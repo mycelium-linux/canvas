@@ -604,6 +604,8 @@ mod tests {
                                         mesh: None,
                                         presence: None,
                                         presence_preview_active: false,
+                                        screensaver: Default::default(),
+                                        workspaces: Vec::new(),
                                     },
                                 },
                             },
