@@ -2141,17 +2141,21 @@ mod platform {
     use dock_core::layout::Rect;
 
     #[cfg(target_os = "macos")]
+    pub(super) fn canvas_frame(display: &dock_control::Display) -> Rect {
+        Rect {
+            x: display.frame.x,
+            y: display.frame.y,
+            width: display.frame.width,
+            height: display.frame.height,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     pub fn display_frames() -> Result<Vec<Rect>, String> {
         match dock_control::request(dock_control::Operation::Displays)? {
-            dock_control::Response::Displays { displays } => Ok(displays
-                .into_iter()
-                .map(|display| Rect {
-                    x: display.visible_frame.x,
-                    y: display.visible_frame.y,
-                    width: display.visible_frame.width,
-                    height: display.visible_frame.height,
-                })
-                .collect()),
+            dock_control::Response::Displays { displays } => {
+                Ok(displays.iter().map(canvas_frame).collect())
+            }
             _ => Err("Dock Control did not return display geometry".into()),
         }
     }
@@ -2876,6 +2880,37 @@ mod tests {
             },
             &displays,
         ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn canvas_uses_complete_display_instead_of_reserving_system_chrome() {
+        let display = dock_control::Display {
+            id: "right".into(),
+            name: "Right".into(),
+            frame: dock_control::Rect {
+                x: 3840,
+                y: 0,
+                width: 1920,
+                height: 1200,
+            },
+            visible_frame: dock_control::Rect {
+                x: 3840,
+                y: 25,
+                width: 1920,
+                height: 1175,
+            },
+            primary: false,
+        };
+        assert_eq!(
+            platform::canvas_frame(&display),
+            Rect {
+                x: 3840,
+                y: 0,
+                width: 1920,
+                height: 1200,
+            }
+        );
     }
 
     #[test]
