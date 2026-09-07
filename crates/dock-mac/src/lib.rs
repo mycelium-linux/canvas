@@ -55,7 +55,7 @@ impl dock_core::desktop::WindowBackend for MacDesktop {
         &mut self,
         plan: &dock_core::layout::LayoutPlan,
     ) -> Result<dock_core::desktop::LayoutReceipt, Self::Error> {
-        use dock_core::layout::Region;
+        use dock_core::layout::{Placement, Region};
         if plan.placements.is_empty() || plan.placements.len() > 16 {
             return Err("Layout requires 1–16 placements".into());
         }
@@ -75,6 +75,7 @@ impl dock_core::desktop::WindowBackend for MacDesktop {
         {
             return Err("Layout contains duplicate surface IDs".into());
         }
+        let mut applied = Vec::with_capacity(plan.placements.len());
         for placement in &plan.placements {
             validate_rect(placement.frame)?;
             let frame = dock_control::Rect {
@@ -83,17 +84,26 @@ impl dock_core::desktop::WindowBackend for MacDesktop {
                 width: placement.frame.width,
                 height: placement.frame.height,
             };
-            match dock_control::request(dock_control::Operation::SetFrame {
+            let actual = match dock_control::request(dock_control::Operation::SetFrame {
                 id: placement.id.clone(),
                 frame,
             })? {
-                dock_control::Response::Applied { window } if window.frame == frame => {}
-                _ => return Err("Application constrained requested window geometry".into()),
+                dock_control::Response::Applied { window } => core_rect(window.frame),
+                _ => return Err("Dock Control did not acknowledge window placement".into()),
+            };
+            if !contains(placement.frame, actual) {
+                return Err("Application placed a window outside its workspace region".into());
             }
+            applied.push(Placement {
+                id: placement.id.clone(),
+                role: placement.role,
+                region: placement.region,
+                frame: actual,
+            });
         }
         let focused = self.focus(&primary[0].id)?;
         Ok(dock_core::desktop::LayoutReceipt {
-            placements: plan.placements.clone(),
+            placements: applied,
             focused: focused.id,
         })
     }
@@ -106,6 +116,17 @@ impl dock_core::desktop::WindowBackend for MacDesktop {
             _ => Err("Dock Control did not acknowledge window focus".into()),
         }
     }
+}
+
+fn contains(outer: Rect, inner: Rect) -> bool {
+    inner.width >= 160
+        && inner.height >= 120
+        && i64::from(inner.x) >= i64::from(outer.x)
+        && i64::from(inner.y) >= i64::from(outer.y)
+        && i64::from(inner.x) + i64::from(inner.width)
+            <= i64::from(outer.x) + i64::from(outer.width)
+        && i64::from(inner.y) + i64::from(inner.height)
+            <= i64::from(outer.y) + i64::from(outer.height)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -329,6 +350,43 @@ mod tests {
         assert_eq!(frames[0].x, 800);
         assert_eq!(frames[1].x, 0);
         assert_eq!(frames[1].width, 800);
+    }
+
+    #[test]
+    fn app_constrained_frame_must_remain_inside_its_layout_region() {
+        let region = Rect {
+            x: -100,
+            y: 25,
+            width: 1000,
+            height: 700,
+        };
+        assert!(contains(
+            region,
+            Rect {
+                x: 0,
+                y: 25,
+                width: 800,
+                height: 650,
+            }
+        ));
+        assert!(!contains(
+            region,
+            Rect {
+                x: -101,
+                y: 25,
+                width: 800,
+                height: 650,
+            }
+        ));
+        assert!(!contains(
+            region,
+            Rect {
+                x: 0,
+                y: 25,
+                width: 1000,
+                height: 650,
+            }
+        ));
     }
 }
 

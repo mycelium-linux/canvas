@@ -20,6 +20,9 @@ the remaining region, and focuses the primary window. Bounds come from AppKit at
 the moment of use and exclude the menu bar and macOS Dock. “Custom work area”
 exposes an optional x, y, width, height override in screen points. Other windows
 remain available and no application is terminated when switching projects.
+If an application clamps its size, Dock accepts the acknowledged frame only when
+it remains fully inside that window's assigned layout region and returns the
+actual geometry in the receipt. Placement outside the region still fails visibly.
 
 macOS requires Accessibility permission for the separately installed Dock Control.app
 helper. The GUI and CLI communicate with it through a same-user Unix socket. The OS bridge reports denial, ambiguity, timeouts, and application size
