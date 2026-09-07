@@ -92,8 +92,8 @@ Manual checks:
 dock-mac orchestrate displays
 dock-mac orchestrate workspaces
 dock-mac orchestrate presence
-fpl-desktop-bridge verify --connector dock-workspaces --local --desktop-read
-fpl-desktop-bridge verify --connector desktop.dock.workspace-mcp --desktop-read
+fpl-desktop-bridge verify --connector dock-workspaces --local
+fpl-desktop-bridge verify --connector desktop.dock.workspace-mcp
 dock-mac orchestrate activate alfalfa presence
 ```
 
