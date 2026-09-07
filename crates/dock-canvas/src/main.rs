@@ -58,6 +58,8 @@ const MAX_IMAGE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_IMAGE_DIMENSION: u32 = 16_384;
 const MAX_DECODED_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_PDF_PAGES: u32 = 10_000;
+/// Largest single-frame gap accepted by the screensaver delta-time clock.
+const MAX_SCREENSAVER_FRAME_DELTA: Duration = Duration::from_millis(250);
 const METRICS_REFRESH: Duration = Duration::from_secs(2);
 const SURFACE_CONTROL_BAR_HEIGHT: f64 = 24.0;
 const SURFACE_CONTROL_HIT_SIZE: f64 = 18.0;
@@ -231,7 +233,8 @@ struct App {
     screensaver_settings: ScreensaverSettings,
     screensaver_clock: screensaver::FrameClock,
     screensaver_index: usize,
-    screensaver_piece_started: Instant,
+    screensaver_piece_elapsed: Duration,
+    screensaver_last_frame: Option<Instant>,
     screensaver_elapsed: Duration,
     screensaver_fps: f32,
 }
@@ -298,7 +301,8 @@ impl App {
                 Instant::now(),
             ),
             screensaver_index: 0,
-            screensaver_piece_started: Instant::now(),
+            screensaver_piece_elapsed: Duration::ZERO,
+            screensaver_last_frame: None,
             screensaver_elapsed: Duration::ZERO,
             screensaver_fps: 0.0,
         }
@@ -1061,8 +1065,9 @@ impl App {
                         .set_max_fps(settings.max_fps, Instant::now());
                     self.screensaver_settings = settings;
                     if settings.enabled {
-                        self.screensaver_piece_started = Instant::now();
+                        self.screensaver_piece_elapsed = Duration::ZERO;
                         self.screensaver_elapsed = Duration::ZERO;
+                        self.screensaver_last_frame = Some(Instant::now());
                     }
                     self.bump();
                     self.status = format!(
@@ -1223,9 +1228,21 @@ impl App {
         if !self.screensaver_settings.enabled || !self.screensaver_clock.record_if_due(now) {
             return;
         }
-        (self.screensaver_index, self.screensaver_piece_started) =
-            screensaver::advance(self.screensaver_index, self.screensaver_piece_started, now);
-        self.screensaver_elapsed = now.duration_since(self.screensaver_piece_started);
+        // Delta-time: advance the shader clock by the real gap since the last
+        // rendered frame, clamped so a pause resumes smoothly instead of
+        // jumping the animation forward by the whole gap.
+        let delta = self
+            .screensaver_last_frame
+            .map(|last| now.duration_since(last).min(MAX_SCREENSAVER_FRAME_DELTA))
+            .unwrap_or(Duration::ZERO);
+        self.screensaver_last_frame = Some(now);
+        (self.screensaver_index, self.screensaver_piece_elapsed) = screensaver::advance_elapsed(
+            self.screensaver_index,
+            self.screensaver_piece_elapsed,
+            delta,
+            MAX_SCREENSAVER_FRAME_DELTA,
+        );
+        self.screensaver_elapsed = self.screensaver_piece_elapsed;
         self.screensaver_fps = self.screensaver_clock.measured_fps();
     }
 

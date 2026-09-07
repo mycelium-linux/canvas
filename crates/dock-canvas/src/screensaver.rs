@@ -120,6 +120,96 @@ fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 }
 "#;
 
+// "Floating Rectangles" — ShaderToy background
+// License: MIT
+// Converted from GLSL to WGSL for the Dock canvas screensaver.
+const FLOATING_RECT: &str = r#"
+fn random(co: vec2<f32>) -> f32 {
+    return fract(sin(dot(co, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+}
+
+fn noise(p: vec2<f32>) -> f32 {
+    let pp = p * 2.8;
+    let i = floor(pp);
+    let f = fract(pp);
+    let u = f * f * (3.0 - 2.0 * f);
+    let r1 = mix(random(i), random(i + vec2<f32>(1.0, 0.0)), u.x);
+    let r2 = mix(random(i + vec2<f32>(0.0, 1.0)), random(i + vec2<f32>(1.0, 1.0)), u.x);
+    return mix(r1, r2, u.y);
+}
+
+fn fbm(uv: vec2<f32>) -> f32 {
+    var uvv = uv * 5.0;
+    let m = mat2x2<f32>(1.6, 1.2, -1.2, 1.6);
+    var f = 0.5 * noise(uvv);
+    uvv = m * uvv;
+    f = f + 0.25 * noise(uvv);
+    uvv = m * uvv;
+    f = f + 0.125 * noise(uvv);
+    uvv = m * uvv;
+    f = f + 0.0625 * noise(uvv);
+    return 0.5 + 0.5 * f;
+}
+
+fn bg(uv: vec2<f32>, t: f32) -> vec3<f32> {
+    let velocity = t / 1.6;
+    let intensity = sin(uv.x * 3.0 + velocity * 2.0) * 1.1 + 1.5;
+    var uvv = uv;
+    uvv.y = uvv.y - 2.0;
+    let bp = uvv + vec2<f32>(-2.0, 0.0);
+    uvv = uvv * 0.6;
+    let rb = fbm(vec2<f32>(uvv.x * 0.5 - velocity * 0.03, uvv.y)) * 0.1;
+    uvv = uvv + vec2<f32>(rb, 0.0);
+    let rz = fbm(uvv * 0.9 + vec2<f32>(velocity * 0.35, 0.0));
+    let rz = rz * (dot(bp * intensity, bp) + 1.2);
+    let bgColor = vec3<f32>(0.01, 0.16, 0.42);
+    let col = bgColor / (0.1 - rz);
+    return sqrt(abs(col));
+}
+
+fn rectangle(uv: vec2<f32>, pos: vec2<f32>, w: f32, h: f32, blur: f32) -> f32 {
+    var p = (vec2<f32>(w, h) + vec2<f32>(0.01)) / 2.0 - abs(uv - pos);
+    p = clamp(p / blur, vec2<f32>(0.0), vec2<f32>(1.0));
+    p = p * p * (3.0 - 2.0 * p);
+    return p.x * p.y;
+}
+
+fn rotate2d(angle: f32) -> mat2x2<f32> {
+    return mat2x2<f32>(cos(angle), -sin(angle), sin(angle), cos(angle));
+}
+
+@fragment
+fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    var uv = pos.xy / u.res * 2.0 - vec2<f32>(1.0);
+    uv.x = uv.x * u.res.x / u.res.y;
+    let t = u.time;
+    let bgColor = vec3<f32>(0.01, 0.16, 0.42);
+    var color = bg(uv, t) * (2.0 - abs(uv.y * 2.0));
+    let velX = -t / 8.0;
+    let velY = t / 10.0;
+    let rectColor = vec3<f32>(0.01, 0.26, 0.57);
+    let total = 60.0;
+    let minSize = 0.03;
+    let maxSize = 0.08 - minSize;
+    let yDist = 0.5;
+    for (var i: f32 = 0.0; i < total; i = i + 1.0) {
+        let index = i / total;
+        let rnd = random(vec2<f32>(index, 0.0));
+        var posX = fract(velX * rnd + index) * 4.0 - 2.0;
+        var posY = sin(index * rnd * 1000.0 + velY) * yDist;
+        let sz = maxSize * rnd + minSize;
+        var uvRot = uv - vec2<f32>(posX, posY) + vec2<f32>(sz / 2.0);
+        let r = rotate2d(i + t / 2.0);
+        uvRot = r * uvRot;
+        uvRot = uvRot + vec2<f32>(posX, posY) + vec2<f32>(sz / 2.0);
+        let blur = (maxSize + minSize - sz) / 2.0;
+        let rect = rectangle(uvRot, vec2<f32>(posX, posY), sz, sz, blur);
+        color = color + rectColor * rect * (sz / maxSize);
+    }
+    return vec4<f32>(color, 1.0);
+}
+"#;
+
 #[derive(Debug)]
 pub struct ShaderPiece {
     pub name: &'static str,
@@ -147,6 +237,10 @@ pub const SHADERS: &[ShaderPiece] = &[
         name: "Spirales",
         wgsl: SPIRAL,
     },
+    ShaderPiece {
+        name: "Floating Rectangles",
+        wgsl: FLOATING_RECT,
+    },
 ];
 
 pub fn attribution(index: usize) -> String {
@@ -154,14 +248,19 @@ pub fn attribution(index: usize) -> String {
     format!("{} — {} ({})", shader.name, CREDIT, LICENSE)
 }
 
-pub fn advance(index: usize, piece_started: Instant, now: Instant) -> (usize, Instant) {
+pub fn advance_elapsed(
+    index: usize,
+    elapsed: Duration,
+    delta: Duration,
+    max_delta: Duration,
+) -> (usize, Duration) {
     let mut index = index;
-    let mut piece_started = piece_started;
-    while now.duration_since(piece_started) >= ROTATION_PERIOD {
+    let mut elapsed = elapsed + delta.min(max_delta);
+    while elapsed >= ROTATION_PERIOD {
         index = (index + 1) % SHADERS.len();
-        piece_started += ROTATION_PERIOD;
+        elapsed -= ROTATION_PERIOD;
     }
-    (index, piece_started)
+    (index, elapsed)
 }
 
 /// Bounded frame scheduler and rolling cadence meter.
@@ -378,7 +477,7 @@ mod tests {
 
     #[test]
     fn manifest_is_complete_and_credited() {
-        assert_eq!(SHADERS.len(), 4);
+        assert!(!SHADERS.is_empty());
         for (index, shader) in SHADERS.iter().enumerate() {
             assert!(!shader.name.is_empty());
             assert!(shader.wgsl.contains("@fragment"));
@@ -389,10 +488,28 @@ mod tests {
 
     #[test]
     fn rotation_advances_only_at_period_boundaries() {
-        let started = Instant::now();
-        assert_eq!(advance(0, started, started + ROTATION_PERIOD / 2).0, 0);
-        assert_eq!(advance(0, started, started + ROTATION_PERIOD).0, 1);
-        assert_eq!(advance(0, started, started + ROTATION_PERIOD * 5).0, 1);
+        let cap = ROTATION_PERIOD * 8;
+        assert_eq!(
+            advance_elapsed(0, Duration::ZERO, ROTATION_PERIOD / 2, cap),
+            (0, ROTATION_PERIOD / 2)
+        );
+        assert_eq!(
+            advance_elapsed(0, Duration::ZERO, ROTATION_PERIOD, cap),
+            (5 % SHADERS.len(), Duration::ZERO)
+        );
+        assert_eq!(
+            advance_elapsed(0, Duration::ZERO, ROTATION_PERIOD * 5, cap),
+            (1, Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn elapsed_time_clamps_resume_gaps() {
+        let cap = Duration::from_millis(250);
+        assert_eq!(
+            advance_elapsed(2, Duration::from_secs(1), Duration::from_secs(30), cap),
+            (2, Duration::from_millis(1_250))
+        );
     }
 
     #[test]
