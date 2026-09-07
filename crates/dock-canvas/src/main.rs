@@ -1,7 +1,8 @@
+use base64::Engine as _;
 use dock_canvas::control::{
     CONTROL_VERSION, Command, ContentKind, ControlReply, ControlRequest, ErrorCode,
     MAX_ACTIVE_INDICATORS, MAX_CONTROL_MESSAGE, MeshSnapshot, Navigation, Outcome, Receipt,
-    RuntimeSnapshot, StatusIndicator, SurfaceSnapshot,
+    PresencePreview, PresenceSnapshot, RuntimeSnapshot, StatusIndicator, SurfaceSnapshot,
 };
 use dock_canvas::hud;
 use dock_canvas::interaction::{
@@ -9,14 +10,15 @@ use dock_canvas::interaction::{
     PointerEvent, PointerPhase, SurfaceGeometry,
 };
 use dock_canvas::media::{
-    LogicalSize, MediaLimits, MediaPlan, PixelSize, plan_pdf_page, plan_raster,
+    LogicalSize, MediaCacheKey, MediaLimits, MediaPlan, MediaVariant, PixelSize, SourceDimensions,
+    plan_pdf_page, plan_raster,
 };
 use dock_canvas::{
     AssetRef, Layout, NormalizedRect, Placement, SCHEMA_VERSION, Surface, SurfaceContent, ThemeRef,
     WorkspaceDocument,
 };
-use dock_core::{Catalog, ThemePalette, desktop::WallpaperRequest, layout::Rect};
-use iced::widget::{container, image as image_widget, markdown, row, space, stack, text};
+use dock_core::{Catalog, ProjectTheme, ThemePalette, desktop::WallpaperRequest, layout::Rect};
+use iced::widget::{container, image as image_widget, markdown, row, scrollable, space, stack, text};
 use iced::{Color, ContentFit, Element, Length, Point, Size, Subscription, Task, Theme};
 use image::{ImageReader, Limits};
 use sha2::{Digest, Sha256};
@@ -36,7 +38,9 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+mod terminal;
 mod indicator;
+mod presence;
 mod transition;
 
 const INITIAL_FRAME: Rect = Rect {
@@ -85,8 +89,17 @@ enum ContentSource {
         page_count: u32,
     },
     Markdown {
-        _path: PathBuf,
+        #[allow(dead_code)]
+        path: PathBuf,
         items: Vec<markdown::Item>,
+    },
+    Terminal {
+        #[allow(dead_code)]
+        master_fd: i32,
+        stdin_fd: i32,
+        #[allow(dead_code)]
+        pid: u32,
+        buffer: String,
     },
 }
 
@@ -98,6 +111,13 @@ struct RuntimeSurface {
     source_pixels: [u32; 2],
     media_plan: MediaPlan,
     upload_pixels: [u32; 2],
+}
+
+struct PresencePreviewVisual {
+    value: PresencePreview,
+    handle: iced::widget::image::Handle,
+    started: Instant,
+    last_frame: Instant,
 }
 
 type ContentLoadResult = Result<LoadedContent, Failure>;
@@ -125,6 +145,7 @@ enum Message {
         result: Result<dock_core::desktop::WallpaperReceipt, Failure>,
     },
     LinkOpened(String),
+    TerminalInput(iced::keyboard::Event),
 }
 
 #[derive(Debug, Clone)]
@@ -180,10 +201,12 @@ struct App {
     receiver: PendingReceiver,
     _socket: SocketGuard,
     window: Option<iced::window::Id>,
-    window_shareable: bool,
     decoded: BTreeMap<String, RuntimeSurface>,
     indicators: BTreeMap<String, StatusIndicator>,
     mesh: Option<MeshSnapshot>,
+    presence: Option<PresenceSnapshot>,
+    presence_received: Option<Instant>,
+    presence_preview: Option<PresencePreviewVisual>,
     visible_indicator_id: Option<String>,
     indicator_started: Instant,
     metrics: hud::LocalMetrics,
@@ -223,10 +246,12 @@ impl App {
             receiver,
             _socket: socket,
             window: None,
-            window_shareable: false,
             decoded: BTreeMap::new(),
             indicators: BTreeMap::new(),
             mesh: None,
+            presence: None,
+            presence_received: None,
+            presence_preview: None,
             visible_indicator_id: None,
             indicator_started: Instant::now(),
             metrics: hud::LocalMetrics {
@@ -316,22 +341,24 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick => {
-                if !self.window_shareable && platform::make_windows_shareable().is_ok() {
-                    self.window_shareable = true;
-                }
                 if self.metrics_last.elapsed() >= METRICS_REFRESH {
                     self.refresh_metrics();
                 }
                 self.tick_transition();
+                if self.presence_preview.as_ref().is_some_and(|preview| {
+                    preview.last_frame.elapsed() >= Duration::from_millis(preview.value.linger_ms)
+                }) {
+                    self.presence_preview = None;
+                    self.bump();
+                }
+                self.refresh_terminal();
                 self.drain_commands()
             }
             Message::WindowReady(window) => {
                 self.window = window;
-                match platform::make_windows_shareable() {
-                    Ok(()) => self.window_shareable = true,
-                    Err(error) => {
-                        self.status = format!("Canvas capture setup deferred: {error}");
-                    }
+                if let Err(error) = platform::make_windows_shareable() {
+                    self.status = format!("Canvas capture setup failed: {error}");
+                    eprintln!("{}", self.status);
                 }
                 window.map_or_else(Task::none, |window| {
                     iced::window::set_mode(window, iced::window::Mode::Windowed)
@@ -386,6 +413,18 @@ impl App {
                     Ok(()) => format!("Opened link {url}."),
                     Err(error) => format!("Could not open link {url}: {error}"),
                 };
+                Task::none()
+            }
+            Message::TerminalInput(kbd_event) => {
+                #[allow(clippy::collapsible_if)]
+                if let Some(surface) = self.document.focused_surface_id.clone().and_then(|id| self.decoded.get_mut(&id)) {
+                    if let ContentSource::Terminal { stdin_fd, .. } = &mut surface.source {
+                        let bytes = key_to_bytes(&kbd_event);
+                        if !bytes.is_empty() {
+                            let _ = terminal::write_fd(*stdin_fd, &bytes);
+                        }
+                    }
+                }
                 Task::none()
             }
             Message::ContentLoaded { pending, result } => {
@@ -916,6 +955,63 @@ impl App {
                 );
                 Task::none()
             }
+            Command::SetPresence { presence } => {
+                let zone = presence.zone.clone();
+                let occupant_count = presence.occupants.len();
+                self.presence = Some(presence);
+                self.presence_received = Some(Instant::now());
+                self.bump();
+                self.status = format!("Updated presence in {zone}.");
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::PresenceSet {
+                            zone,
+                            occupant_count,
+                        },
+                    },
+                );
+                Task::none()
+            }
+            Command::ShowPresencePreview { preview } => {
+                let face_count = preview.faces.len();
+                match decode_presence_preview(preview) {
+                    Ok(mut preview) => {
+                        let replace = self.presence_preview.as_ref().is_none_or(|current| {
+                            preview.value.captured_at_unix_ms >= current.value.captured_at_unix_ms
+                        });
+                        if replace {
+                            if let Some(current) = self.presence_preview.as_ref() {
+                                preview.started = current.started;
+                            }
+                            self.presence_preview = Some(preview);
+                        }
+                        self.bump();
+                        self.status = format!("Showing {face_count} detected faces.");
+                        self.answer(
+                            pending,
+                            Outcome::Ok {
+                                receipt: Receipt::PresencePreviewShown { face_count },
+                            },
+                        );
+                    }
+                    Err(error) => self.fail(pending, error),
+                }
+                Task::none()
+            }
+            Command::DismissPresencePreview => {
+                if self.presence_preview.take().is_some() {
+                    self.bump();
+                    self.status = "Dismissed presence preview.".into();
+                }
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::PresencePreviewDismissed,
+                    },
+                );
+                Task::none()
+            }
             Command::Shutdown => {
                 self.answer(
                     pending,
@@ -925,6 +1021,31 @@ impl App {
                 );
                 iced::exit()
             }
+            Command::SetScreensaver { show_time } => {
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::ScreensaverUpdated { show_time },
+                    },
+                );
+                Task::none()
+            }
+        }
+    }
+
+    fn refresh_terminal(&mut self) {
+        let mut changed = false;
+        for surface in self.decoded.values_mut() {
+            if let ContentSource::Terminal { master_fd, buffer, .. } = &mut surface.source {
+                let data = terminal::read_fd(*master_fd);
+                if let Some(text) = String::from_utf8(data).ok().filter(|t| !t.is_empty()) {
+                    buffer.push_str(&text);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.bump();
         }
     }
 
@@ -1039,6 +1160,8 @@ impl App {
                 .collect(),
             active_indicators: self.indicators.values().cloned().collect(),
             mesh: self.mesh.clone(),
+            presence: self.presence.clone(),
+            presence_preview_active: self.presence_preview.is_some(),
         }
     }
 
@@ -1349,6 +1472,13 @@ impl App {
             .width(width)
             .height(height)
             .into(),
+            ContentSource::Terminal { buffer, .. } => {
+                let palette = self.project_theme().palette();
+                scrollable(text(buffer).color(color(palette.text)).width(Length::Fill))
+                    .width(width)
+                    .height(height)
+                    .into()
+            }
             _ => image_widget(surface.handle.clone())
                 .content_fit(ContentFit::Contain)
                 .width(width)
@@ -1374,14 +1504,7 @@ impl App {
                     ..Default::default()
                 })
         };
-        container(
-            row![
-                dot(palette.danger),
-                dot(palette.warning),
-                dot(palette.success)
-            ]
-            .spacing(9),
-        )
+        container(row![dot(palette.danger), dot(palette.warning), dot(palette.success)].spacing(9))
         .padding(iced::Padding {
             top: 7.0,
             right: 0.0,
@@ -1425,6 +1548,14 @@ impl App {
                 surface.media_plan = plan;
             }
         }
+    }
+
+    fn project_theme(&self) -> ProjectTheme {
+        self.document
+            .resolved_theme(&self.catalog)
+            .expect("validated Canvas document theme")
+            .to_project_theme()
+            .expect("project uses a Coherence theme")
     }
 
     fn theme(&self) -> Theme {
@@ -1490,9 +1621,9 @@ impl App {
                         };
                         let content = self.surface_widget(surface, Length::Fill, Length::Fill);
                         let plane = container(stack(vec![content, self.surface_controls()]))
-                            .width(Length::Fixed(bounds.width as f32))
-                            .height(Length::Fixed(bounds.height as f32))
-                            .center(Length::Fill);
+                        .width(Length::Fixed(bounds.width as f32))
+                        .height(Length::Fixed(bounds.height as f32))
+                        .center(Length::Fill);
                         Some(
                             container(plane)
                                 .width(Length::Fill)
@@ -1599,6 +1730,36 @@ impl App {
             ));
         }
 
+        let presence_palette = presence::PresencePalette {
+            panel: Color {
+                a: 0.94,
+                ..surface_color
+            },
+            border: border_color,
+            text: text_color,
+            muted,
+            presence: color(palette.primary),
+            face: color(palette.success),
+            voice: color(palette.warning),
+            warning: color(palette.danger),
+        };
+        if let Some(snapshot) = self.presence.as_ref() {
+            let stale = self.presence_received.is_none_or(|received| {
+                received.elapsed() >= Duration::from_millis(snapshot.expires_after_ms)
+            });
+            layers.push(presence::rail(snapshot, stale, presence_palette));
+        }
+        if let Some(preview) = self.presence_preview.as_ref() {
+            layers.push(presence::preview(
+                presence::Preview {
+                    value: &preview.value,
+                    image: preview.handle.clone(),
+                    elapsed: preview.started.elapsed(),
+                },
+                presence_palette,
+            ));
+        }
+
         let mesh_nodes = self
             .mesh
             .as_ref()
@@ -1664,6 +1825,77 @@ fn render_mermaid(source: &Path, surface_id: &str) -> Result<PathBuf, Failure> {
         return Err(Failure::resource("mmdc produced no output"));
     }
     Ok(temp)
+}
+
+fn key_to_bytes(event: &iced::keyboard::Event) -> Vec<u8> {
+    use iced::keyboard::Event;
+    match event {
+        Event::KeyPressed { text, key, .. } => {
+            if let Some(text) = text {
+                return text.to_string().into_bytes();
+            }
+            use iced::keyboard::key::Named;
+            match key {
+                iced::keyboard::Key::Named(Named::Enter) => b"\r".to_vec(),
+                iced::keyboard::Key::Named(Named::Backspace) => b"\x7f".to_vec(),
+                iced::keyboard::Key::Named(Named::Tab) => b"\t".to_vec(),
+                iced::keyboard::Key::Named(Named::ArrowUp) => b"\x1b[A".to_vec(),
+                iced::keyboard::Key::Named(Named::ArrowDown) => b"\x1b[B".to_vec(),
+                iced::keyboard::Key::Named(Named::ArrowRight) => b"\x1b[C".to_vec(),
+                iced::keyboard::Key::Named(Named::ArrowLeft) => b"\x1b[D".to_vec(),
+                iced::keyboard::Key::Named(Named::Escape) => b"\x1b".to_vec(),
+                iced::keyboard::Key::Named(Named::Delete) => b"\x1b[3~".to_vec(),
+                _ => Vec::new(),
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn load_terminal(surface_id: String, shell: &str, title: Option<String>) -> Result<LoadedContent, Failure> {
+    let (master_fd, stdin_fd, pid) = terminal::spawn_terminal(shell).map_err(Failure::resource)?;
+    let display_title = title.unwrap_or_else(|| format!("Terminal: {shell}"));
+    let snapshot = SurfaceSnapshot {
+        id: surface_id.clone(),
+        title: display_title,
+        content: ContentKind::Terminal,
+        asset_sha256: None,
+        page_index: None,
+        page_count: None,
+        source_pixels: None,
+        rendered_pixels: None,
+        display_logical: None,
+        scale_factor: None,
+    };
+    Ok(LoadedContent {
+        snapshot,
+            source: ContentSource::Terminal {
+            master_fd,
+            stdin_fd,
+            pid,
+            buffer: String::new(),
+        },
+        handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
+        asset: AssetRef {
+            sha256: format!("{:x}", Sha256::digest(surface_id.as_bytes())),
+            media_type: "application/x-terminal".into(),
+            byte_length: 1,
+        },
+        source_pixels: [1, 1],
+        media_plan: MediaPlan {
+            viewport_logical: LogicalSize { width: 1.0, height: 1.0 },
+            source_dimensions: SourceDimensions::RasterPixels(PixelSize { width: 1, height: 1 }),
+            target_px: PixelSize { width: 1, height: 1 },
+            display_logical: LogicalSize { width: 1.0, height: 1.0 },
+            scale_factor: 1.0,
+            cache_key: MediaCacheKey {
+                source_id: "terminal".to_string(),
+                variant: MediaVariant::Raster,
+                pixel_size: PixelSize { width: 1, height: 1 },
+            },
+        },
+        upload_pixels: [1, 1],
+    })
 }
 
 fn color(rgb: [u8; 3]) -> Color {
@@ -1735,7 +1967,12 @@ fn load_content(
     title: Option<String>,
     viewport: LogicalSize,
     scale_factor: f64,
-) -> Result<LoadedContent, Failure> {
+ ) -> Result<LoadedContent, Failure> {
+    let path_str = path.to_string_lossy();
+    if path_str.starts_with("tty://") {
+        let shell = path_str.strip_prefix("tty://").unwrap_or("sh");
+        return load_terminal(surface_id, shell, title);
+    }
     let path = canonical_regular_file(&path)?;
     let metadata = fs::metadata(&path).map_err(|error| Failure::invalid(error.to_string()))?;
     if metadata.len() == 0 || metadata.len() > MAX_FILE_BYTES {
@@ -1785,7 +2022,7 @@ fn load_content(
         .map_err(|error| Failure::resource(error.to_string()))?;
         return Ok(LoadedContent {
             snapshot,
-            source: ContentSource::Markdown { _path: path, items },
+            source: ContentSource::Markdown { path, items },
             handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
             asset: AssetRef {
                 sha256,
@@ -1944,6 +2181,31 @@ fn decode_rgba(path: &Path) -> Result<(image::RgbaImage, String), Failure> {
         .map_err(|error| Failure::unsupported(format!("image decode failed: {error}")))?
         .into_rgba8();
     Ok((decoded, media_type.into()))
+}
+
+fn decode_presence_preview(preview: PresencePreview) -> Result<PresencePreviewVisual, Failure> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&preview.jpeg_base64)
+        .map_err(|error| Failure::invalid(format!("invalid presence preview base64: {error}")))?;
+    let decoded = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg)
+        .map_err(|error| Failure::invalid(format!("invalid presence preview JPEG: {error}")))?
+        .into_rgba8();
+    if decoded.width() != preview.width || decoded.height() != preview.height {
+        return Err(Failure::invalid(
+            "presence preview dimensions do not match its JPEG",
+        ));
+    }
+    let handle = iced::widget::image::Handle::from_rgba(
+        decoded.width(),
+        decoded.height(),
+        decoded.into_raw(),
+    );
+    Ok(PresencePreviewVisual {
+        value: preview,
+        handle,
+        started: Instant::now(),
+        last_frame: Instant::now(),
+    })
 }
 
 fn decode_image(path: &Path) -> Result<(iced::widget::image::Handle, String, [u32; 2]), Failure> {
@@ -2163,11 +2425,7 @@ mod platform {
 
         let marker = MainThreadMarker::new().ok_or("AppKit window setup left the main thread")?;
         let application = NSApplication::sharedApplication(marker);
-        let windows = application.windows();
-        if windows.is_empty() {
-            return Err("AppKit has not published the Canvas window yet".into());
-        }
-        for window in windows.iter() {
+        for window in application.windows().iter() {
             window.setSharingType(NSWindowSharingType::NSWindowSharingReadOnly);
         }
         Ok(())
@@ -2456,7 +2714,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         App::view,
     )
     .subscription(|app| {
-        let animated = app.visible_indicator_id.is_some() || app.transition.is_some();
+        let animated = app.visible_indicator_id.is_some()
+            || app.presence_preview.is_some()
+            || app.transition.is_some();
         let cadence = if animated {
             Duration::from_millis(16)
         } else {
@@ -2467,6 +2727,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             iced::event::listen_with(|event, _, _| match event {
                 iced::Event::Window(event) => Some(Message::WindowEvent(event)),
                 iced::Event::Mouse(event) => Some(Message::MouseEvent(event)),
+                iced::Event::Keyboard(event) => Some(Message::TerminalInput(event)),
                 _ => None,
             }),
         ])
@@ -2728,6 +2989,59 @@ mod tests {
             },
         );
         assert!(app.snapshot().active_indicators.is_empty());
+        assert_eq!(app.document, durable_document);
+    }
+
+    #[test]
+    fn presence_updates_preserve_workspace_and_are_inspectable() {
+        use dock_canvas::control::{
+            PresenceOccupant, PresenceSignal, PresenceSignalState, PresenceSnapshot,
+        };
+
+        let mut app = test_app();
+        let durable_document = app.document.clone();
+        let detected = PresenceSignal {
+            state: PresenceSignalState::Detected,
+            confidence: Some(0.92),
+            age_ms: 50,
+        };
+        let snapshot = PresenceSnapshot {
+            zone: "bedroom".into(),
+            observed_at_unix_ms: 1000,
+            expires_after_ms: 5000,
+            occupied: true,
+            occupants: vec![PresenceOccupant {
+                id: "ajmwagar".into(),
+                display_name: "Avery".into(),
+                presence: detected.clone(),
+                face: PresenceSignal {
+                    state: PresenceSignalState::Verified,
+                    ..detected.clone()
+                },
+                voice: PresenceSignal {
+                    state: PresenceSignalState::Unavailable,
+                    confidence: None,
+                    age_ms: 50,
+                },
+            }],
+        };
+        let reply = execute(
+            &mut app,
+            "presence-bedroom",
+            Command::SetPresence {
+                presence: snapshot.clone(),
+            },
+        );
+        assert!(matches!(
+            reply.outcome,
+            Outcome::Ok {
+                receipt: Receipt::PresenceSet {
+                    ref zone,
+                    occupant_count: 1
+                }
+            } if zone == "bedroom"
+        ));
+        assert_eq!(app.snapshot().presence, Some(snapshot));
         assert_eq!(app.document, durable_document);
     }
 
