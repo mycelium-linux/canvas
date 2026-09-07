@@ -1,9 +1,20 @@
-import importlib.util, json, pathlib, tempfile, unittest
+import importlib.util, json, pathlib, plistlib, tempfile, unittest
 SCRIPT = pathlib.Path(__file__).with_name("setup-mac-canvas-mcp.py")
 SPEC = importlib.util.spec_from_file_location("setup_mac_canvas_mcp", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(MODULE)
 
 class SetupCanvasMcpTest(unittest.TestCase):
+    def test_launch_agent_uses_visible_single_instance_app(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = pathlib.Path(directory)
+            app = home / "Applications/DockCanvas.app"
+            desired = plistlib.loads(MODULE.launch_agent(app, home))
+            self.assertEqual(
+                desired["ProgramArguments"],
+                ["/usr/bin/open", "-n", "-a", str(app)],
+            )
+            self.assertFalse(desired["KeepAlive"])
+
     def test_registration_preserves_others_and_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "config.json"
