@@ -14,12 +14,16 @@ pub const CONTROL_VERSION: u32 = 1;
 pub const MAX_CONTROL_MESSAGE: u64 = 256 * 1024;
 pub const MAX_ACTIVE_INDICATORS: usize = 16;
 pub const MAX_MESH_NODES: usize = 8;
+pub const MAX_PRESENCE_OCCUPANTS: usize = 8;
+pub const MAX_PRESENCE_FACES: usize = 8;
 const MAX_INDICATOR_TITLE_BYTES: usize = 128;
 const MAX_INDICATOR_CAPTION_BYTES: usize = 512;
 const MAX_INDICATOR_DETAIL_BYTES: usize = 512;
 const MAX_INDICATOR_DIAGNOSTIC_BYTES: usize = 512;
 const MAX_MESH_NODE_LABEL_BYTES: usize = 64;
 const MAX_MESH_NODE_DETAIL_BYTES: usize = 128;
+const MAX_PRESENCE_TEXT_BYTES: usize = 64;
+const MAX_PRESENCE_PREVIEW_BASE64_BYTES: usize = 192 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -73,6 +77,16 @@ pub enum Command {
     },
     SetMesh {
         mesh: MeshSnapshot,
+    },
+    SetPresence {
+        presence: PresenceSnapshot,
+    },
+    ShowPresencePreview {
+        preview: PresencePreview,
+    },
+    DismissPresencePreview,
+    SetScreensaver {
+        show_time: bool,
     },
     Shutdown,
 }
@@ -206,6 +220,149 @@ impl MeshSnapshot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceSignalState {
+    Unavailable,
+    Unknown,
+    Detected,
+    Verified,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PresenceSignal {
+    pub state: PresenceSignalState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
+    pub age_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PresenceOccupant {
+    pub id: String,
+    pub display_name: String,
+    pub presence: PresenceSignal,
+    pub face: PresenceSignal,
+    pub voice: PresenceSignal,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PresenceSnapshot {
+    pub zone: String,
+    pub observed_at_unix_ms: u64,
+    pub expires_after_ms: u64,
+    pub occupied: bool,
+    pub occupants: Vec<PresenceOccupant>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PresencePreviewFace {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occupant_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    pub confidence: f32,
+    pub bounds: [f32; 4],
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PresencePreview {
+    pub captured_at_unix_ms: u64,
+    pub width: u32,
+    pub height: u32,
+    pub linger_ms: u64,
+    pub jpeg_base64: String,
+    pub faces: Vec<PresencePreviewFace>,
+}
+
+impl PresenceSignal {
+    fn validate(&self) -> Result<(), String> {
+        if self
+            .confidence
+            .is_some_and(|confidence| !confidence.is_finite() || !(0.0..=1.0).contains(&confidence))
+        {
+            return Err("presence confidence must be finite and between zero and one".into());
+        }
+        if self.age_ms > 24 * 60 * 60 * 1000 {
+            return Err("presence signal age exceeds 24 hours".into());
+        }
+        Ok(())
+    }
+}
+
+impl PresenceSnapshot {
+    pub fn validate(&self) -> Result<(), String> {
+        if !bounded_printable(&self.zone, MAX_PRESENCE_TEXT_BYTES) {
+            return Err("presence zone must contain 1-64 printable bytes".into());
+        }
+        if !(250..=300_000).contains(&self.expires_after_ms) {
+            return Err("presence expiry must be between 250ms and five minutes".into());
+        }
+        if self.occupants.len() > MAX_PRESENCE_OCCUPANTS {
+            return Err(format!(
+                "presence snapshot may carry at most {MAX_PRESENCE_OCCUPANTS} occupants"
+            ));
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for occupant in &self.occupants {
+            if !presence_identifier(&occupant.id)
+                || !bounded_printable(&occupant.display_name, MAX_PRESENCE_TEXT_BYTES)
+                || !ids.insert(occupant.id.as_str())
+            {
+                return Err("presence occupant IDs and names must be valid and unique".into());
+            }
+            occupant.presence.validate()?;
+            occupant.face.validate()?;
+            occupant.voice.validate()?;
+        }
+        if !self.occupied && !self.occupants.is_empty() {
+            return Err("an unoccupied presence snapshot cannot contain occupants".into());
+        }
+        Ok(())
+    }
+}
+
+impl PresencePreview {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.width == 0
+            || self.height == 0
+            || self.width > 1280
+            || self.height > 1280
+            || !(250..=30_000).contains(&self.linger_ms)
+            || self.jpeg_base64.is_empty()
+            || self.jpeg_base64.len() > MAX_PRESENCE_PREVIEW_BASE64_BYTES
+            || self.faces.is_empty()
+            || self.faces.len() > MAX_PRESENCE_FACES
+        {
+            return Err("invalid bounded presence preview".into());
+        }
+        for face in &self.faces {
+            if face
+                .occupant_id
+                .as_ref()
+                .is_some_and(|id| !presence_identifier(id))
+                || face
+                    .display_name
+                    .as_ref()
+                    .is_some_and(|name| !bounded_printable(name, MAX_PRESENCE_TEXT_BYTES))
+                || !face.confidence.is_finite()
+                || !(0.0..=1.0).contains(&face.confidence)
+                || face.bounds.iter().any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+                || face.bounds[0] >= face.bounds[2]
+                || face.bounds[1] >= face.bounds[3]
+            {
+                return Err("invalid presence preview face".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Navigation {
     Next,
@@ -224,6 +381,7 @@ pub struct ControlReply {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(clippy::large_enum_variant)]
 pub enum Outcome {
     Ok { receipt: Receipt },
     Error { code: ErrorCode, message: String },
@@ -285,6 +443,17 @@ pub enum Receipt {
     MeshSet {
         node_count: usize,
     },
+    PresenceSet {
+        zone: String,
+        occupant_count: usize,
+    },
+    PresencePreviewShown {
+        face_count: usize,
+    },
+    PresencePreviewDismissed,
+    ScreensaverUpdated {
+        show_time: bool,
+    },
     ShuttingDown,
 }
 
@@ -300,6 +469,10 @@ pub struct RuntimeSnapshot {
     pub active_indicators: Vec<StatusIndicator>,
     #[serde(default)]
     pub mesh: Option<MeshSnapshot>,
+    #[serde(default)]
+    pub presence: Option<PresenceSnapshot>,
+    #[serde(default)]
+    pub presence_preview_active: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -380,11 +553,15 @@ impl ControlRequest {
                 }
             }
             Command::SetMesh { mesh } => mesh.validate()?,
+            Command::SetPresence { presence } => presence.validate()?,
+            Command::ShowPresencePreview { preview } => preview.validate()?,
             Command::ApplyDocument { .. }
             | Command::ApplyPatch { .. }
             | Command::Inspect
             | Command::ReadDocument
             | Command::Focus
+            | Command::DismissPresencePreview
+            | Command::SetScreensaver { .. }
             | Command::Shutdown => {}
         }
         Ok(())
@@ -421,6 +598,15 @@ fn request_id(value: &str) -> bool {
         && value.len() <= 64
         && value.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+}
+
+fn presence_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.is_ascii()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'@')
         })
 }
 
@@ -804,6 +990,12 @@ pub mod text {
                     }
                     Receipt::MeshSet { node_count } => format!("mesh={node_count}"),
                     Receipt::ShuttingDown => "shutting down".to_string(),
+                    Receipt::PresenceSet { .. } => "presence set".to_string(),
+                    Receipt::ScreensaverUpdated { show_time } => {
+                        format!("screensaver show_time={show_time}")
+                    }
+                    Receipt::PresencePreviewShown { .. } => "preview shown".to_string(),
+                    Receipt::PresencePreviewDismissed => "preview dismissed".to_string(),
                 };
                 format!("OK rev={} {}", reply.revision, detail)
             }
@@ -975,6 +1167,94 @@ mod tests {
         assert!(mesh.validate().is_err());
         mesh.nodes[0].label = " ".into();
         assert!(mesh.validate().is_err());
+    }
+
+    #[test]
+    fn presence_snapshot_keeps_modalities_independent_and_bounded() {
+        let verified = PresenceSignal {
+            state: PresenceSignalState::Verified,
+            confidence: Some(0.91),
+            age_ms: 120,
+        };
+        let unavailable = PresenceSignal {
+            state: PresenceSignalState::Unavailable,
+            confidence: None,
+            age_ms: 120,
+        };
+        let avery = PresenceOccupant {
+            id: "avery@fpl.dev".into(),
+            display_name: "Avery".into(),
+            presence: PresenceSignal {
+                state: PresenceSignalState::Detected,
+                ..verified.clone()
+            },
+            face: verified.clone(),
+            voice: verified.clone(),
+        };
+        let ange = PresenceOccupant {
+            id: "ange".into(),
+            display_name: "Ange".into(),
+            presence: PresenceSignal {
+                state: PresenceSignalState::Detected,
+                ..verified.clone()
+            },
+            face: verified,
+            voice: unavailable,
+        };
+        let snapshot = PresenceSnapshot {
+            zone: "bedroom".into(),
+            observed_at_unix_ms: 1000,
+            expires_after_ms: 5000,
+            occupied: true,
+            occupants: vec![avery, ange],
+        };
+        snapshot.validate().unwrap();
+        let request = ControlRequest {
+            schema_version: CONTROL_VERSION,
+            request_id: "presence-1".into(),
+            expected_revision: None,
+            command: Command::SetPresence {
+                presence: snapshot.clone(),
+            },
+        };
+        request.validate().unwrap();
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(value["command"]["command"], "set_presence");
+        assert_eq!(value["command"]["presence"]["occupants"][1]["display_name"], "Ange");
+
+        let mut invalid = snapshot.clone();
+        invalid.occupied = false;
+        assert!(invalid.validate().is_err());
+        invalid = snapshot.clone();
+        invalid.occupants[1].id = invalid.occupants[0].id.clone();
+        assert!(invalid.validate().is_err());
+        invalid = snapshot;
+        invalid.occupants[0].face.confidence = Some(f32::NAN);
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn presence_preview_rejects_invalid_geometry_and_oversize_images() {
+        let valid = PresencePreview {
+            captured_at_unix_ms: 1000,
+            width: 480,
+            height: 360,
+            linger_ms: 2500,
+            jpeg_base64: "jpeg".into(),
+            faces: vec![PresencePreviewFace {
+                occupant_id: Some("avery@fpl.dev".into()),
+                display_name: Some("Avery".into()),
+                confidence: 0.9,
+                bounds: [0.1, 0.1, 0.8, 0.9],
+            }],
+        };
+        valid.validate().unwrap();
+        let mut invalid = valid.clone();
+        invalid.faces[0].bounds = [0.8, 0.1, 0.1, 0.9];
+        assert!(invalid.validate().is_err());
+        invalid = valid;
+        invalid.jpeg_base64 = "x".repeat(MAX_PRESENCE_PREVIEW_BASE64_BYTES + 1);
+        assert!(invalid.validate().is_err());
     }
 
     #[test]
