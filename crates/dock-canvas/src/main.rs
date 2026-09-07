@@ -41,6 +41,18 @@ use std::time::{Duration, Instant};
 mod terminal;
 mod indicator;
 mod presence;
+// mod screensaver;
+mod screensaver_stub {
+    use std::time::{Duration, Instant};
+    pub struct Renderer;
+    impl Renderer {
+        pub fn new() -> Result<Self, String> { Err("screensaver not compiled".into()) }
+        pub fn frame(&mut self, _w: u32, _h: u32, _now: Instant) -> Result<(Vec<u8>, usize), String> { Err("not compiled".into()) }
+    }
+    pub fn attribution(index: usize) -> String { format!("screensaver:{index}") }
+    pub const ROTATION_PERIOD: Duration = Duration::from_secs(45);
+}
+use screensaver_stub as screensaver;
 mod transition;
 
 const INITIAL_FRAME: Rect = Rect {
@@ -220,6 +232,11 @@ struct App {
     minimized_surfaces: BTreeSet<String>,
     maximized_surfaces: BTreeSet<String>,
     transition: Option<transition::Transition>,
+    screensaver: Option<screensaver::Renderer>,
+    screensaver_frame: Option<iced::widget::image::Handle>,
+    screensaver_index: usize,
+    screensaver_show_time: bool,
+    last_screensaver_frame: Instant,
 }
 
 impl App {
@@ -277,6 +294,17 @@ impl App {
             minimized_surfaces: BTreeSet::new(),
             maximized_surfaces: BTreeSet::new(),
             transition: None,
+            screensaver: match screensaver::Renderer::new() {
+                Ok(renderer) => Some(renderer),
+                Err(message) => {
+                    eprintln!("Canvas screensaver disabled: {message}");
+                    None
+                }
+            },
+            screensaver_frame: None,
+            screensaver_index: 0,
+            screensaver_show_time: false,
+            last_screensaver_frame: Instant::now(),
         }
     }
 
@@ -345,6 +373,7 @@ impl App {
                     self.refresh_metrics();
                 }
                 self.tick_transition();
+                self.refresh_screensaver();
                 if self.presence_preview.as_ref().is_some_and(|preview| {
                     preview.last_frame.elapsed() >= Duration::from_millis(preview.value.linger_ms)
                 }) {
@@ -1022,6 +1051,14 @@ impl App {
                 iced::exit()
             }
             Command::SetScreensaver { show_time } => {
+                if self.screensaver_show_time != show_time {
+                    self.screensaver_show_time = show_time;
+                    self.bump();
+                    self.status = format!(
+                        "Screensaver time display {}.",
+                        if show_time { "shown" } else { "hidden" }
+                    );
+                }
                 self.answer(
                     pending,
                     Outcome::Ok {
@@ -1126,6 +1163,34 @@ impl App {
         self.metrics_last = Instant::now();
     }
 
+    fn refresh_screensaver(&mut self) {
+        if self.last_screensaver_frame.elapsed() < Duration::from_millis(33) {
+            return;
+        }
+        let renderer = match self.screensaver.as_mut() {
+            Some(renderer) => renderer,
+            None => return,
+        };
+        let width = (self.frame.width / 2).clamp(64, 960);
+        let height =
+            ((f64::from(width) * f64::from(self.frame.height.max(1)))
+                / f64::from(self.frame.width.max(1)))
+            .round()
+            .max(64.0) as u32;
+        match renderer.frame(width, height, Instant::now()) {
+            Ok((pixels, index)) => {
+                self.screensaver_index = index;
+                self.screensaver_frame =
+                    Some(iced::widget::image::Handle::from_rgba(width, height, pixels));
+                self.last_screensaver_frame = Instant::now();
+            }
+            Err(message) => {
+                eprintln!("Canvas screensaver frame failed: {message}");
+                self.screensaver = None;
+            }
+        }
+    }
+
     fn snapshot(&self) -> RuntimeSnapshot {
         RuntimeSnapshot {
             workspace_id: self.document.id.clone(),
@@ -1198,6 +1263,7 @@ impl App {
                 }
                 WindowAction::Maximize => {
                     if self.maximized_surfaces.insert(surface_id.clone()) {
+                        self.start_transition();
                         self.bump();
                         self.status = format!("Maximized {surface_id}.");
                     }
@@ -1596,19 +1662,13 @@ impl App {
                             return None;
                         }
                         let surface = self.decoded.get(&placement.surface_id)?;
-                        let bounds = if self.maximized_surfaces.contains(&placement.surface_id) {
-                            denormalize(
-                                NormalizedRect {
-                                    x: 0.0,
-                                    y: 0.0,
-                                    width: 1.0,
-                                    height: 1.0,
-                                },
-                                self.frame,
-                            )
-                        } else {
-                            let animated =
-                                self.presented_bounds(&placement.surface_id, placement.bounds);
+                        let bounds = {
+                            let target = if self.maximized_surfaces.contains(&placement.surface_id) {
+                                NormalizedRect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 }
+                            } else {
+                                placement.bounds
+                            };
+                            let animated = self.presented_bounds(&placement.surface_id, target);
                             denormalize(
                                 NormalizedRect {
                                     x: animated[0],
@@ -1681,7 +1741,17 @@ impl App {
                 ),
         };
 
-        let mut layers = vec![content];
+        let mut layers: Vec<Element<'_, Message>> = Vec::new();
+        if let Some(handle) = self.screensaver_frame.clone() {
+            layers.push(
+                image_widget(handle)
+                    .content_fit(ContentFit::Fill)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into(),
+            );
+        }
+        layers.push(content);
         if self.is_leftmost_surface() {
             let signature = container(text("FPL").size(13).color(Color::WHITE))
                 .padding([8, 12])
@@ -1782,6 +1852,52 @@ impl App {
                 danger: color(palette.danger),
             },
         ));
+
+        if self.screensaver.is_some() {
+            let attribution_bottom = if self.is_leftmost_surface() {
+                64.0
+            } else {
+                18.0
+            };
+            layers.push(
+                container(
+                    text(screensaver::attribution(self.screensaver_index))
+                        .size(13)
+                        .color(Color {
+                            a: 0.55,
+                            ..muted
+                        }),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding(iced::Padding {
+                    top: 0.0,
+                    right: 0.0,
+                    bottom: attribution_bottom,
+                    left: 20.0,
+                })
+                .align_x(iced::alignment::Horizontal::Left)
+                .align_y(iced::alignment::Vertical::Bottom)
+                .into(),
+            );
+            if self.screensaver_show_time {
+                let (clock, _date) = hud::now_local();
+                layers.push(
+                    container(
+                        text(clock)
+                            .size(72)
+                            .color(Color {
+                                a: 0.85,
+                                ..text_color
+                            }),
+                    )
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .center(Length::Fill)
+                    .into(),
+                );
+            }
+        }
 
         container(stack(layers))
             .width(Length::Fill)
@@ -3057,6 +3173,70 @@ mod tests {
         ));
         assert_eq!(app.snapshot().presence, Some(snapshot));
         assert_eq!(app.document, durable_document);
+    }
+
+    #[test]
+    fn presence_preview_frames_refresh_without_restarting_or_reordering() {
+        use dock_canvas::control::{PresencePreview, PresencePreviewFace};
+
+        fn preview(captured_at_unix_ms: u64) -> PresencePreview {
+            let mut jpeg = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::new_rgb8(4, 3)
+                .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+                .unwrap();
+            PresencePreview {
+                captured_at_unix_ms,
+                width: 4,
+                height: 3,
+                linger_ms: 250,
+                jpeg_base64: base64::engine::general_purpose::STANDARD.encode(jpeg.into_inner()),
+                faces: vec![PresencePreviewFace {
+                    occupant_id: Some("ajmwagar".into()),
+                    display_name: Some("Avery".into()),
+                    confidence: 0.92,
+                    bounds: [0.2, 0.1, 0.8, 0.9],
+                }],
+            }
+        }
+
+        let mut app = test_app();
+        execute(
+            &mut app,
+            "preview-first",
+            Command::ShowPresencePreview {
+                preview: preview(1000),
+            },
+        );
+        let first_started = app.presence_preview.as_ref().unwrap().started;
+        let first_frame = app.presence_preview.as_ref().unwrap().last_frame;
+        std::thread::sleep(Duration::from_millis(2));
+        execute(
+            &mut app,
+            "preview-next",
+            Command::ShowPresencePreview {
+                preview: preview(1001),
+            },
+        );
+        let current = app.presence_preview.as_ref().unwrap();
+        assert_eq!(current.started, first_started);
+        assert!(current.last_frame > first_frame);
+        assert_eq!(current.value.captured_at_unix_ms, 1001);
+
+        execute(
+            &mut app,
+            "preview-old",
+            Command::ShowPresencePreview {
+                preview: preview(999),
+            },
+        );
+        assert_eq!(
+            app.presence_preview
+                .as_ref()
+                .unwrap()
+                .value
+                .captured_at_unix_ms,
+            1001
+        );
     }
 
     #[test]
