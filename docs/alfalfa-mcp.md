@@ -12,17 +12,19 @@ resource URIs, or grant agent control of a project desktop.
 
 The tools are:
 
+- `displays_list`: read live display IDs, names, geometry and primary status
+  from Dock Control on this host. Does not infer other machines or user presence.
 - `projects_list`: return current project IDs, display names, lifecycle status,
   and purpose.
 - `project_resources`: return resource IDs, titles, kinds, and their presentation
   destination for one exact project.
 - `project_recall`: recall an exact project on Agora, focus the viewer on the
   output that owns it, and activate any saved local Mac window bindings through
-  the same layout operation as the GUI and CLI. When the Agora workspace has no windows, Dock opens its
-  first safe HTTPS Alfalfa resource in a project-isolated browser profile. The
-  result reports whether Firefox terms have been accepted for that profile and
-  sets `attention_required` when the owner must finish that one-time step. It
-  also reports `local_workspace_presented` and `local_window_count`; an unbound
+  the same layout operation as the GUI and CLI. Recall is presentation-only: it
+  may open a viewer, but never seeds a browser, opens a project resource, stops
+  applications, migrates compute, or changes MCP bindings. Empty workspaces stay
+  empty. The result reports `presentation_only: true`, `browser_seeded: false`,
+  `local_workspace_presented` and `local_window_count`; an unbound
   project remains a valid remote-only recall.
 - `resource_open`: open an exact HTTPS resource in the Agora project browser,
   or delegate a local document and owner-only resource to the existing safe Mac
@@ -37,6 +39,7 @@ The manual runbook uses the same implementation:
 
 ```sh
 dock-mac orchestrate list
+dock-mac orchestrate displays
 dock-mac orchestrate resources pedalkernel
 dock-mac orchestrate recall pedalkernel
 dock-mac orchestrate open pedalkernel code
@@ -44,10 +47,36 @@ dock-mac orchestrate open pedalkernel code
 
 An MCP client should register the installed executable with `mcp-serve` as its
 only argument. The process inherits `DOCK_DESKTOP_BRIDGE_BIN` when the owner CLI
-is not already on `PATH`. JARVIS Sound can expose the same four operations in its
+is not already on `PATH`. JARVIS Sound can expose these operations in its
 tier-one tool menu; that adapter should call this MCP contract and keep JARVIS's
 existing voice and presence authorization rather than adding another identity
 system to Dock.
+
+Concurrent presentation mutations within one MCP server process fail busy rather
+than interleave. This is not a cross-process transaction or rollback guarantee:
+independent Dock instances and GUI operations still need shared coordination.
+A remote presentation can succeed before a later local placement fails; an error
+must not be interpreted as "nothing changed".
+
+## Desktop Bridge Boundary
+
+The bridge currently proxies HTTP MCP connectors; Dock serves stdio. This is not
+yet a registered bridge connector. Do not add an unauthenticated HTTP wrapper.
+The bridge must own transport adaptation, process lifetime and owner authorization;
+Dock owns presentation and Alfalfa project resolution. Alfalfa remains the owner
+of project records and resources, not a catalog duplicated in the bridge.
+
+Alfalfa's server already exposes its bridge contract at `/mcp/tools` and
+`/mcp/tools/{tool}`. The existing `fpl-mcp/src/alfalfa.rs` adapter translates that
+contract into MCP and forwards verified claims; reuse it rather than treating
+these REST endpoints as Streamable HTTP or implementing another Alfalfa proxy.
+Dock presentation authority is distinct from Alfalfa repository/tool grants.
+
+Dock invokes the owner's `project-read` CLI for Alfalfa reads. That CLI currently
+reads session credentials in each process. Before enrolling automatic workflows,
+move these fixed reads behind the existing credential broker or stable credential
+owner, retaining exact route allowlists, bounded responses and explicit denials.
+Never send owner tokens to Dock or accept caller-supplied upstream URLs.
 
 Dock does not accept Firefox terms on the owner's behalf. Mozilla's managed
 [`SkipTermsOfUse` policy](https://mozilla.github.io/policy-templates/#skiptermsofuse)
