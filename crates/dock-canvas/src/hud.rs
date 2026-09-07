@@ -221,7 +221,7 @@ pub(crate) fn format_rate(bytes_per_second: u64) -> String {
     format!("{} /s", format_bytes(bytes_per_second))
 }
 
-pub(crate) fn now_local() -> (String, String) {
+pub fn now_local() -> (String, String) {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs() as i64);
