@@ -23,6 +23,8 @@ pub mod reconcile;
 
 pub const SCHEMA_VERSION: u32 = 1;
 const MAX_ITEMS: usize = 1_024;
+const MAX_GRADIENT_STOPS: usize = 16;
+pub const BUILT_IN_SHADER_IDS: &[&str] = &["tidepool", "aurora-drift", "dusk-ember", "slow-ripple"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error(pub String);
@@ -77,6 +79,8 @@ pub struct WorkspaceDocument {
     pub project_id: String,
     pub revision: u64,
     pub theme: ThemeRef,
+    #[serde(default)]
+    pub background: Background,
     pub surfaces: Vec<Surface>,
     pub layout: Layout,
     #[serde(default)]
@@ -90,6 +94,57 @@ pub struct WorkspaceDocument {
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum ThemeRef {
     Project,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
+pub enum Background {
+    /// Derive the background gradient from the active Coherence project theme.
+    #[default]
+    Theme,
+    Solid {
+        color: [u8; 4],
+    },
+    Gradient {
+        shape: GradientShape,
+        stops: Vec<GradientStop>,
+    },
+    Image {
+        asset: AssetRef,
+        fit: BackgroundFit,
+    },
+    Shader {
+        shader_id: String,
+        speed: f32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
+pub enum GradientShape {
+    Linear { angle_degrees: f32 },
+    Radial { center: [f32; 2], radius: f32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
+pub struct GradientStop {
+    pub offset: f32,
+    pub color: [u8; 4],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
+pub enum BackgroundFit {
+    Fill,
+    Fit,
+    Stretch,
+    Center,
+    Tile,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -301,6 +356,7 @@ pub enum PatchOperation {
     RemoveSurface { surface_id: String },
     SetLayout { layout: Layout },
     SetTheme { theme: ThemeRef },
+    SetBackground { background: Background },
     SetFocus { surface_id: Option<String> },
     UpsertBinding { binding: DataBinding },
     RemoveBinding { binding_id: String },
@@ -321,6 +377,66 @@ impl AssetRef {
             "Asset media_type must be a printable MIME type",
         )?;
         check(self.byte_length > 0, "Asset byte_length must be positive")
+    }
+}
+
+impl Background {
+    pub fn is_animated(&self) -> bool {
+        matches!(self, Self::Shader { speed, .. } if *speed > 0.0)
+    }
+
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::Theme | Self::Solid { .. } => Ok(()),
+            Self::Gradient { shape, stops } => {
+                match shape {
+                    GradientShape::Linear { angle_degrees } => {
+                        check(angle_degrees.is_finite(), "Gradient angle must be finite")?
+                    }
+                    GradientShape::Radial { center, radius } => check(
+                        center
+                            .iter()
+                            .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+                            && radius.is_finite()
+                            && *radius > 0.0
+                            && *radius <= 2.0,
+                        "Radial gradient center and radius are outside normalized bounds",
+                    )?,
+                }
+                check(
+                    (2..=MAX_GRADIENT_STOPS).contains(&stops.len()),
+                    "Gradient must contain 2 to 16 stops",
+                )?;
+                let mut previous = None;
+                for stop in stops {
+                    check(
+                        stop.offset.is_finite()
+                            && (0.0..=1.0).contains(&stop.offset)
+                            && previous.is_none_or(|offset| stop.offset > offset),
+                        "Gradient stops must be strictly ordered between zero and one",
+                    )?;
+                    previous = Some(stop.offset);
+                }
+                Ok(())
+            }
+            Self::Image { asset, .. } => {
+                asset.validate()?;
+                check(
+                    asset.media_type.starts_with("image/"),
+                    "Canvas background assets must be images",
+                )
+            }
+            Self::Shader { shader_id, speed } => {
+                check(
+                    BUILT_IN_SHADER_IDS.contains(&shader_id.as_str()),
+                    format!("Unknown Canvas background shader: {shader_id}"),
+                )?;
+                check(
+                    speed.is_finite() && (0.0..=4.0).contains(speed),
+                    "Canvas background shader speed must be between zero and four",
+                )
+            }
+        }
     }
 }
 
@@ -470,6 +586,7 @@ impl WorkspaceDocument {
             .project(&self.project_id)
             .map_err(|error| Error(error.to_string()))?;
         check(self.revision > 0, "Workspace revision must be positive")?;
+        self.background.validate()?;
         check(
             self.surfaces.len() <= MAX_ITEMS && self.bindings.len() <= MAX_ITEMS,
             "Workspace has too many surfaces or bindings",
@@ -602,6 +719,9 @@ impl WorkspaceDocument {
                 }
                 PatchOperation::SetLayout { layout } => next.layout = layout.clone(),
                 PatchOperation::SetTheme { theme } => next.theme = *theme,
+                PatchOperation::SetBackground { background } => {
+                    next.background.clone_from(background)
+                }
                 PatchOperation::SetFocus { surface_id } => {
                     next.focused_surface_id.clone_from(surface_id)
                 }
@@ -747,6 +867,7 @@ mod tests {
             project_id: "dock".into(),
             revision: 1,
             theme: ThemeRef::Project,
+            background: crate::Background::default(),
             surfaces: vec![
                 Surface {
                     id: "browser".into(),
@@ -827,6 +948,107 @@ mod tests {
 
         let error = next.apply_patch(&patch, &catalog).unwrap_err();
         assert!(error.to_string().contains("revision"));
+    }
+
+    #[test]
+    fn backgrounds_are_backward_compatible_validated_and_patchable() {
+        let catalog = catalog();
+        let document = document();
+        let mut legacy = serde_json::to_value(&document).unwrap();
+        legacy.as_object_mut().unwrap().remove("background");
+        let legacy = WorkspaceDocument::parse(&legacy.to_string(), &catalog).unwrap();
+        assert_eq!(legacy.background, Background::Theme);
+
+        let gradient = Background::Gradient {
+            shape: GradientShape::Linear {
+                angle_degrees: 125.0,
+            },
+            stops: vec![
+                GradientStop {
+                    offset: 0.0,
+                    color: [7, 12, 24, 255],
+                },
+                GradientStop {
+                    offset: 0.55,
+                    color: [20, 52, 72, 255],
+                },
+                GradientStop {
+                    offset: 1.0,
+                    color: [62, 31, 90, 255],
+                },
+            ],
+        };
+        let patch = WorkspacePatch {
+            schema_version: SCHEMA_VERSION,
+            workspace_id: document.id.clone(),
+            base_revision: document.revision,
+            revision: document.revision + 1,
+            operations: vec![PatchOperation::SetBackground {
+                background: gradient.clone(),
+            }],
+        };
+        let applied = document.apply_patch(&patch, &catalog).unwrap();
+        assert_eq!(applied.background, gradient);
+        let encoded = serde_json::to_string(&applied).unwrap();
+        assert_eq!(
+            WorkspaceDocument::parse(&encoded, &catalog).unwrap(),
+            applied
+        );
+
+        let mut invalid = applied.clone();
+        invalid.background = Background::Gradient {
+            shape: GradientShape::Radial {
+                center: [0.5, 0.5],
+                radius: 0.8,
+            },
+            stops: vec![
+                GradientStop {
+                    offset: 0.7,
+                    color: [0, 0, 0, 255],
+                },
+                GradientStop {
+                    offset: 0.3,
+                    color: [255, 255, 255, 255],
+                },
+            ],
+        };
+        assert!(
+            invalid
+                .validate(&catalog)
+                .unwrap_err()
+                .to_string()
+                .contains("ordered")
+        );
+        invalid.background = Background::Shader {
+            shader_id: "downloaded-code".into(),
+            speed: 1.0,
+        };
+        assert!(
+            invalid
+                .validate(&catalog)
+                .unwrap_err()
+                .to_string()
+                .contains("Unknown")
+        );
+    }
+
+    #[test]
+    fn only_positive_speed_shader_backgrounds_are_animated() {
+        assert!(!Background::Theme.is_animated());
+        assert!(
+            !Background::Shader {
+                shader_id: "tidepool".into(),
+                speed: 0.0,
+            }
+            .is_animated()
+        );
+        assert!(
+            Background::Shader {
+                shader_id: "tidepool".into(),
+                speed: 0.75,
+            }
+            .is_animated()
+        );
     }
 
     #[test]
