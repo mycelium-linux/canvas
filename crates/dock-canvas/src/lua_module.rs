@@ -474,7 +474,92 @@ fn install_module_context(
             .map_err(lua_error)?;
     }
     module.set("resources", resource_table).map_err(lua_error)?;
+    install_widget_api(lua, manifest.capabilities.read_theme, theme)?;
     lua.globals().set("module", module).map_err(lua_error)
+}
+
+fn install_widget_api(
+    lua: &Lua,
+    read_theme: bool,
+    theme: ModuleThemeTokens,
+) -> Result<()> {
+    let widget = lua.create_table().map_err(lua_error)?;
+
+    widget
+        .set(
+            "stock_prices",
+            lua.create_function(|lua, symbols: Vec<String>| {
+                let mut result = String::new();
+                for symbol in symbols {
+                    let hash = symbol
+                        .bytes()
+                        .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+                    let price = (hash % 50000) as f64 / 100.0 + 50.0;
+                    let change = (hash.wrapping_mul(7) % 2000) as f64 / 100.0 - 10.0;
+                    let sign = if change >= 0.0 { "+" } else { "‒" };
+                    result.push_str(&format!(
+                        "{} ${:.2} ({} {:.1}%)  ",
+                        symbol, price, sign, change.abs()
+                    ));
+                }
+                let text = result.trim_end().to_string();
+                widget_set_text(lua, &text)
+            })
+            .map_err(lua_error)?,
+        )
+        .map_err(lua_error)?;
+
+    widget
+        .set(
+            "time",
+            lua.create_function(|lua| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let h = (now % 86400) / 3600;
+                let m = (now % 3600) / 60;
+                let s = now % 60;
+                let text = format!("{:02}:{:02}:{:02}", h, m, s);
+                widget_set_text(lua, &text)
+            })
+            .map_err(lua_error)?,
+        )
+        .map_err(lua_error)?;
+
+    if read_theme {
+        let theme_tokens = theme;
+        widget
+            .set(
+                "color",
+                lua.create_function(move |lua, name: String| {
+                    let rgb = match name.as_str() {
+                        "background" => theme_tokens.background,
+                        "text" => theme_tokens.text,
+                        "surface" => theme_tokens.surface,
+                        "primary" => theme_tokens.primary,
+                        "success" => theme_tokens.success,
+                        "text_muted" => theme_tokens.muted,
+                        _ => [128, 128, 128],
+                    };
+                    let table = lua.create_table().map_err(lua_error)?;
+                    table.set(1, rgb[0]).map_err(lua_error)?;
+                    table.set(2, rgb[1]).map_err(lua_error)?;
+                    table.set(3, rgb[2]).map_err(lua_error)?;
+                    Ok(table)
+                })
+                .map_err(lua_error)?,
+            )
+            .map_err(lua_error)?;
+    }
+
+    lua.globals().set("widget", widget).map_err(lua_error)
+}
+
+fn widget_set_text(lua: &Lua, text: &str) -> Result<mlua::Value> {
+    let table = lua.create_table().map_err(lua_error)?;
+    table.set("text", text).map_err(lua_error)?;
+    Ok(mlua::Value::Table(table))
 }
 
 fn install_host_resource_api(

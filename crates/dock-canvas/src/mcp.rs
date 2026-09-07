@@ -602,6 +602,8 @@ mod tests {
                                         surfaces: Vec::new(),
                                         active_indicators: Vec::new(),
                                         mesh: None,
+                                        presence: None,
+                                        presence_preview_active: false,
                                     },
                                 },
                             },
