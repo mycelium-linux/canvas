@@ -8,7 +8,7 @@ use iced::{Element, Length, Rectangle};
 use std::time::{Duration, Instant};
 
 pub const ROTATION_PERIOD: Duration = Duration::from_secs(45);
-pub const CREDIT: &str = "Danilo Guanabara (ShaderToy) / FPL";
+pub const CREDIT: &str = "Danilo Guanabara, Sebastien Berube & Noztol (ShaderToy) / FPL";
 pub const LICENSE: &str = "MIT";
 
 const UNIFORM_WGSL: &str = r#"
@@ -214,6 +214,8 @@ fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 pub struct ShaderPiece {
     pub name: &'static str,
     pub wgsl: &'static str,
+    pub credit: &'static str,
+    pub license: &'static str,
 }
 
 pub const SHADERS: &[ShaderPiece] = &[
@@ -240,6 +242,10 @@ pub const SHADERS: &[ShaderPiece] = &[
     ShaderPiece {
         name: "Floating Rectangles",
         wgsl: FLOATING_RECT,
+    },
+    ShaderPiece {
+        name: "Inception Tunnel",
+        wgsl: INCEPTION_TUNNEL,
     },
 ];
 
@@ -495,11 +501,11 @@ mod tests {
         );
         assert_eq!(
             advance_elapsed(0, Duration::ZERO, ROTATION_PERIOD, cap),
-            (5 % SHADERS.len(), Duration::ZERO)
+            (1, Duration::ZERO)
         );
         assert_eq!(
             advance_elapsed(0, Duration::ZERO, ROTATION_PERIOD * 5, cap),
-            (1, Duration::ZERO)
+            (5 % SHADERS.len(), Duration::ZERO)
         );
     }
 
