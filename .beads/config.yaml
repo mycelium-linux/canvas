@@ -66,5 +66,6 @@
 # - github.token    → use GITHUB_TOKEN env var instead
 
 export.auto: true
-
 no-git-ops: false
+sync:
+    remote: "git@github.com:FuturePresentLabs/dock.git"
