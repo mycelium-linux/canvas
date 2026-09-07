@@ -15,8 +15,16 @@ use std::collections::BTreeSet;
 #[derive(Clone, Default)]
 struct Orchestration;
 
+static PRESENTATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn tools() -> Vec<Tool> {
     [
+        (
+            "displays_list",
+            "List live displays on this Dock host using Dock Control. Read-only; does not list other machines or change visibility.",
+            json!({}),
+            vec![],
+        ),
         (
             "projects_list",
             "List owner-authorized Alfalfa projects. Use this to resolve a spoken project name to an exact project_id before recalling it.",
@@ -31,7 +39,7 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "project_recall",
-            "Bring up one exact Alfalfa project workspace on Agora and arrange its saved local Mac windows. If Agora has no windows, Dock opens one safe web resource in its isolated browser profile.",
+            "Show one exact Alfalfa project workspace on Agora and its saved local Mac windows. May open a viewer, but never starts project applications, opens artifacts, stops background work, migrates compute, or changes MCP bindings. Use resource_open explicitly to open a resource.",
             json!({"project_id":{"type":"string","maxLength":64}}),
             vec!["project_id"],
         ),
@@ -77,7 +85,7 @@ fn arguments(name: &str, args: &Value) -> Result<(Option<String>, Option<String>
         Ok(value.into())
     };
     match name {
-        "projects_list" if object.is_empty() => Ok((None, None)),
+        "projects_list" | "displays_list" if object.is_empty() => Ok((None, None)),
         "project_resources" | "project_recall" => Ok((Some(value("project_id", 64)?), None)),
         "resource_open" => Ok((
             Some(value("project_id", 64)?),
@@ -196,16 +204,6 @@ fn recall(project: &str) -> Result<Value, String> {
         .ok_or("Alfalfa project home is missing")?;
     let recalled = super::remote::rpc(project, "desktop-recall", &[], None)?;
     let status = super::remote::rpc(project, "desktop-status", &[], None)?;
-    let before = workspace_window_count(&status, project)?;
-    let mut seeded = false;
-    if before == 0 {
-        if let Some(url) = entries.iter().find_map(safe_web_uri) {
-            super::remote::rpc(project, "desktop-web-url", &[url.into()], None)?;
-            seeded = true;
-        }
-    }
-    let browser = super::remote::rpc(project, "desktop-web-status", &[], None)?;
-    let status = super::remote::rpc(project, "desktop-status", &[], None)?;
     let window_count = workspace_window_count(&status, project)?;
     let viewer = super::remote::open_desktop(project)?;
     let local = super::workspace::activate_saved_if_bound(project)?;
@@ -215,9 +213,8 @@ fn recall(project: &str) -> Result<Value, String> {
         "presented":true,
         "output":recalled["active_workspace"]["output"],
         "window_count":window_count,
-        "browser_seeded":seeded,
-        "browser_terms_accepted":browser["terms_accepted"],
-        "attention_required":browser["attention_required"],
+        "browser_seeded":false,
+        "presentation_only":true,
         "local_workspace_presented":local.is_some(),
         "local_window_count":local.as_ref().map(|activation| activation.windows.len()).unwrap_or(0),
         "viewer":{"output_index":viewer["output_index"],"reused":viewer["reused"].as_bool().unwrap_or(false)}
@@ -226,7 +223,23 @@ fn recall(project: &str) -> Result<Value, String> {
 
 pub fn execute(name: &str, args: &Value) -> Result<Value, String> {
     let (project, resource) = arguments(name, args)?;
+    // MCP callers share a host's presentation; fail visibly instead of interleaving moves.
+    let _presentation = if matches!(name, "project_recall" | "resource_open") {
+        Some(
+            PRESENTATION
+                .try_lock()
+                .map_err(|_| "Dock presentation is busy; inspect the workspace before retrying")?,
+        )
+    } else {
+        None
+    };
     let result = match name {
+        "displays_list" => match dock_control::request(dock_control::Operation::Displays)? {
+            dock_control::Response::Displays { displays } => {
+                json!({"scope":"this_dock_host","displays":displays})
+            }
+            _ => return Err("Dock Control returned an unexpected display response".into()),
+        },
         "projects_list" => json!({"projects":project_summaries(&super::alfalfa::list()?)?}),
         "project_resources" => {
             let project = project.as_deref().unwrap();
@@ -367,6 +380,8 @@ mod tests {
 
     #[test]
     fn tool_arguments_require_exact_bounded_ids() {
+        assert!(arguments("displays_list", &json!({})).is_ok());
+        assert!(arguments("displays_list", &json!({"host":"other"})).is_err());
         assert!(arguments("projects_list", &json!({})).is_ok());
         assert!(arguments("project_recall", &json!({"project_id":"dock"})).is_ok());
         assert!(arguments(
@@ -376,6 +391,23 @@ mod tests {
         .is_err());
         assert!(arguments("resource_open", &json!({"project_id":"dock"})).is_err());
         assert!(arguments("unknown", &json!({})).is_err());
+    }
+
+    #[test]
+    fn presentation_contention_fails_before_contacting_owners() {
+        let _guard = PRESENTATION.lock().unwrap();
+        for (name, args) in [
+            ("project_recall", json!({"project_id":"dock"})),
+            (
+                "resource_open",
+                json!({"project_id":"dock","resource_id":"code"}),
+            ),
+        ] {
+            assert!(execute(name, &args)
+                .unwrap_err()
+                .contains("presentation is busy"));
+        }
+        assert_eq!(tools().len(), 5);
     }
 
     #[test]

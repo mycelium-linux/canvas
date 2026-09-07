@@ -1050,6 +1050,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let words: Vec<_> = args.iter().map(String::as_str).collect();
         let (tool, arguments) = match words.as_slice() {
             ["orchestrate", "list"] => ("projects_list", serde_json::json!({})),
+            ["orchestrate", "displays"] => ("displays_list", serde_json::json!({})),
             ["orchestrate", "resources", project] => (
                 "project_resources",
                 serde_json::json!({"project_id":project}),
@@ -1063,7 +1064,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 serde_json::json!({"project_id":project,"resource_id":resource}),
             ),
             _ => {
-                return Err("usage: dock-mac orchestrate list | resources PROJECT | recall PROJECT | open PROJECT RESOURCE".into())
+                return Err("usage: dock-mac orchestrate list | displays | resources PROJECT | recall PROJECT | open PROJECT RESOURCE".into())
             }
         };
         let result = dock_mac::mcp::execute(tool, &arguments)?;
