@@ -1125,6 +1125,33 @@ impl App {
                     Task::none()
                 }
             }
+            Command::ScreensaverShader { index } => {
+                let Some(shader) = screensaver::SHADERS.get(index) else {
+                    self.fail(
+                        pending,
+                        Failure::invalid(format!(
+                            "screensaver shader index {index} is out of range"
+                        )),
+                    );
+                    return Task::none();
+                };
+                self.screensaver_index = index;
+                self.screensaver_piece_elapsed = Duration::ZERO;
+                self.screensaver_elapsed = Duration::ZERO;
+                self.screensaver_last_frame = Some(Instant::now());
+                self.bump();
+                self.status = format!("Using screensaver shader {}.", shader.name);
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::ScreensaverShaderSet {
+                            index,
+                            name: shader.name.to_string(),
+                        },
+                    },
+                );
+                Task::none()
+            }
         }
     }
 
@@ -3118,6 +3145,39 @@ mod tests {
             reply,
         }));
         replies.recv().unwrap()
+    }
+
+    #[test]
+    fn screensaver_shader_selection_is_bounded_and_resets_elapsed_time() {
+        let mut app = test_app();
+        app.screensaver_piece_elapsed = Duration::from_secs(12);
+        app.screensaver_elapsed = Duration::from_secs(12);
+
+        let reply = execute(
+            &mut app,
+            "shader-valid",
+            Command::ScreensaverShader {
+                index: screensaver::SHADERS.len() - 1,
+            },
+        );
+        assert!(matches!(reply.outcome, Outcome::Ok { .. }));
+        assert_eq!(app.screensaver_index, screensaver::SHADERS.len() - 1);
+        assert_eq!(app.screensaver_elapsed, Duration::ZERO);
+
+        let reply = execute(
+            &mut app,
+            "shader-invalid",
+            Command::ScreensaverShader {
+                index: screensaver::SHADERS.len(),
+            },
+        );
+        assert!(matches!(
+            reply.outcome,
+            Outcome::Error {
+                code: ErrorCode::InvalidRequest,
+                ..
+            }
+        ));
     }
 
     #[test]
