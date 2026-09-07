@@ -1,8 +1,10 @@
 //! Thin MCP adapter over the permission-checked owner-local Canvas socket.
 use crate::{
     WorkspaceDocument, WorkspacePatch,
-    control::{self, Command, ControlReply, ControlRequest, Outcome},
+    control::{self, Command, ControlReply, ControlRequest, Outcome, Receipt},
+    reconcile::{self, DesiredWorkspaceState, ReconcileAction, Reconciliation},
 };
+use dock_core::Catalog;
 use rmcp::{
     RoleServer, ServerHandler, ServiceExt,
     model::{
@@ -13,7 +15,7 @@ use rmcp::{
     service::RequestContext,
 };
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -89,6 +91,24 @@ struct RenderMermaid {
     title: Option<String>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ReconcileIntent {
+    request_id: String,
+    #[serde(default)]
+    expected_revision: Option<u64>,
+    desired: DesiredWorkspaceState,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+#[derive(Serialize)]
+struct IntentResult {
+    reconciliation: Reconciliation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    application: Option<ControlReply>,
+}
+
 fn tool<T: JsonSchema>(name: &'static str, description: &'static str) -> Tool {
     let schema = serde_json::to_value(schemars::schema_for!(T)).expect("serializable schema");
     Tool::new(
@@ -131,6 +151,10 @@ fn tools() -> Vec<Tool> {
         tool::<RenderMermaid>(
             "canvas_mermaid",
             "Render a Mermaid diagram via mmdc (outside the Canvas process) and open the result as a surface. Keeps Canvas thin.",
+        ),
+        tool::<ReconcileIntent>(
+            "canvas_reconcile_intent",
+            "Reach a resolved desired workspace state deterministically. Canvas inspects current state, computes the smallest validated change, and applies it through the revisioned owner-local socket. Set dry_run to explain without applying. Project and resource IDs must already be exact and authorized.",
         ),
     ]
 }
@@ -258,6 +282,7 @@ type Sender = dyn Fn(&ControlRequest) -> Result<ControlReply, String> + Send + S
 struct Canvas {
     send: Arc<Sender>,
     slot: Arc<tokio::sync::Semaphore>,
+    catalog: Arc<Catalog>,
 }
 
 impl Default for Canvas {
@@ -265,6 +290,109 @@ impl Default for Canvas {
         Self {
             send: Arc::new(control::send),
             slot: Arc::new(tokio::sync::Semaphore::new(1)),
+            catalog: Arc::new(Catalog::bundled().expect("bundled project catalog must be valid")),
+        }
+    }
+}
+
+impl Canvas {
+    async fn reconcile_intent(&self, args: Value) -> Result<CallToolResponse, ErrorData> {
+        let args: ReconcileIntent = match serde_json::from_value(args) {
+            Ok(args) => args,
+            Err(error) => {
+                return Ok(
+                    CallToolResult::error(vec![ContentBlock::text(error.to_string())]).into(),
+                );
+            }
+        };
+        let Ok(permit) = self.slot.clone().try_acquire_owned() else {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "Canvas is busy; inspect before retrying a mutation",
+            )])
+            .into());
+        };
+        let send = self.send.clone();
+        let catalog = self.catalog.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let inspect_request = ControlRequest {
+                schema_version: control::CONTROL_VERSION,
+                request_id: args.request_id.clone(),
+                expected_revision: None,
+                command: Command::ReadDocument,
+            };
+            inspect_request.validate()?;
+            let inspect = send(&inspect_request)?;
+            if args
+                .expected_revision
+                .is_some_and(|expected| expected != inspect.revision)
+            {
+                return Err(format!(
+                    "Canvas revision conflict: expected {}, observed {}",
+                    args.expected_revision.expect("checked above"),
+                    inspect.revision
+                ));
+            }
+            let Outcome::Ok {
+                receipt: Receipt::DocumentSnapshot { document, .. },
+            } = inspect.outcome
+            else {
+                return Err(serde_json::to_string(&inspect).map_err(|error| error.to_string())?);
+            };
+            let reconciliation = reconcile::reconcile(&document, &args.desired, &catalog)
+                .map_err(|error| error.to_string())?;
+            if args.dry_run {
+                return Ok(IntentResult {
+                    reconciliation,
+                    application: None,
+                });
+            }
+            let command = match &reconciliation.action {
+                ReconcileAction::NoChange { .. } => {
+                    return Ok(IntentResult {
+                        reconciliation,
+                        application: None,
+                    });
+                }
+                ReconcileAction::ApplyPatch { patch } => Command::ApplyPatch {
+                    patch: patch.clone(),
+                },
+                ReconcileAction::ApplyDocument { document } => Command::ApplyDocument {
+                    document: document.clone(),
+                },
+            };
+            let apply_request = ControlRequest {
+                schema_version: control::CONTROL_VERSION,
+                request_id: args.request_id,
+                expected_revision: Some(inspect.revision),
+                command,
+            };
+            apply_request.validate()?;
+            let application = send(&apply_request)?;
+            Ok(IntentResult {
+                reconciliation,
+                application: Some(application),
+            })
+        })
+        .await
+        .map_err(|_| ErrorData::internal_error("Canvas intent worker failed", None))?;
+
+        match result {
+            Ok(result) => {
+                let is_error = result
+                    .application
+                    .as_ref()
+                    .is_some_and(|reply| matches!(reply.outcome, Outcome::Error { .. }));
+                let content = vec![ContentBlock::text(serde_json::to_string(&result).map_err(
+                    |_| ErrorData::internal_error("Canvas intent receipt encoding failed", None),
+                )?)];
+                if is_error {
+                    Ok(CallToolResult::error(content).into())
+                } else {
+                    Ok(CallToolResult::success(content).into())
+                }
+            }
+            Err(error) => Ok(CallToolResult::error(vec![ContentBlock::text(error)]).into()),
         }
     }
 }
@@ -295,10 +423,11 @@ impl ServerHandler for Canvas {
         request: CallToolRequestParams,
         _: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
-        let request = match parse(
-            &request.name,
-            Value::Object(request.arguments.unwrap_or_default()),
-        ) {
+        let arguments = Value::Object(request.arguments.unwrap_or_default());
+        if request.name == "canvas_reconcile_intent" {
+            return self.reconcile_intent(arguments).await;
+        }
+        let request = match parse(&request.name, arguments) {
             Ok(request) => request,
             Err(error) => return Ok(CallToolResult::error(vec![ContentBlock::text(error)]).into()),
         };
@@ -380,7 +509,7 @@ mod tests {
     #[test]
     fn schemas_include_native_document_and_patch_definitions() {
         let tools = tools();
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 9);
         assert!(
             tools[1].input_schema["$defs"]
                 .get("WorkspaceDocument")
@@ -392,6 +521,145 @@ mod tests {
                 .is_some()
         );
         assert_eq!(tools[2].input_schema["additionalProperties"], false);
+        assert!(
+            tools[8].input_schema["$defs"]
+                .get("DesiredWorkspaceState")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn intent_tool_inspects_reconciles_and_applies_through_the_socket_boundary() {
+        use crate::{Layout, Surface, SurfaceContent, ThemeRef};
+        use dock_core::layout::Rect;
+        use std::sync::Mutex;
+
+        let catalog = Arc::new(
+            Catalog::parse(
+                r#"{
+                  "schema_version":1,
+                  "projects":[{
+                    "id":"dock",
+                    "name":"Dock",
+                    "theme":{"source":"coherence","mode":"dark","accent":"info"},
+                    "resources":[
+                      {"id":"docs","title":"Docs","host":"mac","kind":"mac_app","target":"com.apple.Safari"},
+                      {"id":"invoice","title":"Invoice","host":"mac","kind":"mac_app","target":"com.apple.Preview"}
+                    ]
+                  }]
+                }"#,
+            )
+            .unwrap(),
+        );
+        let state = Arc::new(Mutex::new(WorkspaceDocument {
+            schema_version: crate::SCHEMA_VERSION,
+            id: "primary".into(),
+            project_id: "dock".into(),
+            revision: 4,
+            theme: ThemeRef::Project,
+            surfaces: vec![Surface {
+                id: "docs".into(),
+                title: "Docs".into(),
+                content: SurfaceContent::ProjectResource {
+                    resource_id: "docs".into(),
+                },
+                inputs: Vec::new(),
+            }],
+            layout: Layout::Surface {
+                surface_id: "docs".into(),
+            },
+            bindings: Vec::new(),
+            focused_surface_id: Some("docs".into()),
+        }));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let send_state = state.clone();
+        let send_catalog = catalog.clone();
+        let send_calls = calls.clone();
+        let canvas = Canvas {
+            send: Arc::new(move |request| {
+                let mut state = send_state.lock().unwrap();
+                match &request.command {
+                    Command::ReadDocument => {
+                        send_calls.lock().unwrap().push("read");
+                        Ok(ControlReply {
+                            schema_version: control::CONTROL_VERSION,
+                            request_id: request.request_id.clone(),
+                            revision: 10,
+                            outcome: Outcome::Ok {
+                                receipt: Receipt::DocumentSnapshot {
+                                    document: Box::new(state.clone()),
+                                    snapshot: control::RuntimeSnapshot {
+                                        workspace_id: state.id.clone(),
+                                        project_id: state.project_id.clone(),
+                                        revision: 10,
+                                        frame: Rect {
+                                            x: 0,
+                                            y: 0,
+                                            width: 1920,
+                                            height: 1080,
+                                        },
+                                        focused_surface_id: state.focused_surface_id.clone(),
+                                        surfaces: Vec::new(),
+                                        active_indicators: Vec::new(),
+                                        mesh: None,
+                                    },
+                                },
+                            },
+                        })
+                    }
+                    Command::ApplyPatch { patch } => {
+                        send_calls.lock().unwrap().push("apply_patch");
+                        assert_eq!(request.expected_revision, Some(10));
+                        *state = state.apply_patch(patch, &send_catalog).unwrap();
+                        Ok(ControlReply {
+                            schema_version: control::CONTROL_VERSION,
+                            request_id: request.request_id.clone(),
+                            revision: 11,
+                            outcome: Outcome::Ok {
+                                receipt: Receipt::DocumentApplied {
+                                    workspace_id: state.id.clone(),
+                                },
+                            },
+                        })
+                    }
+                    _ => panic!("intent tool sent an unexpected socket command"),
+                }
+            }),
+            catalog: catalog.clone(),
+            ..Canvas::default()
+        };
+        let desired = reconcile::DesiredWorkspaceState {
+            schema_version: crate::SCHEMA_VERSION,
+            workspace_id: "primary".into(),
+            project_id: "dock".into(),
+            mode: reconcile::ReconcileMode::Preserve,
+            surfaces: vec![Surface {
+                id: "invoice".into(),
+                title: "Invoice".into(),
+                content: SurfaceContent::ProjectResource {
+                    resource_id: "invoice".into(),
+                },
+                inputs: Vec::new(),
+            }],
+            bindings: Vec::new(),
+            layout: None,
+            focus: reconcile::DesiredFocus::Surface {
+                surface_id: "invoice".into(),
+            },
+        };
+        canvas
+            .reconcile_intent(json!({
+                "request_id":"intent-invoice",
+                "desired": desired,
+                "dry_run": false
+            }))
+            .await
+            .unwrap();
+        assert_eq!(*calls.lock().unwrap(), ["read", "apply_patch"]);
+        let state = state.lock().unwrap();
+        assert!(state.surfaces.iter().any(|surface| surface.id == "docs"));
+        assert!(state.surfaces.iter().any(|surface| surface.id == "invoice"));
+        assert_eq!(state.focused_surface_id.as_deref(), Some("invoice"));
     }
 
     #[tokio::test]
@@ -421,7 +689,7 @@ mod tests {
                 .unwrap()
         });
         let client = ().serve(client_io).await.unwrap();
-        assert_eq!(client.list_all_tools().await.unwrap().len(), 8);
+        assert_eq!(client.list_all_tools().await.unwrap().len(), 9);
         let result = client
             .call_tool(CallToolRequestParams::new("canvas_inspect"))
             .await

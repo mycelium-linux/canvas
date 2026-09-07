@@ -2,7 +2,7 @@
 
 Canvas owns the document, validation and native presentation. MCP is an adapter
 over its existing owner-local control socket, not another renderer or command
-engine. This first slice exposes eight tools:
+engine. This first slice exposes nine tools:
 
 - `canvas_inspect`: atomically returns the document and runtime snapshot.
 - `canvas_apply_document`: validates and replaces presentation intent.
@@ -14,6 +14,10 @@ engine. This first slice exposes eight tools:
   content loader.
 - `canvas_mermaid`: renders Mermaid source with `mmdc`, then opens the resulting
   image as a Canvas surface.
+- `canvas_reconcile_intent`: inspects the live document, deterministically
+  computes the validated state change for an already-resolved workspace intent,
+  and applies it with optimistic revision checks. A dry run returns the same
+  reconciliation without changing Canvas.
 
 MCP input schemas are generated from the Rust document and patch types at build
 time using Schemars. There is no separately maintained JSON dialect. Operations
@@ -49,6 +53,8 @@ Do not replace Dock Control or its permission-bearing app to install this adapte
 
 ## Read, resolve, apply
 
+For direct document and patch tools:
+
 1. Inspect to obtain exact workspace/surface IDs and current content.
 2. Construct a document or patch with the existing Canvas schema.
 3. Supply `expected_revision` from the returned runtime snapshot. For patches,
@@ -56,6 +62,15 @@ Do not replace Dock Control or its permission-bearing app to install this adapte
    revision in `revision`. These are different counters.
 4. Read the returned receipt. Runtime errors set MCP `isError` and retain the
    native error code and current revision. On conflict inspect again.
+
+For high-level presentation intent, resolve the request to exact project,
+resource, surface and binding IDs, then call `canvas_reconcile_intent`. The tool
+holds one adapter slot while it reads the current document, computes either no
+change, a minimal patch, or an exact project replacement, and applies the result
+at the runtime revision it observed. Preserve mode leaves unmentioned human-opened
+surfaces in place. Exact mode removes unmentioned state and requires an explicit
+layout. A project switch also requires exact mode. The returned ordered change
+list makes the decision inspectable and machine-readable.
 
 `request_id` is a bounded correlation ID, not an idempotency key. A socket timeout
 or disconnected client does not prove an edit was cancelled. Inspect before any
@@ -65,10 +80,14 @@ from multiple adapters and direct human input with revision validation.
 
 ## Voice input boundary
 
-The intended path is transcription -> context and exact-ID resolution -> typed
-Canvas operation -> validation -> receipt -> visible result. Fine-tuning may later
-produce the same typed operations; it must not bypass validation or authorization.
+The intended path is transcription -> bounded LLM-assisted context and exact-ID
+resolution -> desired workspace state -> deterministic reconciliation against the
+live document -> revision-checked socket mutation -> receipt -> visible result.
+The model identifies the requested project and authorized assets. It does not
+decide which existing surfaces to keep, remove or update; the reconciler derives
+those changes from current and desired state. Fine-tuning may later produce the
+same typed desired state; it must not bypass validation or authorization.
 Voice capture, training, durable command deduplication, tool enrollment, and live
 Mac visual qualification are not implemented by this MCP adapter.
 
-Tracking: `dock-2kf.9.10`.
+Tracking: `dock-2kf.9.10`, `dock-q26.10`.
