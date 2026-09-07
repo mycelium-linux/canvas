@@ -501,6 +501,7 @@ pub enum ContentKind {
     Workspace,
     Markdown,
     Terminal,
+    Scene,
 }
 
 impl ControlRequest {

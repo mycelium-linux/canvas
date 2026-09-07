@@ -14,8 +14,8 @@ use dock_canvas::media::{
     plan_pdf_page, plan_raster,
 };
 use dock_canvas::{
-    AssetRef, Layout, NormalizedRect, Placement, SCHEMA_VERSION, Surface, SurfaceContent, ThemeRef,
-    WorkspaceDocument,
+    AssetRef, Layout, NormalizedRect, Placement, SCHEMA_VERSION, Scene, SceneNode,
+    NodeContent, Surface, SurfaceContent, ThemeRef, WorkspaceDocument,
 };
 use dock_core::{Catalog, ProjectTheme, ThemePalette, desktop::WallpaperRequest, layout::Rect};
 use iced::widget::{container, image as image_widget, markdown, row, scrollable, space, stack, text};
@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 mod terminal;
 mod indicator;
 mod presence;
-// mod screensaver;
+mod transition;
 mod screensaver_stub {
     use std::time::{Duration, Instant};
     pub struct Renderer;
@@ -50,10 +50,10 @@ mod screensaver_stub {
         pub fn frame(&mut self, _w: u32, _h: u32, _now: Instant) -> Result<(Vec<u8>, usize), String> { Err("not compiled".into()) }
     }
     pub fn attribution(index: usize) -> String { format!("screensaver:{index}") }
+    #[allow(dead_code)]
     pub const ROTATION_PERIOD: Duration = Duration::from_secs(45);
 }
 use screensaver_stub as screensaver;
-mod transition;
 
 const INITIAL_FRAME: Rect = Rect {
     x: 120,
@@ -112,6 +112,9 @@ enum ContentSource {
         #[allow(dead_code)]
         pid: u32,
         buffer: String,
+    },
+    Scene {
+        scene: Scene,
     },
 }
 
@@ -237,6 +240,7 @@ struct App {
     screensaver_index: usize,
     screensaver_show_time: bool,
     last_screensaver_frame: Instant,
+    screensaver_fps: f32,
 }
 
 impl App {
@@ -305,6 +309,7 @@ impl App {
             screensaver_index: 0,
             screensaver_show_time: false,
             last_screensaver_frame: Instant::now(),
+            screensaver_fps: 0.0,
         }
     }
 
@@ -669,6 +674,7 @@ impl App {
                 let workspace_id = document.id.clone();
                 self.start_transition();
                 self.document = document;
+                self.ensure_scene_decoded();
                 self.bump();
                 self.status = format!("Applied workspace {workspace_id}.");
                 self.answer(
@@ -685,6 +691,7 @@ impl App {
                         self.start_transition();
                         self.document = document;
                         self.prune_decoded();
+                        self.ensure_scene_decoded();
                         self.bump();
                         self.status = format!("Patched workspace {}.", self.document.id);
                         self.answer(
@@ -899,6 +906,7 @@ impl App {
                 document.revision += 1;
                 self.start_transition();
                 self.document = document;
+                self.ensure_scene_decoded();
                 self.bump();
                 self.status = format!("Using {project_id} theme.");
                 self.answer(
@@ -1179,6 +1187,15 @@ impl App {
             .max(64.0) as u32;
         match renderer.frame(width, height, Instant::now()) {
             Ok((pixels, index)) => {
+                let render_dt = self.last_screensaver_frame.elapsed().as_secs_f32();
+                if render_dt > 0.005 {
+                    let instant_fps = (1.0 / render_dt).clamp(1.0, 240.0);
+                    self.screensaver_fps = if self.screensaver_fps <= 0.0 {
+                        instant_fps
+                    } else {
+                        self.screensaver_fps * 0.9 + instant_fps * 0.1
+                    };
+                }
                 self.screensaver_index = index;
                 self.screensaver_frame =
                     Some(iced::widget::image::Handle::from_rgba(width, height, pixels));
@@ -1501,13 +1518,56 @@ impl App {
         self.decoded.retain(|id, decoded| {
             self.document.surfaces.iter().any(|surface| {
                 surface.id == *id
-                    && matches!(
-                        &surface.content,
-                        SurfaceContent::Asset { asset }
-                            if decoded.snapshot.asset_sha256.as_ref() == Some(&asset.sha256)
-                    )
+                    && match &surface.content {
+                        SurfaceContent::Asset { asset } => {
+                            decoded.snapshot.asset_sha256.as_ref() == Some(&asset.sha256)
+                        }
+                        _ => true,
+                    }
             })
         });
+    }
+
+    fn ensure_scene_decoded(&mut self) {
+        for surface in &self.document.surfaces {
+            if self.decoded.contains_key(&surface.id) {
+                continue;
+            }
+            if let SurfaceContent::Scene { scene } = &surface.content {
+                let snapshot = SurfaceSnapshot {
+                    id: surface.id.clone(),
+                    title: surface.title.clone(),
+                    content: ContentKind::Scene,
+                    asset_sha256: None,
+                    page_index: None,
+                    page_count: None,
+                    source_pixels: None,
+                    rendered_pixels: None,
+                    display_logical: None,
+                    scale_factor: None,
+                };
+                let runtime = RuntimeSurface {
+                    snapshot,
+                    source: ContentSource::Scene { scene: scene.clone() },
+                    handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
+                    source_pixels: [1, 1],
+                    media_plan: MediaPlan {
+                        viewport_logical: LogicalSize { width: 1920.0, height: 1080.0 },
+                        source_dimensions: SourceDimensions::RasterPixels(PixelSize { width: 1, height: 1 }),
+                        target_px: PixelSize { width: 1, height: 1 },
+                        display_logical: LogicalSize { width: 1920.0, height: 1080.0 },
+                        scale_factor: 1.0,
+                        cache_key: MediaCacheKey {
+                            source_id: "<scene>".to_string(),
+                            variant: MediaVariant::Raster,
+                            pixel_size: PixelSize { width: 1, height: 1 },
+                        },
+                    },
+                    upload_pixels: [1, 1],
+                };
+                self.decoded.insert(surface.id.clone(), runtime);
+            }
+        }
     }
 
     fn project_palette(&self) -> ThemePalette {
@@ -1538,9 +1598,47 @@ impl App {
             .width(width)
             .height(height)
             .into(),
-            ContentSource::Terminal { buffer, .. } => {
+             ContentSource::Terminal { buffer, .. } => {
                 let palette = self.project_theme().palette();
                 scrollable(text(buffer).color(color(palette.text)).width(Length::Fill))
+                    .width(width)
+                    .height(height)
+                    .into()
+            }
+            ContentSource::Scene { scene } => {
+                let palette = self.project_theme().palette();
+                let text_nodes: Vec<&SceneNode> = scene
+                    .nodes
+                    .iter()
+                    .filter(|n| matches!(n.content, NodeContent::Text { .. }))
+                    .collect();
+                let children: Vec<Element<'_, Message>> = text_nodes
+                    .iter()
+                    .map(|n| {
+                        let NodeContent::Text { text: label } = &n.content else {
+                            return container(text("")).into();
+                        };
+                        let [w, h] = surface.snapshot.display_logical.unwrap_or([1920.0, 1080.0]);
+                        let width_px = w as f32;
+                        let height_px = h as f32;
+                        let x_frac = (n.transform.translation[0] + 4.0) / 8.0;
+                        let y_frac = 1.0 - (n.transform.translation[1] + 4.0) / 8.0;
+                        let x = (x_frac * width_px).max(0.0);
+                        let y = (y_frac * height_px).max(0.0);
+                        let font_size = (n.transform.scale[0] * n.transform.scale[1] * 24.0).max(10.0);
+                        container(text(label).size(font_size).color(color(palette.text)))
+                            .width(Length::Shrink)
+                            .height(Length::Shrink)
+                            .padding(iced::Padding {
+                                top: y,
+                                right: 0.0,
+                                bottom: 0.0,
+                                left: x,
+                            })
+                            .into()
+                    })
+                    .collect();
+                container(stack(children))
                     .width(width)
                     .height(height)
                     .into()
@@ -1880,6 +1978,29 @@ impl App {
                 .align_y(iced::alignment::Vertical::Bottom)
                 .into(),
             );
+            if self.screensaver_fps > 0.0 {
+                layers.push(
+                    container(
+                        text(format!("{:.0} fps", self.screensaver_fps))
+                            .size(12)
+                            .color(Color {
+                                a: 0.45,
+                                ..muted
+                            }),
+                    )
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .padding(iced::Padding {
+                        top: 0.0,
+                        right: 20.0,
+                        bottom: 18.0,
+                        left: 0.0,
+                    })
+                    .align_x(iced::alignment::Horizontal::Right)
+                    .align_y(iced::alignment::Vertical::Bottom)
+                    .into(),
+                );
+            }
             if self.screensaver_show_time {
                 let (clock, _date) = hud::now_local();
                 layers.push(
