@@ -478,11 +478,7 @@ fn install_module_context(
     lua.globals().set("module", module).map_err(lua_error)
 }
 
-fn install_widget_api(
-    lua: &Lua,
-    read_theme: bool,
-    theme: ModuleThemeTokens,
-) -> Result<()> {
+fn install_widget_api(lua: &Lua, read_theme: bool, theme: ModuleThemeTokens) -> Result<()> {
     let widget = lua.create_table().map_err(lua_error)?;
 
     widget
@@ -499,7 +495,10 @@ fn install_widget_api(
                     let sign = if change >= 0.0 { "+" } else { "‒" };
                     result.push_str(&format!(
                         "{} ${:.2} ({} {:.1}%)  ",
-                        symbol, price, sign, change.abs()
+                        symbol,
+                        price,
+                        sign,
+                        change.abs()
                     ));
                 }
                 let text = result.trim_end().to_string();

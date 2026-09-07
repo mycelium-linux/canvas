@@ -1124,6 +1124,31 @@ mod tests {
     }
 
     #[test]
+    fn screensaver_defaults_off_and_rejects_unbounded_frame_rates() {
+        let settings = ScreensaverSettings::default();
+        assert!(!settings.enabled);
+        assert_eq!(settings.max_fps, DEFAULT_SCREENSAVER_FPS);
+        settings.validate().unwrap();
+
+        assert!(
+            ScreensaverSettings {
+                max_fps: 0,
+                ..settings
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            ScreensaverSettings {
+                max_fps: MAX_SCREENSAVER_FPS + 1,
+                ..settings
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
     fn protocol_rejects_unknown_fields_and_unsafe_geometry() {
         let request = ControlRequest {
             schema_version: CONTROL_VERSION,

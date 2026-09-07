@@ -50,7 +50,10 @@ pub fn write_fd(fd: RawFd, data: &[u8]) -> Result<(), String> {
     unsafe {
         let ret = libc::write(fd, data.as_ptr() as *const _, data.len());
         if ret < 0 {
-            return Err(format!("write to terminal failed: {}", std::io::Error::last_os_error()));
+            return Err(format!(
+                "write to terminal failed: {}",
+                std::io::Error::last_os_error()
+            ));
         }
     }
     Ok(())
