@@ -2151,6 +2151,14 @@ mod platform {
     }
 
     #[cfg(target_os = "macos")]
+    pub(super) fn canvas_presentation_options() -> objc2_app_kit::NSApplicationPresentationOptions {
+        use objc2_app_kit::NSApplicationPresentationOptions;
+
+        NSApplicationPresentationOptions::NSApplicationPresentationAutoHideDock
+            | NSApplicationPresentationOptions::NSApplicationPresentationAutoHideMenuBar
+    }
+
+    #[cfg(target_os = "macos")]
     pub fn display_frames() -> Result<Vec<Rect>, String> {
         match dock_control::request(dock_control::Operation::Displays)? {
             dock_control::Response::Displays { displays } => {
@@ -2167,6 +2175,7 @@ mod platform {
 
         let marker = MainThreadMarker::new().ok_or("AppKit window setup left the main thread")?;
         let application = NSApplication::sharedApplication(marker);
+        application.setPresentationOptions(canvas_presentation_options());
         let windows = application.windows();
         if windows.is_empty() {
             return Err("AppKit has not published the Canvas window yet".into());
@@ -2910,6 +2919,17 @@ mod tests {
                 width: 1920,
                 height: 1200,
             }
+        );
+        use objc2_app_kit::NSApplicationPresentationOptions;
+        let options = platform::canvas_presentation_options();
+        assert!(
+            options.contains(
+                NSApplicationPresentationOptions::NSApplicationPresentationAutoHideMenuBar
+            )
+        );
+        assert!(
+            options
+                .contains(NSApplicationPresentationOptions::NSApplicationPresentationAutoHideDock)
         );
     }
 
