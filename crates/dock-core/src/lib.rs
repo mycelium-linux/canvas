@@ -9,6 +9,7 @@ use std::{
 
 pub use coherence_tokens;
 pub mod desktop_theme;
+pub mod layout;
 
 #[derive(Debug)]
 pub struct Error(pub String);

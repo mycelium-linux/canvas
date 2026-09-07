@@ -2,6 +2,8 @@
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
+pub use dock_core::layout::Rect;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Window {
     #[serde(default)]
@@ -11,36 +13,55 @@ pub struct Window {
     pub title: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub struct Rect {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
+/// Plan an explicit work area without assuming a screen size or moving unrelated windows.
+pub fn tiles(area: Rect, count: usize) -> Result<Vec<Rect>, String> {
+    let surfaces = (0..count)
+        .map(|index| dock_core::layout::Surface {
+            id: index.to_string(),
+            role: dock_core::layout::PaneRole::Auxiliary,
+        })
+        .collect::<Vec<_>>();
+    let plan = dock_core::layout::browser_primary(area, &surfaces)?;
+    Ok(plan.placements.into_iter().map(|p| p.frame).collect())
 }
 
-/// Split an explicit work area. Never assumes a screen size or moves unrelated windows.
-pub fn tiles(area: Rect, count: usize) -> Result<Vec<Rect>, String> {
-    if count == 0 || count > 16 || area.width < 160 * count as u32 || area.height < 120 {
-        return Err(
-            "Choose 1–16 windows and a work area at least 160px wide per window and 120px tall"
-                .into(),
-        );
+fn window_role(window: &Window) -> dock_core::layout::PaneRole {
+    let app = window.app.to_ascii_lowercase();
+    if [
+        "arc", "brave", "chrome", "chromium", "firefox", "orion", "safari",
+    ]
+    .iter()
+    .any(|browser| app.contains(browser))
+    {
+        dock_core::layout::PaneRole::Browser
+    } else {
+        dock_core::layout::PaneRole::Tool
     }
-    validate_rect(area)?;
-    let width = area.width / count as u32;
-    Ok((0..count)
-        .map(|i| Rect {
-            x: area.x + (i as i32 * width as i32),
-            y: area.y,
-            width: if i + 1 == count {
-                area.width - width * i as u32
-            } else {
-                width
-            },
-            height: area.height,
+}
+
+pub fn project_primary_index(windows: &[Window]) -> Result<usize, String> {
+    if windows.is_empty() {
+        return Err("Project layout requires at least one attached window".into());
+    }
+    Ok(windows
+        .iter()
+        .position(|window| window_role(window) == dock_core::layout::PaneRole::Browser)
+        .unwrap_or(0))
+}
+
+/// Return frames in the same order as the project bindings. The browser gets
+/// the primary region; other project windows share a focusable stack region.
+pub fn project_tiles(area: Rect, windows: &[Window]) -> Result<Vec<Rect>, String> {
+    let surfaces = windows
+        .iter()
+        .enumerate()
+        .map(|(index, window)| dock_core::layout::Surface {
+            id: index.to_string(),
+            role: window_role(window),
         })
-        .collect())
+        .collect::<Vec<_>>();
+    let plan = dock_core::layout::browser_primary(area, &surfaces)?;
+    Ok(plan.placements.into_iter().map(|p| p.frame).collect())
 }
 
 pub fn windows() -> Result<Vec<Window>, String> {
@@ -105,19 +126,48 @@ mod tests {
         };
         let result = tiles(area, 3).unwrap();
         assert_eq!(result[0].x, -1001);
+        assert_eq!(result[1], result[2]);
         assert_eq!(result[2].x + result[2].width as i32, 0);
-        assert_eq!(result.iter().map(|r| r.width).sum::<u32>(), 1001);
     }
     #[test]
     fn invalid_work_areas_fail_before_os_calls() {
         let area = Rect {
             x: 0,
             y: 0,
-            width: 320,
+            width: 319,
             height: 700,
         };
         assert!(tiles(area, 0).is_err());
         assert!(tiles(area, 3).is_err());
+    }
+
+    #[test]
+    fn project_browser_receives_the_primary_region() {
+        let area = Rect {
+            x: 0,
+            y: 25,
+            width: 1200,
+            height: 800,
+        };
+        let windows = [
+            Window {
+                id: "terminal".into(),
+                pid: 1,
+                app: "Terminal".into(),
+                title: "Shell".into(),
+            },
+            Window {
+                id: "browser".into(),
+                pid: 2,
+                app: "Safari".into(),
+                title: "Project".into(),
+            },
+        ];
+        let frames = project_tiles(area, &windows).unwrap();
+        assert_eq!(project_primary_index(&windows).unwrap(), 1);
+        assert_eq!(frames[0].x, 800);
+        assert_eq!(frames[1].x, 0);
+        assert_eq!(frames[1].width, 800);
     }
 }
 

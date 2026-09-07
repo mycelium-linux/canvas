@@ -627,15 +627,19 @@ impl App {
                                 Some(value) => parse_area(&value)?,
                                 None => dock_mac::work_area()?,
                             };
-                            Some(dock_mac::tiles(area, ws.len())?)
+                            Some(dock_mac::project_tiles(area, &ws)?)
                         } else {
                             None
                         };
                         for (i, w) in ws.iter().enumerate() {
                             if let Some(ref rects) = rects {
                                 dock_mac::tile(w, rects[i])?;
+                            } else {
+                                dock_mac::focus(w)?;
                             }
-                            dock_mac::focus(w)?;
+                        }
+                        if should_tile {
+                            dock_mac::focus(&ws[dock_mac::project_primary_index(&ws)?])?;
                         }
                         Ok("Project windows recalled. Other windows remain available.".into())
                     },
