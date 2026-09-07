@@ -60,9 +60,11 @@ must not be interpreted as "nothing changed".
 
 ## Desktop Bridge Boundary
 
-The bridge currently proxies HTTP MCP connectors; Dock serves stdio. This is not
-yet a registered bridge connector. Do not add an unauthenticated HTTP wrapper.
-The bridge must own transport adaptation, process lifetime and owner authorization;
+The bridge now supports owner-local `mcp-stdio` connectors as well as HTTP MCP.
+Dock can use this transport without an unauthenticated HTTP wrapper. Each client
+gets a lifecycle-managed child with configured executable/arguments and no
+inherited credential environment. Deployment and connector enrollment remain
+separate. The bridge owns transport adaptation, process lifetime and authorization;
 Dock owns presentation and Alfalfa project resolution. Alfalfa remains the owner
 of project records and resources, not a catalog duplicated in the bridge.
 
@@ -72,11 +74,12 @@ contract into MCP and forwards verified claims; reuse it rather than treating
 these REST endpoints as Streamable HTTP or implementing another Alfalfa proxy.
 Dock presentation authority is distinct from Alfalfa repository/tool grants.
 
-Dock invokes the owner's `project-read` CLI for Alfalfa reads. That CLI currently
-reads session credentials in each process. Before enrolling automatic workflows,
-move these fixed reads behind the existing credential broker or stable credential
-owner, retaining exact route allowlists, bounded responses and explicit denials.
-Never send owner tokens to Dock or accept caller-supplied upstream URLs.
+Dock invokes the owner's `project-read` CLI for Alfalfa reads. On Unix this now
+uses the persistent broker and its configuration-bound credential cache, without
+per-CLI Keychain reads or anonymous fallback on broker failure. The broker checks
+the configured Alfalfa port and retains exact route allowlists, response bounds,
+and authorization denials. Owner tokens never reach Dock. Configuration and
+verification live in `shared-infra/docs/desktop-bridge/dock-stdio.md`.
 
 Dock does not accept Firefox terms on the owner's behalf. Mozilla's managed
 [`SkipTermsOfUse` policy](https://mozilla.github.io/policy-templates/#skiptermsofuse)
