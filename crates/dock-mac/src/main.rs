@@ -1046,11 +1046,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dock_mac::mcp::serve()?;
         return Ok(());
     }
+    if let [command, port] = args.as_slice() {
+        if command == "mcp-serve-http" {
+            dock_mac::mcp::serve_http(port.parse()?)?;
+            return Ok(());
+        }
+    }
     if args.first().map(String::as_str) == Some("orchestrate") {
         let words: Vec<_> = args.iter().map(String::as_str).collect();
         let (tool, arguments) = match words.as_slice() {
             ["orchestrate", "list"] => ("projects_list", serde_json::json!({})),
             ["orchestrate", "displays"] => ("displays_list", serde_json::json!({})),
+            ["orchestrate", "workspaces"] => ("workspaces_list", serde_json::json!({})),
+            ["orchestrate", "presence"] => ("presence_route", serde_json::json!({})),
             ["orchestrate", "resources", project] => (
                 "project_resources",
                 serde_json::json!({"project_id":project}),
@@ -1059,12 +1067,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "project_recall",
                 serde_json::json!({"project_id":project}),
             ),
+            ["orchestrate", "recall", project, target] => (
+                "project_recall",
+                serde_json::json!({"project_id":project,"target":target}),
+            ),
+            ["orchestrate", "activate", project] => (
+                "workspace_activate",
+                serde_json::json!({"project_id":project}),
+            ),
+            ["orchestrate", "activate", project, target] => (
+                "workspace_activate",
+                serde_json::json!({"project_id":project,"target":target}),
+            ),
             ["orchestrate", "open", project, resource] => (
                 "resource_open",
                 serde_json::json!({"project_id":project,"resource_id":resource}),
             ),
             _ => {
-                return Err("usage: dock-mac orchestrate list | displays | resources PROJECT | recall PROJECT | open PROJECT RESOURCE".into())
+                return Err("usage: dock-mac orchestrate list | displays | workspaces | presence | resources PROJECT | recall PROJECT [primary|presence] | activate PROJECT [primary|presence] | open PROJECT RESOURCE".into())
             }
         };
         let result = dock_mac::mcp::execute(tool, &arguments)?;

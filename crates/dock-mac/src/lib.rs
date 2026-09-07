@@ -611,6 +611,25 @@ pub fn work_area() -> Result<Rect, String> {
     }
 }
 
+/// Resolve one stable Dock Control display ID to its current usable frame.
+/// Display names and coordinates may change; callers persist only the ID.
+pub fn display_work_area(display_id: &str) -> Result<(String, Rect), String> {
+    if display_id.is_empty() || display_id.len() > 128 || display_id.chars().any(char::is_control) {
+        return Err("Invalid display identifier".into());
+    }
+    match dock_control::request(dock_control::Operation::Displays)? {
+        dock_control::Response::Displays { displays } => {
+            let display = displays
+                .into_iter()
+                .find(|display| display.id == display_id)
+                .ok_or("Configured presence display is not connected")?;
+            Ok((display.name, core_rect(display.visible_frame)))
+        }
+        _ => Err("Dock Control did not return display geometry".into()),
+    }
+}
+
+pub mod presence;
 pub mod reservation;
 pub mod workspace;
 

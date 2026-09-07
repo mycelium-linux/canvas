@@ -7,15 +7,32 @@ use rmcp::{
         Tool,
     },
     service::RequestContext,
+    transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    },
     RoleServer, ServerHandler, ServiceExt,
 };
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
 #[derive(Clone, Default)]
 struct Orchestration;
 
 static PRESENTATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Target {
+    #[default]
+    Primary,
+    Presence,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Arguments {
+    project: Option<String>,
+    resource: Option<String>,
+    target: Target,
+}
 
 fn tools() -> Vec<Tool> {
     [
@@ -32,6 +49,24 @@ fn tools() -> Vec<Tool> {
             vec![],
         ),
         (
+            "workspaces_list",
+            "List owner-authorized Alfalfa projects with saved local Mac window counts. Window titles and application details are omitted.",
+            json!({}),
+            vec![],
+        ),
+        (
+            "presence_route",
+            "Inspect whether a fresh, identified JARVIS Presence publication resolves to one configured display. Read-only and returns no identity details.",
+            json!({}),
+            vec![],
+        ),
+        (
+            "workspace_activate",
+            "Arrange and focus the saved local Mac windows for one exact Alfalfa project. target=presence fails when presence is stale, unknown, absent, ambiguous, or mapped to a disconnected display.",
+            json!({"project_id":{"type":"string","maxLength":64},"target":{"type":"string","enum":["primary","presence"]}}),
+            vec!["project_id"],
+        ),
+        (
             "project_resources",
             "List safe metadata for one exact Alfalfa project's resources. Source content and resource URIs are omitted.",
             json!({"project_id":{"type":"string","maxLength":64}}),
@@ -40,7 +75,7 @@ fn tools() -> Vec<Tool> {
         (
             "project_recall",
             "Show one exact Alfalfa project workspace on Agora and its saved local Mac windows. May open a viewer, but never starts project applications, opens artifacts, stops background work, migrates compute, or changes MCP bindings. Use resource_open explicitly to open a resource.",
-            json!({"project_id":{"type":"string","maxLength":64}}),
+            json!({"project_id":{"type":"string","maxLength":64},"target":{"type":"string","enum":["primary","presence"]}}),
             vec!["project_id"],
         ),
         (
@@ -64,7 +99,7 @@ fn tools() -> Vec<Tool> {
     .collect()
 }
 
-fn arguments(name: &str, args: &Value) -> Result<(Option<String>, Option<String>), String> {
+fn arguments(name: &str, args: &Value) -> Result<Arguments, String> {
     let object = args.as_object().ok_or("Tool arguments must be an object")?;
     let tool = tools()
         .into_iter()
@@ -84,13 +119,31 @@ fn arguments(name: &str, args: &Value) -> Result<(Option<String>, Option<String>
         }
         Ok(value.into())
     };
+    let target = match args.get("target").and_then(Value::as_str) {
+        None | Some("primary") => Target::Primary,
+        Some("presence") => Target::Presence,
+        Some(_) => return Err("target must be primary or presence".into()),
+    };
     match name {
-        "projects_list" | "displays_list" if object.is_empty() => Ok((None, None)),
-        "project_resources" | "project_recall" => Ok((Some(value("project_id", 64)?), None)),
-        "resource_open" => Ok((
-            Some(value("project_id", 64)?),
-            Some(value("resource_id", 128)?),
-        )),
+        "projects_list" | "displays_list" | "workspaces_list" | "presence_route"
+            if object.is_empty() =>
+        {
+            Ok(Arguments::default())
+        }
+        "project_resources" => Ok(Arguments {
+            project: Some(value("project_id", 64)?),
+            ..Arguments::default()
+        }),
+        "project_recall" | "workspace_activate" => Ok(Arguments {
+            project: Some(value("project_id", 64)?),
+            target,
+            ..Arguments::default()
+        }),
+        "resource_open" => Ok(Arguments {
+            project: Some(value("project_id", 64)?),
+            resource: Some(value("resource_id", 128)?),
+            ..Arguments::default()
+        }),
         _ => Err("Missing or invalid orchestration tool arguments".into()),
     }
 }
@@ -195,7 +248,69 @@ fn workspace_window_count(value: &Value, project: &str) -> Result<usize, String>
         .ok_or_else(|| format!("Recalled project workspace {project} is missing"))
 }
 
-fn recall(project: &str) -> Result<Value, String> {
+fn target_area(target: Target) -> Result<(Option<super::Rect>, Option<Value>), String> {
+    match target {
+        Target::Primary => Ok((None, None)),
+        Target::Presence => {
+            let route = super::presence::resolve()?;
+            let (display_name, area) = super::display_work_area(&route.display_id)?;
+            Ok((
+                Some(area),
+                Some(json!({
+                    "target":"presence",
+                    "producer_id":route.producer_id,
+                    "zone":route.zone,
+                    "display_id":route.display_id,
+                    "display_name":display_name,
+                    "age_ms":route.age_ms
+                })),
+            ))
+        }
+    }
+}
+
+fn workspace_summaries() -> Result<Vec<Value>, String> {
+    let bindings = super::workspace::load()?;
+    project_summaries(&super::alfalfa::list()?)?
+        .into_iter()
+        .map(|project| {
+            let id = project["project_id"]
+                .as_str()
+                .ok_or("Projected project identity is missing")?;
+            Ok(json!({
+                "project_id":id,
+                "name":project["name"],
+                "local_window_count":bindings.windows(id).len()
+            }))
+        })
+        .collect()
+}
+
+fn presence_status() -> Value {
+    match target_area(Target::Presence) {
+        Ok((_, Some(route))) => json!({"available":true,"route":route}),
+        Ok(_) => json!({"available":false,"reason":"Presence route did not resolve"}),
+        Err(error) => json!({"available":false,"reason":error}),
+    }
+}
+
+fn activate_workspace(project: &str, target: Target) -> Result<Value, String> {
+    // Project/resource lookup is the owner-authorized exact-ID check.
+    super::resources::project_entries(project)?;
+    let (area, route) = target_area(target)?;
+    let mut bindings = super::workspace::load()?;
+    let activation = super::workspace::activate(&mut bindings, project, area)?;
+    super::workspace::save(&bindings)?;
+    Ok(json!({
+        "project_id":project,
+        "presented":true,
+        "local_window_count":activation.windows.len(),
+        "target":if target == Target::Presence {"presence"} else {"primary"},
+        "presence_route":route
+    }))
+}
+
+fn recall(project: &str, target: Target) -> Result<Value, String> {
     let entries = super::resources::project_entries(project)?;
     let project_name = entries
         .first()
@@ -206,7 +321,8 @@ fn recall(project: &str) -> Result<Value, String> {
     let status = super::remote::rpc(project, "desktop-status", &[], None)?;
     let window_count = workspace_window_count(&status, project)?;
     let viewer = super::remote::open_desktop(project)?;
-    let local = super::workspace::activate_saved_if_bound(project)?;
+    let (area, route) = target_area(target)?;
+    let local = super::workspace::activate_saved_if_bound_at(project, area)?;
     Ok(json!({
         "project_id":project,
         "name":project_name,
@@ -215,6 +331,8 @@ fn recall(project: &str) -> Result<Value, String> {
         "window_count":window_count,
         "browser_seeded":false,
         "presentation_only":true,
+        "target":if target == Target::Presence {"presence"} else {"primary"},
+        "presence_route":route,
         "local_workspace_presented":local.is_some(),
         "local_window_count":local.as_ref().map(|activation| activation.windows.len()).unwrap_or(0),
         "viewer":{"output_index":viewer["output_index"],"reused":viewer["reused"].as_bool().unwrap_or(false)}
@@ -222,9 +340,12 @@ fn recall(project: &str) -> Result<Value, String> {
 }
 
 pub fn execute(name: &str, args: &Value) -> Result<Value, String> {
-    let (project, resource) = arguments(name, args)?;
+    let arguments = arguments(name, args)?;
     // MCP callers share a host's presentation; fail visibly instead of interleaving moves.
-    let _presentation = if matches!(name, "project_recall" | "resource_open") {
+    let _presentation = if matches!(
+        name,
+        "project_recall" | "resource_open" | "workspace_activate"
+    ) {
         Some(
             PRESENTATION
                 .try_lock()
@@ -241,15 +362,20 @@ pub fn execute(name: &str, args: &Value) -> Result<Value, String> {
             _ => return Err("Dock Control returned an unexpected display response".into()),
         },
         "projects_list" => json!({"projects":project_summaries(&super::alfalfa::list()?)?}),
+        "workspaces_list" => json!({"workspaces":workspace_summaries()?}),
+        "presence_route" => presence_status(),
         "project_resources" => {
-            let project = project.as_deref().unwrap();
+            let project = arguments.project.as_deref().unwrap();
             let entries = super::resources::project_entries(project)?;
             json!({"project_id":project,"resources":public_resources(&entries)?})
         }
-        "project_recall" => recall(project.as_deref().unwrap())?,
+        "workspace_activate" => {
+            activate_workspace(arguments.project.as_deref().unwrap(), arguments.target)?
+        }
+        "project_recall" => recall(arguments.project.as_deref().unwrap(), arguments.target)?,
         "resource_open" => {
-            let project = project.as_deref().unwrap();
-            let resource = resource.as_deref().unwrap();
+            let project = arguments.project.as_deref().unwrap();
+            let resource = arguments.resource.as_deref().unwrap();
             let entries = super::resources::project_entries(project)?;
             let entry = entries
                 .iter()
@@ -338,6 +464,97 @@ pub fn serve() -> Result<(), String> {
     })
 }
 
+pub fn token_path() -> Result<std::path::PathBuf, String> {
+    Ok(
+        std::path::PathBuf::from(std::env::var_os("HOME").ok_or("HOME is unset")?)
+            .join("Library/Application Support/Dock/mcp/token"),
+    )
+}
+
+fn local_token() -> Result<String, String> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(token_path()?)
+        .map_err(|_| "Private Dock MCP credential unavailable")?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "Cannot inspect Dock MCP credential")?;
+    if !metadata.is_file()
+        || metadata.mode() & 0o077 != 0
+        || metadata.uid() != unsafe { libc::geteuid() }
+    {
+        return Err("Dock MCP credential must be a private file owned by this user".into());
+    }
+    let mut token = String::new();
+    file.by_ref()
+        .take(129)
+        .read_to_string(&mut token)
+        .map_err(|_| "Cannot read Dock MCP credential")?;
+    if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Invalid Dock MCP credential".into());
+    }
+    Ok(token)
+}
+
+async fn authorize(
+    axum::extract::State(token): axum::extract::State<Arc<String>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let provided = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or("");
+    use subtle::ConstantTimeEq;
+    if !bool::from(provided.as_bytes().ct_eq(token.as_bytes())) {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+    next.run(request).await
+}
+
+/// Serve the same tools over a private loopback transport for FPL Desktop
+/// Bridge. The bridge reads the bearer from `token_path`; callers never do.
+pub fn serve_http(port: u16) -> Result<(), String> {
+    if port < 1024 {
+        return Err("Dock MCP requires an unprivileged explicit loopback port".into());
+    }
+    let token = Arc::new(local_token()?);
+    let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        let service = StreamableHttpService::new(
+            || Ok(Orchestration),
+            Arc::new(LocalSessionManager::default()),
+            {
+                let mut config = StreamableHttpServerConfig::default();
+                config.legacy_session_mode = true;
+                config.max_request_body_bytes = 128 * 1024;
+                config.allowed_hosts =
+                    vec![format!("127.0.0.1:{port}"), format!("localhost:{port}")];
+                config.allowed_origins = vec![format!("http://127.0.0.1:{port}")];
+                config
+            },
+        );
+        let router = axum::Router::new()
+            .nest_service("/mcp", service)
+            .layer(axum::middleware::from_fn_with_state(token, authorize));
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
+            .await
+            .map_err(|error| error.to_string())?;
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async {
+                let _ = tokio::signal::ctrl_c().await;
+            })
+            .await
+            .map_err(|error| error.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,8 +599,24 @@ mod tests {
     fn tool_arguments_require_exact_bounded_ids() {
         assert!(arguments("displays_list", &json!({})).is_ok());
         assert!(arguments("displays_list", &json!({"host":"other"})).is_err());
+        assert!(arguments("workspaces_list", &json!({})).is_ok());
+        assert!(arguments("presence_route", &json!({})).is_ok());
         assert!(arguments("projects_list", &json!({})).is_ok());
         assert!(arguments("project_recall", &json!({"project_id":"dock"})).is_ok());
+        assert_eq!(
+            arguments(
+                "workspace_activate",
+                &json!({"project_id":"dock","target":"presence"})
+            )
+            .unwrap()
+            .target,
+            Target::Presence
+        );
+        assert!(arguments(
+            "workspace_activate",
+            &json!({"project_id":"dock","target":"nearby"})
+        )
+        .is_err());
         assert!(arguments(
             "project_recall",
             &json!({"project_id":"dock","query":"other"})
@@ -402,12 +635,16 @@ mod tests {
                 "resource_open",
                 json!({"project_id":"dock","resource_id":"code"}),
             ),
+            (
+                "workspace_activate",
+                json!({"project_id":"dock","target":"primary"}),
+            ),
         ] {
             assert!(execute(name, &args)
                 .unwrap_err()
                 .contains("presentation is busy"));
         }
-        assert_eq!(tools().len(), 5);
+        assert_eq!(tools().len(), 8);
     }
 
     #[test]

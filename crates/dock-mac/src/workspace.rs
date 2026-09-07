@@ -134,11 +134,18 @@ pub fn activate(
 /// Activate a saved project only when it has local bindings. An unbound
 /// project remains a valid remote-only workspace recall.
 pub fn activate_saved_if_bound(project: &str) -> Result<Option<Activation>, String> {
+    activate_saved_if_bound_at(project, None)
+}
+
+pub fn activate_saved_if_bound_at(
+    project: &str,
+    area: Option<Rect>,
+) -> Result<Option<Activation>, String> {
     let mut bindings = load()?;
     if bindings.windows(project).is_empty() {
         return Ok(None);
     }
-    let activation = activate(&mut bindings, project, None)?;
+    let activation = activate(&mut bindings, project, area)?;
     save(&bindings)?;
     Ok(Some(activation))
 }

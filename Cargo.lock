@@ -567,6 +567,7 @@ dependencies = [
 name = "dock-mac"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "base64 0.22.1",
  "dock-control",
  "dock-core",
@@ -579,6 +580,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "subtle",
  "tokio",
  "url",
 ]

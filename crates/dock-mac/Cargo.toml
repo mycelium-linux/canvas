@@ -14,8 +14,10 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
 url = "2"
 sha2 = "0.10"
-rmcp = { version = "3.2", default-features = false, features = ["server", "transport-io"] }
-tokio = { version = "1", features = ["rt-multi-thread"] }
+rmcp = { version = "3.2", default-features = false, features = ["server", "transport-io", "transport-streamable-http-server"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "signal"] }
+axum = "0.8"
+subtle = "2.6"
 
 [dev-dependencies]
 iced_runtime = "0.14"
