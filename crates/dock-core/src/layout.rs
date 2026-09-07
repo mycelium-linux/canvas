@@ -7,6 +7,7 @@ const MIN_PANE_WIDTH: u32 = 160;
 const MIN_PANE_HEIGHT: u32 = 120;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,

@@ -105,10 +105,12 @@ impl Palette {
         let project = self
             .selected()
             .and_then(|entry| self.catalog.projects.iter().find(|p| p.id == entry.project));
-        let theme = project.map(|p| p.theme).unwrap_or(dock_core::ProjectTheme {
-            mode: dock_core::ThemeMode::Dark,
-            accent: dock_core::Accent::Brand,
-        });
+        let theme = project
+            .map(|p| p.theme)
+            .unwrap_or(dock_core::ThemeSelection::Coherence {
+                mode: dock_core::ThemeMode::Dark,
+                accent: dock_core::Accent::Brand,
+            });
         let p = theme.palette();
         let color = |rgb: [u8; 3]| Color::from_rgb8(rgb[0], rgb[1], rgb[2]);
         Theme::custom(

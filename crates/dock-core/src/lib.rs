@@ -11,6 +11,7 @@ pub use coherence_tokens;
 pub mod desktop;
 pub mod desktop_theme;
 pub mod layout;
+pub mod theme_file;
 
 #[derive(Debug)]
 pub struct Error(pub String);
@@ -50,7 +51,7 @@ pub struct Catalog {
 pub struct Project {
     pub id: String,
     pub name: String,
-    pub theme: ProjectTheme,
+    pub theme: ThemeSelection,
     pub resources: Vec<Resource>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,17 +97,92 @@ pub struct ProjectTheme {
     pub mode: ThemeMode,
     pub accent: Accent,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+
+impl ThemeSelection {
+    pub fn to_project_theme(&self) -> Option<ProjectTheme> {
+        match self {
+            ThemeSelection::Coherence { mode, accent } => Some(ProjectTheme {
+                mode: *mode,
+                accent: *accent,
+            }),
+            ThemeSelection::Palette { .. } => None,
+        }
+    }
+}
+
+/// A project's theme source: a Coherence mode, or an imported palette in the
+/// canonical role set. This is the only theme boundary Dock surfaces read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ThemeSelection {
+    /// Derived from upstream Coherence tokens for a mode and accent.
+    Coherence { mode: ThemeMode, accent: Accent },
+    /// An imported palette (Dock theme file or rice palette adapter output).
+    Palette { palette: ThemePalette },
+}
+/// Canonical role set for every Dock surface. Roles serialize as `#rrggbb`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ThemePalette {
+    #[serde(with = "theme_hex")]
     pub background: [u8; 3],
+    #[serde(with = "theme_hex")]
+    pub background_strong: [u8; 3],
+    #[serde(with = "theme_hex")]
     pub surface: [u8; 3],
+    #[serde(with = "theme_hex")]
+    pub surface_muted: [u8; 3],
+    #[serde(with = "theme_hex")]
     pub text: [u8; 3],
-    pub muted: [u8; 3],
+    #[serde(with = "theme_hex")]
+    pub text_muted: [u8; 3],
+    #[serde(with = "theme_hex")]
     pub primary: [u8; 3],
+    #[serde(with = "theme_hex")]
     pub success: [u8; 3],
-    pub danger: [u8; 3],
+    #[serde(with = "theme_hex")]
     pub warning: [u8; 3],
+    #[serde(with = "theme_hex")]
+    pub danger: [u8; 3],
+    #[serde(with = "theme_hex")]
+    pub info: [u8; 3],
+    #[serde(with = "theme_hex")]
     pub border: [u8; 3],
+    #[serde(with = "theme_hex")]
+    pub border_strong: [u8; 3],
+}
+/// `#rrggbb` hex codec for canonical palette roles.
+pub mod theme_hex {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(rgb: &[u8; 3], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2]))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 3], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        parse_hex(&value).map_err(serde::de::Error::custom)
+    }
+
+    pub fn parse_hex(value: &str) -> Result<[u8; 3], String> {
+        let digits = value
+            .strip_prefix('#')
+            .ok_or_else(|| format!("{value} must be #rrggbb"))?;
+        if digits.len() != 6 {
+            return Err(format!("{value} is not #rrggbb"));
+        }
+        let byte = |start: usize| {
+            u8::from_str_radix(&digits[start..start + 2], 16)
+                .map_err(|_| format!("{value} is not #rrggbb"))
+        };
+        Ok([byte(0)?, byte(2)?, byte(4)?])
+    }
 }
 #[derive(Debug, Clone, Copy)]
 pub struct ThemeMetrics {
@@ -118,35 +194,61 @@ pub struct ThemeMetrics {
     pub body: f32,
     pub small: f32,
 }
-impl ProjectTheme {
+impl ThemeSelection {
+    pub fn coherence(mode: ThemeMode, accent: Accent) -> Self {
+        Self::Coherence { mode, accent }
+    }
+
     pub fn palette(self) -> ThemePalette {
-        use coherence_tokens::{Mode, dark, light};
-        let (p, info, border) = match self.mode {
-            ThemeMode::Dark => (Mode::Dark.palette(), dark::COLOR_INFO, dark::COLOR_BORDER),
-            ThemeMode::Light => (
-                Mode::Light.palette(),
-                light::COLOR_INFO,
-                light::COLOR_BORDER,
-            ),
-        };
-        ThemePalette {
-            background: p.background,
-            surface: p.surface,
-            text: p.text,
-            muted: p.muted,
-            primary: match self.accent {
-                Accent::Brand => p.primary,
-                Accent::Info => info,
-                Accent::Success => p.success,
-            },
-            success: p.success,
-            danger: p.danger,
-            warning: p.warning,
-            border,
+        match self {
+            Self::Coherence { mode, accent } => ProjectTheme { mode, accent }.palette(),
+            Self::Palette { palette } => palette,
         }
     }
+
     pub fn metrics(self) -> ThemeMetrics {
-        // Both current upstream modes share geometry. Never hand-maintain token values.
+        ThemeMetrics::shared()
+    }
+
+    /// Explicit for Coherence themes; inferred from background luminance for
+    /// imported palettes so consumers never branch on the theme source.
+    pub fn mode(self) -> ThemeMode {
+        match self {
+            Self::Coherence { mode, .. } => mode,
+            Self::Palette { palette } => {
+                if luminance(palette.background) < 0.5 {
+                    ThemeMode::Dark
+                } else {
+                    ThemeMode::Light
+                }
+            }
+        }
+    }
+
+    /// Accent identity for tooling that reports it; imported palettes expose
+    /// their accent through `primary`, so a neutral identity is correct.
+    pub fn accent(self) -> Accent {
+        match self {
+            Self::Coherence { accent, .. } => accent,
+            Self::Palette { .. } => Accent::Brand,
+        }
+    }
+}
+
+fn luminance(rgb: [u8; 3]) -> f64 {
+    let linearize = |channel: u8| {
+        let c = f64::from(channel) / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linearize(rgb[0]) + 0.7152 * linearize(rgb[1]) + 0.0722 * linearize(rgb[2])
+}
+impl ThemeMetrics {
+    /// Both current upstream modes share geometry. Never hand-maintain tokens.
+    pub fn shared() -> Self {
         use coherence_tokens::light as t;
         ThemeMetrics {
             space_1: t::SPACE_1,
@@ -157,6 +259,51 @@ impl ProjectTheme {
             body: t::FONT_SIZE_BASE,
             small: t::FONT_SIZE_SM,
         }
+    }
+}
+impl ProjectTheme {
+    pub fn palette(self) -> ThemePalette {
+        use coherence_tokens::{Mode, dark, light};
+        let (p, info, border, background_strong, surface_muted, border_strong) = match self.mode {
+            ThemeMode::Dark => (
+                Mode::Dark.palette(),
+                dark::COLOR_INFO,
+                dark::COLOR_BORDER,
+                dark::COLOR_BACKGROUND_STRONG,
+                dark::COLOR_SURFACE_MUTED,
+                dark::COLOR_BORDER_STRONG,
+            ),
+            ThemeMode::Light => (
+                Mode::Light.palette(),
+                light::COLOR_INFO,
+                light::COLOR_BORDER,
+                light::COLOR_BACKGROUND_STRONG,
+                light::COLOR_SURFACE_MUTED,
+                light::COLOR_BORDER_STRONG,
+            ),
+        };
+        ThemePalette {
+            background: p.background,
+            background_strong,
+            surface: p.surface,
+            surface_muted,
+            text: p.text,
+            text_muted: p.muted,
+            primary: match self.accent {
+                Accent::Brand => p.primary,
+                Accent::Info => info,
+                Accent::Success => p.success,
+            },
+            success: p.success,
+            danger: p.danger,
+            warning: p.warning,
+            info,
+            border,
+            border_strong,
+        }
+    }
+    pub fn metrics(self) -> ThemeMetrics {
+        ThemeMetrics::shared()
     }
 }
 impl Catalog {

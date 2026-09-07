@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "compact-graph",
+  "title": "Compact graph",
+  "inputs": [
+    { "id": "samples", "kind": "series", "required": true }
+  ],
+  "capabilities": {
+    "write_scene": true,
+    "read_inputs": ["samples"],
+    "read_theme": true
+  }
+}

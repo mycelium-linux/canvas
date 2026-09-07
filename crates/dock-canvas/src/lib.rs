@@ -3,9 +3,22 @@
 //! This crate owns durable presentation intent. Renderers own decoded assets,
 //! frame state, GPU allocations, windows, and other reconstructible state.
 
-use dock_core::{Catalog, ProjectTheme, ResourceKind};
+use dock_core::{Catalog, ResourceKind, ThemeSelection};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, fmt};
+
+pub mod backend;
+pub mod control;
+pub mod hud;
+pub mod interaction;
+#[cfg(feature = "lua-scenes")]
+pub mod lua_module;
+#[cfg(feature = "lua-scenes")]
+pub mod lua_scene;
+pub mod map;
+#[cfg(all(feature = "mcp", unix))]
+pub mod mcp;
+pub mod media;
 
 pub const SCHEMA_VERSION: u32 = 1;
 const MAX_ITEMS: usize = 1_024;
@@ -56,6 +69,7 @@ fn visible(value: &str) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct WorkspaceDocument {
     pub schema_version: u32,
     pub id: String,
@@ -72,12 +86,14 @@ pub struct WorkspaceDocument {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum ThemeRef {
     Project,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct Surface {
     pub id: String,
     pub title: String,
@@ -88,6 +104,7 @@ pub struct Surface {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum SurfaceContent {
     ProjectResource { resource_id: String },
     Asset { asset: AssetRef },
@@ -97,6 +114,7 @@ pub enum SurfaceContent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct AssetRef {
     pub sha256: String,
     pub media_type: String,
@@ -105,6 +123,7 @@ pub struct AssetRef {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct InputPort {
     pub id: String,
     pub contract: String,
@@ -112,6 +131,7 @@ pub struct InputPort {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct DataBinding {
     pub id: String,
     pub source: DataSource,
@@ -120,6 +140,7 @@ pub struct DataBinding {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct DataSource {
     pub owner: String,
     pub stream: String,
@@ -128,6 +149,7 @@ pub struct DataSource {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct InputTarget {
     pub surface_id: String,
     pub input_id: String,
@@ -135,6 +157,7 @@ pub struct InputTarget {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum Layout {
     Empty,
     Surface {
@@ -157,6 +180,7 @@ pub enum Layout {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum Axis {
     Horizontal,
     Vertical,
@@ -164,6 +188,7 @@ pub enum Axis {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct Placement {
     pub surface_id: String,
     pub bounds: NormalizedRect,
@@ -173,6 +198,7 @@ pub struct Placement {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct NormalizedRect {
     pub x: f32,
     pub y: f32,
@@ -182,12 +208,14 @@ pub struct NormalizedRect {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct Scene {
     pub nodes: Vec<SceneNode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct SceneNode {
     pub id: String,
     #[serde(default)]
@@ -199,6 +227,7 @@ pub struct SceneNode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct Transform3 {
     pub translation: [f32; 3],
     pub rotation: [f32; 4],
@@ -217,6 +246,7 @@ impl Default for Transform3 {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum NodeContent {
     Group,
     Text { text: String },
@@ -228,6 +258,7 @@ pub enum NodeContent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum Projection {
     Perspective {
         vertical_fov_degrees: f32,
@@ -243,6 +274,7 @@ pub enum Projection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum Light {
     Ambient { intensity: f32 },
     Directional { intensity: f32, color: [f32; 3] },
@@ -251,6 +283,7 @@ pub enum Light {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct WorkspacePatch {
     pub schema_version: u32,
     pub workspace_id: String,
@@ -261,6 +294,7 @@ pub struct WorkspacePatch {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum PatchOperation {
     UpsertSurface { surface: Surface },
     RemoveSurface { surface_id: String },
@@ -415,7 +449,7 @@ impl WorkspaceDocument {
         Ok(document)
     }
 
-    pub fn resolved_theme(&self, catalog: &Catalog) -> Result<ProjectTheme> {
+    pub fn resolved_theme(&self, catalog: &Catalog) -> Result<ThemeSelection> {
         self.validate(catalog)?;
         match self.theme {
             ThemeRef::Project => Ok(catalog
@@ -694,7 +728,7 @@ mod tests {
               "projects": [{
                 "id": "dock",
                 "name": "Dock",
-                "theme": {"mode": "dark", "accent": "info"},
+                "theme": {"source": "coherence", "mode": "dark", "accent": "info"},
                 "resources": [
                   {"id":"docs","title":"Docs","host":"mac","kind":"mac_app","target":"com.apple.Safari"},
                   {"id":"shell","title":"Shell","host":"agora_one","kind":"terminal_session","target":"dock"}

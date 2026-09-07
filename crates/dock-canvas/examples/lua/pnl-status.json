@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "pnl-status",
+  "title": "P/L and status",
+  "inputs": [
+    { "id": "pnl", "kind": "number", "required": true },
+    { "id": "status", "kind": "status", "required": true }
+  ],
+  "capabilities": {
+    "write_scene": true,
+    "read_inputs": ["pnl", "status"],
+    "read_theme": true
+  }
+}

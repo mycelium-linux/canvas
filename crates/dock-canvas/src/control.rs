@@ -1,0 +1,1169 @@
+//! Bounded control protocol for a long-lived Canvas runtime.
+
+use crate::{ThemeRef, WorkspaceDocument, WorkspacePatch};
+use dock_core::{
+    desktop::{Wallpaper, WallpaperReceipt, WallpaperRequest},
+    layout::Rect,
+};
+use serde::{Deserialize, Serialize};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::PathBuf;
+use std::time::Duration;
+
+pub const CONTROL_VERSION: u32 = 1;
+pub const MAX_CONTROL_MESSAGE: u64 = 256 * 1024;
+pub const MAX_ACTIVE_INDICATORS: usize = 16;
+pub const MAX_MESH_NODES: usize = 8;
+const MAX_INDICATOR_TITLE_BYTES: usize = 128;
+const MAX_INDICATOR_CAPTION_BYTES: usize = 512;
+const MAX_INDICATOR_DETAIL_BYTES: usize = 512;
+const MAX_INDICATOR_DIAGNOSTIC_BYTES: usize = 512;
+const MAX_MESH_NODE_LABEL_BYTES: usize = 64;
+const MAX_MESH_NODE_DETAIL_BYTES: usize = 128;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlRequest {
+    pub schema_version: u32,
+    pub request_id: String,
+    #[serde(default)]
+    pub expected_revision: Option<u64>,
+    pub command: Command,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Command {
+    Inspect,
+    ReadDocument,
+    ApplyDocument {
+        document: WorkspaceDocument,
+    },
+    ApplyPatch {
+        patch: WorkspacePatch,
+    },
+    OpenFile {
+        surface_id: String,
+        path: String,
+        #[serde(default)]
+        title: Option<String>,
+    },
+    CloseSurface {
+        surface_id: String,
+    },
+    SetFrame {
+        frame: Rect,
+    },
+    Focus,
+    Navigate {
+        surface_id: String,
+        target: Navigation,
+    },
+    SetTheme {
+        project_id: String,
+    },
+    SetWallpaper {
+        request: WallpaperRequest,
+    },
+    UpsertIndicator {
+        indicator: StatusIndicator,
+    },
+    DismissIndicator {
+        indicator_id: String,
+    },
+    SetMesh {
+        mesh: MeshSnapshot,
+    },
+    Shutdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusIndicator {
+    pub id: String,
+    pub title: String,
+    pub state: IndicatorState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndicatorState {
+    Ready,
+    Transcribing,
+    Listening,
+    Thinking,
+    Speaking,
+}
+
+impl StatusIndicator {
+    pub fn validate(&self) -> Result<(), String> {
+        if !identifier(&self.id) {
+            return Err("invalid status indicator id".into());
+        }
+        if !bounded_printable(&self.title, MAX_INDICATOR_TITLE_BYTES) {
+            return Err("status indicator title must contain 1-128 printable bytes".into());
+        }
+        if self
+            .caption
+            .as_ref()
+            .is_some_and(|caption| !bounded_printable(caption, MAX_INDICATOR_CAPTION_BYTES))
+        {
+            return Err("status indicator caption must contain 1-512 printable bytes".into());
+        }
+        if self
+            .detail
+            .as_ref()
+            .is_some_and(|detail| !bounded_printable(detail, MAX_INDICATOR_DETAIL_BYTES))
+        {
+            return Err("status indicator detail must contain 1-512 printable bytes".into());
+        }
+        if self.diagnostic.as_ref().is_some_and(|diagnostic| {
+            !bounded_printable(diagnostic, MAX_INDICATOR_DIAGNOSTIC_BYTES)
+        }) {
+            return Err("status indicator diagnostic must contain 1-512 printable bytes".into());
+        }
+        Ok(())
+    }
+}
+
+/// State of one computing-mesh node as reported by the orchestrator.
+///
+/// The states track the pause/resume semantics: a hidden UI, a paused agent,
+/// a suspended (frozen, resumable) compute node, and a stopped process are
+/// distinct conditions and must render distinctly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeshNodeState {
+    /// Node is up and doing work.
+    Active,
+    /// Node is up but its work is paused (agent idle, human gate, etc).
+    Paused,
+    /// Compute is suspended (frozen but resumable).
+    Suspended,
+    /// The node's process has stopped.
+    Stopped,
+    /// Node is up but its UI is hidden (locked, screensaver, headless).
+    Hidden,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeshNode {
+    pub id: String,
+    pub label: String,
+    pub state: MeshNodeState,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeshSnapshot {
+    pub nodes: Vec<MeshNode>,
+}
+
+impl MeshNode {
+    pub fn validate(&self) -> Result<(), String> {
+        if !identifier(&self.id) {
+            return Err("invalid mesh node id".into());
+        }
+        if !bounded_printable(&self.label, MAX_MESH_NODE_LABEL_BYTES) {
+            return Err("mesh node label must contain 1-64 printable bytes".into());
+        }
+        if self
+            .detail
+            .as_ref()
+            .is_some_and(|detail| !bounded_printable(detail, MAX_MESH_NODE_DETAIL_BYTES))
+        {
+            return Err("mesh node detail must contain 1-128 printable bytes".into());
+        }
+        Ok(())
+    }
+}
+
+impl MeshSnapshot {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.nodes.len() > MAX_MESH_NODES {
+            return Err(format!(
+                "mesh snapshot may carry at most {MAX_MESH_NODES} nodes"
+            ));
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for node in &self.nodes {
+            node.validate()?;
+            if !ids.insert(node.id.as_str()) {
+                return Err(format!("duplicate mesh node id {}", node.id));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Navigation {
+    Next,
+    Previous,
+    Page { index: u32 },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlReply {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub revision: u64,
+    pub outcome: Outcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Outcome {
+    Ok { receipt: Receipt },
+    Error { code: ErrorCode, message: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    InvalidRequest,
+    Conflict,
+    NotFound,
+    Unsupported,
+    ResourceLimit,
+    Platform,
+    Internal,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Receipt {
+    DocumentSnapshot {
+        document: Box<WorkspaceDocument>,
+        snapshot: RuntimeSnapshot,
+    },
+    Snapshot {
+        snapshot: RuntimeSnapshot,
+    },
+    DocumentApplied {
+        workspace_id: String,
+    },
+    SurfaceOpened {
+        surface: SurfaceSnapshot,
+    },
+    SurfaceClosed {
+        surface_id: String,
+    },
+    FrameSet {
+        frame: Rect,
+    },
+    Focused,
+    Navigated {
+        surface_id: String,
+        page_index: u32,
+        page_count: u32,
+    },
+    ThemeSet {
+        project_id: String,
+        theme: ThemeRef,
+    },
+    WallpaperSet {
+        receipt: WallpaperReceipt,
+    },
+    IndicatorUpserted {
+        indicator_id: String,
+    },
+    IndicatorDismissed {
+        indicator_id: String,
+    },
+    MeshSet {
+        node_count: usize,
+    },
+    ShuttingDown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSnapshot {
+    pub workspace_id: String,
+    pub project_id: String,
+    pub revision: u64,
+    pub frame: Rect,
+    pub focused_surface_id: Option<String>,
+    pub surfaces: Vec<SurfaceSnapshot>,
+    pub active_indicators: Vec<StatusIndicator>,
+    #[serde(default)]
+    pub mesh: Option<MeshSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceSnapshot {
+    pub id: String,
+    pub title: String,
+    pub content: ContentKind,
+    pub asset_sha256: Option<String>,
+    pub page_index: Option<u32>,
+    pub page_count: Option<u32>,
+    pub source_pixels: Option<[u32; 2]>,
+    /// Decoded or rasterized texture dimensions uploaded to the renderer.
+    pub rendered_pixels: Option<[u32; 2]>,
+    /// Logical draw dimensions after applying the display scale factor.
+    pub display_logical: Option<[f64; 2]>,
+    pub scale_factor: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentKind {
+    Empty,
+    Image,
+    Pdf,
+    Workspace,
+    Markdown,
+    Terminal,
+}
+
+impl ControlRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != CONTROL_VERSION {
+            return Err("unsupported Canvas control schema_version".into());
+        }
+        if !request_id(&self.request_id) {
+            return Err("request_id must be 1–64 lowercase identifier characters".into());
+        }
+        match &self.command {
+            Command::OpenFile {
+                surface_id,
+                path,
+                title,
+            } => {
+                if !identifier(surface_id) {
+                    return Err("invalid Canvas surface id".into());
+                }
+                if path.is_empty() || path.len() > 4096 || path.contains('\0') {
+                    return Err("file path must contain 1–4096 non-NUL bytes".into());
+                }
+                if title.as_ref().is_some_and(|value| !visible(value)) {
+                    return Err("file title must be printable and bounded".into());
+                }
+            }
+            Command::CloseSurface { surface_id } | Command::Navigate { surface_id, .. } => {
+                if !identifier(surface_id) {
+                    return Err("invalid Canvas surface id".into());
+                }
+            }
+            Command::SetFrame { frame } => validate_frame(*frame)?,
+            Command::SetTheme { project_id } => {
+                if !identifier(project_id) {
+                    return Err("invalid project id".into());
+                }
+            }
+            Command::SetWallpaper { request } => {
+                if !identifier(&request.project)
+                    || request.display_id.is_empty()
+                    || request.display_id.len() > 128
+                {
+                    return Err("invalid wallpaper project or display id".into());
+                }
+            }
+            Command::UpsertIndicator { indicator } => indicator.validate()?,
+            Command::DismissIndicator { indicator_id } => {
+                if !identifier(indicator_id) {
+                    return Err("invalid status indicator id".into());
+                }
+            }
+            Command::SetMesh { mesh } => mesh.validate()?,
+            Command::ApplyDocument { .. }
+            | Command::ApplyPatch { .. }
+            | Command::Inspect
+            | Command::ReadDocument
+            | Command::Focus
+            | Command::Shutdown => {}
+        }
+        Ok(())
+    }
+}
+
+pub fn validate_frame(frame: Rect) -> Result<(), String> {
+    if frame.width < 320 || frame.height < 240 || frame.width > 16_384 || frame.height > 16_384 {
+        return Err("Canvas frame must be between 320x240 and 16384x16384".into());
+    }
+    let right = i64::from(frame.x) + i64::from(frame.width);
+    let bottom = i64::from(frame.y) + i64::from(frame.height);
+    if right < i64::from(i32::MIN)
+        || right > i64::from(i32::MAX)
+        || bottom < i64::from(i32::MIN)
+        || bottom > i64::from(i32::MAX)
+    {
+        return Err("Canvas frame overflows desktop coordinates".into());
+    }
+    Ok(())
+}
+
+fn identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.as_bytes()[0].is_ascii_lowercase()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn request_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+}
+
+fn visible(value: &str) -> bool {
+    !value.trim().is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
+}
+
+fn bounded_printable(value: &str, max_bytes: usize) -> bool {
+    !value.trim().is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control)
+}
+
+pub fn read_frame(reader: impl Read) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    BufReader::new(reader.take(MAX_CONTROL_MESSAGE + 1))
+        .read_until(b'\n', &mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > MAX_CONTROL_MESSAGE || bytes.last() != Some(&b'\n') {
+        return Err("Canvas control message exceeds limit or lacks newline".into());
+    }
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+pub fn socket_path() -> Result<PathBuf, String> {
+    #[cfg(target_os = "macos")]
+    let path = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or("HOME is unavailable")?
+        .join("Library/Application Support/Dock/canvas/control.sock");
+    #[cfg(not(target_os = "macos"))]
+    let path = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .ok_or("XDG_RUNTIME_DIR is unavailable")?
+        .join("dock/canvas/control.sock");
+    Ok(path)
+}
+
+#[cfg(unix)]
+pub fn send(request: &ControlRequest) -> Result<ControlReply, String> {
+    use std::os::unix::{
+        fs::{FileTypeExt, MetadataExt},
+        net::UnixStream,
+    };
+
+    request.validate()?;
+    let path = socket_path()?;
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|error| format!("Canvas runtime unavailable at {}: {error}", path.display()))?;
+    if !metadata.file_type().is_socket()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err("unsafe Canvas socket type, ownership, or permissions".into());
+    }
+    let mut stream = UnixStream::connect(path).map_err(|error| error.to_string())?;
+    dock_control::verify_peer(&stream)?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .map_err(|error| error.to_string())?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(3)))
+        .map_err(|error| error.to_string())?;
+    let mut bytes = serde_json::to_vec(request).map_err(|error| error.to_string())?;
+    bytes.push(b'\n');
+    if bytes.len() as u64 > MAX_CONTROL_MESSAGE {
+        return Err("Canvas control request exceeds limit".into());
+    }
+    stream
+        .write_all(&bytes)
+        .map_err(|error| error.to_string())?;
+    let reply: ControlReply = serde_json::from_slice(&read_frame(stream)?)
+        .map_err(|error| format!("invalid Canvas control reply: {error}"))?;
+    if reply.schema_version != CONTROL_VERSION || reply.request_id != request.request_id {
+        return Err("Canvas control reply does not match the request".into());
+    }
+    Ok(reply)
+}
+
+pub mod text {
+    use super::*;
+
+    pub fn tokenize(line: &str) -> Vec<String> {
+        let mut tokens = Vec::new();
+        let mut current = String::new();
+        let mut in_quotes = false;
+        let mut quote_char = '\0';
+        for ch in line.chars() {
+            if in_quotes {
+                if ch == quote_char {
+                    in_quotes = false;
+                } else if ch == '\\' {
+                    // pass through escape char
+                } else {
+                    current.push(ch);
+                }
+            } else {
+                match ch {
+                    '"' | '\'' => {
+                        in_quotes = true;
+                        quote_char = ch;
+                    }
+                    ' ' | '\t' | '\n' | '\r' => {
+                        if !current.is_empty() {
+                            tokens.push(std::mem::take(&mut current));
+                        }
+                    }
+                    '#' => break,
+                    _ => current.push(ch),
+                }
+            }
+        }
+        if !current.is_empty() {
+            tokens.push(current);
+        }
+        tokens
+    }
+
+    fn req(tokens: &[String], count: usize, usage: &str) -> Result<(), String> {
+        if tokens.len() < count {
+            Err(format!("expected: {usage}"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn parse_i32(token: &str) -> Result<i32, String> {
+        token
+            .parse()
+            .map_err(|_| format!("not an integer: {token}"))
+    }
+
+    fn parse_u32(token: &str) -> Result<u32, String> {
+        token.parse().map_err(|_| format!("not a number: {token}"))
+    }
+
+    fn parse_u8(token: &str) -> Result<u8, String> {
+        token
+            .parse()
+            .map_err(|_| format!("not a byte value (0-255): {token}"))
+    }
+
+    fn state_from_name(token: &str) -> Result<IndicatorState, String> {
+        match token {
+            "ready" => Ok(IndicatorState::Ready),
+            "transcribing" => Ok(IndicatorState::Transcribing),
+            "listening" => Ok(IndicatorState::Listening),
+            "thinking" => Ok(IndicatorState::Thinking),
+            "speaking" => Ok(IndicatorState::Speaking),
+            _ => Err(format!("unknown indicator state: {token}")),
+        }
+    }
+
+    fn build_command(tokens: &[String]) -> Result<Command, String> {
+        if tokens.is_empty() {
+            return Err("empty command".into());
+        }
+        match tokens[0].as_str() {
+            "inspect" | "info" => Ok(Command::Inspect),
+            "focus" => Ok(Command::Focus),
+            "shutdown" => Ok(Command::Shutdown),
+            "bg" | "theme" => {
+                req(tokens, 2, "bg <project_id>")?;
+                if !identifier(&tokens[1]) {
+                    return Err("invalid project id".into());
+                }
+                Ok(Command::SetTheme {
+                    project_id: tokens[1].clone(),
+                })
+            }
+            "move" | "mv" => {
+                req(tokens, 5, "move <x> <y> <width> <height>")?;
+                Ok(Command::SetFrame {
+                    frame: Rect {
+                        x: parse_i32(&tokens[1])?,
+                        y: parse_i32(&tokens[2])?,
+                        width: parse_u32(&tokens[3])?,
+                        height: parse_u32(&tokens[4])?,
+                    },
+                })
+            }
+            "close" | "rm" => {
+                req(tokens, 2, "close <surface_id>")?;
+                if !identifier(&tokens[1]) {
+                    return Err("invalid surface id".into());
+                }
+                Ok(Command::CloseSurface {
+                    surface_id: tokens[1].clone(),
+                })
+            }
+            "nav" | "go" => {
+                req(tokens, 3, "nav <surface_id> <next|prev|page N>")?;
+                if !identifier(&tokens[1]) {
+                    return Err("invalid surface id".into());
+                }
+                let target = match tokens[2].as_str() {
+                    "next" | "n" => Navigation::Next,
+                    "prev" | "previous" | "p" => Navigation::Previous,
+                    "page" => {
+                        req(tokens, 4, "nav <surface_id> page <index>")?;
+                        Navigation::Page {
+                            index: parse_u32(&tokens[3])?,
+                        }
+                    }
+                    other => return Err(format!("unknown nav target: {other}")),
+                };
+                Ok(Command::Navigate {
+                    surface_id: tokens[1].clone(),
+                    target,
+                })
+            }
+            "indicator" | "ind" => {
+                req(
+                    tokens,
+                    2,
+                    "indicator <id> <state> [caption]  |  indicator <id> off",
+                )?;
+                if !identifier(&tokens[1]) {
+                    return Err("invalid indicator id".into());
+                }
+                if tokens.len() == 3 && tokens[2] == "off" {
+                    return Ok(Command::DismissIndicator {
+                        indicator_id: tokens[1].clone(),
+                    });
+                }
+                req(tokens, 3, "indicator <id> <state> [caption]")?;
+                let state = state_from_name(&tokens[2])?;
+                let caption = if tokens.len() > 3 {
+                    Some(tokens[3..].join(" "))
+                } else {
+                    None
+                };
+                Ok(Command::UpsertIndicator {
+                    indicator: StatusIndicator {
+                        id: tokens[1].clone(),
+                        title: tokens[1].clone(),
+                        state,
+                        caption,
+                        detail: None,
+                        diagnostic: None,
+                    },
+                })
+            }
+            "open" => {
+                req(tokens, 3, "open <surface_id> <path> [title]")?;
+                if !identifier(&tokens[1]) {
+                    return Err("invalid surface id".into());
+                }
+                let title = if tokens.len() > 3 {
+                    Some(tokens[3..].join(" "))
+                } else {
+                    None
+                };
+                Ok(Command::OpenFile {
+                    surface_id: tokens[1].clone(),
+                    path: tokens[2].clone(),
+                    title,
+                })
+            }
+            "wallpaper" | "wp" => {
+                req(tokens, 6, "wp <project> <display_id> <r> <g> <b>")?;
+                if !identifier(&tokens[1]) {
+                    return Err("invalid project id".into());
+                }
+                if tokens[2].is_empty() || tokens[2].len() > 128 {
+                    return Err("display id must be 1-128 chars".into());
+                }
+                Ok(Command::SetWallpaper {
+                    request: WallpaperRequest {
+                        project: tokens[1].clone(),
+                        display_id: tokens[2].clone(),
+                        wallpaper: Wallpaper::Solid {
+                            rgb: [
+                                parse_u8(&tokens[3])?,
+                                parse_u8(&tokens[4])?,
+                                parse_u8(&tokens[5])?,
+                            ],
+                        },
+                    },
+                })
+            }
+            other => Err(format!("unknown command: {other}")),
+        }
+    }
+
+    pub fn parse_line(line: &str) -> Result<ControlRequest, String> {
+        let tokens = tokenize(line);
+        if tokens.is_empty() {
+            return Err("empty command".into());
+        }
+        let mut tokens = tokens;
+        let expected_revision;
+        if tokens[0] == "rev" {
+            req(&tokens, 2, "rev <N> <command>")?;
+            expected_revision = Some(parse_u32(&tokens[1])? as u64);
+            tokens = tokens[2..].to_vec();
+        } else {
+            expected_revision = None;
+        }
+        let request = ControlRequest {
+            schema_version: CONTROL_VERSION,
+            request_id: format!("text-{}", std::process::id()),
+            expected_revision,
+            command: build_command(&tokens)?,
+        };
+        request.validate()?;
+        Ok(request)
+    }
+
+    fn format_error_code(code: &ErrorCode) -> &'static str {
+        match code {
+            ErrorCode::InvalidRequest => "invalid_request",
+            ErrorCode::Conflict => "conflict",
+            ErrorCode::NotFound => "not_found",
+            ErrorCode::Unsupported => "unsupported",
+            ErrorCode::ResourceLimit => "resource_limit",
+            ErrorCode::Platform => "platform",
+            ErrorCode::Internal => "internal",
+        }
+    }
+
+    pub fn format_reply(reply: &ControlReply) -> String {
+        match &reply.outcome {
+            Outcome::Ok { receipt } => {
+                let detail = match receipt {
+                    Receipt::DocumentSnapshot { snapshot, .. } => format!(
+                        "project={} frame={},{},{},{} focus={} surfaces={} indicators={}",
+                        snapshot.project_id,
+                        snapshot.frame.x,
+                        snapshot.frame.y,
+                        snapshot.frame.width,
+                        snapshot.frame.height,
+                        snapshot.focused_surface_id.as_deref().unwrap_or("-"),
+                        snapshot
+                            .surfaces
+                            .iter()
+                            .map(|s| s.id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                        snapshot.active_indicators.len()
+                    ),
+                    Receipt::Snapshot { snapshot } => format!(
+                        "project={} frame={},{},{},{} surfaces={} indicators={}",
+                        snapshot.project_id,
+                        snapshot.frame.x,
+                        snapshot.frame.y,
+                        snapshot.frame.width,
+                        snapshot.frame.height,
+                        snapshot.surfaces.len(),
+                        snapshot.active_indicators.len()
+                    ),
+                    Receipt::DocumentApplied { workspace_id } => {
+                        format!("document={}", workspace_id)
+                    }
+                    Receipt::SurfaceOpened { surface } => {
+                        format!("opened={}", surface.id)
+                    }
+                    Receipt::SurfaceClosed { surface_id } => {
+                        format!("closed={}", surface_id)
+                    }
+                    Receipt::FrameSet { frame } => format!(
+                        "frame={},{},{},{}",
+                        frame.x, frame.y, frame.width, frame.height
+                    ),
+                    Receipt::Focused => "focused".to_string(),
+                    Receipt::Navigated {
+                        surface_id,
+                        page_index,
+                        page_count,
+                    } => format!("nav {} page {}/{}", surface_id, page_index + 1, page_count),
+                    Receipt::ThemeSet { project_id, .. } => {
+                        format!("theme={}", project_id)
+                    }
+                    Receipt::WallpaperSet { receipt } => {
+                        format!("wallpaper={} {}", receipt.project, receipt.display_id)
+                    }
+                    Receipt::IndicatorUpserted { indicator_id } => {
+                        format!("indicator={}", indicator_id)
+                    }
+                    Receipt::IndicatorDismissed { indicator_id } => {
+                        format!("dismissed={}", indicator_id)
+                    }
+                    Receipt::MeshSet { node_count } => format!("mesh={node_count}"),
+                    Receipt::ShuttingDown => "shutting down".to_string(),
+                };
+                format!("OK rev={} {}", reply.revision, detail)
+            }
+            Outcome::Error { code, message } => {
+                format!("ERR {} {}", format_error_code(code), message)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn framing_is_bounded_and_requires_newline() {
+        assert_eq!(read_frame(&b"{}\n"[..]).unwrap(), b"{}\n");
+        assert!(read_frame(&b"{}"[..]).is_err());
+        assert!(read_frame(vec![b'x'; MAX_CONTROL_MESSAGE as usize + 1].as_slice()).is_err());
+    }
+
+    #[test]
+    fn protocol_rejects_unknown_fields_and_unsafe_geometry() {
+        let request = ControlRequest {
+            schema_version: CONTROL_VERSION,
+            request_id: "move-1".into(),
+            expected_revision: Some(4),
+            command: Command::SetFrame {
+                frame: Rect {
+                    x: 10,
+                    y: 20,
+                    width: 1200,
+                    height: 800,
+                },
+            },
+        };
+        request.validate().unwrap();
+        let json = serde_json::to_string(&request)
+            .unwrap()
+            .replace("\"width\":1200", "\"width\":1200,\"surprise\":true");
+        assert!(serde_json::from_str::<ControlRequest>(&json).is_err());
+
+        let mut invalid = request;
+        invalid.command = Command::SetFrame {
+            frame: Rect {
+                x: i32::MAX,
+                y: 0,
+                width: 1000,
+                height: 800,
+            },
+        };
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn indicator_wire_names_and_states_are_stable() {
+        for (state, wire_name) in [
+            (IndicatorState::Ready, "ready"),
+            (IndicatorState::Transcribing, "transcribing"),
+            (IndicatorState::Listening, "listening"),
+            (IndicatorState::Thinking, "thinking"),
+            (IndicatorState::Speaking, "speaking"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&state).unwrap(),
+                format!("\"{wire_name}\"")
+            );
+        }
+
+        let request = ControlRequest {
+            schema_version: CONTROL_VERSION,
+            request_id: "indicator-1".into(),
+            expected_revision: None,
+            command: Command::UpsertIndicator {
+                indicator: StatusIndicator {
+                    id: "assistant-status".into(),
+                    title: "Assistant".into(),
+                    state: IndicatorState::Listening,
+                    caption: Some("Listening...".into()),
+                    detail: Some("I can hear you.".into()),
+                    diagnostic: Some("STT=233ms".into()),
+                },
+            },
+        };
+        request.validate().unwrap();
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["command"]["command"], "upsert_indicator");
+        assert_eq!(value["command"]["indicator"]["state"], "listening");
+        assert_eq!(value["command"]["indicator"]["detail"], "I can hear you.");
+        assert_eq!(value["command"]["indicator"]["diagnostic"], "STT=233ms");
+
+        let dismiss = ControlRequest {
+            command: Command::DismissIndicator {
+                indicator_id: "assistant-status".into(),
+            },
+            ..request
+        };
+        let value = serde_json::to_value(dismiss).unwrap();
+        assert_eq!(value["command"]["command"], "dismiss_indicator");
+    }
+
+    #[test]
+    fn mesh_wire_names_and_states_are_stable() {
+        for (state, wire_name) in [
+            (MeshNodeState::Active, "active"),
+            (MeshNodeState::Paused, "paused"),
+            (MeshNodeState::Suspended, "suspended"),
+            (MeshNodeState::Stopped, "stopped"),
+            (MeshNodeState::Hidden, "hidden"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&state).unwrap(),
+                format!("\"{wire_name}\"")
+            );
+        }
+
+        let mesh = MeshSnapshot {
+            nodes: vec![MeshNode {
+                id: "agora-one".into(),
+                label: "Agora One".into(),
+                state: MeshNodeState::Active,
+                detail: Some("rendering".into()),
+            }],
+        };
+        mesh.validate().unwrap();
+        let request = ControlRequest {
+            schema_version: CONTROL_VERSION,
+            request_id: "mesh-1".into(),
+            expected_revision: None,
+            command: Command::SetMesh { mesh },
+        };
+        request.validate().unwrap();
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["command"]["command"], "set_mesh");
+        assert_eq!(value["command"]["mesh"]["nodes"][0]["state"], "active");
+    }
+
+    #[test]
+    fn mesh_snapshot_is_bounded_and_duplicate_free() {
+        let node = MeshNode {
+            id: "node-a".into(),
+            label: "A".into(),
+            state: MeshNodeState::Active,
+            detail: None,
+        };
+        let mut mesh = MeshSnapshot {
+            nodes: vec![node.clone(); MAX_MESH_NODES],
+        };
+        mesh.nodes
+            .iter_mut()
+            .enumerate()
+            .for_each(|(index, entry)| entry.id = format!("node-{index}"));
+        mesh.validate().unwrap();
+
+        mesh.nodes.push(node.clone());
+        assert!(mesh.validate().is_err());
+
+        mesh.nodes.pop();
+        mesh.nodes[0].id = "node-b".into();
+        mesh.nodes[1].id = "node-b".into();
+        assert!(
+            mesh.validate()
+                .unwrap_err()
+                .contains("duplicate mesh node id")
+        );
+
+        mesh.nodes.pop();
+        mesh.nodes[0].detail = Some("x".repeat(MAX_MESH_NODE_DETAIL_BYTES + 1));
+        assert!(mesh.validate().is_err());
+        mesh.nodes[0].label = " ".into();
+        assert!(mesh.validate().is_err());
+    }
+
+    #[test]
+    fn indicator_text_and_ids_are_bounded_and_printable() {
+        let valid = StatusIndicator {
+            id: "assistant-status".into(),
+            title: "Assistant".into(),
+            state: IndicatorState::Thinking,
+            caption: Some("Working on it".into()),
+            detail: Some("Checking the room".into()),
+            diagnostic: Some("wake=0.91 | STT=233ms".into()),
+        };
+        valid.validate().unwrap();
+
+        for invalid in [
+            StatusIndicator {
+                id: "Assistant_Status".into(),
+                ..valid.clone()
+            },
+            StatusIndicator {
+                title: " ".into(),
+                ..valid.clone()
+            },
+            StatusIndicator {
+                title: "x".repeat(MAX_INDICATOR_TITLE_BYTES + 1),
+                ..valid.clone()
+            },
+            StatusIndicator {
+                caption: Some("line one\nline two".into()),
+                ..valid.clone()
+            },
+            StatusIndicator {
+                caption: Some("x".repeat(MAX_INDICATOR_CAPTION_BYTES + 1)),
+                ..valid.clone()
+            },
+            StatusIndicator {
+                detail: Some("x".repeat(MAX_INDICATOR_DETAIL_BYTES + 1)),
+                ..valid.clone()
+            },
+            StatusIndicator {
+                diagnostic: Some("x".repeat(MAX_INDICATOR_DIAGNOSTIC_BYTES + 1)),
+                ..valid.clone()
+            },
+        ] {
+            assert!(invalid.validate().is_err(), "accepted {invalid:?}");
+        }
+    }
+
+    #[test]
+    fn text_command_round_trips_and_rejects_garbage() {
+        use crate::control::text::*;
+        let req = parse_line("inspect").unwrap();
+        assert_eq!(req.command, Command::Inspect);
+        assert_eq!(req.expected_revision, None);
+
+        let req = parse_line("focus").unwrap();
+        assert_eq!(req.command, Command::Focus);
+
+        let req = parse_line("rev 8 focus").unwrap();
+        assert_eq!(req.expected_revision, Some(8));
+        assert_eq!(req.command, Command::Focus);
+
+        let req = parse_line("move 0 25 1920 1150").unwrap();
+        match req.command {
+            Command::SetFrame { frame } => {
+                assert_eq!(
+                    frame,
+                    Rect {
+                        x: 0,
+                        y: 25,
+                        width: 1920,
+                        height: 1150
+                    }
+                );
+            }
+            _ => panic!("expected SetFrame"),
+        }
+
+        let req = parse_line("bg dock").unwrap();
+        assert_eq!(
+            req.command,
+            Command::SetTheme {
+                project_id: "dock".into()
+            }
+        );
+
+        let req = parse_line("indicator status speaking 'Socket live'").unwrap();
+        match &req.command {
+            Command::UpsertIndicator { indicator } => {
+                assert_eq!(indicator.id, "status");
+                assert_eq!(indicator.state, IndicatorState::Speaking);
+                assert_eq!(indicator.caption.as_deref(), Some("Socket live"));
+            }
+            _ => panic!("expected UpsertIndicator"),
+        }
+
+        let req = parse_line("indicator status off").unwrap();
+        match &req.command {
+            Command::DismissIndicator { indicator_id } => {
+                assert_eq!(indicator_id, "status");
+            }
+            _ => panic!("expected DismissIndicator"),
+        }
+
+        let req = parse_line("nav scene-view next").unwrap();
+        match &req.command {
+            Command::Navigate { surface_id, target } => {
+                assert_eq!(surface_id, "scene-view");
+                assert_eq!(*target, Navigation::Next);
+            }
+            _ => panic!("expected Navigate"),
+        }
+
+        let req = parse_line("nav scene-view page 3").unwrap();
+        match &req.command {
+            Command::Navigate { target, .. } => {
+                assert_eq!(*target, Navigation::Page { index: 3 });
+            }
+            _ => panic!("expected Navigate"),
+        }
+
+        let req = parse_line("close studio-view").unwrap();
+        match &req.command {
+            Command::CloseSurface { surface_id } => {
+                assert_eq!(surface_id, "studio-view");
+            }
+            _ => panic!("expected CloseSurface"),
+        }
+
+        let req = parse_line("wp dock display-1 10 20 30").unwrap();
+        match &req.command {
+            Command::SetWallpaper { request } => {
+                assert_eq!(request.project, "dock");
+                assert_eq!(request.display_id, "display-1");
+                assert_eq!(request.wallpaper, Wallpaper::Solid { rgb: [10, 20, 30] });
+            }
+            _ => panic!("expected SetWallpaper"),
+        }
+
+        // Comments and quotes
+        let req = parse_line("inspect # read state").unwrap();
+        assert_eq!(req.command, Command::Inspect);
+
+        assert!(parse_line("").is_err());
+        assert!(parse_line("# just a comment").is_err());
+        assert!(parse_line("bogus").is_err());
+    }
+
+    #[test]
+    fn text_reply_formats_ok_and_err() {
+        use crate::control::text::*;
+        use dock_core::layout::Rect;
+
+        let ok = ControlReply {
+            schema_version: CONTROL_VERSION,
+            request_id: "test".into(),
+            revision: 42,
+            outcome: Outcome::Ok {
+                receipt: Receipt::Focused,
+            },
+        };
+        assert_eq!(format_reply(&ok), "OK rev=42 focused");
+
+        let ok = ControlReply {
+            schema_version: CONTROL_VERSION,
+            request_id: "test".into(),
+            revision: 42,
+            outcome: Outcome::Ok {
+                receipt: Receipt::FrameSet {
+                    frame: Rect {
+                        x: 0,
+                        y: 25,
+                        width: 1920,
+                        height: 1150,
+                    },
+                },
+            },
+        };
+        assert_eq!(format_reply(&ok), "OK rev=42 frame=0,25,1920,1150");
+
+        let err = ControlReply {
+            schema_version: CONTROL_VERSION,
+            request_id: "test".into(),
+            revision: 41,
+            outcome: Outcome::Error {
+                code: ErrorCode::Conflict,
+                message: "stale".into(),
+            },
+        };
+        assert_eq!(format_reply(&err), "ERR conflict stale");
+    }
+}

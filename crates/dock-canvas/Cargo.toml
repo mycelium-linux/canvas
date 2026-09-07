@@ -4,7 +4,42 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+lua-scenes = ["dep:mlua"]
+mcp = ["dep:rmcp", "dep:schemars", "dep:tokio"]
+
 [dependencies]
+dock-control = { path = "../dock-control" }
 dock-core.workspace = true
+iced = { version = "0.14", default-features = false, features = ["wgpu", "tokio", "canvas", "image-without-codecs", "x11", "wayland", "markdown", "highlighter"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+libc = "0.2"
+mlua = { version = "0.12.1", features = ["luau"], optional = true }
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
+schemars = { version = "1", optional = true }
+sysinfo = "0.36"
+rmcp = { version = "3.2", default-features = false, features = ["server", "transport-io"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "sync"], optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSWindow"] }
+objc2-foundation = { version = "0.2", features = ["NSThread"] }
+
+[dev-dependencies]
+rmcp = { version = "3.2", default-features = false, features = ["client", "server", "transport-io"] }
+
+[[bin]]
+name = "dock-canvas"
+path = "src/main.rs"
+
+[[bin]]
+name = "dock-canvasctl"
+path = "src/bin/dock-canvasctl.rs"
+
+[[bin]]
+name = "dock-canvas-mcp"
+path = "src/bin/dock-canvas-mcp.rs"
+required-features = ["mcp"]

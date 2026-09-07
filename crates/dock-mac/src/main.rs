@@ -720,7 +720,9 @@ impl App {
             .unwrap_or("Ctrl+Option+Space · Enter to send · Esc to stop");
         let content = column![
             strip,
-            text(panel.progress()).size(14).color(color(palette.muted)),
+            text(panel.progress())
+                .size(14)
+                .color(color(palette.text_muted)),
             scrollable(container(text(response).size(18)).padding(iced::Padding {
                 right: 16.0,
                 ..iced::Padding::default()
@@ -731,7 +733,7 @@ impl App {
                 .on_input(Message::Line)
                 .size(14)
                 .padding(12),
-            text(hint).size(14).color(color(palette.muted))
+            text(hint).size(14).color(color(palette.text_muted))
         ]
         .spacing(16)
         .padding(24);
@@ -1022,6 +1024,14 @@ impl App {
                 width: 4.0,
                 radius: 0.0.into(),
             },
+            background: Some(
+                iced::Gradient::Linear(
+                    iced::gradient::Linear::new(core::f32::consts::PI / 2.0)
+                        .add_stop(0.0, color(palette.background))
+                        .add_stop(1.0, color(palette.background_strong)),
+                )
+                .into(),
+            ),
             ..Default::default()
         })
         .height(Length::Fill)
