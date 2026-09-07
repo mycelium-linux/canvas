@@ -16,11 +16,14 @@ The tools are:
   and purpose.
 - `project_resources`: return resource IDs, titles, kinds, and their presentation
   destination for one exact project.
-- `project_recall`: recall an exact project on Agora and focus the viewer on the
-  output that owns it. When the new workspace has no windows, Dock opens its
+- `project_recall`: recall an exact project on Agora, focus the viewer on the
+  output that owns it, and activate any saved local Mac window bindings through
+  the same layout operation as the GUI and CLI. When the Agora workspace has no windows, Dock opens its
   first safe HTTPS Alfalfa resource in a project-isolated browser profile. The
   result reports whether Firefox terms have been accepted for that profile and
-  sets `attention_required` when the owner must finish that one-time step.
+  sets `attention_required` when the owner must finish that one-time step. It
+  also reports `local_workspace_presented` and `local_window_count`; an unbound
+  project remains a valid remote-only recall.
 - `resource_open`: open an exact HTTPS resource in the Agora project browser,
   or delegate a local document and owner-only resource to the existing safe Mac
   launcher.

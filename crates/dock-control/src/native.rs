@@ -1,6 +1,6 @@
 //! Public AppKit and Accessibility APIs. Only this installed process owns TCC access.
 use core_foundation_sys::{array::*, base::*, dictionary::*, number::*, string::*, uuid::*};
-use dock_control::{Display, Operation, Rect, Response, Window};
+use dock_control::{Display, Operation, Rect, Response, Window, WindowSelector};
 use objc2::{class, msg_send, runtime::AnyObject};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use std::{collections::HashMap, ffi::CStr, ptr};
@@ -146,6 +146,22 @@ unsafe fn settable(e: Ax, name: &str) -> bool {
     let mut yes = false;
     AXUIElementIsAttributeSettable(e, key.0 as _, &mut yes) == 0 && yes
 }
+fn choose_window(title: &str, candidates: &[String]) -> Result<usize, String> {
+    let exact = candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(index, candidate)| (candidate == title).then_some(index))
+        .collect::<Vec<_>>();
+    match exact.as_slice() {
+        [index] => Ok(*index),
+        [] if candidates.len() == 1 => Ok(0),
+        [] => Err(format!(
+            "Window title changed and {} candidates remain; refresh bindings",
+            candidates.len()
+        )),
+        _ => Err("Window title is ambiguous".into()),
+    }
+}
 unsafe fn window(e: Ax, id: String, pid: u32, app: String) -> Result<Window, String> {
     let pos = attr(e, "AXPosition")?;
     let size = attr(e, "AXSize")?;
@@ -221,8 +237,12 @@ impl Native {
         if !AXIsProcessTrustedWithOptions(ptr::null()) {
             return Err("Grant Accessibility to Dock Control.app in System Settings → Privacy & Security → Accessibility".into());
         }
-        if matches!(op, Operation::Snapshot) {
-            return self.snapshot();
+        match &op {
+            Operation::Snapshot => return self.snapshot(),
+            Operation::Displays => return self.displays(),
+            Operation::Windows => return self.tolerant_windows(),
+            Operation::Resolve { selectors } => return self.resolve(selectors),
+            _ => {}
         }
         let id = match &op {
             Operation::Focus { id }
@@ -307,6 +327,235 @@ impl Native {
             window: window(e.0, before.id, *pid, app.clone())?,
         })
     }
+
+    unsafe fn displays(&mut self) -> Result<Response, String> {
+        let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
+        let count: usize = msg_send![screens, count];
+        let mut raw = Vec::new();
+        for i in 0..count {
+            let screen: *mut AnyObject = msg_send![screens,objectAtIndex:i];
+            let frame: NSRect = msg_send![screen, frame];
+            let visible: NSRect = msg_send![screen, visibleFrame];
+            let name: *mut AnyObject = msg_send![screen, localizedName];
+            let desc: *mut AnyObject = msg_send![screen, deviceDescription];
+            let key = string("NSScreenNumber");
+            let number: *mut AnyObject = msg_send![desc,objectForKey:key.0 as *mut AnyObject];
+            let number: u32 = msg_send![number, unsignedIntValue];
+            let uuid = Owned(CGDisplayCreateUUIDFromDisplayID(number) as _);
+            let uuidtext = Owned(CFUUIDCreateString(ptr::null(), uuid.0 as _) as _);
+            raw.push((text(uuidtext.0), objtext(name), frame, visible));
+        }
+        let primary_height = raw.first().map(|(_, _, f, _)| f.size.height).unwrap_or(0.);
+        let rect = |r: NSRect| Rect {
+            x: r.origin.x.round() as i32,
+            y: (primary_height - r.origin.y - r.size.height).round() as i32,
+            width: r.size.width.round() as u32,
+            height: r.size.height.round() as u32,
+        };
+        Ok(Response::Displays {
+            displays: raw
+                .into_iter()
+                .enumerate()
+                .map(|(i, (id, name, frame, visible))| Display {
+                    id,
+                    name,
+                    frame: rect(frame),
+                    visible_frame: rect(visible),
+                    primary: i == 0,
+                })
+                .collect(),
+        })
+    }
+
+    unsafe fn tolerant_windows(&mut self) -> Result<Response, String> {
+        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let apps: *mut AnyObject = msg_send![workspace, runningApplications];
+        let count: usize = msg_send![apps, count];
+        let mut windows = Vec::new();
+        let mut warnings = Vec::new();
+        let mut alive = std::collections::HashSet::new();
+        let mut unavailable = std::collections::HashSet::new();
+        for i in 0..count {
+            let app: *mut AnyObject = msg_send![apps,objectAtIndex:i];
+            let policy: isize = msg_send![app, activationPolicy];
+            if policy != 0 {
+                continue;
+            }
+            let pid: i32 = msg_send![app, processIdentifier];
+            let name: *mut AnyObject = msg_send![app, localizedName];
+            let name = objtext(name);
+            let fingerprint = match launch_fingerprint(app) {
+                Ok(value) => value,
+                Err(error) => {
+                    unavailable.insert(pid as u32);
+                    warnings.push(format!("Skipped {name} ({pid}): {error}"));
+                    continue;
+                }
+            };
+            let ax = Owned(AXUIElementCreateApplication(pid));
+            AXUIElementSetMessagingTimeout(ax.0, 0.3);
+            let list = match attr_raw(ax.0, "AXWindows") {
+                Ok(list) => list,
+                Err(-25212) => continue,
+                Err(code) => {
+                    unavailable.insert(pid as u32);
+                    warnings.push(format!(
+                        "Skipped {name} ({pid}): AXWindows Accessibility error {code}"
+                    ));
+                    continue;
+                }
+            };
+            if CFGetTypeID(list.0) != CFArrayGetTypeID() {
+                unavailable.insert(pid as u32);
+                warnings.push(format!("Skipped {name} ({pid}): invalid AXWindows value"));
+                continue;
+            }
+            for j in 0..CFArrayGetCount(list.0 as _) {
+                let e = CFArrayGetValueAtIndex(list.0 as _, j);
+                let id = self
+                    .entries
+                    .iter()
+                    .find(|(_, (value, entry_pid, _, entry_fingerprint))| {
+                        *entry_pid == pid as u32
+                            && *entry_fingerprint == fingerprint
+                            && CFEqual(value.0, e) != 0
+                    })
+                    .map(|(id, _)| id.clone())
+                    .unwrap_or_else(|| {
+                        self.next += 1;
+                        format!("{}:{}", self.nonce, self.next)
+                    });
+                match window(e, id.clone(), pid as u32, name.clone()) {
+                    Ok(found) => {
+                        alive.insert(id.clone());
+                        self.entries.entry(id).or_insert_with(|| {
+                            (Owned(CFRetain(e)), pid as u32, name.clone(), fingerprint)
+                        });
+                        windows.push(found);
+                    }
+                    Err(error) => {
+                        unavailable.insert(pid as u32);
+                        warnings.push(format!("Skipped {name} ({pid}) window {j}: {error}"));
+                    }
+                }
+            }
+        }
+        self.entries
+            .retain(|id, (_, pid, _, _)| alive.contains(id) || unavailable.contains(pid));
+        Ok(Response::Windows { windows, warnings })
+    }
+
+    unsafe fn resolve(&mut self, selectors: &[WindowSelector]) -> Result<Response, String> {
+        if selectors.is_empty() || selectors.len() > 16 {
+            return Err("Resolve requires 1–16 window selectors".into());
+        }
+        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let apps: *mut AnyObject = msg_send![workspace, runningApplications];
+        let app_count: usize = msg_send![apps, count];
+        let mut resolved = Vec::new();
+        let mut resolved_elements: Vec<Owned> = Vec::new();
+        for selector in selectors {
+            if selector.pid == 0
+                || selector.app.is_empty()
+                || selector.app.len() > 256
+                || selector.title.len() > 4096
+                || selector.app.chars().any(char::is_control)
+                || selector.title.chars().any(char::is_control)
+            {
+                return Err("Invalid window selector".into());
+            }
+            if let Some((e, pid, app, fingerprint)) = self.entries.get(&selector.id) {
+                let running: *mut AnyObject = msg_send![class!(NSRunningApplication),runningApplicationWithProcessIdentifier:*pid as i32];
+                if app == &selector.app
+                    && launch_fingerprint(running).is_ok_and(|value| value == *fingerprint)
+                {
+                    let found = window(e.0, selector.id.clone(), *pid, app.clone())?;
+                    if resolved_elements
+                        .iter()
+                        .any(|resolved| CFEqual(resolved.0, e.0) != 0)
+                    {
+                        return Err("Multiple bindings resolve to the same window".into());
+                    }
+                    resolved_elements.push(Owned(CFRetain(e.0)));
+                    resolved.push(found);
+                    continue;
+                }
+            }
+
+            let mut pid_match = Vec::new();
+            let mut name_match = Vec::new();
+            for i in 0..app_count {
+                let app: *mut AnyObject = msg_send![apps,objectAtIndex:i];
+                let policy: isize = msg_send![app, activationPolicy];
+                if policy != 0 {
+                    continue;
+                }
+                let pid: i32 = msg_send![app, processIdentifier];
+                let name: *mut AnyObject = msg_send![app, localizedName];
+                if objtext(name) == selector.app {
+                    name_match.push(app);
+                    if pid as u32 == selector.pid {
+                        pid_match.push(app);
+                    }
+                }
+            }
+            let candidates = if pid_match.len() == 1 {
+                &pid_match
+            } else {
+                &name_match
+            };
+            if candidates.len() != 1 {
+                return Err(format!(
+                    "Window app {} is missing or ambiguous; refresh project bindings",
+                    selector.app
+                ));
+            }
+            let app = candidates[0];
+            let pid: i32 = msg_send![app, processIdentifier];
+            let fingerprint = launch_fingerprint(app)?;
+            let ax = Owned(AXUIElementCreateApplication(pid));
+            AXUIElementSetMessagingTimeout(ax.0, 0.3);
+            let list = attr(ax.0, "AXWindows")?;
+            if CFGetTypeID(list.0) != CFArrayGetTypeID() {
+                return Err(format!("{} returned invalid AXWindows", selector.app));
+            }
+            let mut windows = Vec::new();
+            for j in 0..CFArrayGetCount(list.0 as _) {
+                let e = CFArrayGetValueAtIndex(list.0 as _, j);
+                let found = window(e, String::new(), pid as u32, selector.app.clone())?;
+                windows.push((e, found));
+            }
+            let titles = windows
+                .iter()
+                .map(|(_, found)| found.title.clone())
+                .collect::<Vec<_>>();
+            let index = choose_window(&selector.title, &titles)
+                .map_err(|error| format!("{}: {error}", selector.app))?;
+            let (e, mut found) = windows.swap_remove(index);
+            if resolved_elements
+                .iter()
+                .any(|resolved| CFEqual(resolved.0, e) != 0)
+            {
+                return Err("Multiple bindings resolve to the same window".into());
+            }
+            self.next += 1;
+            let id = format!("{}:{}", self.nonce, self.next);
+            found.id = id.clone();
+            self.entries.insert(
+                id.clone(),
+                (
+                    Owned(CFRetain(e)),
+                    pid as u32,
+                    selector.app.clone(),
+                    fingerprint,
+                ),
+            );
+            resolved_elements.push(Owned(CFRetain(e)));
+            resolved.push(found);
+        }
+        Ok(Response::Resolved { windows: resolved })
+    }
+
     unsafe fn snapshot(&mut self) -> Result<Response, String> {
         let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
         let count: usize = msg_send![screens, count];
@@ -407,6 +656,16 @@ mod identity_tests {
         assert!(first > 0);
         assert!(process_fingerprint(0).is_err());
         assert!(process_fingerprint(-1).is_err());
+    }
+    #[test]
+    fn targeted_resolution_requires_one_unambiguous_window() {
+        assert_eq!(
+            choose_window("Project", &["Project".into(), "Other".into()]),
+            Ok(0)
+        );
+        assert_eq!(choose_window("Old title", &["New title".into()]), Ok(0));
+        assert!(choose_window("Missing", &["One".into(), "Two".into()]).is_err());
+        assert!(choose_window("Same", &["Same".into(), "Same".into()]).is_err());
     }
     #[test]
     #[ignore = "requires a logged-in macOS desktop with Finder running"]

@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
     time::Duration,
 };
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 pub const MAX_MESSAGE: u64 = 1024 * 1024;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Rect {
@@ -35,11 +35,23 @@ pub struct Window {
     pub fullscreen: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowSelector {
+    #[serde(default)]
+    pub id: String,
+    pub pid: u32,
+    pub app: String,
+    pub title: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
     Status,
     RequestPermission,
     Snapshot,
+    Displays,
+    Windows,
+    Resolve { selectors: Vec<WindowSelector> },
     SetFrame { id: String, frame: Rect },
     Focus { id: String },
     SetFullscreen { id: String, fullscreen: bool },
@@ -58,6 +70,16 @@ pub enum Response {
     },
     Snapshot {
         displays: Vec<Display>,
+        windows: Vec<Window>,
+    },
+    Displays {
+        displays: Vec<Display>,
+    },
+    Windows {
+        windows: Vec<Window>,
+        warnings: Vec<String>,
+    },
+    Resolved {
         windows: Vec<Window>,
     },
     Applied {
@@ -186,6 +208,21 @@ mod tests {
             Operation::SetFrame { .. }
         ));
         assert!(serde_json::from_str::<Operation>(r#"{"op":"shell","command":"ls"}"#).is_err());
+        let resolve = Operation::Resolve {
+            selectors: vec![WindowSelector {
+                id: "helper:1".into(),
+                pid: 42,
+                app: "Safari".into(),
+                title: "Project".into(),
+            }],
+        };
+        let value = serde_json::to_value(resolve).unwrap();
+        assert_eq!(value["op"], "resolve");
+        assert!(serde_json::from_value::<Operation>(serde_json::json!({
+            "op":"resolve",
+            "selectors":[{"id":"x","pid":1,"app":"Safari","title":"Page","command":"bad"}]
+        }))
+        .is_err());
     }
     #[cfg(unix)]
     #[test]

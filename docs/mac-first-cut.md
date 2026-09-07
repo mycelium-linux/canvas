@@ -13,18 +13,20 @@ cargo run -p dock-mac
 cargo run -p dock-mac -- --catalog config/projects.json
 ```
 
-Select a project, refresh windows, and attach existing windows to it. Recall
-raises only those attached windows. Tiling divides the primary display’s usable area into columns, deriving its
-bounds from AppKit at the moment of use and excluding the menu bar and macOS
-Dock. “Custom work area” exposes an optional x, y, width, height override in screen
-points for another display or a smaller region. Other windows remain
-available and no application is terminated when switching projects.
+Select a project, refresh windows, and attach existing windows to it. Selecting
+that project again, Recall, and Tile all activate the same project workspace:
+Dock places its browser in the primary region, stacks its supporting windows in
+the remaining region, and focuses the primary window. Bounds come from AppKit at
+the moment of use and exclude the menu bar and macOS Dock. “Custom work area”
+exposes an optional x, y, width, height override in screen points. Other windows
+remain available and no application is terminated when switching projects.
 
 macOS requires Accessibility permission for the separately installed Dock Control.app
 helper. The GUI and CLI communicate with it through a same-user Unix socket. The OS bridge reports denial, ambiguity, timeouts, and application size
-constraints. Window attachments use opaque helper-owned native window identities. A restarted
-helper invalidates those identities and requires refreshed attachments; old
-PID/title-only attachments fail visibly. Attachments persist in
+constraints. Window attachments use opaque helper-owned native window identities
+plus an app/PID/title fingerprint. After a helper restart, Dock refreshes the ID
+only when the fingerprint resolves to one current window; ambiguity fails visibly.
+Attachments persist with owner-only permissions in
 `~/Library/Application Support/Dock/window-bindings.json`.
 
 The GUI and `dockctl` share `.dock/state.json` (`DOCK_STATE` overrides its path).
@@ -38,11 +40,18 @@ Agent callers can enumerate windows and operate on an attached project window:
 
 ```sh
 cargo run -p dock-mac -- windows
+cargo run -p dock-mac -- workspace list
+cargo run -p dock-mac -- workspace bind dock WINDOW_ID
+cargo run -p dock-mac -- workspace activate dock --human
+cargo run -p dock-mac -- workspace unbind dock WINDOW_ID
 cargo run -p dock-mac -- focus dock 12345 'Exact window title'
 cargo run -p dock-mac -- tile dock 12345 'Exact window title' '0,40,900,700'
 ```
 
-Focus/tile require an attached window and agent control for that project.
+The workspace commands validate the exact project through Alfalfa. Binding uses
+an opaque ID from the current tolerant inventory; activation moves only the saved
+windows and persists any refreshed IDs. `--human` makes the caller's intent
+explicit. The older focus/tile primitives require an attached window and agent control for that project.
 A human CLI caller may add `--human`. These CLI actions currently use the bundled
 catalog. The library exposes the narrow OS primitives for other trusted adapters;
 its primitive calls are not an authorization boundary. Processes under the same

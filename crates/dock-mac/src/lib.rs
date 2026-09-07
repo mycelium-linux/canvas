@@ -117,6 +117,12 @@ pub struct Window {
     pub title: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WindowInventory {
+    pub windows: Vec<Window>,
+    pub warnings: Vec<String>,
+}
+
 /// Plan an explicit work area without assuming a screen size or moving unrelated windows.
 pub fn tiles(area: Rect, count: usize) -> Result<Vec<Rect>, String> {
     let surfaces = (0..count)
@@ -168,23 +174,71 @@ pub fn project_tiles(area: Rect, windows: &[Window]) -> Result<Vec<Rect>, String
     Ok(plan.placements.into_iter().map(|p| p.frame).collect())
 }
 
-pub fn windows() -> Result<Vec<Window>, String> {
+pub fn activate_project_windows(
+    area: Rect,
+    windows: &[Window],
+) -> Result<(Vec<Window>, dock_core::desktop::LayoutReceipt), String> {
     use dock_core::desktop::WindowBackend;
-    let snapshot = MacDesktop.snapshot()?;
-    snapshot
-        .windows
-        .into_iter()
-        .map(|window| {
-            Ok(Window {
+    let resolved = resolve_windows(windows)?;
+    let surfaces = resolved
+        .iter()
+        .map(|window| dock_core::layout::Surface {
+            id: window.id.clone(),
+            role: window_role(window),
+        })
+        .collect::<Vec<_>>();
+    let plan = dock_core::layout::browser_primary(area, &surfaces)?;
+    let receipt = MacDesktop.apply_layout(&plan)?;
+    Ok((resolved, receipt))
+}
+
+pub fn windows() -> Result<Vec<Window>, String> {
+    Ok(window_inventory()?.windows)
+}
+
+pub fn window_inventory() -> Result<WindowInventory, String> {
+    match dock_control::request(dock_control::Operation::Windows)? {
+        dock_control::Response::Windows { windows, warnings } => Ok(WindowInventory {
+            windows: windows
+                .into_iter()
+                .map(|window| Window {
+                    id: window.id,
+                    pid: window.pid,
+                    app: window.app,
+                    title: window.title,
+                })
+                .collect(),
+            warnings,
+        }),
+        _ => Err("Dock Control did not return window inventory".into()),
+    }
+}
+
+pub fn resolve_windows(windows: &[Window]) -> Result<Vec<Window>, String> {
+    if windows.is_empty() || windows.len() > 16 {
+        return Err("Resolve requires 1–16 project windows".into());
+    }
+    let selectors = windows
+        .iter()
+        .map(|window| dock_control::WindowSelector {
+            id: window.id.clone(),
+            pid: window.pid,
+            app: window.app.clone(),
+            title: window.title.clone(),
+        })
+        .collect();
+    match dock_control::request(dock_control::Operation::Resolve { selectors })? {
+        dock_control::Response::Resolved { windows } => Ok(windows
+            .into_iter()
+            .map(|window| Window {
                 id: window.id,
-                pid: window
-                    .process_id
-                    .ok_or("Dock Control window lacks a process identity")?,
+                pid: window.pid,
                 app: window.app,
                 title: window.title,
             })
-        })
-        .collect()
+            .collect()),
+        _ => Err("Dock Control did not resolve project windows".into()),
+    }
 }
 fn native_id(window: &Window) -> Result<String, String> {
     if !window.id.is_empty() {
@@ -481,8 +535,8 @@ mod protocol_tests {
 /// Read the primary display's usable frame (excluding menu bar and Dock), then
 /// convert AppKit's bottom-left coordinates to Accessibility's top-left space.
 pub fn work_area() -> Result<Rect, String> {
-    match dock_control::request(dock_control::Operation::Snapshot)? {
-        dock_control::Response::Snapshot { displays, .. } => {
+    match dock_control::request(dock_control::Operation::Displays)? {
+        dock_control::Response::Displays { displays } => {
             let display = displays
                 .iter()
                 .find(|d| d.primary)
@@ -500,6 +554,7 @@ pub fn work_area() -> Result<Rect, String> {
 }
 
 pub mod reservation;
+pub mod workspace;
 
 pub fn recall_linux(project: &str) -> Result<String, String> {
     if !session_identifier(project) {

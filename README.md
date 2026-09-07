@@ -47,9 +47,9 @@ installed `~/Applications/Dock Control.app` stays unchanged during GUI builds.
 The installer preserves an existing helper; upgrading it requires `--upgrade`.
 See [helper identity and signing](docs/mac-control.md) for the exact boundary.
 
-The explicit `--diagnostics` view can attach existing Mac windows to a project, recall them, and tile
-those attached windows within the primary display's usable bounds. A custom work
-area is available as an optional override. Switching projects changes
+The explicit `--diagnostics` view can attach existing Mac windows to a project.
+Recall, Tile, project selection, CLI activation, and MCP recall share one layout
+operation for those bindings. A custom work area is available as an optional override. Switching projects changes
 its Coherence appearance and preserves background work. Mac window control uses
 public Accessibility through the independently installed Rust helper. Permission
 failures are surfaced rather than simulated.

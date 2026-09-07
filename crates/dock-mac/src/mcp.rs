@@ -31,7 +31,7 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "project_recall",
-            "Bring up one exact Alfalfa project workspace. If it has no windows, Dock opens one safe web resource in its isolated Agora browser profile.",
+            "Bring up one exact Alfalfa project workspace on Agora and arrange its saved local Mac windows. If Agora has no windows, Dock opens one safe web resource in its isolated browser profile.",
             json!({"project_id":{"type":"string","maxLength":64}}),
             vec!["project_id"],
         ),
@@ -208,6 +208,7 @@ fn recall(project: &str) -> Result<Value, String> {
     let status = super::remote::rpc(project, "desktop-status", &[], None)?;
     let window_count = workspace_window_count(&status, project)?;
     let viewer = super::remote::open_desktop(project)?;
+    let local = super::workspace::activate_saved_if_bound(project)?;
     Ok(json!({
         "project_id":project,
         "name":project_name,
@@ -217,6 +218,8 @@ fn recall(project: &str) -> Result<Value, String> {
         "browser_seeded":seeded,
         "browser_terms_accepted":browser["terms_accepted"],
         "attention_required":browser["attention_required"],
+        "local_workspace_presented":local.is_some(),
+        "local_window_count":local.as_ref().map(|activation| activation.windows.len()).unwrap_or(0),
         "viewer":{"output_index":viewer["output_index"],"reused":viewer["reused"].as_bool().unwrap_or(false)}
     }))
 }

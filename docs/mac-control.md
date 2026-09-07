@@ -64,12 +64,17 @@ verify the resulting display placement before claiming success.
 
 Window IDs refer to retained Accessibility objects and include a server-instance
 nonce. The registry also verifies each process launch timestamp, rejecting PID reuse.
-IDs expire when a window disappears or the helper restarts. Clients must
-refresh inventory and retain unresolved recovery records instead of guessing
-which replacement window matches a stale ID. Inventory covers regular applications exposing AX windows. An app that reports
-no AXWindows value is treated as having no windows. Other AX window-list errors,
-invalid geometry, and state-read failures reject the complete snapshot with an
-app-specific error; a client must not reserve a display using partial inventory.
+IDs expire when a window disappears or the helper restarts. Project bindings retain
+the app, PID, and title as a resolver fingerprint. After a helper restart, the
+helper reattaches only when that fingerprint identifies one current window; title
+changes are accepted only when the app exposes a single candidate. Ambiguity and
+duplicate resolution fail visibly.
+
+Inventory covers regular applications exposing AX windows. The project picker
+uses tolerant inventory and reports skipped, unresponsive apps as warnings. The
+display-reservation snapshot stays strict: AX window-list errors, invalid geometry,
+and state-read failures reject the complete snapshot, so a client never reserves
+a display from partial inventory.
 Applications without accessibility support and closed windows cannot be controlled. macOS Spaces and
 application sizing constraints remain authoritative.
 
@@ -78,7 +83,7 @@ The native implementation uses Apple's
 and
 [window attribute API](https://developer.apple.com/documentation/applicationservices/1462085-axuielementcopyattributevalue).
 
-## Verified permission recovery and pending helper fix
+## Verified permission recovery
 
 The installed helper now reports `trusted: true`. macOS logs showed that a stale
 code requirement still referenced an older ad-hoc build despite the visible toggle.
@@ -87,8 +92,5 @@ followed by restarting the unchanged helper and the user's approval, resolved it
 This is a diagnosed recovery action, not part of routine startup or GUI builds.
 
 The authorized installed binary then exposed a separate inventory bug: Finder's
-optional AppKit `launchDate` is absent. The source now uses the kernel process
-start time, retaining PID-reuse checks; both the native Finder regression and
-strict Clippy pass. That candidate has not replaced the newly authorized app.
-Full inventory and display-reservation validation still require the controlled
-helper update tracked by `dock-96j.15.1`.
+optional AppKit `launchDate` is absent. The helper uses the kernel process start
+time, retaining PID-reuse checks.

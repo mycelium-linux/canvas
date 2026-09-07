@@ -3,15 +3,13 @@ mod resource_palette;
 mod summon;
 use dock_core::{Action, Actor, Catalog, Control, Host, ResourceKind, StateStore, WorkspaceState};
 use dock_mac::reservation::{self, Desktop};
-use dock_mac::{Rect, RemoteAction, Window};
+use dock_mac::workspace::Bindings;
+use dock_mac::{Rect, RemoteAction, Window, WindowInventory};
 use iced::widget::{button, column, container, row, scrollable, text, text_input, Column};
 use iced::{Color, Element, Length, Task, Theme};
-use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use std::{collections::BTreeMap, path::PathBuf, process::Command};
 
-#[derive(Default, Serialize, Deserialize)]
-struct Bindings(BTreeMap<String, Vec<Window>>);
 struct App {
     diagnostics: bool,
     picker: usize,
@@ -61,12 +59,13 @@ enum Message {
     TakeControl,
     ReleaseControl,
     Refresh,
-    Windows(Result<Vec<Window>, String>),
+    Windows(Result<WindowInventory, String>),
     Bind(Window),
     Unbind(usize),
     Focus(Window),
     Recall,
     Tile,
+    WorkspaceActivated(String, Result<Vec<Window>, String>),
     Area(String),
     ToggleArea,
     Launch(usize),
@@ -81,35 +80,19 @@ fn state_store() -> StateStore {
             .unwrap_or_else(|| PathBuf::from(".dock/state.json")),
     )
 }
-fn bindings_path() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default()
-        .join("Library/Application Support/Dock/window-bindings.json")
-}
 fn color(rgb: [u8; 3]) -> Color {
     Color::from_rgb8(rgb[0], rgb[1], rgb[2])
 }
 impl App {
     fn new(catalog: Catalog, state: WorkspaceState) -> Self {
-        let (bindings, status) = match std::fs::read(bindings_path()) {
-            Ok(bytes) => match serde_json::from_slice(&bytes) {
-                Ok(value) => (
-                    value,
-                    "Ready. Refresh windows to attach existing work.".into(),
-                ),
-                Err(e) => (
-                    Bindings::default(),
-                    format!("Cannot read saved window bindings: {e}"),
-                ),
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
-                Bindings::default(),
-                "Refresh windows to attach existing work.".into(),
+        let (bindings, status) = match dock_mac::workspace::load() {
+            Ok(value) => (
+                value,
+                "Ready. Refresh windows to attach existing work.".into(),
             ),
-            Err(e) => (
+            Err(error) => (
                 Bindings::default(),
-                format!("Cannot read saved window bindings: {e}"),
+                format!("Cannot read saved window bindings: {error}"),
             ),
         };
         let selected = catalog
@@ -151,20 +134,11 @@ impl App {
     }
     fn project_windows(&self) -> Vec<Window> {
         self.bindings
-            .0
-            .get(&self.catalog.projects[self.selected].id)
-            .cloned()
-            .unwrap_or_default()
+            .windows(&self.catalog.projects[self.selected].id)
+            .to_vec()
     }
     fn save(&mut self) {
-        let path = bindings_path();
-        let result = (|| -> Result<(), String> {
-            std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
-            let bytes = serde_json::to_vec_pretty(&self.bindings).map_err(|e| e.to_string())?;
-            let temp = path.with_extension("json.tmp");
-            std::fs::write(&temp, bytes).map_err(|e| e.to_string())?;
-            std::fs::rename(temp, path).map_err(|e| e.to_string())
-        })();
+        let result = dock_mac::workspace::save(&self.bindings);
         self.status = result
             .map(|_| "Window bindings saved.".into())
             .unwrap_or_else(|e| format!("Bindings were not saved: {e}"));
@@ -546,15 +520,21 @@ impl App {
                         self.status = "Recalling this project's windows and conversation.".into();
                         let id = self.catalog.projects[self.selected].id.clone();
                         let windows = self.project_windows();
-                        let native = Task::perform(
-                            async move {
-                                for window in windows {
-                                    dock_mac::focus(&window)?;
-                                }
-                                Ok("Local project windows recalled.".into())
-                            },
-                            Message::Finished,
-                        );
+                        let native = if windows.is_empty() {
+                            Task::none()
+                        } else {
+                            let native_project = id.clone();
+                            Task::perform(
+                                async move {
+                                    let area = dock_mac::work_area()?;
+                                    dock_mac::activate_project_windows(area, &windows)
+                                        .map(|(resolved, _)| resolved)
+                                },
+                                move |result| {
+                                    Message::WorkspaceActivated(native_project.clone(), result)
+                                },
+                            )
+                        };
                         return Task::batch([
                             native,
                             self.update(Message::Panel(
@@ -570,36 +550,38 @@ impl App {
             Message::ToggleArea => self.custom_area = !self.custom_area,
             Message::Refresh => {
                 self.busy = true;
-                return Task::perform(async { dock_mac::windows() }, Message::Windows);
+                return Task::perform(async { dock_mac::window_inventory() }, Message::Windows);
             }
             Message::Windows(result) => {
                 self.busy = false;
                 match result {
-                    Ok(w) => {
-                        self.windows = w;
-                        self.status = "Choose windows to attach to this project.".into();
+                    Ok(inventory) => {
+                        self.windows = inventory.windows;
+                        self.status = if inventory.warnings.is_empty() {
+                            "Choose windows to attach to this project.".into()
+                        } else {
+                            format!(
+                                "Choose responsive windows to attach. {} application warning(s): {}",
+                                inventory.warnings.len(),
+                                inventory.warnings.join("; ")
+                            )
+                        };
                     }
                     Err(e) => self.status = e,
                 }
             }
             Message::Bind(window) => {
-                let ws = self
-                    .bindings
-                    .0
-                    .entry(self.catalog.projects[self.selected].id.clone())
-                    .or_default();
-                if !ws.contains(&window) {
-                    ws.push(window);
-                }
+                self.bindings
+                    .bind(&self.catalog.projects[self.selected].id, window);
                 self.save();
             }
             Message::Unbind(index) => {
-                self.bindings
-                    .0
-                    .entry(self.catalog.projects[self.selected].id.clone())
-                    .or_default()
-                    .remove(index);
-                self.save();
+                let project = &self.catalog.projects[self.selected].id;
+                if self.bindings.unbind_index(project, index) {
+                    self.save();
+                } else {
+                    self.status = "Window binding is no longer present.".into();
+                }
             }
             Message::Focus(window) => {
                 self.busy = true;
@@ -617,34 +599,31 @@ impl App {
                     self.status = "Attach a window before recalling this project.".into();
                     return Task::none();
                 }
-                let should_tile = matches!(message, Message::Tile);
+                let project = self.catalog.projects[self.selected].id.clone();
                 let custom_area = self.custom_area.then(|| self.area.clone());
                 self.busy = true;
                 return Task::perform(
                     async move {
-                        let rects = if should_tile {
-                            let area = match custom_area {
-                                Some(value) => parse_area(&value)?,
-                                None => dock_mac::work_area()?,
-                            };
-                            Some(dock_mac::project_tiles(area, &ws)?)
-                        } else {
-                            None
+                        let area = match custom_area {
+                            Some(value) => parse_area(&value)?,
+                            None => dock_mac::work_area()?,
                         };
-                        for (i, w) in ws.iter().enumerate() {
-                            if let Some(ref rects) = rects {
-                                dock_mac::tile(w, rects[i])?;
-                            } else {
-                                dock_mac::focus(w)?;
-                            }
-                        }
-                        if should_tile {
-                            dock_mac::focus(&ws[dock_mac::project_primary_index(&ws)?])?;
-                        }
-                        Ok("Project windows recalled. Other windows remain available.".into())
+                        dock_mac::activate_project_windows(area, &ws).map(|(resolved, _)| resolved)
                     },
-                    Message::Finished,
+                    move |result| Message::WorkspaceActivated(project.clone(), result),
                 );
+            }
+            Message::WorkspaceActivated(project, result) => {
+                self.busy = false;
+                match result {
+                    Ok(windows) => {
+                        self.bindings.0.insert(project, windows);
+                        self.save();
+                        self.status =
+                            "Project workspace arranged. Other windows remain available.".into();
+                    }
+                    Err(error) => self.status = error,
+                }
             }
             Message::Remote(index, action) => {
                 let target = self.catalog.projects[self.selected].resources[index]
@@ -1204,7 +1183,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     if args.first().map(String::as_str) == Some("windows") {
-        println!("{}", serde_json::to_string_pretty(&dock_mac::windows()?)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&dock_mac::window_inventory()?)?
+        );
+        return Ok(());
+    }
+    if args.first().map(String::as_str) == Some("workspace") {
+        let words = args.iter().map(String::as_str).collect::<Vec<_>>();
+        match words.as_slice() {
+            ["workspace", "list"] => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&dock_mac::workspace::load()?)?
+                );
+            }
+            ["workspace", "bind", project, window_id] => {
+                dock_mac::resources::project_entries(project)?;
+                let inventory = dock_mac::window_inventory()?;
+                let window = inventory
+                    .windows
+                    .into_iter()
+                    .find(|window| window.id == *window_id)
+                    .ok_or("Window ID is absent from the current responsive inventory")?;
+                let mut bindings = dock_mac::workspace::load()?;
+                bindings.bind(project, window);
+                let window_count = bindings.windows(project).len();
+                dock_mac::workspace::save(&bindings)?;
+                println!(
+                    "{}",
+                    serde_json::json!({"schema_version":1,"ok":true,"project":project,"warnings":inventory.warnings,"window_count":window_count})
+                );
+            }
+            ["workspace", "unbind", project, window_id] => {
+                let mut bindings = dock_mac::workspace::load()?;
+                if !bindings.unbind_id(project, window_id) {
+                    return Err("Window is not bound to that project".into());
+                }
+                let window_count = bindings.windows(project).len();
+                dock_mac::workspace::save(&bindings)?;
+                println!(
+                    "{}",
+                    serde_json::json!({"schema_version":1,"ok":true,"project":project,"window_count":window_count})
+                );
+            }
+            ["workspace", "activate", project, "--human"] => {
+                dock_mac::resources::project_entries(project)?;
+                let mut bindings = dock_mac::workspace::load()?;
+                let activation = dock_mac::workspace::activate(&mut bindings, project, None)?;
+                dock_mac::workspace::save(&bindings)?;
+                println!(
+                    "{}",
+                    serde_json::json!({"schema_version":1,"ok":true,"result":activation})
+                );
+            }
+            _ => {
+                return Err("usage: dock-mac workspace list | bind PROJECT WINDOW_ID | unbind PROJECT WINDOW_ID | activate PROJECT --human".into());
+            }
+        }
         return Ok(());
     }
     if matches!(args.first().map(String::as_str), Some("focus" | "tile")) {
@@ -1225,7 +1261,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             title: args[3].clone(),
             app: String::new(),
         };
-        let bindings: Bindings = serde_json::from_slice(&std::fs::read(bindings_path())?)?;
+        let bindings = dock_mac::workspace::load()?;
         if !bindings.0.get(&args[1]).is_some_and(|ws| {
             ws.iter()
                 .any(|bound| bound.pid == w.pid && bound.title == w.title)
