@@ -557,6 +557,7 @@ mod tests {
             project_id: "dock".into(),
             revision: 4,
             theme: ThemeRef::Project,
+            background: crate::Background::default(),
             surfaces: vec![Surface {
                 id: "docs".into(),
                 title: "Docs".into(),
@@ -635,6 +636,7 @@ mod tests {
             workspace_id: "primary".into(),
             project_id: "dock".into(),
             mode: reconcile::ReconcileMode::Preserve,
+            background: None,
             surfaces: vec![Surface {
                 id: "invoice".into(),
                 title: "Invoice".into(),

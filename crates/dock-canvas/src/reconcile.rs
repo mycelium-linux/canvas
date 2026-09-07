@@ -5,8 +5,8 @@
 //! model inference, I/O, or socket operations.
 
 use crate::{
-    DataBinding, Layout, PatchOperation, SCHEMA_VERSION, Surface, ThemeRef, WorkspaceDocument,
-    WorkspacePatch,
+    Background, DataBinding, Layout, PatchOperation, SCHEMA_VERSION, Surface, ThemeRef,
+    WorkspaceDocument, WorkspacePatch,
 };
 use dock_core::Catalog;
 use serde::{Deserialize, Serialize};
@@ -46,6 +46,8 @@ pub struct DesiredWorkspaceState {
     #[serde(default)]
     pub mode: ReconcileMode,
     #[serde(default)]
+    pub background: Option<Background>,
+    #[serde(default)]
     pub surfaces: Vec<Surface>,
     #[serde(default)]
     pub bindings: Vec<DataBinding>,
@@ -66,6 +68,7 @@ pub enum StateChange {
     BindingRemoved { binding_id: String },
     Layout,
     Theme,
+    Background,
     Focus,
 }
 
@@ -165,6 +168,7 @@ fn replace_project(
         project_id: desired.project_id.clone(),
         revision: current.revision + 1,
         theme: ThemeRef::Project,
+        background: desired.background.clone().unwrap_or_default(),
         surfaces: sorted_surfaces(&desired.surfaces),
         layout: desired
             .layout
@@ -197,6 +201,7 @@ fn replace_project(
     );
     changes.push(StateChange::Layout);
     changes.push(StateChange::Theme);
+    changes.push(StateChange::Background);
     if !matches!(desired.focus, DesiredFocus::Preserve) {
         changes.push(StateChange::Focus);
     }
@@ -228,6 +233,9 @@ fn build_same_project_target(
     }
     if let Some(layout) = &desired.layout {
         target.layout.clone_from(layout);
+    }
+    if let Some(background) = &desired.background {
+        target.background.clone_from(background);
     }
     apply_focus(&mut target, &desired.focus);
     if target != *current {
@@ -333,6 +341,12 @@ fn diff(
             theme: target.theme,
         });
         changes.push(StateChange::Theme);
+    }
+    if current.background != target.background {
+        operations.push(PatchOperation::SetBackground {
+            background: target.background.clone(),
+        });
+        changes.push(StateChange::Background);
     }
     if current.focused_surface_id != target.focused_surface_id {
         operations.push(PatchOperation::SetFocus {
@@ -441,6 +455,7 @@ mod tests {
             project_id: "dock".into(),
             revision: 7,
             theme: ThemeRef::Project,
+            background: crate::Background::default(),
             surfaces: vec![
                 resource_surface("docs", "docs"),
                 Surface {
@@ -501,6 +516,7 @@ mod tests {
             workspace_id: "primary".into(),
             project_id: "dock".into(),
             mode: ReconcileMode::Preserve,
+            background: None,
             surfaces: Vec::new(),
             bindings: Vec::new(),
             layout: None,
@@ -516,6 +532,32 @@ mod tests {
             plan.action,
             ReconcileAction::NoChange {
                 document_revision: 7
+            }
+        );
+    }
+
+    #[test]
+    fn background_intent_is_a_minimal_idempotent_state_change() {
+        let current = current();
+        let mut desired = desired();
+        desired.background = Some(Background::Solid {
+            color: [4, 8, 16, 255],
+        });
+        let plan = reconcile(&current, &desired, &catalog()).unwrap();
+        assert_eq!(plan.changes, vec![StateChange::Background]);
+        let ReconcileAction::ApplyPatch { patch } = plan.action else {
+            panic!("expected a patch");
+        };
+        assert_eq!(patch.operations.len(), 1);
+        assert!(matches!(
+            patch.operations[0],
+            PatchOperation::SetBackground { .. }
+        ));
+        let applied = current.apply_patch(&patch, &catalog()).unwrap();
+        assert_eq!(
+            reconcile(&applied, &desired, &catalog()).unwrap().action,
+            ReconcileAction::NoChange {
+                document_revision: applied.revision
             }
         );
     }
