@@ -97,6 +97,9 @@ pub enum Command {
     WorkspaceSwitch {
         name: String,
     },
+    ScreensaverShader {
+        index: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -516,6 +519,10 @@ pub enum Receipt {
     WorkspaceSwitched {
         name: String,
     },
+    ScreensaverShaderSet {
+        index: usize,
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -648,7 +655,8 @@ impl ControlRequest {
             | Command::DismissPresencePreview
             | Command::Shutdown
             | Command::WorkspaceSave { .. }
-            | Command::WorkspaceSwitch { .. } => {}
+            | Command::WorkspaceSwitch { .. }
+            | Command::ScreensaverShader { .. } => {}
         }
         Ok(())
     }
@@ -864,6 +872,13 @@ pub mod text {
                 Ok(Command::WorkspaceSwitch {
                     name: tokens[1].clone(),
                 })
+            }
+            "screensaver_shader" | "shader" => {
+                req(tokens, 2, "screensaver_shader <index>")?;
+                tokens[1]
+                    .parse::<usize>()
+                    .map_err(|_| "invalid shader index".into())
+                    .map(|index| Command::ScreensaverShader { index })
             }
             "bg" | "theme" => {
                 req(tokens, 2, "bg <project_id>")?;
@@ -1102,6 +1117,9 @@ pub mod text {
                     Receipt::PresencePreviewDismissed => "preview dismissed".to_string(),
                     Receipt::WorkspaceSaved { name } => format!("saved={name}"),
                     Receipt::WorkspaceSwitched { name } => format!("switched={name}"),
+                    Receipt::ScreensaverShaderSet { index, name } => {
+                        format!("shader={index} ({name})")
+                    }
                 };
                 format!("OK rev={} {}", reply.revision, detail)
             }

@@ -8,8 +8,6 @@ use iced::{Element, Length, Rectangle};
 use std::time::{Duration, Instant};
 
 pub const ROTATION_PERIOD: Duration = Duration::from_secs(45);
-pub const CREDIT: &str = "Danilo Guanabara, Sebastien Berube & Noztol (ShaderToy) / FPL";
-pub const LICENSE: &str = "MIT";
 
 const UNIFORM_WGSL: &str = r#"
 struct Uniforms {
@@ -210,6 +208,63 @@ fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 }
 "#;
 
+// "Smoke Rings" — IQ 2D simplex noise, ShaderToy
+// License: MIT
+// Source: https://www.shadertoy.com/view/M3XBz4
+const SMOKE_RINGS: &str = r#"
+fn hash(p: vec2<f32>) -> vec2<f32> {
+    let pp = vec2<f32>(dot(p, vec2<f32>(127.1, 311.7)), dot(p, vec2<f32>(269.5, 183.3)));
+    return -1.0 + 2.0 * fract(sin(pp) * 43758.5453123);
+}
+
+fn noise(p: vec2<f32>) -> f32 {
+    let K1: f32 = 0.366025404;
+    let K2: f32 = 0.211324865;
+    let i = floor(p + (p.x + p.y) * K1);
+    let a = p - i + (i.x + i.y) * K2;
+    let m = step(a.y, a.x);
+    let o = vec2<f32>(m, 1.0 - m);
+    let b = a - o + K2;
+    let c = a - 1.0 + 2.0 * K2;
+    let h = max(vec3<f32>(0.5 - vec3<f32>(dot(a, a), dot(b, b), dot(c, c)), vec3<f32>(0.0));
+    let n = h * h * h * h * vec3<f32>(dot(a, hash(i)), dot(b, hash(i + o)), dot(c, hash(i + vec2<f32>(1.0, 1.0))));
+    return dot(n, vec3<f32>(70.0));
+}
+
+@fragment
+fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let uv = (pos.xy - 0.5 * u.res) / u.res.y;
+    var col: vec3<f32> = vec3<f32>(0.0);
+    let tt = 0.05 * u.time;
+    let pxAng = atan(uv.y, uv.x);
+    let pxRad = length(uv);
+    let ringRad = 0.35;
+    let smokeFactor = 1.7;
+    let dA = abs(mod(pxAng - (6.2831853 * tt) + 3.14159265, 6.2831853) - 3.14159265);
+    let totalRingEnv = 1.0 - smoothstep(0.0, smokeFactor, dA);
+    let num_rings = 14.0;
+    for (var ii: i32 = 0; ii < 14; ii = ii + 1) {
+        let i = f32(ii);
+        let ringSpread = 0.01 + 0.06 * (i / 10.0);
+        let freq = 2.0 + mod(i, 5.0);
+        let mainWave = ringSpread * sin((6.2831853 * tt + pxAng) * freq + i * 1.7);
+        let secWave = sin(pxRad * 70.0 + (6.2831853 * tt + pxAng) * 2.0 + i);
+        let cFlow = vec2<f32>(cos(6.2831853 * tt + pxAng), sin(6.2831853 * tt + pxAng));
+        let cTime = vec2<f32>(cos(6.2831853 * tt), sin(6.2831853 * tt));
+        let noiseInp = (2.0 + i * 0.2) * cFlow + 0.5 * cTime + vec2<f32>(i * 4.3, i * 9.1);
+        let turb = noise(noiseInp);
+        let mw = totalRingEnv * 1.0 * mainWave;
+        let sw = totalRingEnv * 0.015 * secWave;
+        let tb = totalRingEnv * 0.03 * turb;
+        let dist = abs(pxRad - (ringRad + mw + sw + tb));
+        let radialD = abs(pxRad - ringRad);
+        let radialFallOff = exp(-radialD * 9.0);
+        col = col + exp(-dist * dist * 1e4) * 0.14 * radialFallOff;
+    }
+    return vec4<f32>(col, 1.0);
+}
+"#;
+
 #[derive(Debug)]
 pub struct ShaderPiece {
     pub name: &'static str,
@@ -222,36 +277,50 @@ pub const SHADERS: &[ShaderPiece] = &[
     ShaderPiece {
         name: "Tidepool",
         wgsl: TIDEPOOL,
+        credit: "FPL",
+        license: "MIT",
     },
     ShaderPiece {
         name: "Aurora Drift",
         wgsl: AURORA_DRIFT,
+        credit: "FPL",
+        license: "MIT",
     },
     ShaderPiece {
         name: "Dusk Ember",
         wgsl: DUSK_EMBER,
+        credit: "FPL",
+        license: "MIT",
     },
     ShaderPiece {
         name: "Slow Ripple",
         wgsl: SLOW_RIPPLE,
+        credit: "FPL",
+        license: "MIT",
     },
     ShaderPiece {
         name: "Spirales",
         wgsl: SPIRAL,
+        credit: "Danilo Guanabara (ShaderToy)",
+        license: "MIT",
     },
     ShaderPiece {
         name: "Floating Rectangles",
         wgsl: FLOATING_RECT,
+        credit: "ShaderToy",
+        license: "MIT",
     },
     ShaderPiece {
-        name: "Inception Tunnel",
-        wgsl: INCEPTION_TUNNEL,
+        name: "Smoke Rings",
+        wgsl: SMOKE_RINGS,
+        credit: "Sebastien Berube & Noztol (ShaderToy)",
+        license: "CC-BY-4.0",
     },
 ];
 
 pub fn attribution(index: usize) -> String {
     let shader = &SHADERS[index % SHADERS.len()];
-    format!("{} — {} ({})", shader.name, CREDIT, LICENSE)
+    format!("{} — {} ({})", shader.name, shader.credit, shader.license)
 }
 
 pub fn advance_elapsed(
@@ -487,8 +556,10 @@ mod tests {
         for (index, shader) in SHADERS.iter().enumerate() {
             assert!(!shader.name.is_empty());
             assert!(shader.wgsl.contains("@fragment"));
-            assert!(attribution(index).contains(CREDIT));
-            assert!(attribution(index).contains(LICENSE));
+            assert!(!shader.credit.is_empty());
+            assert!(!shader.license.is_empty());
+            assert!(attribution(index).contains(shader.credit));
+            assert!(attribution(index).contains(shader.license));
         }
     }
 
