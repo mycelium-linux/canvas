@@ -16,6 +16,8 @@ pub const MAX_ACTIVE_INDICATORS: usize = 16;
 pub const MAX_MESH_NODES: usize = 8;
 pub const MAX_PRESENCE_OCCUPANTS: usize = 8;
 pub const MAX_PRESENCE_FACES: usize = 8;
+pub const DEFAULT_SCREENSAVER_FPS: u16 = 30;
+pub const MAX_SCREENSAVER_FPS: u16 = 60;
 const MAX_INDICATOR_TITLE_BYTES: usize = 128;
 const MAX_INDICATOR_CAPTION_BYTES: usize = 512;
 const MAX_INDICATOR_DETAIL_BYTES: usize = 512;
@@ -86,9 +88,15 @@ pub enum Command {
     },
     DismissPresencePreview,
     SetScreensaver {
-        show_time: bool,
+        settings: ScreensaverSettings,
     },
     Shutdown,
+    WorkspaceSave {
+        name: String,
+    },
+    WorkspaceSwitch {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +121,50 @@ pub enum IndicatorState {
     Listening,
     Thinking,
     Speaking,
+}
+
+/// Complete, declarative state for Canvas' animated privacy background.
+///
+/// Animation is disabled by default so a runtime never starts expensive frame
+/// work until orchestration explicitly asks for it. The frame limit is part of
+/// intent, which makes performance behavior inspectable and reproducible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScreensaverSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub show_time: bool,
+    #[serde(default)]
+    pub show_fps: bool,
+    #[serde(default = "default_screensaver_fps")]
+    pub max_fps: u16,
+}
+
+impl Default for ScreensaverSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            show_time: false,
+            show_fps: false,
+            max_fps: DEFAULT_SCREENSAVER_FPS,
+        }
+    }
+}
+
+impl ScreensaverSettings {
+    pub fn validate(self) -> Result<(), String> {
+        if !(1..=MAX_SCREENSAVER_FPS).contains(&self.max_fps) {
+            return Err(format!(
+                "screensaver max_fps must be between 1 and {MAX_SCREENSAVER_FPS}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+const fn default_screensaver_fps() -> u16 {
+    DEFAULT_SCREENSAVER_FPS
 }
 
 impl StatusIndicator {
@@ -351,7 +403,10 @@ impl PresencePreview {
                     .is_some_and(|name| !bounded_printable(name, MAX_PRESENCE_TEXT_BYTES))
                 || !face.confidence.is_finite()
                 || !(0.0..=1.0).contains(&face.confidence)
-                || face.bounds.iter().any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+                || face
+                    .bounds
+                    .iter()
+                    .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
                 || face.bounds[0] >= face.bounds[2]
                 || face.bounds[1] >= face.bounds[3]
             {
@@ -452,9 +507,15 @@ pub enum Receipt {
     },
     PresencePreviewDismissed,
     ScreensaverUpdated {
-        show_time: bool,
+        settings: ScreensaverSettings,
     },
     ShuttingDown,
+    WorkspaceSaved {
+        name: String,
+    },
+    WorkspaceSwitched {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -473,6 +534,28 @@ pub struct RuntimeSnapshot {
     pub presence: Option<PresenceSnapshot>,
     #[serde(default)]
     pub presence_preview_active: bool,
+    #[serde(default)]
+    pub screensaver: ScreensaverSnapshot,
+    #[serde(default)]
+    pub workspaces: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScreensaverSnapshot {
+    #[serde(flatten)]
+    pub settings: ScreensaverSettings,
+    /// Rolling measured cadence of animation frames requested by Canvas.
+    pub measured_fps: f32,
+}
+
+impl Default for ScreensaverSnapshot {
+    fn default() -> Self {
+        Self {
+            settings: ScreensaverSettings::default(),
+            measured_fps: 0.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -556,14 +639,16 @@ impl ControlRequest {
             Command::SetMesh { mesh } => mesh.validate()?,
             Command::SetPresence { presence } => presence.validate()?,
             Command::ShowPresencePreview { preview } => preview.validate()?,
+            Command::SetScreensaver { settings } => settings.validate()?,
             Command::ApplyDocument { .. }
             | Command::ApplyPatch { .. }
             | Command::Inspect
             | Command::ReadDocument
             | Command::Focus
             | Command::DismissPresencePreview
-            | Command::SetScreensaver { .. }
-            | Command::Shutdown => {}
+            | Command::Shutdown
+            | Command::WorkspaceSave { .. }
+            | Command::WorkspaceSwitch { .. } => {}
         }
         Ok(())
     }
@@ -606,9 +691,9 @@ fn presence_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value.is_ascii()
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'@')
-        })
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'@'))
 }
 
 fn visible(value: &str) -> bool {
@@ -768,6 +853,18 @@ pub mod text {
             "inspect" | "info" => Ok(Command::Inspect),
             "focus" => Ok(Command::Focus),
             "shutdown" => Ok(Command::Shutdown),
+            "ws-save" | "workspace-save" | "save-ws" => {
+                req(tokens, 2, "ws-save <name>")?;
+                Ok(Command::WorkspaceSave {
+                    name: tokens[1].clone(),
+                })
+            }
+            "ws-switch" | "workspace-switch" | "switch-ws" => {
+                req(tokens, 2, "ws-switch <name>")?;
+                Ok(Command::WorkspaceSwitch {
+                    name: tokens[1].clone(),
+                })
+            }
             "bg" | "theme" => {
                 req(tokens, 2, "bg <project_id>")?;
                 if !identifier(&tokens[1]) {
@@ -992,11 +1089,19 @@ pub mod text {
                     Receipt::MeshSet { node_count } => format!("mesh={node_count}"),
                     Receipt::ShuttingDown => "shutting down".to_string(),
                     Receipt::PresenceSet { .. } => "presence set".to_string(),
-                    Receipt::ScreensaverUpdated { show_time } => {
-                        format!("screensaver show_time={show_time}")
+                    Receipt::ScreensaverUpdated { settings } => {
+                        format!(
+                            "screensaver enabled={} show_time={} show_fps={} max_fps={}",
+                            settings.enabled,
+                            settings.show_time,
+                            settings.show_fps,
+                            settings.max_fps
+                        )
                     }
                     Receipt::PresencePreviewShown { .. } => "preview shown".to_string(),
                     Receipt::PresencePreviewDismissed => "preview dismissed".to_string(),
+                    Receipt::WorkspaceSaved { name } => format!("saved={name}"),
+                    Receipt::WorkspaceSwitched { name } => format!("switched={name}"),
                 };
                 format!("OK rev={} {}", reply.revision, detail)
             }
@@ -1221,7 +1326,10 @@ mod tests {
         request.validate().unwrap();
         let value = serde_json::to_value(request).unwrap();
         assert_eq!(value["command"]["command"], "set_presence");
-        assert_eq!(value["command"]["presence"]["occupants"][1]["display_name"], "Ange");
+        assert_eq!(
+            value["command"]["presence"]["occupants"][1]["display_name"],
+            "Ange"
+        );
 
         let mut invalid = snapshot.clone();
         invalid.occupied = false;

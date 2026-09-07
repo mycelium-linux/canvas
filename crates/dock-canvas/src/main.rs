@@ -1,8 +1,9 @@
 use base64::Engine as _;
 use dock_canvas::control::{
     CONTROL_VERSION, Command, ContentKind, ControlReply, ControlRequest, ErrorCode,
-    MAX_ACTIVE_INDICATORS, MAX_CONTROL_MESSAGE, MeshSnapshot, Navigation, Outcome, Receipt,
-    PresencePreview, PresenceSnapshot, RuntimeSnapshot, StatusIndicator, SurfaceSnapshot,
+    MAX_ACTIVE_INDICATORS, MAX_CONTROL_MESSAGE, MeshSnapshot, Navigation, Outcome, PresencePreview,
+    PresenceSnapshot, Receipt, RuntimeSnapshot, ScreensaverSettings, ScreensaverSnapshot,
+    StatusIndicator, SurfaceSnapshot,
 };
 use dock_canvas::hud;
 use dock_canvas::interaction::{
@@ -14,11 +15,13 @@ use dock_canvas::media::{
     plan_pdf_page, plan_raster,
 };
 use dock_canvas::{
-    AssetRef, Layout, NormalizedRect, Placement, SCHEMA_VERSION, Scene, SceneNode,
-    NodeContent, Surface, SurfaceContent, ThemeRef, WorkspaceDocument,
+    AssetRef, Layout, NodeContent, NormalizedRect, Placement, SCHEMA_VERSION, Scene, SceneNode,
+    Surface, SurfaceContent, ThemeRef, WorkspaceDocument,
 };
 use dock_core::{Catalog, ProjectTheme, ThemePalette, desktop::WallpaperRequest, layout::Rect};
-use iced::widget::{container, image as image_widget, markdown, row, scrollable, space, stack, text};
+use iced::widget::{
+    container, image as image_widget, markdown, row, scrollable, space, stack, text,
+};
 use iced::{Color, ContentFit, Element, Length, Point, Size, Subscription, Task, Theme};
 use image::{ImageReader, Limits};
 use sha2::{Digest, Sha256};
@@ -38,22 +41,11 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-mod terminal;
 mod indicator;
 mod presence;
+mod screensaver;
+mod terminal;
 mod transition;
-mod screensaver_stub {
-    use std::time::{Duration, Instant};
-    pub struct Renderer;
-    impl Renderer {
-        pub fn new() -> Result<Self, String> { Err("screensaver not compiled".into()) }
-        pub fn frame(&mut self, _w: u32, _h: u32, _now: Instant) -> Result<(Vec<u8>, usize), String> { Err("not compiled".into()) }
-    }
-    pub fn attribution(index: usize) -> String { format!("screensaver:{index}") }
-    #[allow(dead_code)]
-    pub const ROTATION_PERIOD: Duration = Duration::from_secs(45);
-}
-use screensaver_stub as screensaver;
 
 const INITIAL_FRAME: Rect = Rect {
     x: 120,
@@ -235,11 +227,12 @@ struct App {
     minimized_surfaces: BTreeSet<String>,
     maximized_surfaces: BTreeSet<String>,
     transition: Option<transition::Transition>,
-    screensaver: Option<screensaver::Renderer>,
-    screensaver_frame: Option<iced::widget::image::Handle>,
+    workspaces: BTreeMap<String, WorkspaceDocument>,
+    screensaver_settings: ScreensaverSettings,
+    screensaver_clock: screensaver::FrameClock,
     screensaver_index: usize,
-    screensaver_show_time: bool,
-    last_screensaver_frame: Instant,
+    screensaver_piece_started: Instant,
+    screensaver_elapsed: Duration,
     screensaver_fps: f32,
 }
 
@@ -298,17 +291,15 @@ impl App {
             minimized_surfaces: BTreeSet::new(),
             maximized_surfaces: BTreeSet::new(),
             transition: None,
-            screensaver: match screensaver::Renderer::new() {
-                Ok(renderer) => Some(renderer),
-                Err(message) => {
-                    eprintln!("Canvas screensaver disabled: {message}");
-                    None
-                }
-            },
-            screensaver_frame: None,
+            workspaces: BTreeMap::new(),
+            screensaver_settings: ScreensaverSettings::default(),
+            screensaver_clock: screensaver::FrameClock::new(
+                ScreensaverSettings::default().max_fps,
+                Instant::now(),
+            ),
             screensaver_index: 0,
-            screensaver_show_time: false,
-            last_screensaver_frame: Instant::now(),
+            screensaver_piece_started: Instant::now(),
+            screensaver_elapsed: Duration::ZERO,
             screensaver_fps: 0.0,
         }
     }
@@ -378,7 +369,7 @@ impl App {
                     self.refresh_metrics();
                 }
                 self.tick_transition();
-                self.refresh_screensaver();
+                self.refresh_screensaver(Instant::now());
                 if self.presence_preview.as_ref().is_some_and(|preview| {
                     preview.last_frame.elapsed() >= Duration::from_millis(preview.value.linger_ms)
                 }) {
@@ -451,7 +442,12 @@ impl App {
             }
             Message::TerminalInput(kbd_event) => {
                 #[allow(clippy::collapsible_if)]
-                if let Some(surface) = self.document.focused_surface_id.clone().and_then(|id| self.decoded.get_mut(&id)) {
+                if let Some(surface) = self
+                    .document
+                    .focused_surface_id
+                    .clone()
+                    .and_then(|id| self.decoded.get_mut(&id))
+                {
                     if let ContentSource::Terminal { stdin_fd, .. } = &mut surface.source {
                         let bytes = key_to_bytes(&kbd_event);
                         if !bytes.is_empty() {
@@ -662,13 +658,14 @@ impl App {
                     return Task::none();
                 }
                 self.decoded.retain(|id, decoded| {
-                    document.surfaces.iter().any(|surface| {
+                    self.document.surfaces.iter().any(|surface| {
                         surface.id == *id
-                            && matches!(
-                                &surface.content,
-                                SurfaceContent::Asset { asset }
-                                    if decoded.snapshot.asset_sha256.as_ref() == Some(&asset.sha256)
-                            )
+                            && match &surface.content {
+                                SurfaceContent::Asset { asset } => {
+                                    decoded.snapshot.asset_sha256.as_ref() == Some(&asset.sha256)
+                                }
+                                _ => true,
+                            }
                     })
                 });
                 let workspace_id = document.id.clone();
@@ -1058,22 +1055,70 @@ impl App {
                 );
                 iced::exit()
             }
-            Command::SetScreensaver { show_time } => {
-                if self.screensaver_show_time != show_time {
-                    self.screensaver_show_time = show_time;
+            Command::SetScreensaver { settings } => {
+                if self.screensaver_settings != settings {
+                    self.screensaver_clock
+                        .set_max_fps(settings.max_fps, Instant::now());
+                    self.screensaver_settings = settings;
+                    if settings.enabled {
+                        self.screensaver_piece_started = Instant::now();
+                        self.screensaver_elapsed = Duration::ZERO;
+                    }
                     self.bump();
                     self.status = format!(
-                        "Screensaver time display {}.",
-                        if show_time { "shown" } else { "hidden" }
+                        "Screensaver {} at up to {} FPS.",
+                        if settings.enabled {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        },
+                        settings.max_fps
                     );
                 }
                 self.answer(
                     pending,
                     Outcome::Ok {
-                        receipt: Receipt::ScreensaverUpdated { show_time },
+                        receipt: Receipt::ScreensaverUpdated { settings },
                     },
                 );
                 Task::none()
+            }
+            Command::WorkspaceSave { name } => {
+                self.workspaces.insert(name.clone(), self.document.clone());
+                self.bump();
+                self.status = format!("Saved workspace '{name}'.");
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::WorkspaceSaved { name },
+                    },
+                );
+                Task::none()
+            }
+            Command::WorkspaceSwitch { name } => {
+                if let Some(document) = self.workspaces.get(&name).cloned() {
+                    self.start_transition();
+                    self.document = document;
+                    self.ensure_scene_decoded();
+                    self.bump();
+                    self.status = format!("Switched to workspace '{name}'.");
+                    self.answer(
+                        pending,
+                        Outcome::Ok {
+                            receipt: Receipt::WorkspaceSwitched { name },
+                        },
+                    );
+                    Task::none()
+                } else {
+                    self.fail(
+                        pending,
+                        Failure {
+                            code: ErrorCode::InvalidRequest,
+                            message: format!("workspace '{name}' not found"),
+                        },
+                    );
+                    Task::none()
+                }
             }
         }
     }
@@ -1081,7 +1126,10 @@ impl App {
     fn refresh_terminal(&mut self) {
         let mut changed = false;
         for surface in self.decoded.values_mut() {
-            if let ContentSource::Terminal { master_fd, buffer, .. } = &mut surface.source {
+            if let ContentSource::Terminal {
+                master_fd, buffer, ..
+            } = &mut surface.source
+            {
                 let data = terminal::read_fd(*master_fd);
                 if let Some(text) = String::from_utf8(data).ok().filter(|t| !t.is_empty()) {
                     buffer.push_str(&text);
@@ -1171,41 +1219,14 @@ impl App {
         self.metrics_last = Instant::now();
     }
 
-    fn refresh_screensaver(&mut self) {
-        if self.last_screensaver_frame.elapsed() < Duration::from_millis(33) {
+    fn refresh_screensaver(&mut self, now: Instant) {
+        if !self.screensaver_settings.enabled || !self.screensaver_clock.record_if_due(now) {
             return;
         }
-        let renderer = match self.screensaver.as_mut() {
-            Some(renderer) => renderer,
-            None => return,
-        };
-        let width = (self.frame.width / 2).clamp(64, 960);
-        let height =
-            ((f64::from(width) * f64::from(self.frame.height.max(1)))
-                / f64::from(self.frame.width.max(1)))
-            .round()
-            .max(64.0) as u32;
-        match renderer.frame(width, height, Instant::now()) {
-            Ok((pixels, index)) => {
-                let render_dt = self.last_screensaver_frame.elapsed().as_secs_f32();
-                if render_dt > 0.005 {
-                    let instant_fps = (1.0 / render_dt).clamp(1.0, 240.0);
-                    self.screensaver_fps = if self.screensaver_fps <= 0.0 {
-                        instant_fps
-                    } else {
-                        self.screensaver_fps * 0.9 + instant_fps * 0.1
-                    };
-                }
-                self.screensaver_index = index;
-                self.screensaver_frame =
-                    Some(iced::widget::image::Handle::from_rgba(width, height, pixels));
-                self.last_screensaver_frame = Instant::now();
-            }
-            Err(message) => {
-                eprintln!("Canvas screensaver frame failed: {message}");
-                self.screensaver = None;
-            }
-        }
+        (self.screensaver_index, self.screensaver_piece_started) =
+            screensaver::advance(self.screensaver_index, self.screensaver_piece_started, now);
+        self.screensaver_elapsed = now.duration_since(self.screensaver_piece_started);
+        self.screensaver_fps = self.screensaver_clock.measured_fps();
     }
 
     fn snapshot(&self) -> RuntimeSnapshot {
@@ -1244,6 +1265,11 @@ impl App {
             mesh: self.mesh.clone(),
             presence: self.presence.clone(),
             presence_preview_active: self.presence_preview.is_some(),
+            screensaver: ScreensaverSnapshot {
+                settings: self.screensaver_settings,
+                measured_fps: self.screensaver_clock.measured_fps(),
+            },
+            workspaces: self.workspaces.keys().cloned().collect(),
         }
     }
 
@@ -1548,19 +1574,36 @@ impl App {
                 };
                 let runtime = RuntimeSurface {
                     snapshot,
-                    source: ContentSource::Scene { scene: scene.clone() },
+                    source: ContentSource::Scene {
+                        scene: scene.clone(),
+                    },
                     handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
                     source_pixels: [1, 1],
                     media_plan: MediaPlan {
-                        viewport_logical: LogicalSize { width: 1920.0, height: 1080.0 },
-                        source_dimensions: SourceDimensions::RasterPixels(PixelSize { width: 1, height: 1 }),
-                        target_px: PixelSize { width: 1, height: 1 },
-                        display_logical: LogicalSize { width: 1920.0, height: 1080.0 },
+                        viewport_logical: LogicalSize {
+                            width: 1920.0,
+                            height: 1080.0,
+                        },
+                        source_dimensions: SourceDimensions::RasterPixels(PixelSize {
+                            width: 1,
+                            height: 1,
+                        }),
+                        target_px: PixelSize {
+                            width: 1,
+                            height: 1,
+                        },
+                        display_logical: LogicalSize {
+                            width: 1920.0,
+                            height: 1080.0,
+                        },
                         scale_factor: 1.0,
                         cache_key: MediaCacheKey {
                             source_id: "<scene>".to_string(),
                             variant: MediaVariant::Raster,
-                            pixel_size: PixelSize { width: 1, height: 1 },
+                            pixel_size: PixelSize {
+                                width: 1,
+                                height: 1,
+                            },
                         },
                     },
                     upload_pixels: [1, 1],
@@ -1598,7 +1641,7 @@ impl App {
             .width(width)
             .height(height)
             .into(),
-             ContentSource::Terminal { buffer, .. } => {
+            ContentSource::Terminal { buffer, .. } => {
                 let palette = self.project_theme().palette();
                 scrollable(text(buffer).color(color(palette.text)).width(Length::Fill))
                     .width(width)
@@ -1625,7 +1668,8 @@ impl App {
                         let y_frac = 1.0 - (n.transform.translation[1] + 4.0) / 8.0;
                         let x = (x_frac * width_px).max(0.0);
                         let y = (y_frac * height_px).max(0.0);
-                        let font_size = (n.transform.scale[0] * n.transform.scale[1] * 24.0).max(10.0);
+                        let font_size =
+                            (n.transform.scale[0] * n.transform.scale[1] * 24.0).max(10.0);
                         container(text(label).size(font_size).color(color(palette.text)))
                             .width(Length::Shrink)
                             .height(Length::Shrink)
@@ -1668,7 +1712,14 @@ impl App {
                     ..Default::default()
                 })
         };
-        container(row![dot(palette.danger), dot(palette.warning), dot(palette.success)].spacing(9))
+        container(
+            row![
+                dot(palette.danger),
+                dot(palette.warning),
+                dot(palette.success)
+            ]
+            .spacing(9),
+        )
         .padding(iced::Padding {
             top: 7.0,
             right: 0.0,
@@ -1761,8 +1812,14 @@ impl App {
                         }
                         let surface = self.decoded.get(&placement.surface_id)?;
                         let bounds = {
-                            let target = if self.maximized_surfaces.contains(&placement.surface_id) {
-                                NormalizedRect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 }
+                            let target = if self.maximized_surfaces.contains(&placement.surface_id)
+                            {
+                                NormalizedRect {
+                                    x: 0.0,
+                                    y: 0.0,
+                                    width: 1.0,
+                                    height: 1.0,
+                                }
                             } else {
                                 placement.bounds
                             };
@@ -1779,9 +1836,9 @@ impl App {
                         };
                         let content = self.surface_widget(surface, Length::Fill, Length::Fill);
                         let plane = container(stack(vec![content, self.surface_controls()]))
-                        .width(Length::Fixed(bounds.width as f32))
-                        .height(Length::Fixed(bounds.height as f32))
-                        .center(Length::Fill);
+                            .width(Length::Fixed(bounds.width as f32))
+                            .height(Length::Fixed(bounds.height as f32))
+                            .center(Length::Fill);
                         Some(
                             container(plane)
                                 .width(Length::Fill)
@@ -1840,14 +1897,11 @@ impl App {
         };
 
         let mut layers: Vec<Element<'_, Message>> = Vec::new();
-        if let Some(handle) = self.screensaver_frame.clone() {
-            layers.push(
-                image_widget(handle)
-                    .content_fit(ContentFit::Fill)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .into(),
-            );
+        if self.screensaver_settings.enabled {
+            layers.push(screensaver::view(
+                self.screensaver_index,
+                self.screensaver_elapsed,
+            ));
         }
         layers.push(content);
         if self.is_leftmost_surface() {
@@ -1951,7 +2005,7 @@ impl App {
             },
         ));
 
-        if self.screensaver.is_some() {
+        if self.screensaver_settings.enabled {
             let attribution_bottom = if self.is_leftmost_surface() {
                 64.0
             } else {
@@ -1961,10 +2015,7 @@ impl App {
                 container(
                     text(screensaver::attribution(self.screensaver_index))
                         .size(13)
-                        .color(Color {
-                            a: 0.55,
-                            ..muted
-                        }),
+                        .color(Color { a: 0.55, ..muted }),
                 )
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -1978,40 +2029,37 @@ impl App {
                 .align_y(iced::alignment::Vertical::Bottom)
                 .into(),
             );
-            if self.screensaver_fps > 0.0 {
-                layers.push(
-                    container(
-                        text(format!("{:.0} fps", self.screensaver_fps))
-                            .size(12)
-                            .color(Color {
-                                a: 0.45,
-                                ..muted
-                            }),
+            if self.screensaver_settings.show_fps {
+                let fps = if self.screensaver_fps > 0.0 {
+                    format!(
+                        "{:.1} / {} FPS",
+                        self.screensaver_fps, self.screensaver_settings.max_fps
                     )
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .padding(iced::Padding {
-                        top: 0.0,
-                        right: 20.0,
-                        bottom: 18.0,
-                        left: 0.0,
-                    })
-                    .align_x(iced::alignment::Horizontal::Right)
-                    .align_y(iced::alignment::Vertical::Bottom)
-                    .into(),
+                } else {
+                    format!("measuring / {} FPS", self.screensaver_settings.max_fps)
+                };
+                layers.push(
+                    container(text(fps).size(12).color(Color { a: 0.45, ..muted }))
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .padding(iced::Padding {
+                            top: 0.0,
+                            right: 20.0,
+                            bottom: 18.0,
+                            left: 0.0,
+                        })
+                        .align_x(iced::alignment::Horizontal::Right)
+                        .align_y(iced::alignment::Vertical::Bottom)
+                        .into(),
                 );
             }
-            if self.screensaver_show_time {
+            if self.screensaver_settings.show_time {
                 let (clock, _date) = hud::now_local();
                 layers.push(
-                    container(
-                        text(clock)
-                            .size(72)
-                            .color(Color {
-                                a: 0.85,
-                                ..text_color
-                            }),
-                    )
+                    container(text(clock).size(72).color(Color {
+                        a: 0.85,
+                        ..text_color
+                    }))
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .center(Length::Fill)
@@ -2089,7 +2137,11 @@ fn key_to_bytes(event: &iced::keyboard::Event) -> Vec<u8> {
     }
 }
 
-fn load_terminal(surface_id: String, shell: &str, title: Option<String>) -> Result<LoadedContent, Failure> {
+fn load_terminal(
+    surface_id: String,
+    shell: &str,
+    title: Option<String>,
+) -> Result<LoadedContent, Failure> {
     let (master_fd, stdin_fd, pid) = terminal::spawn_terminal(shell).map_err(Failure::resource)?;
     let display_title = title.unwrap_or_else(|| format!("Terminal: {shell}"));
     let snapshot = SurfaceSnapshot {
@@ -2106,7 +2158,7 @@ fn load_terminal(surface_id: String, shell: &str, title: Option<String>) -> Resu
     };
     Ok(LoadedContent {
         snapshot,
-            source: ContentSource::Terminal {
+        source: ContentSource::Terminal {
             master_fd,
             stdin_fd,
             pid,
@@ -2120,15 +2172,30 @@ fn load_terminal(surface_id: String, shell: &str, title: Option<String>) -> Resu
         },
         source_pixels: [1, 1],
         media_plan: MediaPlan {
-            viewport_logical: LogicalSize { width: 1.0, height: 1.0 },
-            source_dimensions: SourceDimensions::RasterPixels(PixelSize { width: 1, height: 1 }),
-            target_px: PixelSize { width: 1, height: 1 },
-            display_logical: LogicalSize { width: 1.0, height: 1.0 },
+            viewport_logical: LogicalSize {
+                width: 1.0,
+                height: 1.0,
+            },
+            source_dimensions: SourceDimensions::RasterPixels(PixelSize {
+                width: 1,
+                height: 1,
+            }),
+            target_px: PixelSize {
+                width: 1,
+                height: 1,
+            },
+            display_logical: LogicalSize {
+                width: 1.0,
+                height: 1.0,
+            },
             scale_factor: 1.0,
             cache_key: MediaCacheKey {
                 source_id: "terminal".to_string(),
                 variant: MediaVariant::Raster,
-                pixel_size: PixelSize { width: 1, height: 1 },
+                pixel_size: PixelSize {
+                    width: 1,
+                    height: 1,
+                },
             },
         },
         upload_pixels: [1, 1],
@@ -2204,7 +2271,7 @@ fn load_content(
     title: Option<String>,
     viewport: LogicalSize,
     scale_factor: f64,
- ) -> Result<LoadedContent, Failure> {
+) -> Result<LoadedContent, Failure> {
     let path_str = path.to_string_lossy();
     if path_str.starts_with("tty://") {
         let shell = path_str.strip_prefix("tty://").unwrap_or("sh");
@@ -2650,8 +2717,7 @@ mod platform {
     }
 
     #[cfg(target_os = "macos")]
-    pub(super) fn canvas_presentation_options() -> objc2_app_kit::NSApplicationPresentationOptions
-    {
+    pub(super) fn canvas_presentation_options() -> objc2_app_kit::NSApplicationPresentationOptions {
         use objc2_app_kit::NSApplicationPresentationOptions;
 
         NSApplicationPresentationOptions::NSApplicationPresentationAutoHideDock
@@ -2968,7 +3034,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let animated = app.visible_indicator_id.is_some()
             || app.presence_preview.is_some()
             || app.transition.is_some();
-        let cadence = if animated {
+        let cadence = if app.screensaver_settings.enabled {
+            let screensaver = app.screensaver_clock.interval();
+            if animated {
+                screensaver.min(Duration::from_millis(16))
+            } else {
+                screensaver
+            }
+        } else if animated {
             Duration::from_millis(16)
         } else {
             Duration::from_millis(33)
@@ -3538,12 +3611,15 @@ mod tests {
         );
         use objc2_app_kit::NSApplicationPresentationOptions;
         let options = platform::canvas_presentation_options();
-        assert!(options.contains(
-            NSApplicationPresentationOptions::NSApplicationPresentationAutoHideMenuBar
-        ));
-        assert!(options.contains(
-            NSApplicationPresentationOptions::NSApplicationPresentationAutoHideDock
-        ));
+        assert!(
+            options.contains(
+                NSApplicationPresentationOptions::NSApplicationPresentationAutoHideMenuBar
+            )
+        );
+        assert!(
+            options
+                .contains(NSApplicationPresentationOptions::NSApplicationPresentationAutoHideDock)
+        );
     }
 
     #[test]

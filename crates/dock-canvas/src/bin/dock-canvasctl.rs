@@ -77,6 +77,9 @@ fn handle_line(line: &str) -> Result<(), String> {
     if tokens[0] == "open_terminal" {
         return handle_open_terminal(&tokens);
     }
+    if tokens[0] == "workspace" {
+        return handle_workspace(&tokens);
+    }
 
     let mut request = match text::parse_line(line) {
         Ok(req) => req,
@@ -290,6 +293,58 @@ fn handle_open_terminal(tokens: &[String]) -> Result<(), String> {
     let request = text::parse_line(&format!("open {surface_id} {tty_path}"))?;
     let reply = send_with_retry(&request)?;
     println!("{}", text::format_reply(&reply));
+    Ok(())
+}
+
+fn handle_workspace(tokens: &[String]) -> Result<(), String> {
+    if tokens.len() < 2 {
+        return Err(
+            "usage: workspace save <name> | workspace switch <name> | workspace list".into(),
+        );
+    }
+    match tokens[1].as_str() {
+        "save" => {
+            if tokens.len() < 3 {
+                return Err("usage: workspace save <name>".into());
+            }
+            let request = text::parse_line(&format!("ws-save {}", tokens[2]))?;
+            let reply = send_with_retry(&request)?;
+            println!("{}", text::format_reply(&reply));
+        }
+        "switch" => {
+            if tokens.len() < 3 {
+                return Err("usage: workspace switch <name>".into());
+            }
+            let request = text::parse_line(&format!("ws-switch {}", tokens[2]))?;
+            let reply = send_with_retry(&request)?;
+            println!("{}", text::format_reply(&reply));
+        }
+        "list" => {
+            let req = ControlRequest {
+                schema_version: CONTROL_VERSION,
+                request_id: format!("ws-list-{}", id()),
+                expected_revision: None,
+                command: Command::Inspect,
+            };
+            let reply = control::send(&req)?;
+            if let Outcome::Ok {
+                receipt: Receipt::Snapshot { snapshot },
+            } = &reply.outcome
+            {
+                if snapshot.workspaces.is_empty() {
+                    println!("No saved workspaces.");
+                } else {
+                    println!("Saved workspaces:");
+                    for name in &snapshot.workspaces {
+                        println!("  {name}");
+                    }
+                }
+            } else {
+                println!("{}", text::format_reply(&reply));
+            }
+        }
+        other => return Err(format!("unknown workspace subcommand: {other}")),
+    }
     Ok(())
 }
 
