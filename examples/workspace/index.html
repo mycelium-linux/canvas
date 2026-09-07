@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dock workspace preview</title>
+<link rel="stylesheet" href="../../config/linux/themes/dock.css">
+<style>
+body{margin:0;background:var(--background);color:var(--text);font:18px system-ui;line-height:1.6}
+main{max-width:780px;margin:12vh auto;padding:32px}small{color:var(--accent);letter-spacing:.1em}
+h1{font-size:42px;line-height:1.15;font-weight:500}p{color:var(--muted)}
+section{padding:24px;border:1px solid var(--border);background:var(--surface);border-radius:12px}
+button{font:inherit;padding:10px 22px;border:0;border-radius:8px;background:var(--accent);color:var(--background);cursor:pointer}
+output{display:block;margin-top:16px}code{font-size:14px}
+</style>
+<main>
+<small>WORKSPACE PREVIEW</small>
+<h1>Dock — live agent edit verified</h1>
+<p>This small browser fixture lives in the same source tree as the running OpenCode session. Changes to this file can be inspected here after reloading.</p>
+<section>
+<button id="inspect" onclick="document.querySelector('output').textContent='Browser interaction verified · '+(++window.inspections)">Inspect workspace</button>
+<button onclick="window.inspections=0;document.querySelector('output').textContent='Ready for a human or agent.'">Reset</button>
+<output aria-live="polite">Ready for a human or agent.</output>
+</section>
+<p><code>examples/workspace/index.html</code></p>
+</main>
+<script>window.inspections=0;</script>
+</html>

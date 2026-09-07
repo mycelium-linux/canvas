@@ -1,0 +1,16 @@
+--- a/src/main.c
++++ b/src/main.c
+@@ -1209,6 +1209,13 @@
+ 			&display->image_source->observable.destroyed,
+ 			on_desktop_output_destroyed);
+ 
++	/* Hotplug can occur with no clients: every display needs a frame
++	 * before the next RFB handshake, even while capture is idle. */
++	if (wayvnc_display_blank(self, display) < 0) {
++		wayvnc_display_destroy(display);
++		return false;
++	}
++
+ 	return true;
+ }
+ 

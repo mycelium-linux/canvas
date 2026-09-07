@@ -1,0 +1,16 @@
+[workspace]
+members = ["crates/dock-core", "crates/dock-linux", "crates/dock-mac", "crates/dock-control"]
+default-members = ["crates/dock-core", "crates/dock-linux", "crates/dock-mac"]
+exclude = ["vendor/coherence-tokens"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "LicenseRef-Proprietary"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dock-core = { path = "crates/dock-core" }
+coherence-tokens = { path = "vendor/coherence-tokens" }

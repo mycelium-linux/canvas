@@ -1,0 +1,9 @@
+{
+  "source": "/Users/ajmwagar/src/fpl/coherence/crates/coherence-tokens",
+  "captured": "2026-09-06",
+  "files": {
+    "Cargo.toml": "630bb9df86faec2366c3eaff18da11af641e84b8e7db2ec0ec786dbb7ceec087",
+    "src/lib.rs": "b775229e5c3e3ada24d20be68294d940101d55cfc096057557e86b098839e10f",
+    "src/generated.rs": "69e1eedad6b7cd2c3f0180faaaf36111514ec7ee981be3e29ecdfe731e87195e"
+  }
+}

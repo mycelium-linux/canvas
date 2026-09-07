@@ -1,0 +1,33 @@
+# Independent project desktop. No GNOME config or physical input devices imported.
+include ~/.config/dock/sway/themes/dock.conf
+output HEADLESS-1 mode 1600x1000 pos 0 0
+output HEADLESS-1 scale 1
+# The headless backend starts with one output. Create exactly one more on the
+# compositor's initial config load; plain `exec` is not repeated by reload.
+exec /usr/bin/swaymsg create_output
+output HEADLESS-2 mode 1600x1000 pos 1600 0
+output HEADLESS-2 scale 1
+seat seat0 fallback true
+font pango:monospace 10
+default_border pixel 2
+default_floating_border pixel 2
+focus_follows_mouse no
+workspace_layout tabbed
+workspace dock
+set $mod Mod1
+set $dock $HOME/.local/bin/dock-linux
+bindsym $mod+1 exec $dock desktop-recall dock
+bindsym $mod+2 exec $dock desktop-recall studio
+bindsym $mod+Return exec $dock desktop-terminal
+bindsym $mod+h focus left
+bindsym $mod+j focus down
+bindsym $mod+k focus up
+bindsym $mod+l focus right
+bindsym $mod+Shift+h move left
+bindsym $mod+Shift+j move down
+bindsym $mod+Shift+k move up
+bindsym $mod+Shift+l move right
+bindsym $mod+f fullscreen toggle
+bindsym $mod+q kill
+bindsym $mod+Shift+1 move container to workspace dock
+bindsym $mod+Shift+2 move container to workspace studio

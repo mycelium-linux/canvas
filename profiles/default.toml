@@ -1,0 +1,17 @@
+id = "default"
+name = "Default"
+workspace = "1:default"
+session = "default"
+colorway = "dark"
+
+[[apps]]
+platform = "macos"
+argv = ["open", "-a", "kitty"]
+cwd = "~"
+placement = "tiled"
+
+[[apps]]
+platform = "linux"
+argv = ["foot"]
+cwd = "~"
+placement = "tiled"

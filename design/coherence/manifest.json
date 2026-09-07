@@ -1,0 +1,13 @@
+{
+  "source": "Local snapshot of /Users/ajmwagar/src/fpl/coherence/dist, captured 2026-09-06; hashes identify the exact upstream artifacts.",
+  "colorways": {
+    "dark": {
+      "file": "coherence-dark.tokens.json",
+      "sha256": "c3c06f4ffea71372845754af979f14e35307f8510f0d97f13c2d2221a6590738"
+    },
+    "light": {
+      "file": "coherence-light.tokens.json",
+      "sha256": "e01aedfbba069cbbf8dec44dd8be50f8633f7108a9b595bd034dd3392990327c"
+    }
+  }
+}

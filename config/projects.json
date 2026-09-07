@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "projects": [
+    {
+      "id": "dock",
+      "name": "Dock",
+      "theme": { "mode": "dark", "accent": "info" },
+      "resources": [
+        { "id": "mac-terminal", "title": "Local terminal", "host": "mac", "kind": "mac_app", "target": "kitty" },
+        { "id": "agora-desktop", "title": "Agora One desktop", "host": "agora_one", "kind": "remote_desktop", "target": "100.80.85.86" }
+      ]
+    },
+    {
+      "id": "studio",
+      "name": "Studio",
+      "theme": { "mode": "light", "accent": "brand" },
+      "resources": [
+        { "id": "mac-browser", "title": "Local browser", "host": "mac", "kind": "mac_app", "target": "Safari" },
+        { "id": "agora-desktop", "title": "Agora One desktop", "host": "agora_one", "kind": "remote_desktop", "target": "100.80.85.86" }
+      ]
+    }
+  ]
+}

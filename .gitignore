@@ -4,3 +4,11 @@
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# Local Python environment and generated Dock artifacts
+.venv/
+build/
+__pycache__/
+*.egg-info/
+target/
+.dock/

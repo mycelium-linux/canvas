@@ -1,0 +1,18 @@
+id = "pedalkernel"
+name = "PedalKernel"
+workspace = "2:pedalkernel"
+session = "pedalkernel"
+colorway = "light"
+
+# Set this directory to the actual checkout on each host before launch support is enabled.
+[[apps]]
+platform = "macos"
+argv = ["open", "-a", "kitty"]
+cwd = "~/src/fpl/pedalkernel"
+placement = "tiled"
+
+[[apps]]
+platform = "linux"
+argv = ["foot"]
+cwd = "~/src/fpl/pedalkernel"
+placement = "tiled"
