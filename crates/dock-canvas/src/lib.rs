@@ -19,6 +19,7 @@ pub mod map;
 #[cfg(all(feature = "mcp", unix))]
 pub mod mcp;
 pub mod media;
+pub mod reconcile;
 
 pub const SCHEMA_VERSION: u32 = 1;
 const MAX_ITEMS: usize = 1_024;
