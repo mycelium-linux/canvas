@@ -8,6 +8,7 @@ use std::{
 };
 
 pub use coherence_tokens;
+pub mod desktop;
 pub mod desktop_theme;
 pub mod layout;
 

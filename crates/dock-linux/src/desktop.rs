@@ -3,6 +3,7 @@ use crate::{command, control, unit};
 #[path = "desktop_pointer.rs"]
 mod pointer;
 use base64::Engine;
+use dock_core::desktop::{Wallpaper, WallpaperBackend, WallpaperReceipt, WallpaperRequest};
 use serde_json::{json, Value};
 use std::{
     env, fs,
@@ -194,14 +195,22 @@ pub fn recall(project: &str) -> Result<Value, String> {
     let theme_root = home()?.join(".config/dock/sway/themes");
     let (theme, theme_source) = theme_path(&theme_root, project)?;
     let source = fs::read_to_string(&theme).map_err(|e| e.to_string())?;
-    let commands = recall_commands(project, &source)?;
+    let plan = recall_commands(project, &source)?;
 
-    sway("command", Some(&commands.join("; ")))?;
+    sway("command", Some(&plan.commands.join("; ")))?;
     let active_workspace = active(project)?;
+    let output = active_workspace["output"]
+        .as_str()
+        .ok_or("project output missing")?;
+    let wallpaper = SwayDesktop.set_wallpaper(&WallpaperRequest {
+        project: project.into(),
+        display_id: output.into(),
+        wallpaper: plan.wallpaper,
+    })?;
     let tree = sway("get_tree", None)?;
     verify_workspace_layout(&tree, project, "tabbed")?;
     Ok(
-        json!({"project":project,"active_workspace":active_workspace,"theme_applied":true,"theme_source":theme_source,"layout":"tabbed","compositor":"sway","transport":"wayvnc via SSH"}),
+        json!({"project":project,"active_workspace":active_workspace,"theme_applied":true,"theme_source":theme_source,"wallpaper":wallpaper,"layout":"tabbed","compositor":"sway","transport":"wayvnc via SSH"}),
     )
 }
 
@@ -218,11 +227,17 @@ fn theme_path(root: &Path, project: &str) -> Result<(PathBuf, &'static str), Str
     }
 }
 
-fn recall_commands(project: &str, source: &str) -> Result<Vec<String>, String> {
+struct RecallPlan {
+    commands: Vec<String>,
+    wallpaper: Wallpaper,
+}
+
+fn recall_commands(project: &str, source: &str) -> Result<RecallPlan, String> {
     let mut commands = vec![
         format!("workspace {}", sway_quote(project)),
         "layout tabbed".into(),
     ];
+    let mut wallpaper = None;
     for line in source
         .lines()
         .map(str::trim)
@@ -241,7 +256,12 @@ fn recall_commands(project: &str, source: &str) -> Result<Vec<String>, String> {
         {
             return Err("unsupported command in generated Sway theme".into());
         }
-        if let Some(value) = line.strip_prefix("gaps inner ") {
+        if line.starts_with("output ") {
+            if wallpaper.is_some() {
+                return Err("generated Sway theme contains multiple wallpapers".into());
+            }
+            wallpaper = Some(parse_solid_wallpaper(line)?);
+        } else if let Some(value) = line.strip_prefix("gaps inner ") {
             commands.push(format!("gaps inner current set {value}"));
         } else if let Some(value) = line.strip_prefix("gaps outer ") {
             commands.push(format!("gaps outer current set {value}"));
@@ -249,7 +269,75 @@ fn recall_commands(project: &str, source: &str) -> Result<Vec<String>, String> {
             commands.push(line.to_owned());
         }
     }
-    Ok(commands)
+    Ok(RecallPlan {
+        commands,
+        wallpaper: wallpaper.ok_or("generated Sway theme is missing its wallpaper")?,
+    })
+}
+
+fn parse_solid_wallpaper(line: &str) -> Result<Wallpaper, String> {
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    if fields.len() != 5
+        || fields[0] != "output"
+        || fields[1] != "*"
+        || fields[2] != "bg"
+        || fields[4] != "solid_color"
+        || fields[3].len() != 7
+        || !fields[3].starts_with('#')
+    {
+        return Err("generated Sway wallpaper must be one solid RGB color".into());
+    }
+    let color = &fields[3][1..];
+    let channel = |start| {
+        u8::from_str_radix(&color[start..start + 2], 16)
+            .map_err(|_| "generated Sway wallpaper contains invalid RGB")
+    };
+    Ok(Wallpaper::Solid {
+        rgb: [channel(0)?, channel(2)?, channel(4)?],
+    })
+}
+
+struct SwayDesktop;
+
+impl WallpaperBackend for SwayDesktop {
+    type Error = String;
+
+    fn set_wallpaper(
+        &mut self,
+        request: &WallpaperRequest,
+    ) -> Result<WallpaperReceipt, Self::Error> {
+        unit(&request.project)?;
+        let outputs = sway("get_outputs", None)?;
+        if !outputs.as_array().is_some_and(|outputs| {
+            outputs.iter().any(|output| {
+                output["name"] == request.display_id && output["active"].as_bool() == Some(true)
+            })
+        }) {
+            return Err("wallpaper display is missing or inactive".into());
+        }
+        let rgb = match &request.wallpaper {
+            Wallpaper::Solid { rgb } => *rgb,
+            Wallpaper::ManagedImage { .. } => {
+                return Err(
+                    "managed wallpaper images are not installed on this Sway backend".into(),
+                );
+            }
+        };
+        let color = format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2]);
+        sway(
+            "command",
+            Some(&format!(
+                "output {} bg {} solid_color",
+                sway_quote(&request.display_id),
+                sway_quote(&color)
+            )),
+        )?;
+        Ok(WallpaperReceipt {
+            project: request.project.clone(),
+            display_id: request.display_id.clone(),
+            wallpaper: request.wallpaper.clone(),
+        })
+    }
 }
 fn nodes<'a>(value: &'a Value, out: &mut Vec<&'a Value>) {
     if value["app_id"].is_string() || value["window"].is_number() {
@@ -711,15 +799,20 @@ mod tests {
     }
     #[test]
     fn recall_uses_a_full_width_tabbed_workspace_before_applying_theme() {
-        let commands = recall_commands(
+        let plan = recall_commands(
             "studio",
-            "# generated\nclient.focused #fff #000 #000 #fff #fff\ngaps inner 8\n",
+            "# generated\nclient.focused #fff #000 #000 #fff #fff\noutput * bg #18191c solid_color\ngaps inner 8\n",
         )
         .unwrap();
-        assert_eq!(commands[0], "workspace \"studio\"");
-        assert_eq!(commands[1], "layout tabbed");
-        assert_eq!(commands[2], "client.focused #fff #000 #000 #fff #fff");
-        assert_eq!(commands[3], "gaps inner current set 8");
+        assert_eq!(plan.commands[0], "workspace \"studio\"");
+        assert_eq!(plan.commands[1], "layout tabbed");
+        assert_eq!(plan.commands[2], "client.focused #fff #000 #000 #fff #fff");
+        assert_eq!(plan.commands[3], "gaps inner current set 8");
+        assert_eq!(plan.wallpaper, Wallpaper::Solid { rgb: [24, 25, 28] });
+        assert!(!plan
+            .commands
+            .iter()
+            .any(|command| command.contains("output *")));
         assert!(recall_commands("studio", "exec rm -rf /;").is_err());
     }
     #[test]

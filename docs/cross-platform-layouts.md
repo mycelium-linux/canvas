@@ -12,9 +12,24 @@ Accessibility. Secondary windows overlap in the stack region and remain
 selectable through Dock recall. Windows outside the project binding are never
 moved.
 
+The operating-system boundary is split into three narrow traits:
+
+- `WindowBackend` inventories, focuses, and applies verified layout frames.
+- `WorkspaceBackend` recalls a native or compositor workspace when supported.
+- `WallpaperBackend` applies an opaque wallpaper description to one display.
+
+The orchestration layer never sends shell commands, registry keys, AppleScript,
+or compositor syntax through these interfaces. It sends typed project, display,
+surface, geometry, and color values and requires an application receipt.
+
 Sway compiles the same primary/stack regions into compositor containers, where
 the secondary region can be genuinely tabbed. Alfalfa remains the source of
 project and resource identity; it does not own window geometry.
+
+macOS and Windows adapters run as independently installed helpers so their OS
+permissions and identity survive ordinary Dock GUI rebuilds. Sway implements
+the contracts directly inside `dock-linux`. A future Smithay or other desktop
+backend implements the same traits without changing project orchestration.
 
 Dock intentionally does not use private macOS Spaces APIs. Project recall and
 tiling operate on visible desktop windows through public AppKit and

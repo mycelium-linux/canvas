@@ -20,6 +20,9 @@ attaches a visible terminal to the same session. Backend control gates serialize
 agent inputs and revoke them before aborting a session on human takeover.
 Mac AX operations belong in the independently installed Dock Control helper;
 normal GUI rebuilds must not overwrite that permission-bearing app.
+Window, workspace, and wallpaper behavior implement the narrow traits in
+`dock-core`; macOS and Windows use independently installed permission-bearing
+helpers, Sway implements them directly, and future compositors remain adapters.
 Old Sway/dotfiles are inspiration, not a restoration target.
 Preserve the separation of presentation, orchestration,
 transport, compute, and agency in `docs/computing-mesh-design.md`.

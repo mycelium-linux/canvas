@@ -192,8 +192,9 @@ Primary port 5901 still presents only the first output, preserving its aspect
 ratio. A separate authenticated `--desktop` probe produced a real 3200×1000
 frame containing both outputs. This is one composite framebuffer, not two
 independent Mac windows or automatic matching to physical Mac monitors.
-Workspace recall currently applies compositor-wide border/background settings;
-simultaneous per-output project palettes are not implemented.
+Workspace recall applies the project's generated solid wallpaper only to the
+workspace's exact output. Border colors remain compositor-wide until Sway's
+window criteria are generated from the shared project layout roles.
 Captures now identify and capture the active project's actual output; Rust
 pointer transactions bind that named output so coordinates stay local to it.
 Named-output selection and bounds have regression tests; actual capture output

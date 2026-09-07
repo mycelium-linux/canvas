@@ -4,6 +4,110 @@ use std::process::Command;
 
 pub use dock_core::layout::Rect;
 
+pub struct MacDesktop;
+
+fn core_rect(rect: dock_control::Rect) -> Rect {
+    Rect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+    }
+}
+
+fn surface(window: dock_control::Window) -> dock_core::desktop::WindowSurface {
+    dock_core::desktop::WindowSurface {
+        id: window.id,
+        process_id: Some(window.pid),
+        app: window.app,
+        title: window.title,
+        frame: core_rect(window.frame),
+        movable: window.movable,
+        resizable: window.resizable,
+    }
+}
+
+impl dock_core::desktop::WindowBackend for MacDesktop {
+    type Error = String;
+
+    fn snapshot(&mut self) -> Result<dock_core::desktop::DesktopSnapshot, Self::Error> {
+        match dock_control::request(dock_control::Operation::Snapshot)? {
+            dock_control::Response::Snapshot { displays, windows } => {
+                Ok(dock_core::desktop::DesktopSnapshot {
+                    displays: displays
+                        .into_iter()
+                        .map(|display| dock_core::desktop::Display {
+                            id: display.id,
+                            name: display.name,
+                            frame: core_rect(display.frame),
+                            work_area: core_rect(display.visible_frame),
+                            primary: display.primary,
+                        })
+                        .collect(),
+                    windows: windows.into_iter().map(surface).collect(),
+                })
+            }
+            _ => Err("Dock Control did not return a desktop snapshot".into()),
+        }
+    }
+
+    fn apply_layout(
+        &mut self,
+        plan: &dock_core::layout::LayoutPlan,
+    ) -> Result<dock_core::desktop::LayoutReceipt, Self::Error> {
+        use dock_core::layout::Region;
+        if plan.placements.is_empty() || plan.placements.len() > 16 {
+            return Err("Layout requires 1–16 placements".into());
+        }
+        let primary = plan
+            .placements
+            .iter()
+            .filter(|placement| placement.region == Region::Primary)
+            .collect::<Vec<_>>();
+        if primary.len() != 1 {
+            return Err("Layout must identify exactly one primary surface".into());
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        if plan
+            .placements
+            .iter()
+            .any(|placement| !ids.insert(placement.id.as_str()))
+        {
+            return Err("Layout contains duplicate surface IDs".into());
+        }
+        for placement in &plan.placements {
+            validate_rect(placement.frame)?;
+            let frame = dock_control::Rect {
+                x: placement.frame.x,
+                y: placement.frame.y,
+                width: placement.frame.width,
+                height: placement.frame.height,
+            };
+            match dock_control::request(dock_control::Operation::SetFrame {
+                id: placement.id.clone(),
+                frame,
+            })? {
+                dock_control::Response::Applied { window } if window.frame == frame => {}
+                _ => return Err("Application constrained requested window geometry".into()),
+            }
+        }
+        let focused = self.focus(&primary[0].id)?;
+        Ok(dock_core::desktop::LayoutReceipt {
+            placements: plan.placements.clone(),
+            focused: focused.id,
+        })
+    }
+
+    fn focus(&mut self, window_id: &str) -> Result<dock_core::desktop::WindowSurface, Self::Error> {
+        match dock_control::request(dock_control::Operation::Focus {
+            id: window_id.into(),
+        })? {
+            dock_control::Response::Applied { window } => Ok(surface(window)),
+            _ => Err("Dock Control did not acknowledge window focus".into()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Window {
     #[serde(default)]
@@ -65,19 +169,22 @@ pub fn project_tiles(area: Rect, windows: &[Window]) -> Result<Vec<Rect>, String
 }
 
 pub fn windows() -> Result<Vec<Window>, String> {
-    use dock_control::{Operation, Response};
-    match dock_control::request(Operation::Snapshot)? {
-        Response::Snapshot { windows, .. } => Ok(windows
-            .into_iter()
-            .map(|w| Window {
-                id: w.id,
-                pid: w.pid,
-                app: w.app,
-                title: w.title,
+    use dock_core::desktop::WindowBackend;
+    let snapshot = MacDesktop.snapshot()?;
+    snapshot
+        .windows
+        .into_iter()
+        .map(|window| {
+            Ok(Window {
+                id: window.id,
+                pid: window
+                    .process_id
+                    .ok_or("Dock Control window lacks a process identity")?,
+                app: window.app,
+                title: window.title,
             })
-            .collect()),
-        _ => Err("Unexpected Dock Control response".into()),
-    }
+        })
+        .collect()
 }
 fn native_id(window: &Window) -> Result<String, String> {
     if !window.id.is_empty() {
