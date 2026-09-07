@@ -10,6 +10,7 @@ lua-scenes = ["dep:mlua"]
 mcp = ["dep:rmcp", "dep:schemars", "dep:tokio"]
 
 [dependencies]
+base64 = "0.22"
 dock-control = { path = "../dock-control" }
 dock-core.workspace = true
 iced = { version = "0.14", default-features = false, features = ["wgpu", "tokio", "canvas", "image-without-codecs", "x11", "wayland", "markdown", "highlighter"] }
@@ -21,6 +22,7 @@ serde_json.workspace = true
 sha2 = "0.10"
 schemars = { version = "1", optional = true }
 sysinfo = "0.36"
+wgpu = "27"
 rmcp = { version = "3.2", default-features = false, features = ["server", "transport-io"], optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "sync"], optional = true }
 

@@ -700,6 +700,7 @@ dependencies = [
 name = "dock-canvas"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "dock-control",
  "dock-core",
  "iced",
@@ -715,6 +716,7 @@ dependencies = [
  "sha2",
  "sysinfo",
  "tokio",
+ "wgpu",
 ]
 
 [[package]]
