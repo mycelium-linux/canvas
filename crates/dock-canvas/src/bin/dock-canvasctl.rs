@@ -74,6 +74,9 @@ fn handle_line(line: &str) -> Result<(), String> {
     if tokens[0] == "minimize" || tokens[0] == "maximize" || tokens[0] == "restore" {
         return handle_window_control(&tokens);
     }
+    if tokens[0] == "open_terminal" {
+        return handle_open_terminal(&tokens);
+    }
 
     let mut request = match text::parse_line(line) {
         Ok(req) => req,
@@ -275,6 +278,19 @@ struct DocumentState {
     surfaces: Vec<String>,
     focused: Option<String>,
     workspace_id: String,
+}
+
+fn handle_open_terminal(tokens: &[String]) -> Result<(), String> {
+    if tokens.len() < 2 {
+        return Err("usage: open_terminal <surface_id> [shell]".into());
+    }
+    let surface_id = &tokens[1];
+    let shell = tokens.get(2).map(|s| s.as_str()).unwrap_or("sh");
+    let tty_path = format!("tty://{shell}");
+    let request = text::parse_line(&format!("open {surface_id} {tty_path}"))?;
+    let reply = send_with_retry(&request)?;
+    println!("{}", text::format_reply(&reply));
+    Ok(())
 }
 
 fn read_document_state() -> Result<DocumentState, String> {
