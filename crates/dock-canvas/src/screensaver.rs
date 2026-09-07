@@ -112,7 +112,7 @@ fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         z = z + 0.07;
         l = length(p);
         uv = uv + p / l * (sin(z) + 1.0) * abs(sin(l * 9.0 - z - z));
-        c[i] = 0.01 / length(mod(uv, vec2<f32>(1.0)) - vec2<f32>(0.5));
+        c[i] = 0.01 / length((uv - floor(uv)) - vec2<f32>(0.5));
     }
     return vec4<f32>(c / l, u.time);
 }
@@ -158,8 +158,8 @@ fn bg(uv: vec2<f32>, t: f32) -> vec3<f32> {
     uvv = uvv * 0.6;
     let rb = fbm(vec2<f32>(uvv.x * 0.5 - velocity * 0.03, uvv.y)) * 0.1;
     uvv = uvv + vec2<f32>(rb, 0.0);
-    let rz = fbm(uvv * 0.9 + vec2<f32>(velocity * 0.35, 0.0));
-    let rz = rz * (dot(bp * intensity, bp) + 1.2);
+    let rz_noise = fbm(uvv * 0.9 + vec2<f32>(velocity * 0.35, 0.0));
+    let rz = rz_noise * (dot(bp * intensity, bp) + 1.2);
     let bgColor = vec3<f32>(0.01, 0.16, 0.42);
     let col = bgColor / (0.1 - rz);
     return sqrt(abs(col));
@@ -226,7 +226,10 @@ fn noise(p: vec2<f32>) -> f32 {
     let o = vec2<f32>(m, 1.0 - m);
     let b = a - o + K2;
     let c = a - 1.0 + 2.0 * K2;
-    let h = max(vec3<f32>(0.5 - vec3<f32>(dot(a, a), dot(b, b), dot(c, c)), vec3<f32>(0.0));
+    let h = max(
+        vec3<f32>(0.5) - vec3<f32>(dot(a, a), dot(b, b), dot(c, c)),
+        vec3<f32>(0.0),
+    );
     let n = h * h * h * h * vec3<f32>(dot(a, hash(i)), dot(b, hash(i + o)), dot(c, hash(i + vec2<f32>(1.0, 1.0))));
     return dot(n, vec3<f32>(70.0));
 }
@@ -236,17 +239,18 @@ fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let uv = (pos.xy - 0.5 * u.res) / u.res.y;
     var col: vec3<f32> = vec3<f32>(0.0);
     let tt = 0.05 * u.time;
-    let pxAng = atan(uv.y, uv.x);
+    let pxAng = atan2(uv.y, uv.x);
     let pxRad = length(uv);
     let ringRad = 0.35;
     let smokeFactor = 1.7;
-    let dA = abs(mod(pxAng - (6.2831853 * tt) + 3.14159265, 6.2831853) - 3.14159265);
+    let phase = pxAng - (6.2831853 * tt) + 3.14159265;
+    let dA = abs((phase - 6.2831853 * floor(phase / 6.2831853)) - 3.14159265);
     let totalRingEnv = 1.0 - smoothstep(0.0, smokeFactor, dA);
     let num_rings = 14.0;
     for (var ii: i32 = 0; ii < 14; ii = ii + 1) {
         let i = f32(ii);
         let ringSpread = 0.01 + 0.06 * (i / 10.0);
-        let freq = 2.0 + mod(i, 5.0);
+        let freq = 2.0 + (i - 5.0 * floor(i / 5.0));
         let mainWave = ringSpread * sin((6.2831853 * tt + pxAng) * freq + i * 1.7);
         let secWave = sin(pxRad * 70.0 + (6.2831853 * tt + pxAng) * 2.0 + i);
         let cFlow = vec2<f32>(cos(6.2831853 * tt + pxAng), sin(6.2831853 * tt + pxAng));
@@ -560,6 +564,15 @@ mod tests {
             assert!(!shader.license.is_empty());
             assert!(attribution(index).contains(shader.credit));
             assert!(attribution(index).contains(shader.license));
+        }
+    }
+
+    #[test]
+    fn every_registered_shader_parses_as_wgsl() {
+        for shader in SHADERS {
+            let source = format!("{UNIFORM_WGSL}\n{}", shader.wgsl);
+            wgpu::naga::front::wgsl::parse_str(&source)
+                .unwrap_or_else(|error| panic!("shader {} failed to parse: {error}", shader.name));
         }
     }
 
