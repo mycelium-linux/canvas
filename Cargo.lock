@@ -525,6 +525,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dock-canvas"
+version = "0.1.0"
+dependencies = [
+ "dock-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "dock-control"
 version = "0.1.0"
 dependencies = [
