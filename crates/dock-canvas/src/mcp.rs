@@ -102,6 +102,24 @@ struct ReconcileIntent {
     dry_run: bool,
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ScreenshotParams {
+    request_id: String,
+    #[serde(default)]
+    expected_revision: Option<u64>,
+    #[serde(default)]
+    surface_id: Option<String>,
+    #[serde(default)]
+    x: Option<i64>,
+    #[serde(default)]
+    y: Option<i64>,
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
+}
+
 #[derive(Serialize)]
 struct IntentResult {
     reconciliation: Reconciliation,
@@ -155,6 +173,10 @@ fn tools() -> Vec<Tool> {
         tool::<ReconcileIntent>(
             "canvas_reconcile_intent",
             "Reach a resolved desired workspace state deterministically. Canvas inspects current state, computes the smallest validated change, and applies it through the revisioned owner-local socket. Set dry_run to explain without applying. Project and resource IDs must already be exact and authorized.",
+        ),
+        tool::<ScreenshotParams>(
+            "canvas_screenshot",
+            "Capture a PNG screenshot of a Canvas surface or screen region. Provide surface_id to capture a specific surface, or x/y/width/height for an absolute screen region. Returns base64-encoded PNG data. Essential for LLM vision workflows: focus a region, screenshot it, inspect details, then zoom further.",
         ),
     ]
 }
@@ -395,6 +417,84 @@ impl Canvas {
             Err(error) => Ok(CallToolResult::error(vec![ContentBlock::text(error)]).into()),
         }
     }
+
+    async fn screenshot(&self, args: Value) -> Result<CallToolResponse, ErrorData> {
+        let params: ScreenshotParams = serde_json::from_value(args)
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let request = ControlRequest {
+            schema_version: control::CONTROL_VERSION,
+            request_id: format!("screenshot-inspect-{}", params.request_id),
+            expected_revision: params.expected_revision,
+            command: Command::Inspect,
+        };
+        let send = self.send.clone();
+        let result = tokio::task::spawn_blocking(move || send(&request))
+            .await
+            .map_err(|_| ErrorData::internal_error("Canvas control worker failed", None))?;
+        let inspect_reply = result.map_err(|e| ErrorData::internal_error(e, None))?;
+
+        let snapshot = match &inspect_reply.outcome {
+            Outcome::Ok {
+                receipt: Receipt::Snapshot { snapshot },
+            } => snapshot,
+            _ => {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
+                    "Failed to inspect Canvas for screenshot",
+                )])
+                .into());
+            }
+        };
+
+        let (screen_x, screen_y, screen_w, screen_h) = if params.surface_id.is_some() {
+            (
+                snapshot.frame.x as i64,
+                snapshot.frame.y as i64,
+                snapshot.frame.width,
+                snapshot.frame.height,
+            )
+        } else {
+            (
+                params.x.unwrap_or(snapshot.frame.x as i64),
+                params.y.unwrap_or(snapshot.frame.y as i64),
+                params.width.unwrap_or(snapshot.frame.width),
+                params.height.unwrap_or(snapshot.frame.height),
+            )
+        };
+
+        let temp_path =
+            std::env::temp_dir().join(format!("canvas_screenshot_{}.png", std::process::id()));
+
+        #[cfg(target_os = "macos")]
+        let _ = std::process::Command::new("screencapture")
+            .args([
+                "-R",
+                &format!("{screen_x},{screen_y},{screen_w},{screen_h}"),
+                "-t",
+                "png",
+                &temp_path.to_string_lossy(),
+            ])
+            .output();
+
+        #[cfg(not(target_os = "macos"))]
+        let _ = std::process::Command::new("grim")
+            .args([
+                &format!("{screen_x},{screen_y} {screen_w}x{screen_h}"),
+                &temp_path.to_string_lossy(),
+            ])
+            .output();
+
+        let png_bytes = std::fs::read(&temp_path)
+            .map_err(|e| ErrorData::internal_error(format!("Screenshot failed: {e}"), None))?;
+        let _ = std::fs::remove_file(&temp_path);
+
+        let encoded = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(&png_bytes)
+        };
+
+        Ok(CallToolResult::success(vec![ContentBlock::image(encoded, "image/png")]).into())
+    }
 }
 
 impl ServerHandler for Canvas {
@@ -426,6 +526,9 @@ impl ServerHandler for Canvas {
         let arguments = Value::Object(request.arguments.unwrap_or_default());
         if request.name == "canvas_reconcile_intent" {
             return self.reconcile_intent(arguments).await;
+        }
+        if request.name == "canvas_screenshot" {
+            return self.screenshot(arguments).await;
         }
         let request = match parse(&request.name, arguments) {
             Ok(request) => request,
@@ -509,7 +612,7 @@ mod tests {
     #[test]
     fn schemas_include_native_document_and_patch_definitions() {
         let tools = tools();
-        assert_eq!(tools.len(), 9);
+        assert_eq!(tools.len(), 10);
         assert!(
             tools[1].input_schema["$defs"]
                 .get("WorkspaceDocument")
@@ -700,7 +803,7 @@ mod tests {
                 .unwrap()
         });
         let client = ().serve(client_io).await.unwrap();
-        assert_eq!(client.list_all_tools().await.unwrap().len(), 9);
+        assert_eq!(client.list_all_tools().await.unwrap().len(), 10);
         let result = client
             .call_tool(CallToolRequestParams::new("canvas_inspect"))
             .await
