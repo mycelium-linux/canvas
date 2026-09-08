@@ -298,9 +298,13 @@ impl App {
         let workspaces = workspace_store::load(&workspace_store_path, &catalog)
             .map_err(|error| error.to_string())?;
         let project_id = catalog.projects[0].id.clone();
+        let restored_document = workspaces.get(&project_id).cloned();
+        let active_project_workspace = restored_document
+            .as_ref()
+            .map(|document| document.project_id.clone());
         let mut app = Self {
             catalog,
-            document: WorkspaceDocument {
+            document: restored_document.unwrap_or_else(|| WorkspaceDocument {
                 schema_version: SCHEMA_VERSION,
                 id: "canvas-runtime".into(),
                 project_id,
@@ -312,7 +316,7 @@ impl App {
                 layout: Layout::Empty,
                 bindings: Vec::new(),
                 focused_surface_id: None,
-            },
+            }),
             runtime_revision: 1,
             frame,
             display_frames: platform::display_frames().unwrap_or_default(),
@@ -353,7 +357,7 @@ impl App {
             transition: None,
             workspaces,
             workspace_store_path,
-            active_project_workspace: None,
+            active_project_workspace,
             events: Vec::new(),
             background_assets: BTreeMap::new(),
             presence_orb_visible: true,
@@ -368,6 +372,7 @@ impl App {
             screensaver_elapsed: Duration::ZERO,
             screensaver_fps: 0.0,
         };
+        app.ensure_scene_decoded();
         app.reset_background_animation();
         Ok(app)
     }
@@ -5494,5 +5499,53 @@ mod tests {
         if let Some(parent) = app.workspace_store_path.parent() {
             let _ = std::fs::remove_dir_all(parent);
         }
+    }
+
+    #[test]
+    fn startup_restores_the_initial_projects_saved_desktop() {
+        let root = std::env::temp_dir().join(format!(
+            "dock-canvas-startup-workspace-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join("workspaces.json");
+        let catalog = Catalog::bundled().unwrap();
+        let project_id = catalog.projects[0].id.clone();
+        let mut document = WorkspaceDocument {
+            schema_version: SCHEMA_VERSION,
+            id: "saved-project-desktop".into(),
+            project_id: project_id.clone(),
+            revision: 7,
+            theme: ThemeRef::Project,
+            background: Background::default(),
+            chrome: SurfaceChrome::default(),
+            surfaces: Vec::new(),
+            layout: Layout::Empty,
+            bindings: Vec::new(),
+            focused_surface_id: None,
+        };
+        document.chrome.canvas_padding = 18;
+        let mut store = workspace_store::WorkspaceStore::default();
+        store.upsert(document);
+        workspace_store::save(&path, &store, &catalog).unwrap();
+
+        let (_sender, receiver) = mpsc::sync_channel(1);
+        let app = App::new(
+            Arc::new(Mutex::new(receiver)),
+            SocketGuard {
+                path: root.join("missing-test-socket"),
+            },
+            INITIAL_FRAME,
+            path,
+        )
+        .unwrap();
+
+        assert_eq!(app.document.id, "saved-project-desktop");
+        assert_eq!(app.document.chrome.canvas_padding, 18);
+        assert_eq!(
+            app.active_project_workspace.as_deref(),
+            Some(project_id.as_str())
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }
