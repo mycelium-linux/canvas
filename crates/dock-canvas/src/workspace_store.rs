@@ -130,33 +130,49 @@ impl WorkspaceStore {
         projects: Vec<ProjectWorkspaceSpec>,
         base: &Catalog,
     ) -> Result<SyncReport, Error> {
+        if projects.is_empty() || projects.len() > MAX_PROJECT_WORKSPACES {
+            return Err(Error(format!(
+                "Canvas workspace sync must contain 1-{MAX_PROJECT_WORKSPACES} projects"
+            )));
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for definition in &projects {
+            definition.validate().map_err(Error)?;
+            if !ids.insert(definition.project_id.as_str()) {
+                return Err(Error(
+                    "Canvas workspace sync contains duplicate project ids".into(),
+                ));
+            }
+        }
+        let mut next = self.clone();
         let mut created = 0;
         let mut updated = 0;
         let mut preserved = 0;
         for definition in projects {
-            definition.validate().map_err(Error)?;
-            if self.definitions.get(&definition.project_id) != Some(&definition) {
+            if next.definitions.get(&definition.project_id) != Some(&definition) {
                 updated += 1;
             }
-            self.definitions
+            next.definitions
                 .insert(definition.project_id.clone(), definition.clone());
-            if self.projects.contains_key(&definition.project_id) {
+            if next.projects.contains_key(&definition.project_id) {
                 preserved += 1;
             } else {
-                self.projects.insert(
+                next.projects.insert(
                     definition.project_id.clone(),
                     empty_workspace(&definition.project_id),
                 );
                 created += 1;
             }
         }
-        self.validate(base)?;
-        Ok(SyncReport {
+        next.validate(base)?;
+        let report = SyncReport {
             created,
             updated,
             preserved,
-            total: self.projects.len(),
-        })
+            total: next.projects.len(),
+        };
+        *self = next;
+        Ok(report)
     }
 
     pub fn upsert(&mut self, document: WorkspaceDocument) {
@@ -443,5 +459,15 @@ mod tests {
                 .is_ok()
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejected_sync_does_not_partially_mutate_the_store() {
+        let base = Catalog::bundled().unwrap();
+        let mut store = WorkspaceStore::default();
+        let before = store.clone();
+        let project = definition("gh-1288853134", "ohmOS");
+        assert!(store.sync(vec![project.clone(), project], &base).is_err());
+        assert_eq!(store, before);
     }
 }

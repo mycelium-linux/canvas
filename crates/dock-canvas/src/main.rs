@@ -3,8 +3,8 @@ use dock_canvas::chart::{ChartDocument, ChartKind};
 use dock_canvas::control::{
     CONTROL_VERSION, Command, ContentKind, ControlReply, ControlRequest, ErrorCode,
     MAX_ACTIVE_INDICATORS, MAX_CONTROL_MESSAGE, MeshSnapshot, Navigation, Outcome, PresencePreview,
-    PresenceSnapshot, ProjectWorkspaceSnapshot, ProjectWorkspaceSpec, Receipt, RuntimeSnapshot,
-    ScreensaverSettings, ScreensaverSnapshot, StatusIndicator, SurfaceSnapshot,
+    PresenceSnapshot, ProjectWorkspaceSnapshot, Receipt, RuntimeSnapshot, ScreensaverSettings,
+    ScreensaverSnapshot, StatusIndicator, SurfaceSnapshot,
 };
 use dock_canvas::hud;
 use dock_canvas::interaction::{
@@ -5630,7 +5630,7 @@ mod tests {
         app.document.background = Background::Solid {
             color: [8, 16, 24, 255],
         };
-        let projects = vec![ProjectWorkspaceSpec {
+        let projects = vec![dock_canvas::control::ProjectWorkspaceSpec {
             project_id: "gh-1288853134".into(),
             name: "ohmOS".into(),
             status: "paused".into(),
