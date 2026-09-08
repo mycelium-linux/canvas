@@ -2,7 +2,7 @@
 
 Canvas owns the document, validation and native presentation. MCP is an adapter
 over its existing owner-local control socket, not another renderer or command
-engine. The current adapter exposes thirteen tools:
+engine. The current adapter exposes fifteen tools:
 
 The longer-lived contract is the
 [shared visualization plane](canvas-shared-visualization.md): agent inspection
@@ -27,8 +27,15 @@ requests state transitions; it does not maintain a private visual context.
   computes the validated state change for an already-resolved workspace intent,
   and applies it with optimistic revision checks. A dry run returns the same
   reconciliation without changing Canvas.
+- `canvas_view_patch`: atomically changes the normalized viewport, visible
+  attention, source position, navigation state, and typed parameters of a
+  mounted image or PDF view. Use `canvas_navigate` first when changing the
+  rasterized PDF page.
 - `canvas_screenshot`: captures an exact Canvas surface or screen region for
-  agent vision.
+  agent vision and returns its resolved bounds and any mounted view metadata.
+- `canvas_view_capture`: captures an exact mounted shared-view revision. It
+  rejects hidden, unmounted, stale, or replaced views instead of returning an
+  image from a different visual state.
 
 MCP input schemas are generated from the Rust document and patch types at build
 time using Schemars. There is no separately maintained JSON dialect. Operations
@@ -101,4 +108,22 @@ same typed desired state; it must not bypass validation or authorization.
 Voice capture, training, durable command deduplication, tool enrollment, and live
 Mac visual qualification are not implemented by this MCP adapter.
 
-Tracking: `dock-2kf.9.10`, `dock-q26.10`.
+## Shared agent vision
+
+An agent opens an image or PDF with `canvas_open_file`, then reads the returned
+surface and shared-view state with `canvas_inspect`. It can use
+`canvas_navigate` to select a PDF page and `canvas_view_patch` to set a normalized
+viewport and attention region. Both changes are immediately visible on Canvas.
+The patch receipt returns the new view revision. Supplying that revision to
+`canvas_view_capture` returns two MCP content blocks: JSON metadata identifying
+the Canvas revision, absolute surface bounds, full shared view, source positions,
+page, and viewport; then the PNG the agent can inspect. A human and an agent
+therefore refer to the same bounded visual state rather than maintaining separate
+copies of a document view.
+
+The first capture backend reads the composited native Canvas surface using
+macOS `screencapture` or Wayland `grim`. Rendering the same view into an offscreen
+GPU target is the next backend step for display-independent and headless use;
+the shared-view and MCP contracts do not depend on either capture mechanism.
+
+Tracking: `dock-cov.2`, `dock-2kf.9.10`, `dock-q26.10`.

@@ -3,6 +3,7 @@
 use crate::{
     Background, ThemeRef, WorkspaceDocument, WorkspacePatch,
     display::{DisplayInfo, DisplayTarget},
+    view::{SharedViewDocument, SharedViewPatch},
 };
 use dock_core::{
     ThemeSelection,
@@ -10,6 +11,7 @@ use dock_core::{
     layout::Rect,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -52,6 +54,10 @@ pub enum Command {
     },
     ApplyPatch {
         patch: WorkspacePatch,
+    },
+    PatchView {
+        surface_id: String,
+        patch: SharedViewPatch,
     },
     OpenFile {
         surface_id: String,
@@ -535,6 +541,10 @@ pub enum Receipt {
     SurfaceOpened {
         surface: SurfaceSnapshot,
     },
+    ViewPatched {
+        surface_id: String,
+        view: Box<SharedViewDocument>,
+    },
     SurfaceClosed {
         surface_id: String,
     },
@@ -612,6 +622,10 @@ pub struct RuntimeSnapshot {
     pub frame: Rect,
     pub focused_surface_id: Option<String>,
     pub surfaces: Vec<SurfaceSnapshot>,
+    #[serde(default)]
+    pub surface_bounds: BTreeMap<String, Rect>,
+    #[serde(default)]
+    pub views: Vec<MountedViewSnapshot>,
     pub active_indicators: Vec<StatusIndicator>,
     #[serde(default)]
     pub mesh: Option<MeshSnapshot>,
@@ -641,6 +655,15 @@ pub struct RuntimeSnapshot {
     pub overlays: OverlaySettings,
     #[serde(default = "default_true")]
     pub visible: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MountedViewSnapshot {
+    pub surface_id: String,
+    /// Absolute desktop coordinates of the visibly rendered Canvas surface.
+    pub bounds: Rect,
+    pub view: SharedViewDocument,
 }
 
 fn default_true() -> bool {
@@ -772,7 +795,9 @@ impl ControlRequest {
                     return Err("file title must be printable and bounded".into());
                 }
             }
-            Command::CloseSurface { surface_id } | Command::Navigate { surface_id, .. } => {
+            Command::CloseSurface { surface_id }
+            | Command::Navigate { surface_id, .. }
+            | Command::PatchView { surface_id, .. } => {
                 if !identifier(surface_id) {
                     return Err("invalid Canvas surface id".into());
                 }
@@ -1320,6 +1345,9 @@ pub mod text {
                     }
                     Receipt::SurfaceOpened { surface } => {
                         format!("opened={}", surface.id)
+                    }
+                    Receipt::ViewPatched { surface_id, view } => {
+                        format!("view={} revision={}", surface_id, view.revision)
                     }
                     Receipt::SurfaceClosed { surface_id } => {
                         format!("closed={}", surface_id)
@@ -1889,6 +1917,36 @@ mod tests {
             serde_json::to_value(overlays).unwrap()["shortcut_help"],
             "center"
         );
+    }
+
+    #[test]
+    fn shared_view_patch_round_trips_over_the_control_socket() {
+        let request = ControlRequest {
+            schema_version: CONTROL_VERSION,
+            request_id: "view-focus-region".into(),
+            expected_revision: Some(8),
+            command: Command::PatchView {
+                surface_id: "drawing".into(),
+                patch: SharedViewPatch {
+                    schema_version: crate::SCHEMA_VERSION,
+                    view_id: "drawing".into(),
+                    base_revision: 3,
+                    revision: 4,
+                    operations: vec![crate::view::ViewOperation::SetViewport {
+                        viewport: crate::view::ViewRect {
+                            x: 0.25,
+                            y: 0.25,
+                            width: 0.5,
+                            height: 0.5,
+                        },
+                    }],
+                },
+            },
+        };
+        request.validate().unwrap();
+        let encoded = serde_json::to_vec(&request).unwrap();
+        let decoded: ControlRequest = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, request);
     }
 
     #[test]
