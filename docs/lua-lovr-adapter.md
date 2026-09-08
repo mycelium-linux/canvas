@@ -10,10 +10,10 @@ producer.
 
 The VM loads only table, string, math, and UTF-8 libraries. Luau sandboxing
 makes builtin globals read-only and removes filesystem, process, package, and
-native-module entry points. Dock also applies source-size, memory, VM-interrupt,
+native-module entry points. Canvas also applies source-size, memory, VM-interrupt,
 and node-count limits. Scripts receive no network, clock, random, native window,
-Dock control, durable storage, or workspace-patch callback. A generated scene
-therefore remains an untrusted proposal; Dock retains authorization, revision,
+Canvas control, durable storage, or workspace-patch callback. A generated scene
+therefore remains an untrusted proposal; Canvas retains authorization, revision,
 placement, persistence, and human-takeover policy.
 
 LÖVR should begin as a separate renderer adapter or process. It consumes a

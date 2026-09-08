@@ -1,0 +1,856 @@
+//! Project identity and control policy. No desktop, transport or inference ownership.
+
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt, fs,
+    path::Path,
+};
+
+pub use coherence_tokens;
+pub mod desktop;
+pub mod desktop_theme;
+pub mod global_hotkey;
+pub mod layout;
+pub mod theme_file;
+
+#[derive(Debug)]
+pub struct Error(pub String);
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl std::error::Error for Error {}
+pub type Result<T> = std::result::Result<T, Error>;
+fn check(ok: bool, message: impl Into<String>) -> Result<()> {
+    if ok {
+        Ok(())
+    } else {
+        Err(Error(message.into()))
+    }
+}
+fn identifier(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.as_bytes()[0].is_ascii_lowercase()
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+fn visible(s: &str) -> bool {
+    !s.trim().is_empty() && !s.chars().any(char::is_control)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Catalog {
+    pub schema_version: u32,
+    pub projects: Vec<Project>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    pub theme: ThemeSelection,
+    pub resources: Vec<Resource>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Resource {
+    pub id: String,
+    pub title: String,
+    pub host: Host,
+    pub kind: ResourceKind,
+    pub target: String,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Host {
+    Mac,
+    AgoraOne,
+    EdgeRunner,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceKind {
+    MacApp,
+    RemoteDesktop,
+    TerminalSession,
+    AgentSession,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeMode {
+    Light,
+    Dark,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Accent {
+    Brand,
+    Info,
+    Success,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectTheme {
+    pub mode: ThemeMode,
+    pub accent: Accent,
+}
+
+impl ThemeSelection {
+    pub fn to_project_theme(&self) -> Option<ProjectTheme> {
+        match self {
+            ThemeSelection::Coherence { mode, accent } => Some(ProjectTheme {
+                mode: *mode,
+                accent: *accent,
+            }),
+            ThemeSelection::Palette { .. } => None,
+        }
+    }
+}
+
+/// A project's theme source: a Coherence mode, or an imported palette in the
+/// canonical role set. This is the only theme boundary Canvas surfaces read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ThemeSelection {
+    /// Derived from upstream Coherence tokens for a mode and accent.
+    Coherence { mode: ThemeMode, accent: Accent },
+    /// An imported palette (Dock theme file or rice palette adapter output).
+    Palette { palette: ThemePalette },
+}
+/// Canonical role set for every Canvas surface. Roles serialize as `#rrggbb`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThemePalette {
+    #[serde(with = "theme_hex")]
+    pub background: [u8; 3],
+    #[serde(with = "theme_hex")]
+    pub background_strong: [u8; 3],
+    #[serde(with = "theme_hex")]
+    pub surface: [u8; 3],
+    #[serde(with = "theme_hex")]
+    pub surface_muted: [u8; 3],
+    #[serde(with = "theme_hex")]
+    pub text: [u8; 3],
+    #[serde(with = "theme_hex")]
+    pub text_muted: [u8; 3],
+    #[serde(with = "theme_hex")]
+    pub primary: [u8; 3],
+    #[serde(with = "theme_hex")]
+    pub success: [u8; 3],
+    #[serde(with = "theme_hex")]
+    pub warning: [u8; 3],
+    #[serde(with = "theme_hex")]
+    pub danger: [u8; 3],
+    #[serde(with = "theme_hex")]
+    pub info: [u8; 3],
+    #[serde(with = "theme_hex")]
+    pub border: [u8; 3],
+    #[serde(with = "theme_hex")]
+    pub border_strong: [u8; 3],
+}
+/// `#rrggbb` hex codec for canonical palette roles.
+pub mod theme_hex {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(rgb: &[u8; 3], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2]))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 3], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        parse_hex(&value).map_err(serde::de::Error::custom)
+    }
+
+    pub fn parse_hex(value: &str) -> Result<[u8; 3], String> {
+        let digits = value
+            .strip_prefix('#')
+            .ok_or_else(|| format!("{value} must be #rrggbb"))?;
+        if digits.len() != 6 {
+            return Err(format!("{value} is not #rrggbb"));
+        }
+        let byte = |start: usize| {
+            u8::from_str_radix(&digits[start..start + 2], 16)
+                .map_err(|_| format!("{value} is not #rrggbb"))
+        };
+        Ok([byte(0)?, byte(2)?, byte(4)?])
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThemeMetrics {
+    pub space_1: f32,
+    pub space_2: f32,
+    pub space_3: f32,
+    pub space_4: f32,
+    pub space_5: f32,
+    pub radius_xs: f32,
+    pub radius_sm: f32,
+    pub radius_md: f32,
+    pub radius_lg: f32,
+    /// Compatibility alias for the default component radius.
+    pub radius: f32,
+    pub body: f32,
+    pub small: f32,
+    pub large: f32,
+    pub title: f32,
+    pub display: f32,
+}
+
+/// A resolved, renderer-neutral Coherence theme. Consumers select semantic
+/// roles from this value instead of inventing component-local colors or sizes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VisualTheme {
+    pub mode: ThemeMode,
+    pub palette: ThemePalette,
+    pub surface_raised: [u8; 3],
+    pub surface_accent: [u8; 3],
+    pub surface_accent_strong: [u8; 3],
+    pub focus: [u8; 3],
+    pub metrics: ThemeMetrics,
+    pub panel_opacity: f32,
+    pub muted_opacity: f32,
+    pub grid_opacity: f32,
+    pub shadow_opacity: f32,
+    pub shadow_blur: f32,
+    pub shadow_offset_y: f32,
+}
+impl ThemeSelection {
+    pub fn coherence(mode: ThemeMode, accent: Accent) -> Self {
+        Self::Coherence { mode, accent }
+    }
+
+    pub fn palette(self) -> ThemePalette {
+        match self {
+            Self::Coherence { mode, accent } => ProjectTheme { mode, accent }.palette(),
+            Self::Palette { palette } => palette,
+        }
+    }
+
+    pub fn metrics(self) -> ThemeMetrics {
+        ThemeMetrics::shared()
+    }
+
+    pub fn visual_theme(self) -> VisualTheme {
+        let mode = self.mode();
+        let palette = self.palette();
+        let (surface_raised, surface_accent, surface_accent_strong, focus) = match self {
+            Self::Coherence {
+                mode: ThemeMode::Light,
+                ..
+            } => (
+                coherence_tokens::light::COLOR_SURFACE_RAISED,
+                coherence_tokens::light::COLOR_SURFACE_ACCENT,
+                coherence_tokens::light::COLOR_SURFACE_ACCENT_STRONG,
+                coherence_tokens::light::COLOR_FOCUS,
+            ),
+            Self::Coherence {
+                mode: ThemeMode::Dark,
+                ..
+            } => (
+                coherence_tokens::dark::COLOR_SURFACE_RAISED,
+                coherence_tokens::dark::COLOR_SURFACE_ACCENT,
+                coherence_tokens::dark::COLOR_SURFACE_ACCENT_STRONG,
+                coherence_tokens::dark::COLOR_FOCUS,
+            ),
+            Self::Palette { .. } => (
+                palette.surface,
+                palette.surface_muted,
+                mix_rgb(palette.surface_muted, palette.primary, 0.24),
+                palette.primary,
+            ),
+        };
+        VisualTheme {
+            mode,
+            palette,
+            surface_raised,
+            surface_accent,
+            surface_accent_strong,
+            focus,
+            metrics: self.metrics(),
+            panel_opacity: 0.92,
+            muted_opacity: 0.68,
+            grid_opacity: 0.24,
+            shadow_opacity: if mode == ThemeMode::Dark { 0.30 } else { 0.16 },
+            shadow_blur: 18.0,
+            shadow_offset_y: 6.0,
+        }
+    }
+
+    /// Explicit for Coherence themes; inferred from background luminance for
+    /// imported palettes so consumers never branch on the theme source.
+    pub fn mode(self) -> ThemeMode {
+        match self {
+            Self::Coherence { mode, .. } => mode,
+            Self::Palette { palette } => {
+                if luminance(palette.background) < 0.5 {
+                    ThemeMode::Dark
+                } else {
+                    ThemeMode::Light
+                }
+            }
+        }
+    }
+
+    /// Accent identity for tooling that reports it; imported palettes expose
+    /// their accent through `primary`, so a neutral identity is correct.
+    pub fn accent(self) -> Accent {
+        match self {
+            Self::Coherence { accent, .. } => accent,
+            Self::Palette { .. } => Accent::Brand,
+        }
+    }
+}
+
+fn luminance(rgb: [u8; 3]) -> f64 {
+    let linearize = |channel: u8| {
+        let c = f64::from(channel) / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linearize(rgb[0]) + 0.7152 * linearize(rgb[1]) + 0.0722 * linearize(rgb[2])
+}
+impl ThemeMetrics {
+    /// Both current upstream modes share geometry. Never hand-maintain tokens.
+    pub fn shared() -> Self {
+        use coherence_tokens::light as t;
+        ThemeMetrics {
+            space_1: t::SPACE_1,
+            space_2: t::SPACE_2,
+            space_3: t::SPACE_3,
+            space_4: t::SPACE_4,
+            space_5: t::SPACE_5,
+            radius_xs: t::RADIUS_XS,
+            radius_sm: t::RADIUS_SM,
+            radius_md: t::RADIUS_MD,
+            radius_lg: t::RADIUS_LG,
+            radius: t::RADIUS_MD,
+            body: t::FONT_SIZE_BASE,
+            small: t::FONT_SIZE_SM,
+            large: t::FONT_SIZE_LG,
+            title: t::FONT_SIZE_XL,
+            display: t::FONT_SIZE_2XL,
+        }
+    }
+}
+
+fn mix_rgb(a: [u8; 3], b: [u8; 3], amount: f32) -> [u8; 3] {
+    std::array::from_fn(|index| {
+        (f32::from(a[index]) * (1.0 - amount) + f32::from(b[index]) * amount).round() as u8
+    })
+}
+impl ProjectTheme {
+    pub fn palette(self) -> ThemePalette {
+        use coherence_tokens::{Mode, dark, light};
+        let (p, info, border, background_strong, surface_muted, border_strong) = match self.mode {
+            ThemeMode::Dark => (
+                Mode::Dark.palette(),
+                dark::COLOR_INFO,
+                dark::COLOR_BORDER,
+                dark::COLOR_BACKGROUND_STRONG,
+                dark::COLOR_SURFACE_MUTED,
+                dark::COLOR_BORDER_STRONG,
+            ),
+            ThemeMode::Light => (
+                Mode::Light.palette(),
+                light::COLOR_INFO,
+                light::COLOR_BORDER,
+                light::COLOR_BACKGROUND_STRONG,
+                light::COLOR_SURFACE_MUTED,
+                light::COLOR_BORDER_STRONG,
+            ),
+        };
+        ThemePalette {
+            background: p.background,
+            background_strong,
+            surface: p.surface,
+            surface_muted,
+            text: p.text,
+            text_muted: p.muted,
+            primary: match self.accent {
+                Accent::Brand => p.primary,
+                Accent::Info => info,
+                Accent::Success => p.success,
+            },
+            success: p.success,
+            danger: p.danger,
+            warning: p.warning,
+            info,
+            border,
+            border_strong,
+        }
+    }
+    pub fn metrics(self) -> ThemeMetrics {
+        ThemeMetrics::shared()
+    }
+}
+impl Catalog {
+    pub fn load(path: impl AsRef<Path>) -> Result<Self> {
+        Self::parse(
+            &fs::read_to_string(path.as_ref())
+                .map_err(|e| Error(format!("{}: {e}", path.as_ref().display())))?,
+        )
+    }
+    pub fn bundled() -> Result<Self> {
+        Self::parse(include_str!("../../../config/projects.json"))
+    }
+    pub fn parse(input: &str) -> Result<Self> {
+        let c: Self = serde_json::from_str(input)
+            .map_err(|e| Error(format!("Invalid project catalog: {e}")))?;
+        c.validate()?;
+        Ok(c)
+    }
+    pub fn project(&self, id: &str) -> Result<&Project> {
+        self.projects
+            .iter()
+            .find(|p| p.id == id)
+            .ok_or_else(|| Error(format!("Unknown project: {id}")))
+    }
+    pub fn validate(&self) -> Result<()> {
+        check(
+            self.schema_version == 1,
+            "Unsupported catalog schema_version",
+        )?;
+        check(
+            !self.projects.is_empty(),
+            "At least one project is required",
+        )?;
+        let mut ids = BTreeSet::new();
+        for p in &self.projects {
+            check(
+                identifier(&p.id) && ids.insert(&p.id),
+                format!("Invalid or duplicate project id: {}", p.id),
+            )?;
+            check(
+                visible(&p.name),
+                "Project name must be nonempty and printable",
+            )?;
+            let mut resources = BTreeSet::new();
+            for r in &p.resources {
+                check(
+                    identifier(&r.id) && resources.insert(&r.id),
+                    format!("Invalid or duplicate resource id: {}", r.id),
+                )?;
+                check(
+                    visible(&r.title) && visible(&r.target),
+                    "Resource title and target must be nonempty and printable",
+                )?;
+                check(
+                    r.kind != ResourceKind::MacApp || r.host == Host::Mac,
+                    "Mac apps require a Mac host",
+                )?;
+                if matches!(
+                    r.kind,
+                    ResourceKind::TerminalSession | ResourceKind::AgentSession
+                ) {
+                    check(
+                        identifier(&r.target),
+                        "Session target must be a managed project/session identifier",
+                    )?;
+                }
+                if r.kind == ResourceKind::RemoteDesktop {
+                    check(
+                        r.target.parse::<std::net::IpAddr>().is_ok(),
+                        "Desktop target must be an explicit IP address",
+                    )?;
+                    check(
+                        r.host != Host::EdgeRunner,
+                        "Edge Runner is a session provider, not a desktop transport",
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Lifecycle {
+    Active,
+    Idle,
+    Paused,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Control {
+    Human,
+    Agent,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Actor {
+    Human,
+    Agent,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectState {
+    pub lifecycle: Lifecycle,
+    pub control: Control,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceState {
+    pub schema_version: u32,
+    pub selected_project: String,
+    pub projects: BTreeMap<String, ProjectState>,
+}
+#[derive(Debug, Clone)]
+pub enum Action {
+    SelectProject(String),
+    TakeControl(String),
+    ReleaseControl(String),
+}
+impl WorkspaceState {
+    pub fn new(catalog: &Catalog) -> Result<Self> {
+        catalog.validate()?;
+        let selected_project = catalog.projects[0].id.clone();
+        let projects = catalog
+            .projects
+            .iter()
+            .map(|p| {
+                (
+                    p.id.clone(),
+                    ProjectState {
+                        lifecycle: if p.id == selected_project {
+                            Lifecycle::Active
+                        } else {
+                            Lifecycle::Idle
+                        },
+                        control: Control::Human,
+                    },
+                )
+            })
+            .collect();
+        Ok(Self {
+            schema_version: 1,
+            selected_project,
+            projects,
+        })
+    }
+    pub fn validate(&self, catalog: &Catalog) -> Result<()> {
+        check(
+            self.schema_version == 1,
+            "Unsupported workspace state version",
+        )?;
+        catalog.project(&self.selected_project)?;
+        check(
+            self.projects.len() == catalog.projects.len(),
+            "State/catalog projects differ",
+        )?;
+        for (id, state) in &self.projects {
+            catalog.project(id)?;
+            check(
+                state.lifecycle != Lifecycle::Active || id == &self.selected_project,
+                "Only selected project can be active",
+            )?;
+        }
+        check(
+            self.projects.contains_key(&self.selected_project),
+            "Missing selected project state",
+        )?;
+        check(
+            self.projects[&self.selected_project].lifecycle != Lifecycle::Idle,
+            "Selected project must be active or explicitly paused",
+        )?;
+        Ok(())
+    }
+    pub fn apply(&mut self, actor: Actor, action: Action) -> Result<()> {
+        let id = match &action {
+            Action::SelectProject(id) | Action::TakeControl(id) | Action::ReleaseControl(id) => id,
+        };
+        let state = self
+            .projects
+            .get(id)
+            .ok_or_else(|| Error(format!("Unknown project: {id}")))?;
+        if actor == Actor::Agent {
+            check(
+                matches!(action, Action::SelectProject(_)),
+                "Only the human can grant or take control",
+            )?;
+            check(
+                state.control == Control::Agent,
+                "Project is under human control",
+            )?;
+            let current = &self.projects[&self.selected_project];
+            check(
+                current.control == Control::Agent,
+                "Cannot switch away from a human-controlled project",
+            )?;
+        }
+        match action {
+            Action::SelectProject(id) => {
+                let old = self
+                    .projects
+                    .get_mut(&self.selected_project)
+                    .ok_or_else(|| Error("Missing selected project state".into()))?;
+                if old.lifecycle == Lifecycle::Active {
+                    old.lifecycle = Lifecycle::Idle;
+                }
+                let new = self.projects.get_mut(&id).unwrap();
+                // Selecting a paused project never thaws its processes implicitly.
+                if new.lifecycle != Lifecycle::Paused {
+                    new.lifecycle = Lifecycle::Active;
+                }
+                self.selected_project = id;
+            }
+            Action::TakeControl(id) => self.projects.get_mut(&id).unwrap().control = Control::Human,
+            Action::ReleaseControl(id) => {
+                self.projects.get_mut(&id).unwrap().control = Control::Agent
+            }
+        }
+        Ok(())
+    }
+    /// Call only after the platform reports a successful pause/resume.
+    /// This policy model never freezes processes or claims transport/session ownership.
+    pub fn acknowledge_pause(&mut self, id: &str, paused: bool) -> Result<()> {
+        let project = self
+            .projects
+            .get_mut(id)
+            .ok_or_else(|| Error(format!("Unknown project: {id}")))?;
+        project.lifecycle = if paused {
+            Lifecycle::Paused
+        } else if id == self.selected_project {
+            Lifecycle::Active
+        } else {
+            Lifecycle::Idle
+        };
+        Ok(())
+    }
+    pub fn load(path: impl AsRef<Path>, catalog: &Catalog) -> Result<Self> {
+        let state: Self = serde_json::from_str(
+            &fs::read_to_string(path.as_ref()).map_err(|e| Error(e.to_string()))?,
+        )
+        .map_err(|e| Error(format!("Invalid workspace state: {e}")))?;
+        state.validate(catalog)?;
+        Ok(state)
+    }
+    pub fn save(&self, path: impl AsRef<Path>, catalog: &Catalog) -> Result<()> {
+        self.validate(catalog)?;
+        let path = path.as_ref();
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            fs::create_dir_all(parent).map_err(|e| Error(e.to_string()))?;
+        }
+        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+        fs::write(
+            &tmp,
+            serde_json::to_vec_pretty(self).map_err(|e| Error(e.to_string()))?,
+        )
+        .map_err(|e| Error(e.to_string()))?;
+        fs::rename(&tmp, path).map_err(|e| Error(e.to_string()))
+    }
+}
+
+/// Local cooperative state coordination. OS account/file permissions remain the
+/// security boundary; an actor flag is not authentication of a remote caller.
+pub struct StateStore {
+    pub path: std::path::PathBuf,
+}
+struct LockFile(std::path::PathBuf);
+impl Drop for LockFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+impl StateStore {
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+    pub fn load(&self, catalog: &Catalog) -> Result<WorkspaceState> {
+        match fs::metadata(&self.path) {
+            Ok(_) => WorkspaceState::load(&self.path, catalog),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => WorkspaceState::new(catalog),
+            Err(e) => Err(Error(format!(
+                "Cannot inspect {}: {e}",
+                self.path.display()
+            ))),
+        }
+    }
+    /// Serialize read-modify-write across the GUI and CLI. A stale crash lock is
+    /// surfaced for inspection instead of silently overwriting another process.
+    pub fn update<F>(&self, catalog: &Catalog, change: F) -> Result<WorkspaceState>
+    where
+        F: FnOnce(&mut WorkspaceState) -> Result<()>,
+    {
+        if let Some(parent) = self.path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            fs::create_dir_all(parent).map_err(|e| Error(e.to_string()))?;
+        }
+        let lock = self.path.with_extension("lock");
+        let mut handle = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock)
+            .map_err(|e| {
+                Error(format!(
+                    "Cannot lock {}: {e}. If stale, inspect its PID before removing it.",
+                    lock.display()
+                ))
+            })?;
+        let _guard = LockFile(lock);
+        use std::io::Write;
+        writeln!(handle, "{}", std::process::id()).map_err(|e| Error(e.to_string()))?;
+        let mut state = self.load(catalog)?;
+        change(&mut state)?;
+        state.save(&self.path, catalog)?;
+        Ok(state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn catalog() -> Catalog {
+        Catalog::bundled().unwrap()
+    }
+    #[test]
+    fn themes_are_upstream_and_visually_distinct() {
+        let c = catalog();
+        let a = c.projects[0].theme.palette();
+        let b = c.projects[1].theme.palette();
+        assert_ne!(a.background, b.background);
+        assert_eq!(a.primary, coherence_tokens::dark::COLOR_INFO);
+        assert_eq!(b.primary, coherence_tokens::light::COLOR_BRAND);
+    }
+    #[test]
+    fn visual_themes_carry_coherence_beyond_color() {
+        let c = catalog();
+        let dark = c.projects[0].theme.visual_theme();
+        let light = c.projects[1].theme.visual_theme();
+        assert_eq!(
+            dark.surface_raised,
+            coherence_tokens::dark::COLOR_SURFACE_RAISED
+        );
+        assert_eq!(
+            light.surface_accent,
+            coherence_tokens::light::COLOR_SURFACE_ACCENT
+        );
+        assert_ne!(dark.surface_raised, light.surface_raised);
+        assert_eq!(dark.metrics.display, coherence_tokens::dark::FONT_SIZE_2XL);
+        assert_eq!(dark.metrics.radius_lg, coherence_tokens::dark::RADIUS_LG);
+        assert!(dark.shadow_opacity > light.shadow_opacity);
+    }
+    #[test]
+    fn imported_palette_resolves_the_complete_visual_contract() {
+        let palette = catalog().projects[0].theme.palette();
+        let visual = ThemeSelection::Palette { palette }.visual_theme();
+        assert_eq!(visual.palette, palette);
+        assert_eq!(visual.surface_raised, palette.surface);
+        assert_eq!(visual.focus, palette.primary);
+        assert_ne!(visual.surface_accent_strong, palette.surface_muted);
+    }
+    #[test]
+    fn unsupported_schema_and_duplicate_ids_rejected() {
+        let mut c = catalog();
+        c.schema_version = 2;
+        assert!(c.validate().is_err());
+        c.schema_version = 1;
+        c.projects.push(c.projects[0].clone());
+        assert!(c.validate().is_err());
+    }
+    #[test]
+    fn malformed_resources_rejected() {
+        let mut c = catalog();
+        c.projects[0].resources[0].host = Host::AgoraOne;
+        assert!(c.validate().is_err());
+        c = catalog();
+        c.projects[0].resources[1].target = "host; echo injected".into();
+        assert!(c.validate().is_err());
+    }
+    #[test]
+    fn project_switch_preserves_paused_background_and_control() {
+        let mut s = WorkspaceState::new(&catalog()).unwrap();
+        s.acknowledge_pause("dock", true).unwrap();
+        s.apply(Actor::Human, Action::SelectProject("studio".into()))
+            .unwrap();
+        assert_eq!(s.projects["dock"].lifecycle, Lifecycle::Paused);
+        assert_eq!(s.projects["dock"].control, Control::Human);
+        s.apply(Actor::Human, Action::SelectProject("dock".into()))
+            .unwrap();
+        assert_eq!(s.projects["dock"].lifecycle, Lifecycle::Paused);
+    }
+    #[test]
+    fn switching_only_changes_visibility() {
+        let mut s = WorkspaceState::new(&catalog()).unwrap();
+        s.apply(Actor::Human, Action::SelectProject("studio".into()))
+            .unwrap();
+        assert_eq!(s.projects["dock"].lifecycle, Lifecycle::Idle);
+        assert_eq!(s.projects["studio"].lifecycle, Lifecycle::Active);
+    }
+    #[test]
+    fn agent_cannot_grant_itself_control_or_steal_focus() {
+        let mut s = WorkspaceState::new(&catalog()).unwrap();
+        assert!(
+            s.apply(Actor::Agent, Action::ReleaseControl("dock".into()))
+                .is_err()
+        );
+        s.apply(Actor::Human, Action::ReleaseControl("studio".into()))
+            .unwrap();
+        assert!(
+            s.apply(Actor::Agent, Action::SelectProject("studio".into()))
+                .is_err()
+        );
+        s.apply(Actor::Human, Action::ReleaseControl("dock".into()))
+            .unwrap();
+        s.apply(Actor::Agent, Action::SelectProject("studio".into()))
+            .unwrap();
+        s.apply(Actor::Human, Action::TakeControl("studio".into()))
+            .unwrap();
+        assert!(
+            s.apply(Actor::Agent, Action::SelectProject("dock".into()))
+                .is_err()
+        );
+    }
+    #[test]
+    fn failed_action_leaves_selection_unchanged() {
+        let mut s = WorkspaceState::new(&catalog()).unwrap();
+        assert!(
+            s.apply(Actor::Human, Action::SelectProject("missing".into()))
+                .is_err()
+        );
+        assert_eq!(s.selected_project, "dock");
+    }
+    #[test]
+    fn resume_background_project_does_not_steal_focus() {
+        let mut s = WorkspaceState::new(&catalog()).unwrap();
+        s.acknowledge_pause("studio", true).unwrap();
+        s.acknowledge_pause("studio", false).unwrap();
+        assert_eq!(s.selected_project, "dock");
+        assert_eq!(s.projects["studio"].lifecycle, Lifecycle::Idle);
+    }
+    #[test]
+    fn corrupted_state_rejected() {
+        let mut s = WorkspaceState::new(&catalog()).unwrap();
+        s.projects.get_mut("studio").unwrap().lifecycle = Lifecycle::Active;
+        assert!(s.validate(&catalog()).is_err());
+    }
+    #[test]
+    fn file_store_roundtrip_and_lock_contention() {
+        let path = std::env::temp_dir()
+            .join(format!("canvas-core-test-{}", std::process::id()))
+            .join("state.json");
+        let store = StateStore::new(path.clone());
+        let c = catalog();
+        store
+            .update(&c, |s| {
+                s.apply(Actor::Human, Action::SelectProject("studio".into()))
+            })
+            .unwrap();
+        assert_eq!(store.load(&c).unwrap().selected_project, "studio");
+        fs::write(path.with_extension("lock"), "other-process").unwrap();
+        assert!(store.update(&c, |_| Ok(())).is_err());
+        fs::remove_file(path.with_extension("lock")).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::remove_dir(path.parent().unwrap()).unwrap();
+    }
+}

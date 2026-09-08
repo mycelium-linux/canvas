@@ -1,7 +1,7 @@
 # Persistent project coding sessions
 
 Agora One runs OpenCode's supported HTTP backend independently of its terminal.
-Dock stores the selected session ID per project. A persistent tmux terminal
+Canvas stores the selected session ID per project. A persistent tmux terminal
 attaches to that exact ID; the iced shell submits prompts and reads progress from
 the same backend. Switching projects does not restart the conversation or its
 processes. Edge Runner remains the intended long-term owner of session hosting;
@@ -16,16 +16,16 @@ The directory is canonicalized and a subsequent request for the same project
 with a different directory is rejected, preserving session identity.
 
 ```sh
-~/.local/bin/dock-linux session-ensure dock
-~/.local/bin/dock-linux session-attach dock
-~/.local/bin/dock-linux session-status dock
-~/.local/bin/dock-linux desktop-control dock agent
+~/.local/bin/canvas-linux session-ensure dock
+~/.local/bin/canvas-linux session-attach dock
+~/.local/bin/canvas-linux session-status dock
+~/.local/bin/canvas-linux desktop-control dock agent
 printf '%s' 'Read Cargo.toml and describe the workspace.' | \
-  ~/.local/bin/dock-linux session-prompt dock opencode/big-pickle
-~/.local/bin/dock-linux session-status dock
-~/.local/bin/dock-linux session-abort dock
+  ~/.local/bin/canvas-linux session-prompt dock opencode/big-pickle
+~/.local/bin/canvas-linux session-status dock
+~/.local/bin/canvas-linux session-abort dock
 printf '%s' 'Continue after inspecting the current files.' | \
-  ~/.local/bin/dock-linux session-resume dock opencode/big-pickle
+  ~/.local/bin/canvas-linux session-resume dock opencode/big-pickle
 ```
 
 Prompts arrive on standard input, not shell arguments. `session-resume` sends a
@@ -36,10 +36,10 @@ current state before continuing. `session-status` returns the session ID, status
 accepted asynchronous request is not a completed inference: poll status and
 inspect message errors and tool results.
 
-The backend checks Dock's shared project control latch while accepting a prompt.
+The backend checks Canvas's shared project control latch while accepting a prompt.
 The default is human control. Human takeover revokes that latch before requesting
 OpenCode's supported abort operation. The local account can still interact with
-OpenCode directly; the latch governs Dock's orchestration interface, not a
+OpenCode directly; the latch governs Canvas's orchestration interface, not a
 sandbox around the user account. OpenCode owns model permissions, conversation
 persistence, tool execution, and cancellation semantics.
 
@@ -47,12 +47,12 @@ Each project backend is a systemd user service named
 `dock-opencode-PROJECT.service`, with its working directory fixed at registration.
 It listens only on `127.0.0.1` on a recorded per-project port; a generated local
 HTTP password stays in a private 0600 environment file, never a CLI argument.
-State lives under `~/.local/state/dock/opencode` (0700). Dock does not expose this
+State lives under `~/.local/state/dock/opencode` (0700). Canvas does not expose this
 HTTP listener on Tailscale or the LAN. Remote clients invoke the narrow Rust CLI
-through SSH. Provider credentials are managed by OpenCode, not copied into Dock.
+through SSH. Provider credentials are managed by OpenCode, not copied into Canvas.
 
 The terminal uses a dedicated tmux server (`tmux -L dock-opencode`) and a session
-named `dock-PROJECT`. `session-attach` opens it inside Dock's isolated Sway desktop.
+named `dock-PROJECT`. `session-attach` opens it inside Canvas's isolated Sway desktop.
 Closing a terminal window leaves the backend and tmux session alive. Manual
 recovery is possible with `tmux -L dock-opencode attach -t dock-dock`.
 Backend logs are available with:
@@ -82,7 +82,7 @@ OpenCode TUI processes were checked to attach to their recorded session IDs.
 Both listeners bind to 127.0.0.1 only and return HTTP 401 without local service
 authentication.
 
-With `opencode/big-pickle`, the Dock session used completed **read** and **edit**
+With `opencode/big-pickle`, the Canvas session used completed **read** and **edit**
 tool calls to update the browser fixture heading and add a working Reset button.
 The changed file is `examples/workspace/index.html`; the Reset button clears its
 interaction counter and restores the initial output text.
@@ -91,7 +91,7 @@ A subsequent authorized cancellation test entered `busy` with an actual Bash
 tool running `sleep 45`. Human takeover returned an acknowledged OpenCode abort.
 The same session became `idle`, recorded `MessageAbortedError`, and its tool
 output reported user cancellation without executing the post-sleep finish marker.
-A new Dock prompt was rejected while human ownership remained in effect. After
+A new Canvas prompt was rejected while human ownership remained in effect. After
 an explicit grant back to the agent, `session-resume` retained the same ID and
 conversation, correctly recalled both prior edits, and completed without rerunning
 the canceled command. Desktop input refusal and visual browser verification are

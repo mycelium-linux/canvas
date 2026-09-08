@@ -13,14 +13,23 @@ import stat
 import subprocess
 import tempfile
 
+import importlib.util as _importlib_util
+
+# Same-directory import: these installers are scripts run by path, not a package.
+_spec = _importlib_util.spec_from_file_location(
+    "mcp_loopback", pathlib.Path(__file__).resolve().with_name("mcp_loopback.py")
+)
+mcp_loopback = _importlib_util.module_from_spec(_spec)
+_spec.loader.exec_module(mcp_loopback)
+
+# One source of truth for the loopback credential, shared with the canvas
+# installer and `canvas::loopback` on the Rust side.
+private_regular = mcp_loopback.private_regular
+ensure_token = mcp_loopback.ensure_token
+
 LABEL = "dev.fpl.dock-mcp"
 CONNECTOR_ID = "dock-workspaces"
 CAPABILITY_ID = "dock.workspace-mcp"
-
-
-def private_regular(path: pathlib.Path) -> bool:
-    info = path.lstat()
-    return stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077
 
 
 def write_atomic(path: pathlib.Path, data: bytes, mode: int = 0o600) -> None:
@@ -36,21 +45,6 @@ def write_atomic(path: pathlib.Path, data: bytes, mode: int = 0o600) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
-
-
-def ensure_token(path: pathlib.Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.parent.chmod(0o700)
-    try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        if not private_regular(path) or len(path.read_text()) != 64:
-            raise SystemExit("Existing Dock MCP token is unsafe or invalid")
-        return
-    with os.fdopen(descriptor, "w") as output:
-        output.write(secrets.token_hex(32))
-        output.flush()
-        os.fsync(output.fileno())
 
 
 def desired_connector(port: int, token: pathlib.Path) -> dict:

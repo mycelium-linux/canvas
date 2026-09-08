@@ -63,11 +63,11 @@ binding choices later.
 ## Rust control contract
 
 ```sh
-ssh -o BatchMode=yes agora-one .local/bin/dock-linux hypr-start
-ssh -o BatchMode=yes agora-one .local/bin/dock-linux hypr-status
-ssh -o BatchMode=yes agora-one .local/bin/dock-linux hypr-project studio
-ssh -o BatchMode=yes agora-one .local/bin/dock-linux hypr-open studio /tmp
-ssh -o BatchMode=yes agora-one .local/bin/dock-linux hypr-focus 0xCLIENT_ADDRESS
+ssh -o BatchMode=yes agora-one .local/bin/canvas-linux hypr-start
+ssh -o BatchMode=yes agora-one .local/bin/canvas-linux hypr-status
+ssh -o BatchMode=yes agora-one .local/bin/canvas-linux hypr-project studio
+ssh -o BatchMode=yes agora-one .local/bin/canvas-linux hypr-open studio /tmp
+ssh -o BatchMode=yes agora-one .local/bin/canvas-linux hypr-focus 0xCLIENT_ADDRESS
 ```
 
 `hypr-start` verifies config, starts or registers the owned service, and selects
@@ -89,7 +89,7 @@ its project theme. Launch acceptance is reported separately from the client
 appearing; inspect `hypr-status` to verify it. Directory arguments are quoted
 for Hyprland's command shell. `hypr-focus` only accepts an observed client
 address and verifies focus afterward. `capabilities` reports window control
-only when the registered compositor responds, scoped to this Dock instance.
+only when the registered compositor responds, scoped to this Canvas instance.
 This does not yet implement generic screenshot/input tools, coding-agent
 prompting, or backend human-control leases.
 
@@ -108,7 +108,7 @@ Coherence artifacts are installed as:
 ~/.config/dock/hypr/themes/studio.conf
 ```
 
-Regenerate with `cargo run -p dock-core --bin dockctl -- export-desktop config/linux`
+Regenerate with `cargo run -p canvas-core --bin canvas-core-ctl -- export-desktop config/linux`
 (see the repository README for the current CLI package command). Do not edit
 generated palettes separately. Theme files include actual border, gap and
 rounding assignments, so sourcing them applies the new project appearance.

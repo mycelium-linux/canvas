@@ -1,0 +1,17 @@
+[package]
+name = "canvas-widgets"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+canvas-core.workspace = true
+iced = { version = "0.14", default-features = false, features = ["wgpu", "canvas", "tokio"], optional = true }
+# Only for callers that publish these types over a schema-carrying protocol (MCP).
+schemars = { version = "1", optional = true }
+
+[features]
+default = []
+live = ["dep:iced"]
+schema = ["dep:schemars"]

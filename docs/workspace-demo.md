@@ -3,12 +3,12 @@
 Start the iced shell on the Mac:
 
 ```sh
-cargo run -p dock-mac -- --connect-project dock
+cargo run -p canvas-mac -- --connect-project dock
 ```
 
-The normal interface is a small keyboard companion. While Dock is running,
+The normal interface is a small keyboard companion. While Canvas is running,
 **Ctrl+Option+Space** summons it. Choose a project with **Cmd+1 / Cmd+2**, or use
-its project picker. Dock restores the existing conversation, terminal and browser,
+its project picker. Canvas restores the existing conversation, terminal and browser,
 opens or reuses the live desktop viewer, and gets out of the way.
 
 To work with the agent, summon the companion, type in its single prompt field and
@@ -24,16 +24,16 @@ The earlier detailed controls and Mac restoration tools are accessible only with
 `--diagnostics`; they are not the everyday interface.
 
 The Linux desktop contains a real OpenCode terminal and Firefox showing the
-project's editable browser fixture. Dock's fixture lives in
+project's editable browser fixture. Canvas's fixture lives in
 `~/src/dock/examples/workspace/index.html`; Studio uses `~/src/dock-studio/index.html`.
-These are small test applications, not a replacement for Dock's iced GUI.
+These are small test applications, not a replacement for Canvas's iced GUI.
 
-The complete working sequence is to open Dock, ask for an edit, observe the real
+The complete working sequence is to open Canvas, ask for an edit, observe the real
 change in Firefox, interrupt ongoing work, switch to Studio, then return to Dock.
 The original windows and conversation remain. Switching projects changes
 visibility; it does not automatically suspend inference or freeze processes.
 
-Direct typing in OpenCode's terminal uses OpenCode itself; the Dock latch governs
+Direct typing in OpenCode's terminal uses OpenCode itself; the Canvas latch governs
 cooperating orchestration clients, not all processes belonging to the OS user.
 Normal viewer input stays available to the human. No global keyboard injection
 or Accessibility bypass is used by the summon shortcut.
@@ -72,4 +72,4 @@ harness used on the Mac. With the viewer tunnel already open, no arguments only
 captures the desktop; explicit `X Y` sends a click, and `--keyboard` sends Tab and
 Return. Run input variants only with the browser fixture focused. It reads the
 private credential over SSH and saves frames in `/private/tmp`; it never prints
-the credential. This harness is not part of Dock's Rust runtime.
+the credential. This harness is not part of Canvas's Rust runtime.

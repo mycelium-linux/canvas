@@ -48,13 +48,13 @@ validated again by the Canvas runtime and remain local to the Canvas host.
 ## Build and connect
 
 ```sh
-cargo build -p dock-canvas --features mcp --bin dock-canvas --bin dock-canvas-mcp
+cargo build -p canvas --features mcp --bin canvas --bin canvas-mcp
 ```
 
-Start the matching `dock-canvas` GUI on the intended desktop, then configure the
-MCP client to run the absolute path to `dock-canvas-mcp` with no arguments over
+Start the matching `canvas` GUI on the intended desktop, then configure the
+MCP client to run the absolute path to `canvas-mcp` with no arguments over
 stdio. Run `scripts/setup-mac-canvas-mcp.py --canvas PATH --adapter PATH` to
-atomically install the matching pair, register the `dock-canvas` connector, and
+atomically install the matching pair, register the `canvas` connector, and
 start the Canvas LaunchAgent. Do not enable a remote connector until its
 presentation access is authorized. This adapter does not itself enroll the device
 or expose a public port. File-opening tools address paths on the Canvas host; the

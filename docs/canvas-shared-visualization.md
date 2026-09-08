@@ -159,6 +159,6 @@ The automated path must remain explainable as these steps:
    positions.
 8. On conflict, inspect again and recompute; never replay a blind mutation.
 
-The first protocol types live in `dock_canvas::view`. Runtime mounting, MCP tools,
+The first protocol types live in `canvas::view`. Runtime mounting, MCP tools,
 capture coupling, and stream adapters build on that contract rather than creating
 parallel representations.

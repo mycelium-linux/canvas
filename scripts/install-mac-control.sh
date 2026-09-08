@@ -11,29 +11,29 @@ if [[ -e "$app" ]]; then
     /usr/bin/open -g "$app"
     exit 0
   fi
-  if /usr/bin/pgrep -x dock-control >/dev/null; then
+  if /usr/bin/pgrep -x canvas-control >/dev/null; then
     echo 'Quit Dock Control using Activity Monitor before an explicit upgrade. Restore reserved displays first.' >&2
     exit 1
   fi
 fi
 cd "$repo"
-cargo build --release -p dock-control
+cargo build --release -p canvas-control
 # Cargo owns where artifacts land: CARGO_TARGET_DIR, or build.target-dir in a cargo
 # config, can point it away from ./target. Ask cargo rather than assume.
 dock_target="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
 mkdir -p "$HOME/Applications"
-stage="$(mktemp -d "$HOME/Applications/.dock-control.XXXXXX")"
+stage="$(mktemp -d "$HOME/Applications/.canvas-control.XXXXXX")"
 trap 'rm -rf "$stage"' EXIT
 bundle="$stage/Dock Control.app"
 mkdir -p "$bundle/Contents/MacOS"
-cp -f "$dock_target/release/dock-control" "$bundle/Contents/MacOS/dock-control"
+cp -f "$dock_target/release/canvas-control" "$bundle/Contents/MacOS/canvas-control"
 cat > "$bundle/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>CFBundleIdentifier</key><string>com.futurepresentlabs.dock.control</string>
 <key>CFBundleName</key><string>Dock Control</string>
-<key>CFBundleExecutable</key><string>dock-control</string>
+<key>CFBundleExecutable</key><string>canvas-control</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>0.1.0</string>
 <key>CFBundleVersion</key><string>1</string>

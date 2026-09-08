@@ -1,0 +1,681 @@
+//! Narrow macOS Accessibility bridge, callable by the GUI or an agent CLI.
+use serde::{Deserialize, Serialize};
+use std::process::Command;
+
+pub use canvas_core::layout::Rect;
+
+pub struct MacDesktop;
+
+fn core_rect(rect: canvas_control::Rect) -> Rect {
+    Rect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+    }
+}
+
+fn surface(window: canvas_control::Window) -> canvas_core::desktop::WindowSurface {
+    canvas_core::desktop::WindowSurface {
+        id: window.id,
+        process_id: Some(window.pid),
+        app: window.app,
+        title: window.title,
+        frame: core_rect(window.frame),
+        movable: window.movable,
+        resizable: window.resizable,
+    }
+}
+
+impl canvas_core::desktop::WindowBackend for MacDesktop {
+    type Error = String;
+
+    fn snapshot(&mut self) -> Result<canvas_core::desktop::DesktopSnapshot, Self::Error> {
+        match canvas_control::request(canvas_control::Operation::Snapshot)? {
+            canvas_control::Response::Snapshot { displays, windows } => {
+                Ok(canvas_core::desktop::DesktopSnapshot {
+                    displays: displays
+                        .into_iter()
+                        .map(|display| canvas_core::desktop::Display {
+                            id: display.id,
+                            name: display.name,
+                            frame: core_rect(display.frame),
+                            work_area: core_rect(display.visible_frame),
+                            primary: display.primary,
+                        })
+                        .collect(),
+                    windows: windows.into_iter().map(surface).collect(),
+                })
+            }
+            _ => Err("Dock Control did not return a desktop snapshot".into()),
+        }
+    }
+
+    fn apply_layout(
+        &mut self,
+        plan: &canvas_core::layout::LayoutPlan,
+    ) -> Result<canvas_core::desktop::LayoutReceipt, Self::Error> {
+        use canvas_core::layout::{Placement, Region};
+        if plan.placements.is_empty() || plan.placements.len() > 16 {
+            return Err("Layout requires 1–16 placements".into());
+        }
+        let primary = plan
+            .placements
+            .iter()
+            .filter(|placement| placement.region == Region::Primary)
+            .collect::<Vec<_>>();
+        if primary.len() != 1 {
+            return Err("Layout must identify exactly one primary surface".into());
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        if plan
+            .placements
+            .iter()
+            .any(|placement| !ids.insert(placement.id.as_str()))
+        {
+            return Err("Layout contains duplicate surface IDs".into());
+        }
+        let mut applied = Vec::with_capacity(plan.placements.len());
+        for placement in &plan.placements {
+            validate_rect(placement.frame)?;
+            let frame = canvas_control::Rect {
+                x: placement.frame.x,
+                y: placement.frame.y,
+                width: placement.frame.width,
+                height: placement.frame.height,
+            };
+            let actual = match canvas_control::request(canvas_control::Operation::SetFrame {
+                id: placement.id.clone(),
+                frame,
+            })? {
+                canvas_control::Response::Applied { window } => core_rect(window.frame),
+                _ => return Err("Dock Control did not acknowledge window placement".into()),
+            };
+            if !contains(placement.frame, actual) {
+                return Err("Application placed a window outside its workspace region".into());
+            }
+            applied.push(Placement {
+                id: placement.id.clone(),
+                role: placement.role,
+                region: placement.region,
+                frame: actual,
+            });
+        }
+        let focused = self.focus(&primary[0].id)?;
+        Ok(canvas_core::desktop::LayoutReceipt {
+            placements: applied,
+            focused: focused.id,
+        })
+    }
+
+    fn focus(
+        &mut self,
+        window_id: &str,
+    ) -> Result<canvas_core::desktop::WindowSurface, Self::Error> {
+        match canvas_control::request(canvas_control::Operation::Focus {
+            id: window_id.into(),
+        })? {
+            canvas_control::Response::Applied { window } => Ok(surface(window)),
+            _ => Err("Dock Control did not acknowledge window focus".into()),
+        }
+    }
+}
+
+fn contains(outer: Rect, inner: Rect) -> bool {
+    inner.width >= 160
+        && inner.height >= 120
+        && i64::from(inner.x) >= i64::from(outer.x)
+        && i64::from(inner.y) >= i64::from(outer.y)
+        && i64::from(inner.x) + i64::from(inner.width)
+            <= i64::from(outer.x) + i64::from(outer.width)
+        && i64::from(inner.y) + i64::from(inner.height)
+            <= i64::from(outer.y) + i64::from(outer.height)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Window {
+    #[serde(default)]
+    pub id: String,
+    pub pid: u32,
+    pub app: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WindowInventory {
+    pub windows: Vec<Window>,
+    pub warnings: Vec<String>,
+}
+
+/// Plan an explicit work area without assuming a screen size or moving unrelated windows.
+pub fn tiles(area: Rect, count: usize) -> Result<Vec<Rect>, String> {
+    let surfaces = (0..count)
+        .map(|index| canvas_core::layout::Surface {
+            id: index.to_string(),
+            role: canvas_core::layout::PaneRole::Auxiliary,
+        })
+        .collect::<Vec<_>>();
+    let plan = canvas_core::layout::browser_primary(area, &surfaces)?;
+    Ok(plan.placements.into_iter().map(|p| p.frame).collect())
+}
+
+fn window_role(window: &Window) -> canvas_core::layout::PaneRole {
+    let app = window.app.to_ascii_lowercase();
+    if [
+        "arc", "brave", "chrome", "chromium", "firefox", "orion", "safari",
+    ]
+    .iter()
+    .any(|browser| app.contains(browser))
+    {
+        canvas_core::layout::PaneRole::Browser
+    } else {
+        canvas_core::layout::PaneRole::Tool
+    }
+}
+
+pub fn project_primary_index(windows: &[Window]) -> Result<usize, String> {
+    if windows.is_empty() {
+        return Err("Project layout requires at least one attached window".into());
+    }
+    Ok(windows
+        .iter()
+        .position(|window| window_role(window) == canvas_core::layout::PaneRole::Browser)
+        .unwrap_or(0))
+}
+
+/// Return frames in the same order as the project bindings. The browser gets
+/// the primary region; other project windows share a focusable stack region.
+pub fn project_tiles(area: Rect, windows: &[Window]) -> Result<Vec<Rect>, String> {
+    let surfaces = windows
+        .iter()
+        .enumerate()
+        .map(|(index, window)| canvas_core::layout::Surface {
+            id: index.to_string(),
+            role: window_role(window),
+        })
+        .collect::<Vec<_>>();
+    let plan = canvas_core::layout::browser_primary(area, &surfaces)?;
+    Ok(plan.placements.into_iter().map(|p| p.frame).collect())
+}
+
+pub fn activate_project_windows(
+    area: Rect,
+    windows: &[Window],
+) -> Result<(Vec<Window>, canvas_core::desktop::LayoutReceipt), String> {
+    use canvas_core::desktop::WindowBackend;
+    let resolved = resolve_windows(windows)?;
+    let surfaces = resolved
+        .iter()
+        .map(|window| canvas_core::layout::Surface {
+            id: window.id.clone(),
+            role: window_role(window),
+        })
+        .collect::<Vec<_>>();
+    let plan = canvas_core::layout::browser_primary(area, &surfaces)?;
+    let receipt = MacDesktop.apply_layout(&plan)?;
+    Ok((resolved, receipt))
+}
+
+pub fn windows() -> Result<Vec<Window>, String> {
+    Ok(window_inventory()?.windows)
+}
+
+pub fn window_inventory() -> Result<WindowInventory, String> {
+    match canvas_control::request(canvas_control::Operation::Windows)? {
+        canvas_control::Response::Windows { windows, warnings } => Ok(WindowInventory {
+            windows: windows
+                .into_iter()
+                .map(|window| Window {
+                    id: window.id,
+                    pid: window.pid,
+                    app: window.app,
+                    title: window.title,
+                })
+                .collect(),
+            warnings,
+        }),
+        _ => Err("Dock Control did not return window inventory".into()),
+    }
+}
+
+pub fn resolve_windows(windows: &[Window]) -> Result<Vec<Window>, String> {
+    if windows.is_empty() || windows.len() > 16 {
+        return Err("Resolve requires 1–16 project windows".into());
+    }
+    let selectors = windows
+        .iter()
+        .map(|window| canvas_control::WindowSelector {
+            id: window.id.clone(),
+            pid: window.pid,
+            app: window.app.clone(),
+            title: window.title.clone(),
+        })
+        .collect();
+    match canvas_control::request(canvas_control::Operation::Resolve { selectors })? {
+        canvas_control::Response::Resolved { windows } => Ok(windows
+            .into_iter()
+            .map(|window| Window {
+                id: window.id,
+                pid: window.pid,
+                app: window.app,
+                title: window.title,
+            })
+            .collect()),
+        _ => Err("Dock Control did not resolve project windows".into()),
+    }
+}
+fn native_id(window: &Window) -> Result<String, String> {
+    if !window.id.is_empty() {
+        return Ok(window.id.clone());
+    }
+    Err("Window attachment predates Dock Control or the helper restarted. Refresh and attach this window again.".into())
+}
+pub fn focus(window: &Window) -> Result<(), String> {
+    match canvas_control::request(canvas_control::Operation::Focus {
+        id: native_id(window)?,
+    })? {
+        canvas_control::Response::Applied { .. } => Ok(()),
+        _ => Err("Dock Control did not acknowledge window focus".into()),
+    }
+}
+pub fn tile(window: &Window, rect: Rect) -> Result<(), String> {
+    validate_rect(rect)?;
+    if rect.width < 160 || rect.height < 120 {
+        return Err("Window size must be at least 160 × 120".into());
+    }
+    let frame = canvas_control::Rect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+    };
+    match canvas_control::request(canvas_control::Operation::SetFrame {
+        id: native_id(window)?,
+        frame,
+    })? {
+        canvas_control::Response::Applied { window } if window.frame == frame => Ok(()),
+        _ => Err("Application constrained requested window geometry".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn tiles_preserve_work_area_and_negative_screen_origin() {
+        let area = Rect {
+            x: -1001,
+            y: 25,
+            width: 1001,
+            height: 700,
+        };
+        let result = tiles(area, 3).unwrap();
+        assert_eq!(result[0].x, -1001);
+        assert_eq!(result[1], result[2]);
+        assert_eq!(result[2].x + result[2].width as i32, 0);
+    }
+    #[test]
+    fn invalid_work_areas_fail_before_os_calls() {
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 319,
+            height: 700,
+        };
+        assert!(tiles(area, 0).is_err());
+        assert!(tiles(area, 3).is_err());
+    }
+
+    #[test]
+    fn project_browser_receives_the_primary_region() {
+        let area = Rect {
+            x: 0,
+            y: 25,
+            width: 1200,
+            height: 800,
+        };
+        let windows = [
+            Window {
+                id: "terminal".into(),
+                pid: 1,
+                app: "Terminal".into(),
+                title: "Shell".into(),
+            },
+            Window {
+                id: "browser".into(),
+                pid: 2,
+                app: "Safari".into(),
+                title: "Project".into(),
+            },
+        ];
+        let frames = project_tiles(area, &windows).unwrap();
+        assert_eq!(project_primary_index(&windows).unwrap(), 1);
+        assert_eq!(frames[0].x, 800);
+        assert_eq!(frames[1].x, 0);
+        assert_eq!(frames[1].width, 800);
+    }
+
+    #[test]
+    fn app_constrained_frame_must_remain_inside_its_layout_region() {
+        let region = Rect {
+            x: -100,
+            y: 25,
+            width: 1000,
+            height: 700,
+        };
+        assert!(contains(
+            region,
+            Rect {
+                x: 0,
+                y: 25,
+                width: 800,
+                height: 650,
+            }
+        ));
+        assert!(!contains(
+            region,
+            Rect {
+                x: -101,
+                y: 25,
+                width: 800,
+                height: 650,
+            }
+        ));
+        assert!(!contains(
+            region,
+            Rect {
+                x: 0,
+                y: 25,
+                width: 1000,
+                height: 650,
+            }
+        ));
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum RemoteAction {
+    Status,
+    Pause,
+    Resume,
+}
+impl RemoteAction {
+    fn argument(self) -> &'static str {
+        match self {
+            Self::Status => "status",
+            Self::Pause => "pause",
+            Self::Resume => "resume",
+        }
+    }
+}
+fn session_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.as_bytes()[0].is_ascii_lowercase()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+/// SSH is a narrow authenticated transport to an installed, deterministic host adapter.
+/// Target is validated because SSH serializes command arguments through the remote shell.
+pub fn remote_session(target: &str, action: RemoteAction) -> Result<String, String> {
+    if !session_identifier(target) {
+        return Err("Invalid managed session identifier".into());
+    }
+    let out = bounded_output(
+        Command::new("ssh").args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=8",
+            "-o",
+            "ServerAliveInterval=5",
+            "-o",
+            "ServerAliveCountMax=2",
+            "agora-one",
+            ".local/bin/canvas-linux",
+            action.argument(),
+            target,
+        ]),
+        20,
+    )
+    .map_err(|e| format!("Cannot reach Agora One: {e}"))?;
+    parse_remote_response(&out.stdout, out.status.success(), action)
+}
+
+fn validate_rect(rect: Rect) -> Result<(), String> {
+    let width =
+        i32::try_from(rect.width).map_err(|_| "Window width exceeds screen coordinate range")?;
+    let height =
+        i32::try_from(rect.height).map_err(|_| "Window height exceeds screen coordinate range")?;
+    rect.x
+        .checked_add(width)
+        .ok_or("Window right edge exceeds screen coordinate range")?;
+    rect.y
+        .checked_add(height)
+        .ok_or("Window bottom edge exceeds screen coordinate range")?;
+    Ok(())
+}
+fn parse_remote_response(
+    bytes: &[u8],
+    success: bool,
+    action: RemoteAction,
+) -> Result<String, String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| format!("Agora One adapter did not return JSON: {e}"))?;
+    if value["schema_version"].as_u64() != Some(1) {
+        return Err("Unsupported Agora One response schema".into());
+    }
+    if !success || value["ok"].as_bool() != Some(true) {
+        return Err(value["error"]
+            .as_str()
+            .unwrap_or("Agora One rejected the action")
+            .into());
+    }
+    let result = value
+        .get("result")
+        .filter(|v| v.is_object())
+        .ok_or("Agora One response is missing its result")?;
+    if !matches!(action, RemoteAction::Status) {
+        let expected = if matches!(action, RemoteAction::Pause) {
+            "frozen"
+        } else {
+            "running"
+        };
+        if result["properties"]["FreezerState"] != expected {
+            return Err("Agora One did not acknowledge the requested process state".into());
+        }
+    }
+    serde_json::to_string_pretty(result).map_err(|e| e.to_string())
+}
+
+fn bounded_output(
+    command: &mut Command,
+    timeout_seconds: u64,
+) -> Result<std::process::Output, String> {
+    use std::{
+        io::Read,
+        process::Stdio,
+        time::{Duration, Instant},
+    };
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let out_thread = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        stdout.read_to_end(&mut v).map(|_| v)
+    });
+    let err_thread = std::thread::spawn(move || {
+        let mut v = Vec::new();
+        stderr.read_to_end(&mut v).map(|_| v)
+    });
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            break status;
+        }
+        if start.elapsed() >= Duration::from_secs(timeout_seconds) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "Timed out after {timeout_seconds}s; the command was stopped"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    let stdout = out_thread
+        .join()
+        .map_err(|_| "stdout reader failed")?
+        .map_err(|e| e.to_string())?;
+    let stderr = err_thread
+        .join()
+        .map_err(|_| "stderr reader failed")?
+        .map_err(|e| e.to_string())?;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+    #[test]
+    fn overflowing_geometry_is_rejected() {
+        assert!(tiles(
+            Rect {
+                x: i32::MAX,
+                y: 0,
+                width: 160,
+                height: 120
+            },
+            1
+        )
+        .is_err());
+        assert!(tiles(
+            Rect {
+                x: 0,
+                y: 0,
+                width: u32::MAX,
+                height: 120
+            },
+            1
+        )
+        .is_err());
+    }
+    #[test]
+    fn no_pause_ack_for_wrong_version_missing_result_or_missing_freezer_state() {
+        for input in [
+            r#"{"schema_version":2,"ok":true,"result":{}}"#,
+            r#"{"schema_version":1,"ok":true}"#,
+            r#"{"schema_version":1,"ok":true,"result":{}}"#,
+            r#"{"schema_version":1,"ok":true,"result":{"properties":{"FreezerState":"running"}}}"#,
+        ] {
+            assert!(parse_remote_response(input.as_bytes(), true, RemoteAction::Pause).is_err());
+        }
+        assert!(parse_remote_response(
+            br#"{"schema_version":1,"ok":true,"result":{"properties":{"FreezerState":"frozen"}}}"#,
+            true,
+            RemoteAction::Pause
+        )
+        .is_ok());
+    }
+    #[test]
+    fn remote_shell_metacharacters_are_rejected_before_transport() {
+        for target in ["dock;id", "$(id)", "-option", "foo bar", ""] {
+            assert!(remote_session(target, RemoteAction::Status).is_err());
+        }
+    }
+}
+
+/// Read the primary display's usable frame (excluding menu bar and Dock), then
+/// convert AppKit's bottom-left coordinates to Accessibility's top-left space.
+pub fn work_area() -> Result<Rect, String> {
+    match canvas_control::request(canvas_control::Operation::Displays)? {
+        canvas_control::Response::Displays { displays } => {
+            let display = displays
+                .iter()
+                .find(|d| d.primary)
+                .ok_or("Primary display unavailable")?;
+            let r = display.visible_frame;
+            Ok(Rect {
+                x: r.x,
+                y: r.y,
+                width: r.width,
+                height: r.height,
+            })
+        }
+        _ => Err("Dock Control did not return display geometry".into()),
+    }
+}
+
+/// Resolve one stable Dock Control display ID to its current usable frame.
+/// Display names and coordinates may change; callers persist only the ID.
+pub fn display_work_area(display_id: &str) -> Result<(String, Rect), String> {
+    if display_id.is_empty() || display_id.len() > 128 || display_id.chars().any(char::is_control) {
+        return Err("Invalid display identifier".into());
+    }
+    match canvas_control::request(canvas_control::Operation::Displays)? {
+        canvas_control::Response::Displays { displays } => {
+            let display = displays
+                .into_iter()
+                .find(|display| display.id == display_id)
+                .ok_or("Configured presence display is not connected")?;
+            Ok((display.name, core_rect(display.visible_frame)))
+        }
+        _ => Err("Dock Control did not return display geometry".into()),
+    }
+}
+
+pub mod presence;
+pub mod reservation;
+pub mod workspace;
+
+pub fn recall_linux(project: &str) -> Result<String, String> {
+    if !session_identifier(project) {
+        return Err("Invalid project identifier".into());
+    }
+    let out = bounded_output(
+        Command::new("ssh").args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=8",
+            "agora-one",
+            ".local/bin/canvas-linux",
+            "hypr-project",
+            project,
+        ]),
+        20,
+    )?;
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| format!("Invalid Agora One response: {e}"))?;
+    if !out.status.success() || value["schema_version"] != 1 || value["ok"] != true {
+        return Err(value["error"]
+            .as_str()
+            .unwrap_or("Agora One rejected workspace recall")
+            .into());
+    }
+    if value["result"]["active_workspace"]["name"] != project
+        || value["result"]["theme_applied"] != true
+    {
+        return Err("Agora One did not acknowledge the requested workspace and theme".into());
+    }
+    Ok(format!(
+        "Agora One recalled {project} and applied its Coherence theme."
+    ))
+}
+
+pub mod alfalfa;
+pub mod bridge;
+pub mod edgerunner;
+pub mod mcp;
+pub mod remote;
+pub mod resources;
+
+pub mod edgerunner_authenticated;

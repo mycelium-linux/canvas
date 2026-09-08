@@ -1,6 +1,6 @@
 # Owner-managed desktop enrollment
 
-Dock invokes FPL Desktop Bridge rather than implementing an identity issuer or
+Canvas invokes FPL Desktop Bridge rather than implementing an identity issuer or
 copying another machine's credentials. The owner CLI now provides:
 
 ```sh
@@ -41,15 +41,15 @@ was found in the owner contract. Browser SSO and bridge application identity mus
 be verified separately after approval. An enrolled bridge also does not establish
 that a selected Edgerunner session has working Bifrost or MCP authorization.
 
-The Dock client is `crates/dock-mac/src/bridge.rs`. Mac invocation honors
+The Canvas client is `crates/canvas-mac/src/bridge.rs`. Mac invocation honors
 `DOCK_DESKTOP_BRIDGE_BIN`; Agora uses the existing SSH host and
 `.local/bin/fpl-desktop-bridge`. No credential or SSH-key transfer is involved.
 
-Dock exposes the owner interface directly:
+Canvas exposes the owner interface directly:
 
 ```sh
-dock-mac bridge status agora
-dock-mac bridge pair agora studio
+canvas-mac bridge status agora
+canvas-mac bridge pair agora studio
 ```
 
 The pair command opens the owner's public approval URL in the named project's
@@ -67,10 +67,10 @@ session binding remains distinct from device enrollment and MCP readiness.
 
 ## Project desktop MCP
 
-`dock-linux mcp-serve PROJECT PORT` uses the Rust MCP SDK and exposes only that
+`canvas-linux mcp-serve PROJECT PORT` uses the Rust MCP SDK and exposes only that
 project's status, PNG capture, recall, focus, text, key and click operations.
 Recall takes no project argument and requires agent ownership. It invokes
-Dock's existing Sway APIs and human takeover gate. There is no grant-control,
+Canvas's existing Sway APIs and human takeover gate. There is no grant-control,
 arbitrary shell, or agent-session provisioning tool. Status filters other
 projects out; capture requires the requested project to be active.
 
@@ -87,7 +87,7 @@ The owner advertises capabilities `dock.desktop.dock` and
 `dock.desktop.studio` once enrolled and its daemon is running. The existing
 cloud gateway resolves them at `/mcp/desktop.dock.desktop.PROJECT` using the
 verified user's enrolled device route. No second gateway catalog or issuer is
-created. `dock-linux mcp-ready PROJECT` checks genuine owner application identity,
+created. `canvas-linux mcp-ready PROJECT` checks genuine owner application identity,
 starts the configured owner daemon, then verifies real tools/list and
 `desktop_status` through the cloud gateway, including the returned project ID.
 It fails while enrollment is missing, a route is unavailable, or only a gateway
@@ -103,7 +103,7 @@ credentials remain in the owner's OS keyring.
 After enrollment and route verification, a manual equivalent is:
 
 ```sh
-~/.local/bin/dock-linux mcp-ready studio
+~/.local/bin/canvas-linux mcp-ready studio
 ~/.local/bin/fpl-desktop-bridge verify --connector dock-desktop-studio --local --desktop-read
 ~/.local/bin/fpl-desktop-bridge verify --connector desktop.dock.desktop.studio --desktop-read
 ~/.local/bin/fpl-desktop-bridge configure-client --client opencode \
@@ -131,13 +131,13 @@ its assets, example config and vendored Coherence dependency, with:
 cargo build --locked --features desktop --bins
 ```
 
-Install the resulting pair of binaries on Agora using Dock's installer:
+Install the resulting pair of binaries on Agora using Canvas's installer:
 
 ```sh
 sh scripts/setup-agora-fpl-desktop.sh /absolute/path/to/owner/target/debug
 ```
 
-The installed `~/.local/bin/dock-linux` must include `desktop-web-url` from this
+The installed `~/.local/bin/canvas-linux` must include `desktop-web-url` from this
 revision. From a terminal inside the existing project Sway desktop, launch:
 
 ```sh
@@ -146,7 +146,7 @@ revision. From a terminal inside the existing project Sway desktop, launch:
 
 The launcher preserves the Wayland display, uses the original user's GNOME
 Secret Service bus, and routes only this app's `xdg-open` calls through
-`dock-linux desktop-web-url PROJECT HTTPS_URL`. The existing browser adapter
+`canvas-linux desktop-web-url PROJECT HTTPS_URL`. The existing browser adapter
 opens the selected project's persistent Firefox profile on Sway's private bus.
 GNOME's browser defaults and activation environment are unchanged. General app
 links require HTTPS without embedded credentials; `desktop-browser-url` retains
@@ -157,7 +157,7 @@ The GUI owns its child bridge daemon and stops it when closed. The launcher
 refuses a second GUI and refuses to compete with an active
 `fpl-desktop-bridge-dock.service`. To switch from the background service to the
 GUI, stop that service explicitly first. While the GUI owns the route, use the
-owner's `verify` CLI directly; `dock-linux mcp-ready` starts the background
+owner's `verify` CLI directly; `canvas-linux mcp-ready` starts the background
 service and must not run alongside the GUI.
 
 The installer does not change owner configuration or credentials. Normal app

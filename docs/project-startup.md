@@ -3,7 +3,7 @@
 Alfalfa owns project identity, shared context and bulletin-board resources.
 Edgerunner/OpenCode owns agent conversations, model selection and run-scoped
 Bifrost/MCP configuration. The FPL desktop bridge and fpl-auth own enrollment and
-credentials. Dock recalls the desktop and consumes those interfaces.
+credentials. Canvas recalls the desktop and consumes those interfaces.
 
 The Rust Alfalfa adapter reads the existing local service at
 `http://127.0.0.1:8791` (override its port with `DOCK_ALFALFA_PORT`). It neither
@@ -13,8 +13,8 @@ prevent access to the existing desktop. The diagnostic view reports whether
 context was attached; the normal interface gains no setup buttons.
 
 ```sh
-dock-mac alfalfa list
-dock-mac alfalfa context alfalfa
+canvas-mac alfalfa list
+canvas-mac alfalfa context alfalfa
 ```
 
 Cross-project callers use the owner-backed orchestration tools documented in
@@ -24,9 +24,9 @@ owner's source context or credentials.
 
 The context response preserves Alfalfa's source content and resource links,
 including board links when the owner supplies them. It is not a new messaging
-API, and Dock does not automatically post the briefing into an agent conversation.
+API, and Canvas does not automatically post the briefing into an agent conversation.
 The local running owner returned the actual `alfalfa` project, seven resources
-and four context sources during validation. Dock was then registered through the
+and four context sources during validation. Canvas was then registered through the
 owner's project-editor API with its source workspace, Beads tracker and startup
 ownership note. A fresh read returned project `dock`, three resources and two
 context sources. Studio remains a demo with no Alfalfa project; its identity is
@@ -42,4 +42,4 @@ on the Mac alone does not sign the Agora browser in.
 Edgerunner already has run-scoped Bifrost leases and MCP configuration. A model
 name in session metadata is not an authenticated readiness probe. Local desktop
 Bifrost SSO issuance and full owner-backed terminal attachment remain incomplete;
-neither is replaced by copying static keys into Dock.
+neither is replaced by copying static keys into Canvas.

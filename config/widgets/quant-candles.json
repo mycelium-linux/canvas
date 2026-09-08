@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "id": "quant-candles",
+  "kind": "quant",
+  "widget": {
+    "visualization": "candlestick",
+    "symbol": "ESU6",
+    "interval": "5m",
+    "show_volume": true,
+    "candles": [
+    {"time": 1, "open": 6482.00, "high": 6488.25, "low": 6479.50, "close": 6486.75, "volume": 1820},
+    {"time": 2, "open": 6486.75, "high": 6491.00, "low": 6484.25, "close": 6488.50, "volume": 1460},
+    {"time": 3, "open": 6488.50, "high": 6489.75, "low": 6481.25, "close": 6483.00, "volume": 2110},
+    {"time": 4, "open": 6483.00, "high": 6487.50, "low": 6480.75, "close": 6486.25, "volume": 1330},
+    {"time": 5, "open": 6486.25, "high": 6494.50, "low": 6485.00, "close": 6492.75, "volume": 2480},
+    {"time": 6, "open": 6492.75, "high": 6497.25, "low": 6490.50, "close": 6495.00, "volume": 1740},
+    {"time": 7, "open": 6495.00, "high": 6496.00, "low": 6487.75, "close": 6489.25, "volume": 2260},
+    {"time": 8, "open": 6489.25, "high": 6493.50, "low": 6486.00, "close": 6491.75, "volume": 1560},
+    {"time": 9, "open": 6491.75, "high": 6499.75, "low": 6490.25, "close": 6498.50, "volume": 2710},
+    {"time": 10, "open": 6498.50, "high": 6502.25, "low": 6495.75, "close": 6497.00, "volume": 1920},
+    {"time": 11, "open": 6497.00, "high": 6504.50, "low": 6496.25, "close": 6503.25, "volume": 2840},
+    {"time": 12, "open": 6503.25, "high": 6507.00, "low": 6500.50, "close": 6505.75, "volume": 2050}
+    ]
+  },
+  "chrome": "drag_only"
+}

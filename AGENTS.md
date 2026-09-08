@@ -1,12 +1,12 @@
 # Agent Instructions
 
-## Dock build and architecture
+## Canvas build and architecture
 
 Rust is the runtime and iced is the required GUI toolkit. Build with
 `cargo build --workspace`; test with `cargo test --workspace`; lint with
 `cargo clippy --workspace --all-targets -- -D warnings`; format with `cargo fmt --all`.
-Run the Mac shell with `cargo run -p dock-mac` and inspect the agent-facing policy
-interface with `cargo run -p dock-core --bin dockctl -- --help`.
+Run the Mac shell with `cargo run -p canvas-mac` and inspect the agent-facing policy
+interface with `cargo run -p canvas-core --bin canvas-core-ctl -- --help`.
 
 `config/projects.json` supplies initial project/resource identities. Coherence's
 upstream native token crate is vendored with checksums under `vendor/`.
@@ -15,18 +15,34 @@ or a prerequisite. Do not extend it. Do not duplicate Coherence palettes.
 Agora One is the Ubuntu GPU desktop. The interactive project surface is an
 isolated headless Sway desktop with wayvnc over an SSH tunnel, independently of
 GNOME's lock state. The earlier nested Hyprland session remains exploratory.
-OpenCode owns persistent coding conversations; Dock uses its supported API and
+OpenCode owns persistent coding conversations; Canvas uses its supported API and
 attaches a visible terminal to the same session. Backend control gates serialize
 agent inputs and revoke them before aborting a session on human takeover.
 Mac AX operations belong in the independently installed Dock Control helper;
 normal GUI rebuilds must not overwrite that permission-bearing app.
 Window, workspace, and wallpaper behavior implement the narrow traits in
-`dock-core`; macOS and Windows use independently installed permission-bearing
+`canvas-core`; macOS and Windows use independently installed permission-bearing
 helpers, Sway implements them directly, and future compositors remain adapters.
 Old Sway/dotfiles are inspiration, not a restoration target.
 Preserve the separation of presentation, orchestration,
 transport, compute, and agency in `docs/computing-mesh-design.md`.
 Beads epic `dock-96j` tracks v0; `dock-2kf` tracks later mesh phases.
+
+## Naming
+
+The project is Canvas; crates, binaries and modules use that name. Several
+identifiers deliberately still say `dock`, because each one names state already
+installed on a machine rather than something in this tree: the repository
+directory and its GitHub remote, the `fpl-local-dock-canvas` and
+`fpl-local-dock-workspaces` MCP registrations, `dev.fpl.dock-canvas` and the
+paths in `scripts/setup-mac-canvas-mcp.py`, `.dock/state.json` and `DOCK_STATE`,
+the `Dock Control.app` bundle and its `com.futurepresentlabs.dock.control`
+Accessibility grant, `ThemeFormat::Dock` and the `Library/Application
+Support/Dock` socket paths, and the `dock-*` Bead IDs. Renaming one of those from
+inside a refactor orphans the installed copy instead of upgrading it; they move
+in a deliberate migration, when someone is present to re-grant or re-register
+what breaks. `Dock` and `Studio` are also the names of two project workspaces in
+`config/projects.json` — those are project identity, not the old product name.
 
 This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
 
