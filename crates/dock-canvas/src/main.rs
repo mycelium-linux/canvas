@@ -155,7 +155,7 @@ struct LoadedBackground {
 #[derive(Debug, Clone)]
 enum Message {
     Tick,
-    WindowReady(Option<iced::window::Id>),
+    WindowReady(iced::window::Id),
     WindowEvent(iced::window::Event),
     MouseEvent(iced::mouse::Event),
     RestoreSurface(String),
@@ -458,23 +458,21 @@ impl App {
                 self.drain_commands()
             }
             Message::WindowReady(window) => {
-                self.window = window;
+                self.window = Some(window);
                 if let Err(error) = platform::make_windows_shareable() {
                     self.status = format!("Canvas capture setup failed: {error}");
                     eprintln!("{}", self.status);
                 }
-                window.map_or_else(Task::none, |window| {
-                    iced::window::set_mode(window, iced::window::Mode::Windowed)
-                        .chain(iced::window::move_to(
-                            window,
-                            Point::new(self.frame.x as f32, self.frame.y as f32),
-                        ))
-                        .chain(iced::window::resize(
-                            window,
-                            Size::new(self.frame.width as f32, self.frame.height as f32),
-                        ))
-                        .chain(iced::window::scale_factor(window).map(Message::ScaleFactorChanged))
-                })
+                iced::window::set_mode(window, iced::window::Mode::Windowed)
+                    .chain(iced::window::move_to(
+                        window,
+                        Point::new(self.frame.x as f32, self.frame.y as f32),
+                    ))
+                    .chain(iced::window::resize(
+                        window,
+                        Size::new(self.frame.width as f32, self.frame.height as f32),
+                    ))
+                    .chain(iced::window::scale_factor(window).map(Message::ScaleFactorChanged))
             }
             Message::WindowEvent(event) => {
                 let mut metrics_changed = false;
@@ -4423,6 +4421,24 @@ fn write_reply(stream: &mut impl Write, reply: &ControlReply) {
     }
 }
 
+fn daemon_view(app: &App, _window: iced::window::Id) -> Element<'_, Message> {
+    app.view()
+}
+
+fn daemon_theme(app: &App, _window: iced::window::Id) -> Theme {
+    app.theme()
+}
+
+fn canvas_window_settings(frame: Rect) -> iced::window::Settings {
+    iced::window::Settings {
+        size: Size::new(frame.width as f32, frame.height as f32),
+        position: iced::window::Position::Specific(Point::new(frame.x as f32, frame.y as f32)),
+        decorations: false,
+        exit_on_close_request: false,
+        ..iced::window::Settings::default()
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args_os().len() != 1 {
         return Err(
@@ -4434,26 +4450,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workspace_store_path = workspace_store::default_path()?;
     let boot_receiver = Arc::clone(&receiver);
     let boot_socket = Arc::new(Mutex::new(Some(socket)));
-    iced::application(
+    iced::daemon(
         move || {
             let socket = boot_socket
                 .lock()
                 .expect("Canvas boot lock poisoned")
                 .take()
                 .expect("Canvas can only boot once");
-            (
-                App::new(
-                    Arc::clone(&boot_receiver),
-                    socket,
-                    initial_frame,
-                    workspace_store_path.clone(),
-                )
-                .expect("Canvas project workspace store must remain valid"),
-                iced::window::oldest().map(Message::WindowReady),
+            let app = App::new(
+                Arc::clone(&boot_receiver),
+                socket,
+                initial_frame,
+                workspace_store_path.clone(),
             )
+            .expect("Canvas project workspace store must remain valid");
+            let (_, open) = iced::window::open(canvas_window_settings(initial_frame));
+            (app, open.map(Message::WindowReady))
         },
         App::update,
-        App::view,
+        daemon_view,
     )
     .subscription(|app| {
         let animated = app.visible_indicator_id.is_some()
@@ -4482,15 +4497,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }),
         ])
     })
-    .title(|app: &App| format!("Canvas · {}", app.document.project_id))
-    .theme(App::theme)
-    .window_size((initial_frame.width as f32, initial_frame.height as f32))
-    .position(iced::window::Position::Specific(Point::new(
-        initial_frame.x as f32,
-        initial_frame.y as f32,
-    )))
-    .decorations(false)
-    .exit_on_close_request(false)
+    .title(|app: &App, _| format!("Canvas · {}", app.document.project_id))
+    .theme(daemon_theme)
     .antialiasing(true)
     .run()?;
     Ok(())
@@ -5547,5 +5555,24 @@ mod tests {
             Some(project_id.as_str())
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn canvas_window_opens_as_a_persistent_borderless_desktop() {
+        let frame = Rect {
+            x: 3840,
+            y: 0,
+            width: 1920,
+            height: 1200,
+        };
+        let settings = canvas_window_settings(frame);
+        assert_eq!(settings.size, Size::new(1920.0, 1200.0));
+        assert!(matches!(
+            settings.position,
+            iced::window::Position::Specific(Point { x: 3840.0, y: 0.0 })
+        ));
+        assert!(!settings.decorations);
+        assert!(!settings.exit_on_close_request);
+        assert!(settings.visible);
     }
 }
