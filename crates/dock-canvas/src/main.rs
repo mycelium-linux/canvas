@@ -274,6 +274,7 @@ struct App {
     transition: Option<transition::Transition>,
     workspaces: WorkspaceStore,
     workspace_store_path: PathBuf,
+    active_project_workspace: Option<String>,
     background_assets: BTreeMap<String, iced::widget::image::Handle>,
     events: Vec<String>,
     presence_orb_visible: bool,
@@ -352,6 +353,7 @@ impl App {
             transition: None,
             workspaces,
             workspace_store_path,
+            active_project_workspace: None,
             events: Vec::new(),
             background_assets: BTreeMap::new(),
             presence_orb_visible: true,
@@ -815,6 +817,7 @@ impl App {
                 let workspace_id = document.id.clone();
                 self.start_transition();
                 self.document = document;
+                self.active_project_workspace = None;
                 self.ensure_scene_decoded();
                 if presentation_changed {
                     self.reset_background_animation();
@@ -1058,6 +1061,7 @@ impl App {
                 document.revision += 1;
                 self.start_transition();
                 self.document = document;
+                self.active_project_workspace = None;
                 self.ensure_scene_decoded();
                 self.bump();
                 self.status = format!("Using {project_id} theme.");
@@ -1278,6 +1282,7 @@ impl App {
                     return Task::none();
                 }
                 self.workspaces = next;
+                self.active_project_workspace = Some(name.clone());
                 self.bump();
                 self.status = format!("Saved project workspace '{name}'.");
                 self.answer(
@@ -1291,7 +1296,11 @@ impl App {
             Command::WorkspaceSwitch { name } => {
                 if self.workspaces.get(&name).is_some() {
                     let mut next = self.workspaces.clone();
-                    next.upsert(self.document.clone());
+                    if self.active_project_workspace.as_deref()
+                        == Some(self.document.project_id.as_str())
+                    {
+                        next.upsert(self.document.clone());
+                    }
                     if let Err(error) =
                         workspace_store::save(&self.workspace_store_path, &next, &self.catalog)
                     {
@@ -1309,6 +1318,7 @@ impl App {
                     self.workspaces = next;
                     self.start_transition();
                     self.document = document;
+                    self.active_project_workspace = Some(name.clone());
                     self.ensure_scene_decoded();
                     self.reset_background_animation();
                     self.bump();
@@ -5429,6 +5439,14 @@ mod tests {
             Command::WorkspaceSave { name: dock.clone() },
         );
         assert!(matches!(saved.outcome, Outcome::Ok { .. }));
+        app.active_project_workspace = None;
+        app.document.chrome.canvas_padding = 10;
+        drop(execute(
+            &mut app,
+            "recall-dock-after-bootstrap",
+            Command::WorkspaceSwitch { name: dock.clone() },
+        ));
+        assert_eq!(app.document.chrome.canvas_padding, 0);
 
         let studio = WorkspaceDocument {
             schema_version: SCHEMA_VERSION,
