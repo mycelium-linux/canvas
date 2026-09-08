@@ -1,9 +1,9 @@
 use base64::Engine as _;
 use dock_canvas::chart::{ChartDocument, ChartKind};
 use dock_canvas::control::{
-    CONTROL_VERSION, Command, ContentKind, ControlReply, ControlRequest, ErrorCode,
-    MAX_ACTIVE_INDICATORS, MAX_CONTROL_MESSAGE, MeshSnapshot, MountedViewSnapshot, Navigation,
-    Outcome, OverlaySettings, OverlayTarget, PresencePreview, PresenceSnapshot,
+    CONTROL_VERSION, CaptureChromeSnapshot, Command, ContentKind, ControlReply, ControlRequest,
+    ErrorCode, MAX_ACTIVE_INDICATORS, MAX_CONTROL_MESSAGE, MeshSnapshot, MountedViewSnapshot,
+    Navigation, Outcome, OverlaySettings, OverlayTarget, PresencePreview, PresenceSnapshot,
     ProjectWorkspaceSnapshot, Receipt, RuntimeSnapshot, ScreensaverSettings, ScreensaverSnapshot,
     StatusIndicator, SurfaceSnapshot,
 };
@@ -2316,6 +2316,14 @@ impl App {
                     })
                 })
                 .collect(),
+            capture_chrome: Some({
+                let palette = self.presented_palette();
+                CaptureChromeSnapshot {
+                    danger: palette.danger,
+                    warning: palette.warning,
+                    success: palette.success,
+                }
+            }),
             active_indicators: self.indicators.values().cloned().collect(),
             mesh: self.mesh.clone(),
             presence: self.presence.clone(),

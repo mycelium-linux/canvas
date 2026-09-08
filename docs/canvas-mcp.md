@@ -121,6 +121,12 @@ page, and viewport; then the PNG the agent can inspect. A human and an agent
 therefore refer to the same bounded visual state rather than maintaining separate
 copies of a document view.
 
+Surface capture also verifies the three existing Canvas window controls at the
+expected pixel positions using the runtime's current theme colors. If macOS or a
+Wayland compositor returns an occluding window, another desktop, or bare
+wallpaper, the tool returns an error instead of attaching that PNG to the shared
+view revision.
+
 The first capture backend reads the composited native Canvas surface using
 macOS `screencapture` or Wayland `grim`. Rendering the same view into an offscreen
 GPU target is the next backend step for display-independent and headless use;

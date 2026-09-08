@@ -626,6 +626,8 @@ pub struct RuntimeSnapshot {
     pub surface_bounds: BTreeMap<String, Rect>,
     #[serde(default)]
     pub views: Vec<MountedViewSnapshot>,
+    #[serde(default)]
+    pub capture_chrome: Option<CaptureChromeSnapshot>,
     pub active_indicators: Vec<StatusIndicator>,
     #[serde(default)]
     pub mesh: Option<MeshSnapshot>,
@@ -655,6 +657,14 @@ pub struct RuntimeSnapshot {
     pub overlays: OverlaySettings,
     #[serde(default = "default_true")]
     pub visible: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureChromeSnapshot {
+    pub danger: [u8; 3],
+    pub warning: [u8; 3],
+    pub success: [u8; 3],
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

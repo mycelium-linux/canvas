@@ -152,6 +152,8 @@ struct CaptureMetadata {
     region: dock_core::layout::Rect,
     #[serde(skip_serializing_if = "Option::is_none")]
     view: Option<SharedViewDocument>,
+    #[serde(skip)]
+    capture_chrome: Option<control::CaptureChromeSnapshot>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -598,6 +600,12 @@ impl Canvas {
             };
             let metadata = resolve_capture(&snapshot, &params, require_shared_view)?;
             let png_bytes = capture_region(metadata.region, &params.request_id)?;
+            if metadata.surface_id.is_some() {
+                let chrome = metadata
+                    .capture_chrome
+                    .ok_or("Canvas runtime did not provide capture verification colors")?;
+                verify_surface_chrome(&png_bytes, metadata.region, chrome)?;
+            }
             let verify_request = ControlRequest {
                 schema_version: control::CONTROL_VERSION,
                 request_id: "mcp-capture-verify".into(),
@@ -613,7 +621,10 @@ impl Canvas {
                 _ => return Err("Canvas returned the wrong screenshot verification receipt".into()),
             };
             let verified = resolve_capture(&verify_snapshot, &params, require_shared_view)?;
-            if verified != metadata {
+            if verified.surface_id != metadata.surface_id
+                || verified.region != metadata.region
+                || verified.view != metadata.view
+            {
                 return Err("Canvas changed while the screen capture was being read".into());
             }
             Ok::<_, String>((metadata, png_bytes))
@@ -724,7 +735,64 @@ fn resolve_capture(
         surface_id: params.surface_id.clone(),
         region,
         view,
+        capture_chrome: snapshot.capture_chrome,
     })
+}
+
+fn verify_surface_chrome(
+    png_bytes: &[u8],
+    region: dock_core::layout::Rect,
+    chrome: control::CaptureChromeSnapshot,
+) -> Result<(), String> {
+    let image = image::load_from_memory_with_format(png_bytes, image::ImageFormat::Png)
+        .map_err(|error| format!("Captured PNG is invalid: {error}"))?
+        .to_rgba8();
+    let scale_x = image.width() as f32 / region.width.max(1) as f32;
+    let scale_y = image.height() as f32 / region.height.max(1) as f32;
+    let sample = |logical_x: f32, logical_y: f32| -> [u8; 3] {
+        let center_x = (logical_x * scale_x).round() as i32;
+        let center_y = (logical_y * scale_y).round() as i32;
+        let radius = ((2.0 * scale_x.min(scale_y)).round() as i32).max(1);
+        let mut total = [0_u32; 3];
+        let mut count = 0_u32;
+        for y in center_y - radius..=center_y + radius {
+            for x in center_x - radius..=center_x + radius {
+                if x >= 0 && y >= 0 && x < image.width() as i32 && y < image.height() as i32 {
+                    let pixel = image.get_pixel(x as u32, y as u32).0;
+                    for channel in 0..3 {
+                        total[channel] += u32::from(pixel[channel]);
+                    }
+                    count += 1;
+                }
+            }
+        }
+        if count == 0 {
+            return [0; 3];
+        }
+        [
+            (total[0] / count) as u8,
+            (total[1] / count) as u8,
+            (total[2] / count) as u8,
+        ]
+    };
+    let observed = [sample(12.5, 14.0), sample(30.5, 14.0), sample(48.5, 14.0)];
+    let expected = [chrome.danger, chrome.warning, chrome.success];
+    let matches = observed
+        .into_iter()
+        .zip(expected)
+        .all(|(actual, expected)| {
+            actual
+                .into_iter()
+                .zip(expected)
+                .all(|(actual, expected)| actual.abs_diff(expected) <= 56)
+        });
+    if !matches {
+        return Err(
+            "Captured pixels do not contain the requested Canvas surface chrome; the surface may be occluded or on another desktop"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 fn capture_region(region: dock_core::layout::Rect, request_id: &str) -> Result<Vec<u8>, String> {
@@ -1021,6 +1089,11 @@ mod tests {
                 bounds,
                 view,
             }],
+            capture_chrome: Some(control::CaptureChromeSnapshot {
+                danger: [240, 80, 90],
+                warning: [240, 190, 70],
+                success: [70, 210, 120],
+            }),
             active_indicators: Vec::new(),
             mesh: None,
             presence: None,
@@ -1121,6 +1194,65 @@ mod tests {
         assert_eq!(capture.region.height, 640);
     }
 
+    #[test]
+    fn surface_capture_verifies_existing_chrome_pixels() {
+        use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
+        use std::io::Cursor;
+
+        let chrome = control::CaptureChromeSnapshot {
+            danger: [240, 80, 90],
+            warning: [240, 190, 70],
+            success: [70, 210, 120],
+        };
+        let mut image = RgbaImage::from_pixel(200, 100, Rgba([20, 24, 30, 255]));
+        for (center, color) in [
+            (13, chrome.danger),
+            (31, chrome.warning),
+            (49, chrome.success),
+        ] {
+            for y in 10..=18 {
+                for x in center - 4..=center + 4 {
+                    image.put_pixel(x, y, Rgba([color[0], color[1], color[2], 255]));
+                }
+            }
+        }
+        let mut png = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(image)
+            .write_to(&mut png, ImageFormat::Png)
+            .unwrap();
+        verify_surface_chrome(
+            png.get_ref(),
+            dock_core::layout::Rect {
+                x: 0,
+                y: 0,
+                width: 200,
+                height: 100,
+            },
+            chrome,
+        )
+        .unwrap();
+
+        let wallpaper = RgbaImage::from_pixel(200, 100, Rgba([70, 80, 60, 255]));
+        let mut png = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(wallpaper)
+            .write_to(&mut png, ImageFormat::Png)
+            .unwrap();
+        assert!(
+            verify_surface_chrome(
+                png.get_ref(),
+                dock_core::layout::Rect {
+                    x: 0,
+                    y: 0,
+                    width: 200,
+                    height: 100,
+                },
+                chrome,
+            )
+            .unwrap_err()
+            .contains("surface chrome")
+        );
+    }
+
     #[tokio::test]
     async fn intent_tool_inspects_reconciles_and_applies_through_the_socket_boundary() {
         use crate::{Layout, Surface, SurfaceContent, ThemeRef};
@@ -1197,6 +1329,7 @@ mod tests {
                                         surfaces: Vec::new(),
                                         surface_bounds: Default::default(),
                                         views: Vec::new(),
+                                        capture_chrome: None,
                                         active_indicators: Vec::new(),
                                         mesh: None,
                                         presence: None,
