@@ -552,8 +552,52 @@ fn install_widget_api(lua: &Lua, read_theme: bool, theme: ModuleThemeTokens) -> 
             .map_err(lua_error)?;
     }
 
-    lua.globals().set("widget", widget).map_err(lua_error)
-}
+    lua.globals().set("widget", widget).map_err(lua_error)?;
+
+    let canvas: Table = lua.create_table().map_err(lua_error)?;
+    canvas
+        .set(
+            "events",
+            lua.create_function(|lua| {
+                let table = lua.create_table().map_err(lua_error)?;
+                Ok(mlua::Value::Table(table))
+            })
+            .map_err(lua_error)?,
+        )
+        .map_err(lua_error)?;
+    canvas
+        .set(
+            "webhook_post",
+            lua.create_function(|_, (url, payload): (String, String)| {
+                let result = std::process::Command::new("curl")
+                    .arg("-sS")
+                    .arg("-X")
+                    .arg("POST")
+                    .arg(&url)
+                    .arg("-H")
+                    .arg("Content-Type: application/json")
+                    .arg("-d")
+                    .arg(&payload)
+                    .arg("--max-time")
+                    .arg("10")
+                    .arg("--connect-timeout")
+                    .arg("5")
+                    .output();
+                match result {
+                    Ok(output) => Ok(format!(
+                        "ok status={} body={}",
+                        output.status,
+                        String::from_utf8_lossy(&output.stdout)
+                    )),
+                    Err(error) => Err(mlua::Error::RuntimeError(format!(
+                        "webhook failed: {error}"
+                    ))),
+                }
+            })
+            .map_err(lua_error)?,
+        )
+        .map_err(lua_error)?;
+    lua.globals().set("canvas", canvas).map_err(lua_error)
 
 fn widget_set_text(lua: &Lua, text: &str) -> Result<mlua::Value> {
     let table = lua.create_table().map_err(lua_error)?;

@@ -23,7 +23,8 @@ use dock_core::{Catalog, ProjectTheme, ThemePalette, desktop::WallpaperRequest, 
 use iced::mouse;
 use iced::widget::canvas::{Canvas, Geometry};
 use iced::widget::{
-    canvas, container, image as image_widget, markdown, row, scrollable, space, stack, text,
+    button, canvas, container, image as image_widget, markdown, row, scrollable, space, stack, text,
+    tooltip,
 };
 use iced::{
     Color, ContentFit, Element, Length, Point, Rectangle, Renderer, Size, Subscription, Task, Theme,
@@ -153,6 +154,7 @@ enum Message {
     WindowReady(Option<iced::window::Id>),
     WindowEvent(iced::window::Event),
     MouseEvent(iced::mouse::Event),
+    RestoreSurface(String),
     ScaleFactorChanged(f32),
     ContentLoaded {
         pending: Box<Pending>,
@@ -251,6 +253,7 @@ struct App {
     transition: Option<transition::Transition>,
     workspaces: BTreeMap<String, WorkspaceDocument>,
     background_assets: BTreeMap<String, iced::widget::image::Handle>,
+    events: Vec<String>,
     screensaver_settings: ScreensaverSettings,
     screensaver_clock: screensaver::FrameClock,
     screensaver_index: usize,
@@ -318,6 +321,7 @@ impl App {
             transition: None,
             workspaces: BTreeMap::new(),
             background_assets: BTreeMap::new(),
+            events: Vec::new(),
             screensaver_settings: ScreensaverSettings::default(),
             screensaver_clock: screensaver::FrameClock::new(
                 ScreensaverSettings::default().max_fps,
@@ -455,6 +459,22 @@ impl App {
                 self.handle_mouse(event);
                 Task::none()
             }
+            Message::RestoreSurface(surface_id) => {
+                if self.minimized_surfaces.remove(&surface_id) {
+                    self.start_transition();
+                    self.apply_interaction_intents(vec![
+                        InteractionIntent::Focus {
+                            surface_id: surface_id.clone(),
+                        },
+                        InteractionIntent::PromoteToFront {
+                            surface_id: surface_id.clone(),
+                        },
+                    ]);
+                    self.status = format!("Restored {surface_id}.");
+                    self.emit_event(format!("surface_restored {surface_id}"));
+                }
+                Task::none()
+            }
             Message::ScaleFactorChanged(scale) => {
                 self.scale_factor = f64::from(scale);
                 self.replan_rasters();
@@ -523,6 +543,7 @@ impl App {
                         self.rebuild_stack();
                         self.bump();
                         self.status = format!("Opened {}.", loaded.snapshot.title);
+                        self.emit_event(format!("surface_opened {}", loaded.snapshot.id));
                         self.answer(
                             pending,
                             Outcome::Ok {
@@ -1240,6 +1261,7 @@ impl App {
                     ),
                     Err(failure) => self.fail(pending, failure),
                 }
+                self.emit_event("background_changed theme".to_string());
                 Task::none()
             }
             Command::OpenDataViz {
@@ -1344,6 +1366,7 @@ impl App {
                         self.document.layout = Layout::Canvas { placements };
                         self.bump();
                         self.status = format!("Opened data viz surface {surface_id}.");
+                        self.emit_event(format!("surface_opened {surface_id}"));
                         self.answer(
                             pending,
                             Outcome::Ok {
@@ -1557,6 +1580,14 @@ impl App {
                 measured_fps: self.screensaver_clock.measured_fps(),
             },
             workspaces: self.workspaces.keys().cloned().collect(),
+            events: self.events.clone(),
+        }
+    }
+
+    fn emit_event(&mut self, event: impl Into<String>) {
+        self.events.push(event.into());
+        if self.events.len() > 100 {
+            self.events.remove(0);
         }
     }
 
@@ -1605,8 +1636,8 @@ impl App {
         let phase = match event {
             Event::CursorMoved { position } => {
                 self.cursor = Some(LogicalPoint {
-                    x: f64::from(position.x) - f64::from(self.frame.x),
-                    y: f64::from(position.y) - f64::from(self.frame.y),
+                    x: f64::from(position.x),
+                    y: f64::from(position.y),
                 });
                 self.primary_pointer_down.then_some(PointerPhase::Move)
             }
@@ -1647,6 +1678,7 @@ impl App {
         };
         placements
             .iter()
+            .filter(|placement| !self.minimized_surfaces.contains(&placement.surface_id))
             .map(|placement| SurfaceGeometry {
                 surface_id: placement.surface_id.clone(),
                 bounds: denormalize(placement.bounds, self.frame),
@@ -1661,10 +1693,9 @@ impl App {
         let Layout::Canvas { placements } = &self.document.layout else {
             return None;
         };
-        for placement in placements.iter().rev() {
-            if self.minimized_surfaces.contains(&placement.surface_id) {
-                continue;
-            }
+        let mut placements = placements.iter().collect::<Vec<_>>();
+        placements.sort_by_key(|placement| std::cmp::Reverse(placement.layer));
+        for placement in placements {
             let bounds = denormalize(placement.bounds, frame);
             let top = bounds.y;
             let bottom = top + SURFACE_CONTROL_BAR_HEIGHT;
@@ -1788,6 +1819,7 @@ impl App {
         self.reset_background_animation();
         self.bump();
         self.status = "Canvas background updated.".into();
+        self.emit_event("background_changed image".to_string());
         Ok(())
     }
 
@@ -2070,10 +2102,97 @@ impl App {
             left: 8.0,
         })
         .width(Length::Fill)
-        .height(Length::Fill)
+        .height(Length::Fixed(SURFACE_CONTROL_BAR_HEIGHT as f32))
         .align_x(iced::alignment::Horizontal::Left)
         .align_y(iced::alignment::Vertical::Top)
+        .style(move |_| container::Style {
+            background: Some(Color::from_rgba8(
+                palette.surface[0],
+                palette.surface[1],
+                palette.surface[2],
+                0.78,
+            ).into()),
+            border: iced::Border {
+                color: Color::from_rgba8(
+                    palette.border[0],
+                    palette.border[1],
+                    palette.border[2],
+                    0.78,
+                ),
+                width: 1.0,
+                radius: 8.0.into(),
+            },
+            ..Default::default()
+        })
         .into()
+    }
+
+    fn minimized_dock(&self) -> Option<Element<'_, Message>> {
+        if self.minimized_surfaces.is_empty() {
+            return None;
+        }
+        let palette = self.presented_palette();
+        let items = self
+            .document
+            .surfaces
+            .iter()
+            .filter(|surface| self.minimized_surfaces.contains(&surface.id))
+            .map(|surface| {
+                let initial = surface
+                    .title
+                    .chars()
+                    .find(|character| character.is_alphanumeric())
+                    .unwrap_or('•')
+                    .to_uppercase()
+                    .to_string();
+                tooltip(
+                    button(text(initial).size(14))
+                        .width(Length::Fixed(36.0))
+                        .height(Length::Fixed(36.0))
+                        .padding(0)
+                        .on_press(Message::RestoreSurface(surface.id.clone()))
+                        .style(button::secondary),
+                    text(surface.title.clone()).size(12),
+                    tooltip::Position::Top,
+                )
+                .into()
+            })
+            .collect::<Vec<Element<'_, Message>>>();
+        let dock = container(row(items).spacing(8))
+            .padding(8)
+            .style(move |_| container::Style {
+                background: Some(Color::from_rgba8(
+                    palette.surface[0],
+                    palette.surface[1],
+                    palette.surface[2],
+                    0.82,
+                ).into()),
+                border: iced::Border {
+                    color: Color::from_rgba8(
+                        palette.border[0],
+                        palette.border[1],
+                        palette.border[2],
+                        0.72,
+                    ),
+                    width: 1.0,
+                    radius: 14.0.into(),
+                },
+                shadow: iced::Shadow {
+                    color: Color::from_rgba8(0, 0, 0, 0.32),
+                    offset: iced::Vector::new(0.0, 8.0),
+                    blur_radius: 24.0,
+                },
+                ..Default::default()
+            });
+        Some(
+            container(dock)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding(18)
+                .align_x(iced::alignment::Horizontal::Center)
+                .align_y(iced::alignment::Vertical::Bottom)
+                .into(),
+        )
     }
 
     fn replan_rasters(&mut self) {
@@ -2191,9 +2310,32 @@ impl App {
                             )
                         };
                         let content = self.surface_widget(surface, Length::Fill, Length::Fill);
+                        let focused = self.document.focused_surface_id.as_deref()
+                            == Some(placement.surface_id.as_str());
+                        let edge = if focused {
+                            color(palette.primary)
+                        } else {
+                            border_color
+                        };
                         let plane = container(stack(vec![content, self.surface_controls()]))
                             .width(Length::Fixed(bounds.width as f32))
-                            .height(Length::Fixed(bounds.height as f32));
+                            .height(Length::Fixed(bounds.height as f32))
+                            .style(move |_| container::Style {
+                                border: iced::Border {
+                                    color: Color {
+                                        a: if focused { 0.88 } else { 0.62 },
+                                        ..edge
+                                    },
+                                    width: if focused { 1.5 } else { 1.0 },
+                                    radius: 9.0.into(),
+                                },
+                                shadow: iced::Shadow {
+                                    color: Color::from_rgba8(0, 0, 0, if focused { 0.38 } else { 0.24 }),
+                                    offset: iced::Vector::new(0.0, if focused { 8.0 } else { 5.0 }),
+                                    blur_radius: if focused { 24.0 } else { 16.0 },
+                                },
+                                ..Default::default()
+                            });
                         Some(
                             container(plane)
                                 .width(Length::Fill)
@@ -2278,6 +2420,9 @@ impl App {
             }
         }
         layers.push(content);
+        if let Some(dock) = self.minimized_dock() {
+            layers.push(dock);
+        }
         if self.is_leftmost_surface() {
             let signature = container(text("FPL").size(13).color(Color::WHITE))
                 .padding([8, 12])

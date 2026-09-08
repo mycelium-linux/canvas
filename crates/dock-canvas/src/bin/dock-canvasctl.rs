@@ -80,6 +80,31 @@ fn handle_line(line: &str) -> Result<(), String> {
     if tokens[0] == "workspace" {
         return handle_workspace(&tokens);
     }
+    if tokens[0] == "events" {
+        let req = ControlRequest {
+            schema_version: CONTROL_VERSION,
+            request_id: format!("events-{}", id()),
+            expected_revision: None,
+            command: Command::Inspect,
+        };
+        let reply = control::send(&req)?;
+        if let Outcome::Ok {
+            receipt: Receipt::Snapshot { snapshot },
+        } = &reply.outcome
+        {
+            if snapshot.events.is_empty() {
+                println!("No events.");
+            } else {
+                println!("Recent events:");
+                for event in &snapshot.events {
+                    println!("  {event}");
+                }
+            }
+        } else {
+            println!("{}", text::format_reply(&reply));
+        }
+        return Ok(());
+    }
 
     let mut request = match text::parse_line(line) {
         Ok(req) => req,

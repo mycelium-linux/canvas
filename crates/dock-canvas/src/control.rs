@@ -554,6 +554,8 @@ pub struct RuntimeSnapshot {
     pub screensaver: ScreensaverSnapshot,
     #[serde(default)]
     pub workspaces: Vec<String>,
+    #[serde(default)]
+    pub events: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -1092,14 +1094,15 @@ pub mod text {
                         snapshot.active_indicators.len()
                     ),
                     Receipt::Snapshot { snapshot } => format!(
-                        "project={} frame={},{},{},{} surfaces={} indicators={}",
+                        "project={} frame={},{},{},{} surfaces={} indicators={} events={}",
                         snapshot.project_id,
                         snapshot.frame.x,
                         snapshot.frame.y,
                         snapshot.frame.width,
                         snapshot.frame.height,
                         snapshot.surfaces.len(),
-                        snapshot.active_indicators.len()
+                        snapshot.active_indicators.len(),
+                        snapshot.events.len()
                     ),
                     Receipt::DocumentApplied { workspace_id } => {
                         format!("document={}", workspace_id)
