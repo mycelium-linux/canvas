@@ -15,18 +15,18 @@ use dock_canvas::media::{
     plan_pdf_page, plan_raster,
 };
 use dock_canvas::{
-    AssetRef, Layout, NodeContent, NormalizedRect, Placement, SCHEMA_VERSION, Scene, SceneNode,
-    Surface, SurfaceContent, ThemeRef, WorkspaceDocument,
+    AssetRef, Background, BackgroundFit, BackgroundShader, GradientStop, Layout, NodeContent,
+    NormalizedRect, PatchOperation, Placement, SCHEMA_VERSION, Scene, SceneNode, Surface,
+    SurfaceContent, ThemeRef, WorkspaceDocument, WorkspacePatch,
 };
 use dock_core::{Catalog, ProjectTheme, ThemePalette, desktop::WallpaperRequest, layout::Rect};
+use iced::mouse;
+use iced::widget::canvas::{Canvas, Geometry};
 use iced::widget::{
     canvas, container, image as image_widget, markdown, row, scrollable, space, stack, text,
 };
-use iced::widget::canvas::{Canvas, Geometry};
-use iced::mouse;
 use iced::{
-    Color, ContentFit, Element, Length, Point, Rectangle, Renderer, Size, Subscription, Task,
-    Theme,
+    Color, ContentFit, Element, Length, Point, Rectangle, Renderer, Size, Subscription, Task, Theme,
 };
 use image::{ImageReader, Limits};
 use sha2::{Digest, Sha256};
@@ -142,6 +142,12 @@ type ContentLoadResult = Result<LoadedContent, Failure>;
 type PageLoadResult = Result<(iced::widget::image::Handle, [u32; 2], MediaPlan), Failure>;
 
 #[derive(Debug, Clone)]
+struct LoadedBackground {
+    asset: AssetRef,
+    handle: iced::widget::image::Handle,
+}
+
+#[derive(Debug, Clone)]
 enum Message {
     Tick,
     WindowReady(Option<iced::window::Id>),
@@ -157,6 +163,11 @@ enum Message {
         surface_id: String,
         page_index: u32,
         result: Box<PageLoadResult>,
+    },
+    BackgroundLoaded {
+        pending: Box<Pending>,
+        base_document_revision: u64,
+        result: Result<LoadedBackground, Failure>,
     },
     WallpaperFinished {
         pending: Box<Pending>,
@@ -239,6 +250,7 @@ struct App {
     maximized_surfaces: BTreeSet<String>,
     transition: Option<transition::Transition>,
     workspaces: BTreeMap<String, WorkspaceDocument>,
+    background_assets: BTreeMap<String, iced::widget::image::Handle>,
     screensaver_settings: ScreensaverSettings,
     screensaver_clock: screensaver::FrameClock,
     screensaver_index: usize,
@@ -305,6 +317,7 @@ impl App {
             maximized_surfaces: BTreeSet::new(),
             transition: None,
             workspaces: BTreeMap::new(),
+            background_assets: BTreeMap::new(),
             screensaver_settings: ScreensaverSettings::default(),
             screensaver_clock: screensaver::FrameClock::new(
                 ScreensaverSettings::default().max_fps,
@@ -1135,6 +1148,38 @@ impl App {
                     Task::none()
                 }
             }
+            Command::SetBackground { path } => {
+                match canonical_regular_file(&path) {
+                    Ok(abs) => {
+                        self.background = Some(iced::widget::image::Handle::from_path(abs.clone()));
+                        self.bump();
+                        self.status = format!("Background image set: {}", abs.display());
+                    }
+                    Err(failure) => {
+                        self.fail(pending, failure);
+                        return Task::none();
+                    }
+                }
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::FrameSet { frame: self.frame },
+                    },
+                );
+                Task::none()
+            }
+            Command::ClearBackground => {
+                self.background = None;
+                self.bump();
+                self.status = "Background image cleared.".into();
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::FrameSet { frame: self.frame },
+                    },
+                );
+                Task::none()
+            }
             Command::OpenDataViz {
                 surface_id,
                 file,
@@ -1145,7 +1190,11 @@ impl App {
                     Ok(data) => {
                         let snapshot = SurfaceSnapshot {
                             id: surface_id.clone(),
-                            title: file.file_name().unwrap_or_default().to_string_lossy().into(),
+                            title: file
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into(),
                             content: ContentKind::DataViz,
                             asset_sha256: None,
                             page_index: None,
@@ -1169,13 +1218,19 @@ impl App {
                                     width: 1,
                                     height: 1,
                                 }),
-                                target_px: PixelSize { width: 1, height: 1 },
+                                target_px: PixelSize {
+                                    width: 1,
+                                    height: 1,
+                                },
                                 display_logical: self.media_viewport(),
                                 scale_factor: self.scale_factor,
                                 cache_key: MediaCacheKey {
                                     source_id: format!("dataviz:{surface_id}"),
                                     variant: MediaVariant::Raster,
-                                    pixel_size: PixelSize { width: 1, height: 1 },
+                                    pixel_size: PixelSize {
+                                        width: 1,
+                                        height: 1,
+                                    },
                                 },
                             },
                             upload_pixels: [1, 1],
@@ -1202,7 +1257,12 @@ impl App {
                             Layout::Canvas { placements } => placements.clone(),
                             Layout::Surface { surface_id: sid } => vec![Placement {
                                 surface_id: sid.clone(),
-                                bounds: NormalizedRect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 },
+                                bounds: NormalizedRect {
+                                    x: 0.0,
+                                    y: 0.0,
+                                    width: 1.0,
+                                    height: 1.0,
+                                },
                                 layer: 0,
                             }],
                             _ => Vec::new(),
@@ -1210,7 +1270,12 @@ impl App {
                         if !placements.iter().any(|p| p.surface_id == surface_id) {
                             placements.push(Placement {
                                 surface_id: surface_id.clone(),
-                                bounds: NormalizedRect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 },
+                                bounds: NormalizedRect {
+                                    x: 0.0,
+                                    y: 0.0,
+                                    width: 1.0,
+                                    height: 1.0,
+                                },
                                 layer: placements.len() as i32,
                             });
                         }
@@ -1954,11 +2019,16 @@ impl App {
 
     fn view(&self) -> Element<'_, Message> {
         let palette = self.presented_palette();
-        let background = iced::Gradient::Linear(
-            iced::gradient::Linear::new(core::f32::consts::PI / 2.0)
-                .add_stop(0.0, color(palette.background))
-                .add_stop(1.0, color(palette.background_strong)),
-        );
+        let background: iced::Background = if self.background.is_some() {
+            iced::Background::Color(Color::TRANSPARENT)
+        } else {
+            iced::Gradient::Linear(
+                iced::gradient::Linear::new(core::f32::consts::PI / 2.0)
+                    .add_stop(0.0, color(palette.background))
+                    .add_stop(1.0, color(palette.background_strong)),
+            )
+            .into()
+        };
         let surface_color = color(palette.surface);
         let border_color = color(palette.border);
         let muted = color(palette.text_muted);
@@ -2061,6 +2131,16 @@ impl App {
         };
 
         let mut layers: Vec<Element<'_, Message>> = Vec::new();
+        if let Some(handle) = &self.background {
+            layers.insert(
+                0,
+                image_widget(handle.clone())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .content_fit(iced::ContentFit::Cover)
+                    .into(),
+            );
+        }
         if self.screensaver_settings.enabled {
             layers.push(screensaver::view(
                 self.screensaver_index,
@@ -2236,7 +2316,7 @@ impl App {
             .width(Length::Fill)
             .height(Length::Fill)
             .style(move |_| container::Style {
-                background: Some(background.into()),
+                background: Some(background),
                 ..Default::default()
             })
             .into()
@@ -2427,8 +2507,14 @@ fn parse_csv_with_sep(content: &str, sep: char) -> Result<Vec<(f32, f32)>, Strin
         if parts.len() < 2 {
             continue;
         }
-        let x: f32 = parts[0].trim().parse().map_err(|_| format!("invalid x: {}", parts[0]))?;
-        let y: f32 = parts[1].trim().parse().map_err(|_| format!("invalid y: {}", parts[1]))?;
+        let x: f32 = parts[0]
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid x: {}", parts[0]))?;
+        let y: f32 = parts[1]
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid y: {}", parts[1]))?;
         data.push((x, y));
     }
     if data.is_empty() {
@@ -2479,14 +2565,31 @@ impl<Message> canvas::Program<Message> for ChartProgram {
         }
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         let margin = 40.0f32;
-        let stroke = canvas::Stroke::default()
-            .with_width(1.0)
-            .with_color(Color { a: 0.15, ..self.axis_color });
+        let stroke = canvas::Stroke::default().with_width(1.0).with_color(Color {
+            a: 0.15,
+            ..self.axis_color
+        });
 
-        let min_x = self.data.iter().map(|(x, _)| *x).fold(f32::INFINITY, f32::min);
-        let max_x = self.data.iter().map(|(x, _)| *x).fold(f32::NEG_INFINITY, f32::max);
-        let min_y = self.data.iter().map(|(_, y)| *y).fold(f32::INFINITY, f32::min);
-        let max_y = self.data.iter().map(|(_, y)| *y).fold(f32::NEG_INFINITY, f32::max);
+        let min_x = self
+            .data
+            .iter()
+            .map(|(x, _)| *x)
+            .fold(f32::INFINITY, f32::min);
+        let max_x = self
+            .data
+            .iter()
+            .map(|(x, _)| *x)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let min_y = self
+            .data
+            .iter()
+            .map(|(_, y)| *y)
+            .fold(f32::INFINITY, f32::min);
+        let max_y = self
+            .data
+            .iter()
+            .map(|(_, y)| *y)
+            .fold(f32::NEG_INFINITY, f32::max);
 
         let plot_w = bounds.width - 2.0 * margin;
         let plot_h = bounds.height - 2.0 * margin;

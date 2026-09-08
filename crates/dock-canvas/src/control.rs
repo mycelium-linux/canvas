@@ -91,6 +91,10 @@ pub enum Command {
         settings: ScreensaverSettings,
     },
     Shutdown,
+    SetBackground {
+        path: PathBuf,
+    },
+    ClearBackground,
     WorkspaceSave {
         name: String,
     },
@@ -663,7 +667,9 @@ impl ControlRequest {
             | Command::WorkspaceSave { .. }
             | Command::WorkspaceSwitch { .. }
             | Command::ScreensaverShader { .. }
-            | Command::OpenDataViz { .. } => {}
+            | Command::OpenDataViz { .. }
+            | Command::SetBackground { .. }
+            | Command::ClearBackground => {}
         }
         Ok(())
     }
@@ -898,6 +904,13 @@ pub mod text {
                     chart_type,
                 })
             }
+            "bg-image" | "bgimg" => {
+                req(tokens, 2, "bg-image <path>")?;
+                Ok(Command::SetBackground {
+                    path: std::path::PathBuf::from(&tokens[1]),
+                })
+            }
+            "bg-clear" | "bgclear" | "bg-default" => Ok(Command::ClearBackground),
             "bg" | "theme" => {
                 req(tokens, 2, "bg <project_id>")?;
                 if !identifier(&tokens[1]) {
