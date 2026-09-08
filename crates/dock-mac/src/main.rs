@@ -1068,6 +1068,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ["orchestrate", "list"] => ("projects_list", serde_json::json!({})),
             ["orchestrate", "displays"] => ("displays_list", serde_json::json!({})),
             ["orchestrate", "workspaces"] => ("workspaces_list", serde_json::json!({})),
+            ["orchestrate", "canvas-sync"] => {
+                ("canvas_workspaces_sync", serde_json::json!({}))
+            }
+            ["orchestrate", "canvas-switch", project] => (
+                "canvas_workspace_switch",
+                serde_json::json!({"project_id":project}),
+            ),
             ["orchestrate", "presence"] => ("presence_route", serde_json::json!({})),
             ["orchestrate", "resources", project] => (
                 "project_resources",
@@ -1094,7 +1101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 serde_json::json!({"project_id":project,"resource_id":resource}),
             ),
             _ => {
-                return Err("usage: dock-mac orchestrate list | displays | workspaces | presence | resources PROJECT | recall PROJECT [primary|presence] | activate PROJECT [primary|presence] | open PROJECT RESOURCE".into())
+                return Err("usage: dock-mac orchestrate list | displays | workspaces | canvas-sync | canvas-switch PROJECT | presence | resources PROJECT | recall PROJECT [primary|presence] | activate PROJECT [primary|presence] | open PROJECT RESOURCE".into())
             }
         };
         let result = dock_mac::mcp::execute(tool, &arguments)?;

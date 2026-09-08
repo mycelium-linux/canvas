@@ -3,8 +3,8 @@ use dock_canvas::chart::{ChartDocument, ChartKind};
 use dock_canvas::control::{
     CONTROL_VERSION, Command, ContentKind, ControlReply, ControlRequest, ErrorCode,
     MAX_ACTIVE_INDICATORS, MAX_CONTROL_MESSAGE, MeshSnapshot, Navigation, Outcome, PresencePreview,
-    PresenceSnapshot, Receipt, RuntimeSnapshot, ScreensaverSettings, ScreensaverSnapshot,
-    StatusIndicator, SurfaceSnapshot,
+    PresenceSnapshot, ProjectWorkspaceSnapshot, ProjectWorkspaceSpec, Receipt, RuntimeSnapshot,
+    ScreensaverSettings, ScreensaverSnapshot, StatusIndicator, SurfaceSnapshot,
 };
 use dock_canvas::hud;
 use dock_canvas::interaction::{
@@ -296,10 +296,16 @@ impl App {
         frame: Rect,
         workspace_store_path: PathBuf,
     ) -> Result<Self, String> {
-        let catalog = Catalog::bundled().expect("bundled project catalog must remain valid");
-        let workspaces = workspace_store::load(&workspace_store_path, &catalog)
+        let base_catalog = Catalog::bundled().expect("bundled project catalog must remain valid");
+        let workspaces = workspace_store::load(&workspace_store_path, &base_catalog)
             .map_err(|error| error.to_string())?;
-        let project_id = catalog.projects[0].id.clone();
+        let catalog = workspaces
+            .effective_catalog(&base_catalog)
+            .map_err(|error| error.to_string())?;
+        let project_id = workspaces
+            .active_project_id
+            .clone()
+            .unwrap_or_else(|| catalog.projects[0].id.clone());
         let restored_document = workspaces.get(&project_id).cloned();
         let active_project_workspace = restored_document
             .as_ref()
@@ -1280,6 +1286,7 @@ impl App {
                 }
                 let mut next = self.workspaces.clone();
                 next.upsert(self.document.clone());
+                next.active_project_id = Some(name.clone());
                 if let Err(error) =
                     workspace_store::save(&self.workspace_store_path, &next, &self.catalog)
                 {
@@ -1306,6 +1313,7 @@ impl App {
                     {
                         next.upsert(self.document.clone());
                     }
+                    next.active_project_id = Some(name.clone());
                     if let Err(error) =
                         workspace_store::save(&self.workspace_store_path, &next, &self.catalog)
                     {
@@ -1345,6 +1353,50 @@ impl App {
                     );
                     Task::none()
                 }
+            }
+            Command::WorkspaceSync { projects } => {
+                let base_catalog =
+                    Catalog::bundled().expect("bundled project catalog must remain valid");
+                let mut next = self.workspaces.clone();
+                next.upsert(self.document.clone());
+                next.active_project_id = Some(self.document.project_id.clone());
+                let report = match next.sync(projects, &base_catalog) {
+                    Ok(report) => report,
+                    Err(error) => {
+                        self.fail(pending, Failure::invalid(error.to_string()));
+                        return Task::none();
+                    }
+                };
+                let catalog = match next.effective_catalog(&base_catalog) {
+                    Ok(catalog) => catalog,
+                    Err(error) => {
+                        self.fail(pending, Failure::invalid(error.to_string()));
+                        return Task::none();
+                    }
+                };
+                if let Err(error) =
+                    workspace_store::save(&self.workspace_store_path, &next, &base_catalog)
+                {
+                    self.fail(pending, Failure::resource(error.to_string()));
+                    return Task::none();
+                }
+                self.workspaces = next;
+                self.catalog = catalog;
+                self.active_project_workspace = Some(self.document.project_id.clone());
+                self.bump();
+                self.status = format!("Synchronized {} project workspaces.", report.total);
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::WorkspacesSynced {
+                            created: report.created,
+                            updated: report.updated,
+                            preserved: report.preserved,
+                            total: report.total,
+                        },
+                    },
+                );
+                Task::none()
             }
             Command::SetBackground { path } => {
                 let base_document_revision = self.document.revision;
@@ -1768,6 +1820,28 @@ impl App {
                 measured_fps: self.screensaver_clock.measured_fps(),
             },
             workspaces: self.workspaces.project_ids().map(str::to_owned).collect(),
+            workspace_summaries: self
+                .workspaces
+                .projects
+                .iter()
+                .filter_map(|(project_id, document)| {
+                    let project = self.catalog.project(project_id).ok()?;
+                    Some(ProjectWorkspaceSnapshot {
+                        project_id: project_id.clone(),
+                        name: project.name.clone(),
+                        status: self
+                            .workspaces
+                            .definitions
+                            .get(project_id)
+                            .map(|definition| definition.status.clone())
+                            .unwrap_or_else(|| "active".into()),
+                        surface_count: document.surfaces.len(),
+                        active: self.document.project_id == *project_id,
+                        theme: project.theme,
+                        background: document.background.clone(),
+                    })
+                })
+                .collect(),
             minimized_surface_ids: self.minimized_surfaces.iter().cloned().collect(),
             maximized_surface_ids: self.maximized_surfaces.iter().cloned().collect(),
             events: self.events.clone(),
@@ -5548,6 +5622,67 @@ mod tests {
         if let Some(parent) = app.workspace_store_path.parent() {
             let _ = std::fs::remove_dir_all(parent);
         }
+    }
+
+    #[test]
+    fn workspace_sync_is_idempotent_and_exposes_machine_readable_summaries() {
+        let mut app = test_app();
+        app.document.background = Background::Solid {
+            color: [8, 16, 24, 255],
+        };
+        let projects = vec![ProjectWorkspaceSpec {
+            project_id: "gh-1288853134".into(),
+            name: "ohmOS".into(),
+            status: "paused".into(),
+            theme: dock_core::ThemeSelection::Coherence {
+                mode: dock_core::ThemeMode::Dark,
+                accent: dock_core::Accent::Success,
+            },
+        }];
+        let first = execute(
+            &mut app,
+            "sync-projects",
+            Command::WorkspaceSync {
+                projects: projects.clone(),
+            },
+        );
+        assert!(matches!(
+            first.outcome,
+            Outcome::Ok {
+                receipt: Receipt::WorkspacesSynced { created: 1, .. }
+            }
+        ));
+        let second = execute(
+            &mut app,
+            "sync-projects-again",
+            Command::WorkspaceSync { projects },
+        );
+        assert!(matches!(
+            second.outcome,
+            Outcome::Ok {
+                receipt: Receipt::WorkspacesSynced {
+                    created: 0,
+                    updated: 0,
+                    ..
+                }
+            }
+        ));
+        let summary = app
+            .snapshot()
+            .workspace_summaries
+            .into_iter()
+            .find(|workspace| workspace.project_id == "gh-1288853134")
+            .unwrap();
+        assert_eq!(summary.name, "ohmOS");
+        assert_eq!(summary.status, "paused");
+        assert_eq!(summary.surface_count, 0);
+        assert!(!summary.active);
+        assert_eq!(
+            app.workspaces.get("dock").unwrap().background,
+            Background::Solid {
+                color: [8, 16, 24, 255]
+            }
+        );
     }
 
     #[test]

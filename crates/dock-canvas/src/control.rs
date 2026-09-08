@@ -1,7 +1,8 @@
 //! Bounded control protocol for a long-lived Canvas runtime.
 
-use crate::{ThemeRef, WorkspaceDocument, WorkspacePatch};
+use crate::{Background, ThemeRef, WorkspaceDocument, WorkspacePatch};
 use dock_core::{
+    ThemeSelection,
     desktop::{Wallpaper, WallpaperReceipt, WallpaperRequest},
     layout::Rect,
 };
@@ -16,6 +17,7 @@ pub const MAX_ACTIVE_INDICATORS: usize = 16;
 pub const MAX_MESH_NODES: usize = 8;
 pub const MAX_PRESENCE_OCCUPANTS: usize = 8;
 pub const MAX_PRESENCE_FACES: usize = 8;
+pub const MAX_PROJECT_WORKSPACES: usize = 1024;
 pub const DEFAULT_SCREENSAVER_FPS: u16 = 30;
 pub const MAX_SCREENSAVER_FPS: u16 = 60;
 const MAX_INDICATOR_TITLE_BYTES: usize = 128;
@@ -105,6 +107,9 @@ pub enum Command {
     WorkspaceSwitch {
         name: String,
     },
+    WorkspaceSync {
+        projects: Vec<ProjectWorkspaceSpec>,
+    },
     ScreensaverShader {
         index: usize,
     },
@@ -113,6 +118,34 @@ pub enum Command {
         file: PathBuf,
         chart_type: String,
     },
+}
+
+/// Public project metadata resolved by an authenticated catalog owner.
+///
+/// Canvas persists this bounded projection beside workspace documents. It does
+/// not contact Alfalfa or copy private project context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectWorkspaceSpec {
+    pub project_id: String,
+    pub name: String,
+    pub status: String,
+    pub theme: ThemeSelection,
+}
+
+impl ProjectWorkspaceSpec {
+    pub fn validate(&self) -> Result<(), String> {
+        if !identifier(&self.project_id) {
+            return Err("invalid project workspace id".into());
+        }
+        if !bounded_printable(&self.name, 256) {
+            return Err("project workspace name must contain 1-256 printable bytes".into());
+        }
+        if !bounded_printable(&self.status, 64) {
+            return Err("project workspace status must contain 1-64 printable bytes".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -532,6 +565,12 @@ pub enum Receipt {
     WorkspaceSwitched {
         name: String,
     },
+    WorkspacesSynced {
+        created: usize,
+        updated: usize,
+        preserved: usize,
+        total: usize,
+    },
     ScreensaverShaderSet {
         index: usize,
         name: String,
@@ -559,6 +598,8 @@ pub struct RuntimeSnapshot {
     #[serde(default)]
     pub workspaces: Vec<String>,
     #[serde(default)]
+    pub workspace_summaries: Vec<ProjectWorkspaceSnapshot>,
+    #[serde(default)]
     pub minimized_surface_ids: Vec<String>,
     #[serde(default)]
     pub maximized_surface_ids: Vec<String>,
@@ -566,6 +607,18 @@ pub struct RuntimeSnapshot {
     pub events: Vec<String>,
     #[serde(default)]
     pub display_frames: Vec<Rect>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectWorkspaceSnapshot {
+    pub project_id: String,
+    pub name: String,
+    pub status: String,
+    pub surface_count: usize,
+    pub active: bool,
+    pub theme: ThemeSelection,
+    pub background: Background,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -670,6 +723,25 @@ impl ControlRequest {
             Command::SetPresence { presence } => presence.validate()?,
             Command::ShowPresencePreview { preview } => preview.validate()?,
             Command::SetScreensaver { settings } => settings.validate()?,
+            Command::WorkspaceSync { projects } => {
+                if projects.is_empty() || projects.len() > MAX_PROJECT_WORKSPACES {
+                    return Err(format!(
+                        "workspace sync must contain 1-{MAX_PROJECT_WORKSPACES} projects"
+                    ));
+                }
+                let mut ids = std::collections::BTreeSet::new();
+                for project in projects {
+                    project.validate()?;
+                    if !ids.insert(project.project_id.as_str()) {
+                        return Err("workspace sync contains duplicate project ids".into());
+                    }
+                }
+            }
+            Command::WorkspaceSave { name } | Command::WorkspaceSwitch { name } => {
+                if !identifier(name) {
+                    return Err("invalid project workspace id".into());
+                }
+            }
             Command::ApplyDocument { .. }
             | Command::ApplyPatch { .. }
             | Command::Inspect
@@ -677,8 +749,6 @@ impl ControlRequest {
             | Command::Focus
             | Command::DismissPresencePreview
             | Command::Shutdown
-            | Command::WorkspaceSave { .. }
-            | Command::WorkspaceSwitch { .. }
             | Command::ScreensaverShader { .. }
             | Command::OpenDataViz { .. }
             | Command::SetBackground { .. }
@@ -1171,6 +1241,14 @@ pub mod text {
                     Receipt::PresencePreviewDismissed => "preview dismissed".to_string(),
                     Receipt::WorkspaceSaved { name } => format!("saved={name}"),
                     Receipt::WorkspaceSwitched { name } => format!("switched={name}"),
+                    Receipt::WorkspacesSynced {
+                        created,
+                        updated,
+                        preserved,
+                        total,
+                    } => format!(
+                        "workspaces={total} created={created} updated={updated} preserved={preserved}"
+                    ),
                     Receipt::ScreensaverShaderSet { index, name } => {
                         format!("shader={index} ({name})")
                     }
@@ -1217,6 +1295,33 @@ mod tests {
             }
             .validate()
             .is_err()
+        );
+    }
+
+    #[test]
+    fn workspace_sync_requires_unique_bounded_project_definitions() {
+        let project = ProjectWorkspaceSpec {
+            project_id: "gh-1288853134".into(),
+            name: "ohmOS".into(),
+            status: "paused".into(),
+            theme: ThemeSelection::Coherence {
+                mode: dock_core::ThemeMode::Dark,
+                accent: dock_core::Accent::Success,
+            },
+        };
+        let request = |projects| ControlRequest {
+            schema_version: CONTROL_VERSION,
+            request_id: "sync-projects".into(),
+            expected_revision: Some(4),
+            command: Command::WorkspaceSync { projects },
+        };
+        request(vec![project.clone()]).validate().unwrap();
+        assert!(request(Vec::new()).validate().is_err());
+        assert!(
+            request(vec![project.clone(), project])
+                .validate()
+                .unwrap_err()
+                .contains("duplicate")
         );
     }
 

@@ -1,5 +1,11 @@
 //! Cross-project presentation MCP. Alfalfa owns project/resource identity;
 //! Dock resolves exact IDs and invokes existing Mac and Agora presentation APIs.
+use dock_canvas::control::{
+    self as canvas_control, Command as CanvasCommand, ControlRequest as CanvasRequest,
+    Outcome as CanvasOutcome, ProjectWorkspaceSpec, Receipt as CanvasReceipt, RuntimeSnapshot,
+    CONTROL_VERSION as CANVAS_CONTROL_VERSION, MAX_PROJECT_WORKSPACES,
+};
+use dock_core::{Accent, ThemeMode, ThemeSelection};
 use rmcp::{
     model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorData,
@@ -50,9 +56,21 @@ fn tools() -> Vec<Tool> {
         ),
         (
             "workspaces_list",
-            "List owner-authorized Alfalfa projects with saved local Mac window counts. Window titles and application details are omitted.",
+            "Synchronize Canvas with owner-authorized Alfalfa projects, then list full-desktop workspaces with project labels, surface counts, appearance, and saved local Mac window counts.",
             json!({}),
             vec![],
+        ),
+        (
+            "canvas_workspaces_sync",
+            "Create missing Canvas desktops from the owner-authorized Alfalfa catalog and refresh their public labels, status, and project themes. Existing layouts and backgrounds are preserved.",
+            json!({}),
+            vec![],
+        ),
+        (
+            "canvas_workspace_switch",
+            "Synchronize Canvas and switch its complete desktop to one exact Alfalfa project_id. The outgoing desktop remains saved for later recall.",
+            json!({"project_id":{"type":"string","maxLength":64}}),
+            vec!["project_id"],
         ),
         (
             "presence_route",
@@ -125,7 +143,11 @@ fn arguments(name: &str, args: &Value) -> Result<Arguments, String> {
         Some(_) => return Err("target must be primary or presence".into()),
     };
     match name {
-        "projects_list" | "displays_list" | "workspaces_list" | "presence_route"
+        "projects_list"
+        | "displays_list"
+        | "workspaces_list"
+        | "canvas_workspaces_sync"
+        | "presence_route"
             if object.is_empty() =>
         {
             Ok(Arguments::default())
@@ -134,7 +156,7 @@ fn arguments(name: &str, args: &Value) -> Result<Arguments, String> {
             project: Some(value("project_id", 64)?),
             ..Arguments::default()
         }),
-        "project_recall" | "workspace_activate" => Ok(Arguments {
+        "project_recall" | "workspace_activate" | "canvas_workspace_switch" => Ok(Arguments {
             project: Some(value("project_id", 64)?),
             target,
             ..Arguments::default()
@@ -151,7 +173,7 @@ fn arguments(name: &str, args: &Value) -> Result<Arguments, String> {
 fn project_summaries(value: &Value) -> Result<Vec<Value>, String> {
     let projects = value
         .as_array()
-        .filter(|projects| projects.len() <= 128)
+        .filter(|projects| projects.len() <= MAX_PROJECT_WORKSPACES)
         .ok_or("Alfalfa project catalog has an unsupported size or shape")?;
     let mut ids = BTreeSet::new();
     projects
@@ -180,6 +202,60 @@ fn project_summaries(value: &Value) -> Result<Vec<Value>, String> {
                 "status":status,
                 "purpose":purpose
             }))
+        })
+        .collect()
+}
+
+fn project_theme(entry: &Value) -> ThemeSelection {
+    match entry
+        .pointer("/appearance/colorway")
+        .and_then(Value::as_str)
+    {
+        Some("light") => ThemeSelection::Coherence {
+            mode: ThemeMode::Light,
+            accent: Accent::Brand,
+        },
+        Some("forest") => ThemeSelection::Coherence {
+            mode: ThemeMode::Dark,
+            accent: Accent::Success,
+        },
+        Some("navy") | Some("profile") => ThemeSelection::Coherence {
+            mode: ThemeMode::Dark,
+            accent: Accent::Info,
+        },
+        _ => ThemeSelection::Coherence {
+            mode: ThemeMode::Dark,
+            accent: Accent::Brand,
+        },
+    }
+}
+
+fn project_workspace_specs(value: &Value) -> Result<Vec<ProjectWorkspaceSpec>, String> {
+    let summaries = project_summaries(value)?;
+    let entries = value
+        .as_array()
+        .ok_or("Alfalfa project catalog has an unsupported shape")?;
+    summaries
+        .into_iter()
+        .zip(entries)
+        .map(|(summary, entry)| {
+            let spec = ProjectWorkspaceSpec {
+                project_id: summary["project_id"]
+                    .as_str()
+                    .ok_or("Projected project identity is missing")?
+                    .into(),
+                name: summary["name"]
+                    .as_str()
+                    .ok_or("Projected project name is missing")?
+                    .into(),
+                status: summary["status"]
+                    .as_str()
+                    .ok_or("Projected project status is missing")?
+                    .into(),
+                theme: project_theme(entry),
+            };
+            spec.validate()?;
+            Ok(spec)
         })
         .collect()
 }
@@ -269,18 +345,126 @@ fn target_area(target: Target) -> Result<(Option<super::Rect>, Option<Value>), S
     }
 }
 
+fn canvas_snapshot() -> Result<RuntimeSnapshot, String> {
+    let reply = canvas_control::send(&CanvasRequest {
+        schema_version: CANVAS_CONTROL_VERSION,
+        request_id: "dock-workspaces-inspect".into(),
+        expected_revision: None,
+        command: CanvasCommand::Inspect,
+    })?;
+    match reply.outcome {
+        CanvasOutcome::Ok {
+            receipt: CanvasReceipt::Snapshot { snapshot },
+        } => Ok(snapshot),
+        CanvasOutcome::Error { message, .. } => Err(message),
+        _ => Err("Canvas returned an unexpected inspection receipt".into()),
+    }
+}
+
+fn sync_canvas_projects(source: &Value) -> Result<Value, String> {
+    let projects = project_workspace_specs(source)?;
+    let revision = canvas_snapshot()?.revision;
+    let reply = canvas_control::send(&CanvasRequest {
+        schema_version: CANVAS_CONTROL_VERSION,
+        request_id: "dock-workspaces-sync".into(),
+        expected_revision: Some(revision),
+        command: CanvasCommand::WorkspaceSync { projects },
+    })?;
+    match reply.outcome {
+        CanvasOutcome::Ok {
+            receipt:
+                CanvasReceipt::WorkspacesSynced {
+                    created,
+                    updated,
+                    preserved,
+                    total,
+                },
+        } => Ok(json!({
+            "created":created,
+            "updated":updated,
+            "preserved":preserved,
+            "total":total,
+            "revision":reply.revision
+        })),
+        CanvasOutcome::Error { message, .. } => Err(message),
+        _ => Err("Canvas returned an unexpected workspace sync receipt".into()),
+    }
+}
+
+fn switch_canvas_workspace(source: &Value, project: &str) -> Result<Value, String> {
+    if !project_workspace_specs(source)?
+        .iter()
+        .any(|candidate| candidate.project_id == project)
+    {
+        return Err("Alfalfa project does not exist for Canvas recall".into());
+    }
+    let sync = sync_canvas_projects(source)?;
+    let revision = sync["revision"]
+        .as_u64()
+        .ok_or("Canvas sync omitted its revision")?;
+    let reply = canvas_control::send(&CanvasRequest {
+        schema_version: CANVAS_CONTROL_VERSION,
+        request_id: "dock-workspace-switch".into(),
+        expected_revision: Some(revision),
+        command: CanvasCommand::WorkspaceSwitch {
+            name: project.into(),
+        },
+    })?;
+    match reply.outcome {
+        CanvasOutcome::Ok {
+            receipt: CanvasReceipt::WorkspaceSwitched { name },
+        } if name == project => {
+            let snapshot = canvas_snapshot()?;
+            let workspace = snapshot
+                .workspace_summaries
+                .into_iter()
+                .find(|workspace| workspace.project_id == project)
+                .ok_or("Canvas switched workspace is missing from its snapshot")?;
+            Ok(json!({
+                "project_id":workspace.project_id,
+                "name":workspace.name,
+                "status":workspace.status,
+                "surface_count":workspace.surface_count,
+                "theme":workspace.theme,
+                "background":workspace.background,
+                "active":workspace.active,
+                "revision":reply.revision,
+                "sync":sync
+            }))
+        }
+        CanvasOutcome::Error { message, .. } => Err(message),
+        _ => Err("Canvas returned an unexpected workspace switch receipt".into()),
+    }
+}
+
 fn workspace_summaries() -> Result<Vec<Value>, String> {
+    let source = super::alfalfa::list()?;
+    sync_canvas_projects(&source)?;
+    let canvas = canvas_snapshot()?;
+    let canvas_by_project = canvas
+        .workspace_summaries
+        .into_iter()
+        .map(|workspace| (workspace.project_id.clone(), workspace))
+        .collect::<std::collections::BTreeMap<_, _>>();
     let bindings = super::workspace::load()?;
-    project_summaries(&super::alfalfa::list()?)?
+    project_summaries(&source)?
         .into_iter()
         .map(|project| {
             let id = project["project_id"]
                 .as_str()
                 .ok_or("Projected project identity is missing")?;
+            let canvas = canvas_by_project
+                .get(id)
+                .ok_or("Synchronized Canvas workspace is missing")?;
             Ok(json!({
                 "project_id":id,
                 "name":project["name"],
-                "local_window_count":bindings.windows(id).len()
+                "status":project["status"],
+                "local_window_count":bindings.windows(id).len(),
+                "canvas_surface_count":canvas.surface_count,
+                "canvas_active":canvas.active,
+                "theme":canvas.theme,
+                "background":canvas.background
             }))
         })
         .collect()
@@ -317,6 +501,7 @@ fn recall(project: &str, target: Target) -> Result<Value, String> {
         .filter(|entry| entry.id == "@home")
         .map(|entry| entry.project_name.clone())
         .ok_or("Alfalfa project home is missing")?;
+    let canvas = switch_canvas_workspace(&super::alfalfa::list()?, project)?;
     let recalled = super::remote::rpc(project, "desktop-recall", &[], None)?;
     let status = super::remote::rpc(project, "desktop-status", &[], None)?;
     let window_count = workspace_window_count(&status, project)?;
@@ -335,6 +520,7 @@ fn recall(project: &str, target: Target) -> Result<Value, String> {
         "presence_route":route,
         "local_workspace_presented":local.is_some(),
         "local_window_count":local.as_ref().map(|activation| activation.windows.len()).unwrap_or(0),
+        "canvas":canvas,
         "viewer":{"output_index":viewer["output_index"],"reused":viewer["reused"].as_bool().unwrap_or(false)}
     }))
 }
@@ -344,7 +530,12 @@ pub fn execute(name: &str, args: &Value) -> Result<Value, String> {
     // MCP callers share a host's presentation; fail visibly instead of interleaving moves.
     let _presentation = if matches!(
         name,
-        "project_recall" | "resource_open" | "workspace_activate"
+        "project_recall"
+            | "resource_open"
+            | "workspace_activate"
+            | "workspaces_list"
+            | "canvas_workspaces_sync"
+            | "canvas_workspace_switch"
     ) {
         Some(
             PRESENTATION
@@ -363,6 +554,15 @@ pub fn execute(name: &str, args: &Value) -> Result<Value, String> {
         },
         "projects_list" => json!({"projects":project_summaries(&super::alfalfa::list()?)?}),
         "workspaces_list" => json!({"workspaces":workspace_summaries()?}),
+        "canvas_workspaces_sync" => {
+            let source = super::alfalfa::list()?;
+            json!({"canvas":sync_canvas_projects(&source)?})
+        }
+        "canvas_workspace_switch" => {
+            let project = arguments.project.as_deref().unwrap();
+            let source = super::alfalfa::list()?;
+            json!({"canvas":switch_canvas_workspace(&source, project)?})
+        }
         "presence_route" => presence_status(),
         "project_resources" => {
             let project = arguments.project.as_deref().unwrap();
@@ -571,6 +771,50 @@ mod tests {
     }
 
     #[test]
+    fn canvas_projection_keeps_exact_ambiguous_projects_and_maps_colorways() {
+        let source = json!([
+            {"project":{"id":"gh-1288853134","name":"ohmOS","status":"paused"},"appearance":{"colorway":"forest"}},
+            {"project":{"id":"gh-1303320551","name":"ohm-web","status":"paused"},"appearance":{"colorway":"light"}}
+        ]);
+        let specs = project_workspace_specs(&source).unwrap();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].project_id, "gh-1288853134");
+        assert_eq!(
+            specs[0].theme,
+            ThemeSelection::Coherence {
+                mode: ThemeMode::Dark,
+                accent: Accent::Success
+            }
+        );
+        assert_eq!(
+            specs[1].theme,
+            ThemeSelection::Coherence {
+                mode: ThemeMode::Light,
+                accent: Accent::Brand
+            }
+        );
+    }
+
+    #[test]
+    fn live_sized_catalog_projection_is_bounded_above_current_inventory() {
+        let source = Value::Array(
+            (0..380)
+                .map(|index| {
+                    json!({
+                        "project":{
+                            "id":format!("project-{index}"),
+                            "name":format!("Project {index}"),
+                            "status":"paused"
+                        },
+                        "appearance":{"colorway":"graphite"}
+                    })
+                })
+                .collect(),
+        );
+        assert_eq!(project_workspace_specs(&source).unwrap().len(), 380);
+    }
+
+    #[test]
     fn resource_projection_omits_uri_notes_and_context() {
         let entries = vec![super::super::resources::Entry {
             company_id: None,
@@ -600,6 +844,12 @@ mod tests {
         assert!(arguments("displays_list", &json!({})).is_ok());
         assert!(arguments("displays_list", &json!({"host":"other"})).is_err());
         assert!(arguments("workspaces_list", &json!({})).is_ok());
+        assert!(arguments("canvas_workspaces_sync", &json!({})).is_ok());
+        assert!(arguments(
+            "canvas_workspace_switch",
+            &json!({"project_id":"gh-1288853134"})
+        )
+        .is_ok());
         assert!(arguments("presence_route", &json!({})).is_ok());
         assert!(arguments("projects_list", &json!({})).is_ok());
         assert!(arguments("project_recall", &json!({"project_id":"dock"})).is_ok());
@@ -644,7 +894,7 @@ mod tests {
                 .unwrap_err()
                 .contains("presentation is busy"));
         }
-        assert_eq!(tools().len(), 8);
+        assert_eq!(tools().len(), 10);
     }
 
     #[test]

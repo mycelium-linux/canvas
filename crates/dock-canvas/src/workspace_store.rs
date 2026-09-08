@@ -4,8 +4,11 @@
 //! per project; renderers retain decoded/GPU state separately and rebuild it
 //! from these documents when a project becomes active again.
 
-use crate::{Error, WorkspaceDocument};
-use dock_core::Catalog;
+use crate::{
+    Background, Error, Layout, SCHEMA_VERSION, SurfaceChrome, ThemeRef, WorkspaceDocument,
+    control::{MAX_PROJECT_WORKSPACES, ProjectWorkspaceSpec},
+};
+use dock_core::{Catalog, Project};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -15,23 +18,36 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsE
 use std::path::{Path, PathBuf};
 
 pub const STORE_SCHEMA_VERSION: u32 = 1;
-pub const MAX_PROJECT_WORKSPACES: usize = 128;
 const MAX_STORE_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceStore {
     pub schema_version: u32,
+    #[serde(default)]
+    pub definitions: BTreeMap<String, ProjectWorkspaceSpec>,
     pub projects: BTreeMap<String, WorkspaceDocument>,
+    #[serde(default)]
+    pub active_project_id: Option<String>,
 }
 
 impl Default for WorkspaceStore {
     fn default() -> Self {
         Self {
             schema_version: STORE_SCHEMA_VERSION,
+            definitions: BTreeMap::new(),
             projects: BTreeMap::new(),
+            active_project_id: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncReport {
+    pub created: usize,
+    pub updated: usize,
+    pub preserved: usize,
+    pub total: usize,
 }
 
 impl WorkspaceStore {
@@ -41,11 +57,23 @@ impl WorkspaceStore {
                 "Unsupported Canvas workspace store schema_version".into(),
             ));
         }
-        if self.projects.len() > MAX_PROJECT_WORKSPACES {
+        if self.projects.len() > MAX_PROJECT_WORKSPACES
+            || self.definitions.len() > MAX_PROJECT_WORKSPACES
+        {
             return Err(Error(format!(
                 "Canvas workspace store exceeds {MAX_PROJECT_WORKSPACES} projects"
             )));
         }
+        for (project_id, definition) in &self.definitions {
+            if project_id != &definition.project_id {
+                return Err(Error(format!(
+                    "Project definition key {project_id:?} does not match project_id {:?}",
+                    definition.project_id
+                )));
+            }
+            definition.validate().map_err(Error)?;
+        }
+        let effective_catalog = self.effective_catalog(catalog)?;
         for (project_id, document) in &self.projects {
             if project_id != &document.project_id {
                 return Err(Error(format!(
@@ -53,9 +81,82 @@ impl WorkspaceStore {
                     document.project_id
                 )));
             }
-            document.validate(catalog)?;
+            document.validate(&effective_catalog)?;
+        }
+        if self
+            .active_project_id
+            .as_ref()
+            .is_some_and(|id| !self.projects.contains_key(id))
+        {
+            return Err(Error(
+                "Active Canvas project must have a saved workspace".into(),
+            ));
         }
         Ok(())
+    }
+
+    pub fn effective_catalog(&self, base: &Catalog) -> Result<Catalog, Error> {
+        let mut projects = base.projects.clone();
+        for definition in self.definitions.values() {
+            if let Some(project) = projects
+                .iter_mut()
+                .find(|project| project.id == definition.project_id)
+            {
+                project.name.clone_from(&definition.name);
+                project.theme = definition.theme;
+            } else {
+                projects.push(Project {
+                    id: definition.project_id.clone(),
+                    name: definition.name.clone(),
+                    theme: definition.theme,
+                    resources: Vec::new(),
+                });
+            }
+        }
+        let catalog = Catalog {
+            schema_version: base.schema_version,
+            projects,
+        };
+        catalog
+            .validate()
+            .map_err(|error| Error(error.to_string()))?;
+        Ok(catalog)
+    }
+
+    /// Upsert public project definitions and create only missing desktops.
+    /// Existing documents remain the source of truth for layout and appearance.
+    pub fn sync(
+        &mut self,
+        projects: Vec<ProjectWorkspaceSpec>,
+        base: &Catalog,
+    ) -> Result<SyncReport, Error> {
+        let mut created = 0;
+        let mut updated = 0;
+        let mut preserved = 0;
+        for definition in projects {
+            definition.validate().map_err(Error)?;
+            if self.definitions.get(&definition.project_id) != Some(&definition) {
+                updated += 1;
+            }
+            self.definitions
+                .insert(definition.project_id.clone(), definition.clone());
+            if self.projects.contains_key(&definition.project_id) {
+                preserved += 1;
+            } else {
+                self.projects.insert(
+                    definition.project_id.clone(),
+                    empty_workspace(&definition.project_id),
+                );
+                created += 1;
+            }
+        }
+        self.validate(base)?;
+        Ok(SyncReport {
+            created,
+            updated,
+            preserved,
+            total: self.projects.len(),
+        })
     }
 
     pub fn upsert(&mut self, document: WorkspaceDocument) {
@@ -68,6 +169,22 @@ impl WorkspaceStore {
 
     pub fn project_ids(&self) -> impl Iterator<Item = &str> {
         self.projects.keys().map(String::as_str)
+    }
+}
+
+fn empty_workspace(project_id: &str) -> WorkspaceDocument {
+    WorkspaceDocument {
+        schema_version: SCHEMA_VERSION,
+        id: format!("{project_id}-workspace"),
+        project_id: project_id.into(),
+        revision: 1,
+        theme: ThemeRef::Project,
+        background: Background::Theme,
+        chrome: SurfaceChrome::default(),
+        surfaces: Vec::new(),
+        layout: Layout::Empty,
+        bindings: Vec::new(),
+        focused_surface_id: None,
     }
 }
 
@@ -195,6 +312,19 @@ fn create_private_dir(path: &Path) -> Result<(), Error> {
 mod tests {
     use super::*;
     use crate::{Background, Layout, SCHEMA_VERSION, SurfaceChrome, ThemeRef};
+    use dock_core::{Accent, ThemeMode, ThemeSelection};
+
+    fn definition(project_id: &str, name: &str) -> ProjectWorkspaceSpec {
+        ProjectWorkspaceSpec {
+            project_id: project_id.into(),
+            name: name.into(),
+            status: "active".into(),
+            theme: ThemeSelection::Coherence {
+                mode: ThemeMode::Dark,
+                accent: Accent::Success,
+            },
+        }
+    }
 
     fn document(project_id: &str) -> WorkspaceDocument {
         WorkspaceDocument {
@@ -247,5 +377,71 @@ mod tests {
                 .0
                 .contains("does not match")
         );
+    }
+
+    #[test]
+    fn catalog_sync_creates_missing_desktops_and_preserves_saved_appearance() {
+        let base = Catalog::bundled().unwrap();
+        let mut store = WorkspaceStore::default();
+        let mut dock = document("dock");
+        dock.background = Background::Solid {
+            color: [10, 20, 30, 255],
+        };
+        dock.chrome.canvas_padding = 17;
+        store.upsert(dock.clone());
+
+        let report = store
+            .sync(
+                vec![
+                    definition("dock", "Dock renamed upstream"),
+                    definition("gh-1288853134", "ohmOS"),
+                ],
+                &base,
+            )
+            .unwrap();
+
+        assert_eq!(report.created, 1);
+        assert_eq!(report.preserved, 1);
+        assert_eq!(store.get("dock"), Some(&dock));
+        let ohm = store.get("gh-1288853134").unwrap();
+        assert_eq!(ohm.background, Background::Theme);
+        assert_eq!(ohm.theme, ThemeRef::Project);
+        assert!(ohm.surfaces.is_empty());
+        let catalog = store.effective_catalog(&base).unwrap();
+        assert_eq!(catalog.project("dock").unwrap().resources.len(), 2);
+        assert_eq!(
+            catalog.project("dock").unwrap().name,
+            "Dock renamed upstream"
+        );
+        assert_eq!(catalog.project("gh-1288853134").unwrap().name, "ohmOS");
+    }
+
+    #[test]
+    fn dynamic_catalog_and_active_workspace_survive_restart() {
+        let base = Catalog::bundled().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "dock-canvas-dynamic-workspace-store-test-{}",
+            std::process::id()
+        ));
+        let path = root.join("workspaces.json");
+        let _ = fs::remove_dir_all(&root);
+        let mut store = WorkspaceStore::default();
+        store
+            .sync(vec![definition("gh-1288853134", "ohmOS")], &base)
+            .unwrap();
+        store.active_project_id = Some("gh-1288853134".into());
+        save(&path, &store, &base).unwrap();
+
+        let loaded = load(&path, &base).unwrap();
+        assert_eq!(loaded, store);
+        assert_eq!(loaded.active_project_id.as_deref(), Some("gh-1288853134"));
+        assert!(
+            loaded
+                .effective_catalog(&base)
+                .unwrap()
+                .project("gh-1288853134")
+                .is_ok()
+        );
+        let _ = fs::remove_dir_all(root);
     }
 }

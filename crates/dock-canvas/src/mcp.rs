@@ -711,6 +711,7 @@ mod tests {
                                         presence_preview_active: false,
                                         screensaver: Default::default(),
                                         workspaces: Vec::new(),
+                                        workspace_summaries: Vec::new(),
                                         minimized_surface_ids: Vec::new(),
                                         maximized_surface_ids: Vec::new(),
                                         events: Vec::new(),
