@@ -14,6 +14,9 @@ pub mod display;
 pub mod hud;
 pub mod interaction;
 #[cfg(feature = "lua-scenes")]
+// Folds activity frames into a GraphSnapshot, which lives in the Lua module
+// vocabulary, so it shares that feature gate.
+#[cfg(feature = "lua-scenes")]
 pub mod activity;
 pub mod lua_module;
 #[cfg(feature = "lua-scenes")]
@@ -1250,6 +1253,7 @@ mod tests {
                     nodes: vec![SceneNode {
                         id: "mesh".into(),
                         parent_id: None,
+                        tint: SceneTint::default(),
                         transform: Transform3 {
                             scale: [0.0, 1.0, 1.0],
                             ..Transform3::default()
