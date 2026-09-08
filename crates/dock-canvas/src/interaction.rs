@@ -106,6 +106,9 @@ pub struct PointerEvent {
 pub struct InteractionConfig {
     pub workspace_bounds: LogicalRect,
     pub minimum_surface_size: LogicalPoint,
+    /// Horizontal portion of the top bar that must remain reachable after a
+    /// move, even when the rest of the surface extends beyond the workspace.
+    pub minimum_visible_top_bar_width: f64,
     pub resize_handle_size: f64,
     /// Height of the draggable window chrome. The remaining body belongs to
     /// the embedded surface after it has been focused and promoted.
@@ -185,7 +188,7 @@ impl InteractionEngine {
         surfaces: &[SurfaceGeometry],
     ) -> Result<Vec<InteractionIntent>, InteractionError> {
         validate_point(event.position)?;
-        validate_surfaces(surfaces, self.config.workspace_bounds)?;
+        validate_surfaces(surfaces, self.config)?;
 
         match event.phase {
             PointerPhase::Press => self.press(event, surfaces),
@@ -360,14 +363,6 @@ fn move_rect(
     let mut bounds = active.original_bounds;
     bounds.x += point.x - active.origin.x;
     bounds.y += point.y - active.origin.y;
-    bounds.x = bounds.x.clamp(
-        config.workspace_bounds.x,
-        config.workspace_bounds.right() - bounds.width,
-    );
-    bounds.y = bounds.y.clamp(
-        config.workspace_bounds.y,
-        config.workspace_bounds.bottom() - bounds.height,
-    );
     bounds.x = snap_translation(
         bounds.x,
         bounds.width,
@@ -383,6 +378,18 @@ fn move_rect(
         config.workspace_bounds.bottom(),
         config.grid_size,
         config.snap_distance,
+    );
+    let reachable_width = config
+        .minimum_visible_top_bar_width
+        .min(bounds.width)
+        .min(config.workspace_bounds.width);
+    bounds.x = bounds.x.clamp(
+        config.workspace_bounds.x + reachable_width - bounds.width,
+        config.workspace_bounds.right() - reachable_width,
+    );
+    bounds.y = bounds.y.clamp(
+        config.workspace_bounds.y,
+        config.workspace_bounds.bottom() - config.top_bar_height,
     );
     bounds
 }
@@ -582,14 +589,25 @@ fn validate_config(config: InteractionConfig) -> Result<(), InteractionError> {
             "minimum surface size must fit within workspace bounds",
         ));
     }
+    if !config.minimum_visible_top_bar_width.is_finite()
+        || config.minimum_visible_top_bar_width <= 0.0
+        || config.minimum_visible_top_bar_width > config.workspace_bounds.width
+    {
+        return Err(InteractionError(
+            "minimum visible top-bar width must fit within workspace bounds",
+        ));
+    }
     if !config.resize_handle_size.is_finite() || config.resize_handle_size < 0.0 {
         return Err(InteractionError(
             "resize handle size must be finite and non-negative",
         ));
     }
-    if !config.top_bar_height.is_finite() || config.top_bar_height < 0.0 {
+    if !config.top_bar_height.is_finite()
+        || config.top_bar_height < 0.0
+        || config.top_bar_height > config.workspace_bounds.height
+    {
         return Err(InteractionError(
-            "top bar height must be finite and non-negative",
+            "top bar height must be finite and fit within workspace bounds",
         ));
     }
     if !config.snap_distance.is_finite() || config.snap_distance < 0.0 {
@@ -608,7 +626,7 @@ fn validate_config(config: InteractionConfig) -> Result<(), InteractionError> {
 
 fn validate_surfaces(
     surfaces: &[SurfaceGeometry],
-    workspace: LogicalRect,
+    config: InteractionConfig,
 ) -> Result<(), InteractionError> {
     let mut ids = BTreeSet::new();
     for surface in surfaces {
@@ -619,15 +637,20 @@ fn validate_surfaces(
             return Err(InteractionError("surface IDs must be unique"));
         }
         validate_rect(surface.bounds)?;
-        if surface.bounds.width > workspace.width || surface.bounds.height > workspace.height {
+        if surface.bounds.width > config.workspace_bounds.width
+            || surface.bounds.height > config.workspace_bounds.height
+        {
             return Err(InteractionError("surface must fit within workspace bounds"));
         }
-        if surface.bounds.x < workspace.x
-            || surface.bounds.y < workspace.y
-            || surface.bounds.right() > workspace.right()
-            || surface.bounds.bottom() > workspace.bottom()
+        let reachable_width = config
+            .minimum_visible_top_bar_width
+            .min(surface.bounds.width);
+        if surface.bounds.right() < config.workspace_bounds.x + reachable_width
+            || surface.bounds.x > config.workspace_bounds.right() - reachable_width
+            || surface.bounds.y < config.workspace_bounds.y
+            || surface.bounds.y + config.top_bar_height > config.workspace_bounds.bottom()
         {
-            return Err(InteractionError("surface must be inside workspace bounds"));
+            return Err(InteractionError("surface top bar must remain reachable"));
         }
     }
     Ok(())
@@ -690,6 +713,7 @@ mod tests {
         InteractionConfig {
             workspace_bounds: rect(0.0, 0.0, 1_000.0, 800.0),
             minimum_surface_size: point(100.0, 80.0),
+            minimum_visible_top_bar_width: 72.0,
             resize_handle_size: 10.0,
             top_bar_height: 24.0,
             snap_distance: 8.0,
@@ -792,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn captured_drag_continues_outside_surface_and_stays_in_workspace() {
+    fn captured_drag_allows_offscreen_content_but_keeps_top_bar_reachable() {
         let surfaces = vec![surface("card", rect(100.0, 100.0, 300.0, 200.0), 1)];
         let mut engine = InteractionEngine::new(config()).unwrap();
         engine
@@ -805,7 +829,32 @@ mod tests {
             intents,
             vec![InteractionIntent::SetBounds {
                 surface_id: "card".to_owned(),
-                bounds: rect(700.0, 600.0, 300.0, 200.0),
+                bounds: rect(928.0, 776.0, 300.0, 200.0),
+            }]
+        );
+
+        let moved = vec![surface("card", rect(928.0, 776.0, 300.0, 200.0), 1)];
+        assert!(
+            engine
+                .handle(event(8, PointerPhase::Release, 2_000.0, 2_000.0), &moved)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn moving_left_retains_a_recoverable_top_bar_segment() {
+        let surfaces = vec![surface("card", rect(100.0, 100.0, 300.0, 200.0), 1)];
+        let mut engine = InteractionEngine::new(config()).unwrap();
+        engine
+            .handle(event(9, PointerPhase::Press, 200.0, 115.0), &surfaces)
+            .unwrap();
+        assert_eq!(
+            engine
+                .handle(event(9, PointerPhase::Move, -2_000.0, -2_000.0), &surfaces)
+                .unwrap(),
+            vec![InteractionIntent::SetBounds {
+                surface_id: "card".to_owned(),
+                bounds: rect(-228.0, 0.0, 300.0, 200.0),
             }]
         );
     }

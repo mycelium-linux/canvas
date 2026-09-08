@@ -8,8 +8,8 @@ use dock_canvas::control::{
 };
 use dock_canvas::hud;
 use dock_canvas::interaction::{
-    InteractionConfig, InteractionEngine, InteractionIntent, LogicalPoint, LogicalRect,
-    PointerEvent, PointerPhase, SurfaceGeometry,
+    HitRegion, InteractionConfig, InteractionEngine, InteractionIntent, LogicalPoint, LogicalRect,
+    PointerEvent, PointerPhase, ResizeHandle, SurfaceGeometry, hit_test,
 };
 use dock_canvas::media::{
     LogicalSize, MediaCacheKey, MediaLimits, MediaPlan, MediaVariant, PixelSize, SourceDimensions,
@@ -72,6 +72,8 @@ const METRICS_REFRESH: Duration = Duration::from_secs(2);
 const SURFACE_CONTROL_BAR_HEIGHT: f64 = 24.0;
 const SURFACE_CONTROL_HIT_SIZE: f64 = 18.0;
 const SURFACE_CONTROL_INSET: f64 = 4.0;
+const SURFACE_RESIZE_HANDLE_SIZE: f64 = 10.0;
+const SURFACE_TOP_BAR_GRAB_WIDTH: f64 = 72.0;
 
 #[derive(Debug, Clone)]
 struct Pending {
@@ -1953,6 +1955,28 @@ impl App {
         None
     }
 
+    fn pointer_interaction(&self) -> mouse::Interaction {
+        if self.hit_test_surface_control().is_some() {
+            return mouse::Interaction::Pointer;
+        }
+        let Some(cursor) = self.cursor else {
+            return mouse::Interaction::None;
+        };
+        let surfaces = self.interaction_surfaces();
+        let Ok(Some(target)) = hit_test(
+            &surfaces,
+            cursor,
+            SURFACE_RESIZE_HANDLE_SIZE,
+            SURFACE_CONTROL_BAR_HEIGHT,
+        ) else {
+            return mouse::Interaction::None;
+        };
+        match target.region {
+            HitRegion::Resize { handle } => resize_cursor(handle),
+            HitRegion::Body | HitRegion::TopBar => mouse::Interaction::None,
+        }
+    }
+
     fn apply_interaction_intents(&mut self, intents: Vec<InteractionIntent>) {
         let mut changed = false;
         for intent in intents {
@@ -2992,14 +3016,17 @@ impl App {
             }
         }
 
-        container(stack(layers))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(move |_| container::Style {
-                background: Some(background),
-                ..Default::default()
-            })
-            .into()
+        mouse_area(
+            container(stack(layers))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(move |_| container::Style {
+                    background: Some(background),
+                    ..Default::default()
+                }),
+        )
+        .interaction(self.pointer_interaction())
+        .into()
     }
 
     fn is_leftmost_surface(&self) -> bool {
@@ -3174,12 +3201,26 @@ fn interaction_engine(frame: Rect) -> InteractionEngine {
             height: f64::from(frame.height.max(1)),
         },
         minimum_surface_size: LogicalPoint { x: 160.0, y: 120.0 },
-        resize_handle_size: 10.0,
+        minimum_visible_top_bar_width: SURFACE_TOP_BAR_GRAB_WIDTH,
+        resize_handle_size: SURFACE_RESIZE_HANDLE_SIZE,
         top_bar_height: SURFACE_CONTROL_BAR_HEIGHT,
         snap_distance: 12.0,
         grid_size: Some(8.0),
     })
     .expect("Canvas interaction defaults must remain valid")
+}
+
+fn resize_cursor(handle: ResizeHandle) -> mouse::Interaction {
+    match handle {
+        ResizeHandle::East | ResizeHandle::West => mouse::Interaction::ResizingHorizontally,
+        ResizeHandle::North | ResizeHandle::South => mouse::Interaction::ResizingVertically,
+        ResizeHandle::NorthEast | ResizeHandle::SouthWest => {
+            mouse::Interaction::ResizingDiagonallyUp
+        }
+        ResizeHandle::NorthWest | ResizeHandle::SouthEast => {
+            mouse::Interaction::ResizingDiagonallyDown
+        }
+    }
 }
 
 fn parse_dataviz_file(file: &Path, chart_type: &str) -> Result<ChartDocument, String> {
@@ -5574,5 +5615,33 @@ mod tests {
         assert!(!settings.decorations);
         assert!(!settings.exit_on_close_request);
         assert!(settings.visible);
+    }
+
+    #[test]
+    fn every_resize_handle_uses_its_matching_directional_cursor() {
+        for handle in [ResizeHandle::East, ResizeHandle::West] {
+            assert_eq!(
+                resize_cursor(handle),
+                mouse::Interaction::ResizingHorizontally
+            );
+        }
+        for handle in [ResizeHandle::North, ResizeHandle::South] {
+            assert_eq!(
+                resize_cursor(handle),
+                mouse::Interaction::ResizingVertically
+            );
+        }
+        for handle in [ResizeHandle::NorthEast, ResizeHandle::SouthWest] {
+            assert_eq!(
+                resize_cursor(handle),
+                mouse::Interaction::ResizingDiagonallyUp
+            );
+        }
+        for handle in [ResizeHandle::NorthWest, ResizeHandle::SouthEast] {
+            assert_eq!(
+                resize_cursor(handle),
+                mouse::Interaction::ResizingDiagonallyDown
+            );
+        }
     }
 }

@@ -872,13 +872,15 @@ impl NormalizedRect {
             [self.x, self.y, self.width, self.height]
                 .iter()
                 .all(|value| value.is_finite())
-                && self.x >= 0.0
                 && self.y >= 0.0
                 && self.width > 0.0
                 && self.height > 0.0
-                && self.x + self.width <= 1.0
-                && self.y + self.height <= 1.0,
-            "Canvas bounds must be a positive rectangle inside normalized workspace space",
+                && self.width <= 1.0
+                && self.height <= 1.0
+                && self.x < 1.0
+                && self.x + self.width > 0.0
+                && self.y < 1.0,
+            "Canvas bounds must be a positive, reachable rectangle in normalized workspace space",
         )
     }
 }
@@ -1256,5 +1258,39 @@ mod tests {
         };
         assert!(document.apply_patch(&patch, &catalog).is_err());
         assert_eq!(document.surfaces.len(), 2);
+    }
+
+    #[test]
+    fn canvas_placements_allow_offscreen_content_but_require_reachability() {
+        assert!(
+            NormalizedRect {
+                x: -0.6,
+                y: 0.8,
+                width: 0.7,
+                height: 0.5,
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            NormalizedRect {
+                x: -0.8,
+                y: 0.0,
+                width: 0.7,
+                height: 0.5,
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            NormalizedRect {
+                x: 0.1,
+                y: -0.01,
+                width: 0.7,
+                height: 0.5,
+            }
+            .validate()
+            .is_err()
+        );
     }
 }
