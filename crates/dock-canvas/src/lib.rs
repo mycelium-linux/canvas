@@ -23,7 +23,7 @@ pub mod reconcile;
 
 pub const SCHEMA_VERSION: u32 = 1;
 const MAX_ITEMS: usize = 1_024;
-const MAX_GRADIENT_STOPS: usize = 16;
+const MAX_GRADIENT_STOPS: usize = 8;
 pub const BUILT_IN_SHADER_IDS: &[&str] = &["tidepool", "aurora-drift", "dusk-ember", "slow-ripple"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,7 +107,7 @@ pub enum Background {
         color: [u8; 4],
     },
     Gradient {
-        shape: GradientShape,
+        angle_degrees: f32,
         stops: Vec<GradientStop>,
     },
     Image {
@@ -118,14 +118,6 @@ pub enum Background {
         shader_id: String,
         speed: f32,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
-pub enum GradientShape {
-    Linear { angle_degrees: f32 },
-    Radial { center: [f32; 2], radius: f32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -144,7 +136,6 @@ pub enum BackgroundFit {
     Fit,
     Stretch,
     Center,
-    Tile,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -388,24 +379,14 @@ impl Background {
     fn validate(&self) -> Result<()> {
         match self {
             Self::Theme | Self::Solid { .. } => Ok(()),
-            Self::Gradient { shape, stops } => {
-                match shape {
-                    GradientShape::Linear { angle_degrees } => {
-                        check(angle_degrees.is_finite(), "Gradient angle must be finite")?
-                    }
-                    GradientShape::Radial { center, radius } => check(
-                        center
-                            .iter()
-                            .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
-                            && radius.is_finite()
-                            && *radius > 0.0
-                            && *radius <= 2.0,
-                        "Radial gradient center and radius are outside normalized bounds",
-                    )?,
-                }
+            Self::Gradient {
+                angle_degrees,
+                stops,
+            } => {
+                check(angle_degrees.is_finite(), "Gradient angle must be finite")?;
                 check(
                     (2..=MAX_GRADIENT_STOPS).contains(&stops.len()),
-                    "Gradient must contain 2 to 16 stops",
+                    "Gradient must contain 2 to 8 stops",
                 )?;
                 let mut previous = None;
                 for stop in stops {
@@ -960,9 +941,7 @@ mod tests {
         assert_eq!(legacy.background, Background::Theme);
 
         let gradient = Background::Gradient {
-            shape: GradientShape::Linear {
-                angle_degrees: 125.0,
-            },
+            angle_degrees: 125.0,
             stops: vec![
                 GradientStop {
                     offset: 0.0,
@@ -997,10 +976,7 @@ mod tests {
 
         let mut invalid = applied.clone();
         invalid.background = Background::Gradient {
-            shape: GradientShape::Radial {
-                center: [0.5, 0.5],
-                radius: 0.8,
-            },
+            angle_degrees: 45.0,
             stops: vec![
                 GradientStop {
                     offset: 0.7,
