@@ -15,7 +15,7 @@ use dock_canvas::media::{
     plan_pdf_page, plan_raster,
 };
 use dock_canvas::{
-    AssetRef, Background, BackgroundFit, BackgroundShader, GradientStop, Layout, NodeContent,
+    AssetRef, Background, BackgroundFit, GradientStop, Layout, NodeContent,
     NormalizedRect, PatchOperation, Placement, SCHEMA_VERSION, Scene, SceneNode, Surface,
     SurfaceContent, ThemeRef, WorkspaceDocument, WorkspacePatch,
 };
@@ -536,6 +536,52 @@ impl App {
                 }
                 Task::none()
             }
+            Message::BackgroundLoaded {
+                pending,
+                base_document_revision,
+                result,
+            } => {
+                let pending = *pending;
+                if self.document.revision != base_document_revision {
+                    self.fail(
+                        pending,
+                        Failure {
+                            code: ErrorCode::Conflict,
+                            message: format!(
+                                "workspace changed while the background loaded; expected document revision {base_document_revision}, current revision is {}",
+                                self.document.revision
+                            ),
+                        },
+                    );
+                    return Task::none();
+                }
+                match result {
+                    Ok(loaded) => {
+                        let sha256 = loaded.asset.sha256.clone();
+                        self.background_assets.insert(sha256.clone(), loaded.handle);
+                        let background = Background::Image {
+                            asset: loaded.asset,
+                            fit: BackgroundFit::Cover,
+                        };
+                        match self.apply_background(background) {
+                            Ok(()) => self.answer(
+                                pending,
+                                Outcome::Ok {
+                                    receipt: Receipt::DocumentApplied {
+                                        workspace_id: self.document.id.clone(),
+                                    },
+                                },
+                            ),
+                            Err(failure) => {
+                                self.background_assets.remove(&sha256);
+                                self.fail(pending, failure);
+                            }
+                        }
+                    }
+                    Err(failure) => self.fail(pending, failure),
+                }
+                Task::none()
+            }
             Message::PageLoaded {
                 pending,
                 surface_id,
@@ -684,6 +730,11 @@ impl App {
                     self.fail(pending, Failure::invalid(error.to_string()));
                     return Task::none();
                 }
+                if let Err(failure) = self.ensure_background_available(&document) {
+                    self.fail(pending, failure);
+                    return Task::none();
+                }
+                let background_changed = self.document.background != document.background;
                 self.decoded.retain(|id, decoded| {
                     self.document.surfaces.iter().any(|surface| {
                         surface.id == *id
@@ -699,6 +750,9 @@ impl App {
                 self.start_transition();
                 self.document = document;
                 self.ensure_scene_decoded();
+                if background_changed {
+                    self.reset_background_animation();
+                }
                 self.bump();
                 self.status = format!("Applied workspace {workspace_id}.");
                 self.answer(
@@ -712,10 +766,18 @@ impl App {
             Command::ApplyPatch { patch } => {
                 match self.document.apply_patch(&patch, &self.catalog) {
                     Ok(document) => {
+                        if let Err(failure) = self.ensure_background_available(&document) {
+                            self.fail(pending, failure);
+                            return Task::none();
+                        }
+                        let background_changed = self.document.background != document.background;
                         self.start_transition();
                         self.document = document;
                         self.prune_decoded();
                         self.ensure_scene_decoded();
+                        if background_changed {
+                            self.reset_background_animation();
+                        }
                         self.bump();
                         self.status = format!("Patched workspace {}.", self.document.id);
                         self.answer(
@@ -1125,9 +1187,17 @@ impl App {
             }
             Command::WorkspaceSwitch { name } => {
                 if let Some(document) = self.workspaces.get(&name).cloned() {
+                    if let Err(failure) = self.ensure_background_available(&document) {
+                        self.fail(pending, failure);
+                        return Task::none();
+                    }
+                    let background_changed = self.document.background != document.background;
                     self.start_transition();
                     self.document = document;
                     self.ensure_scene_decoded();
+                    if background_changed {
+                        self.reset_background_animation();
+                    }
                     self.bump();
                     self.status = format!("Switched to workspace '{name}'.");
                     self.answer(
@@ -1149,35 +1219,27 @@ impl App {
                 }
             }
             Command::SetBackground { path } => {
-                match canonical_regular_file(&path) {
-                    Ok(abs) => {
-                        self.background = Some(iced::widget::image::Handle::from_path(abs.clone()));
-                        self.bump();
-                        self.status = format!("Background image set: {}", abs.display());
+                let base_document_revision = self.document.revision;
+                Task::perform(async move { load_background(path) }, move |result| {
+                    Message::BackgroundLoaded {
+                        pending: Box::new(pending),
+                        base_document_revision,
+                        result,
                     }
-                    Err(failure) => {
-                        self.fail(pending, failure);
-                        return Task::none();
-                    }
-                }
-                self.answer(
-                    pending,
-                    Outcome::Ok {
-                        receipt: Receipt::FrameSet { frame: self.frame },
-                    },
-                );
-                Task::none()
+                })
             }
             Command::ClearBackground => {
-                self.background = None;
-                self.bump();
-                self.status = "Background image cleared.".into();
-                self.answer(
-                    pending,
-                    Outcome::Ok {
-                        receipt: Receipt::FrameSet { frame: self.frame },
-                    },
-                );
+                match self.apply_background(Background::Theme) {
+                    Ok(()) => self.answer(
+                        pending,
+                        Outcome::Ok {
+                            receipt: Receipt::DocumentApplied {
+                                workspace_id: self.document.id.clone(),
+                            },
+                        },
+                    ),
+                    Err(failure) => self.fail(pending, failure),
+                }
                 Task::none()
             }
             Command::OpenDataViz {
@@ -1422,7 +1484,13 @@ impl App {
     }
 
     fn refresh_screensaver(&mut self, now: Instant) {
-        if !self.screensaver_settings.enabled || !self.screensaver_clock.record_if_due(now) {
+        let document_shader = match &self.document.background {
+            Background::Shader { shader_id, speed } if *speed > 0.0 => Some((*shader_id, *speed)),
+            _ => None,
+        };
+        if (!self.screensaver_settings.enabled && document_shader.is_none())
+            || !self.screensaver_clock.record_if_due(now)
+        {
             return;
         }
         // Delta-time: advance the shader clock by the real gap since the last
@@ -1433,12 +1501,17 @@ impl App {
             .map(|last| now.duration_since(last).min(MAX_SCREENSAVER_FRAME_DELTA))
             .unwrap_or(Duration::ZERO);
         self.screensaver_last_frame = Some(now);
-        (self.screensaver_index, self.screensaver_piece_elapsed) = screensaver::advance_elapsed(
-            self.screensaver_index,
-            self.screensaver_piece_elapsed,
-            delta,
-            MAX_SCREENSAVER_FRAME_DELTA,
-        );
+        if self.screensaver_settings.enabled {
+            (self.screensaver_index, self.screensaver_piece_elapsed) = screensaver::advance_elapsed(
+                self.screensaver_index,
+                self.screensaver_piece_elapsed,
+                delta,
+                MAX_SCREENSAVER_FRAME_DELTA,
+            );
+        } else if let Some((shader_id, speed)) = document_shader {
+            self.screensaver_index = screensaver::index_for(shader_id);
+            self.screensaver_piece_elapsed += delta.mul_f32(speed);
+        }
         self.screensaver_elapsed = self.screensaver_piece_elapsed;
         self.screensaver_fps = self.screensaver_clock.measured_fps();
     }
@@ -1696,6 +1769,47 @@ impl App {
 
     fn bump(&mut self) {
         self.runtime_revision = self.runtime_revision.saturating_add(1);
+    }
+
+    fn apply_background(&mut self, background: Background) -> Result<(), Failure> {
+        let patch = WorkspacePatch {
+            schema_version: SCHEMA_VERSION,
+            workspace_id: self.document.id.clone(),
+            base_revision: self.document.revision,
+            revision: self.document.revision.saturating_add(1),
+            operations: vec![PatchOperation::SetBackground { background }],
+        };
+        let next = self
+            .document
+            .apply_patch(&patch, &self.catalog)
+            .map_err(|error| Failure::invalid(error.to_string()))?;
+        self.ensure_background_available(&next)?;
+        self.document = next;
+        self.reset_background_animation();
+        self.bump();
+        self.status = "Canvas background updated.".into();
+        Ok(())
+    }
+
+    fn ensure_background_available(&self, document: &WorkspaceDocument) -> Result<(), Failure> {
+        if let Background::Image { asset, .. } = &document.background
+            && !self.background_assets.contains_key(&asset.sha256)
+        {
+            return Err(Failure::invalid(format!(
+                "background asset {} has not been imported into this Canvas runtime",
+                asset.sha256
+            )));
+        }
+        Ok(())
+    }
+
+    fn reset_background_animation(&mut self) {
+        self.screensaver_piece_elapsed = Duration::ZERO;
+        self.screensaver_elapsed = Duration::ZERO;
+        self.screensaver_last_frame = Some(Instant::now());
+        if let Background::Shader { shader_id, .. } = &self.document.background {
+            self.screensaver_index = screensaver::index_for(*shader_id);
+        }
     }
 
     fn rebuild_stack(&mut self) {
@@ -2019,15 +2133,23 @@ impl App {
 
     fn view(&self) -> Element<'_, Message> {
         let palette = self.presented_palette();
-        let background: iced::Background = if self.background.is_some() {
-            iced::Background::Color(Color::TRANSPARENT)
+        let background: iced::Background = if self.screensaver_settings.enabled {
+            Color::TRANSPARENT.into()
         } else {
-            iced::Gradient::Linear(
-                iced::gradient::Linear::new(core::f32::consts::PI / 2.0)
-                    .add_stop(0.0, color(palette.background))
-                    .add_stop(1.0, color(palette.background_strong)),
-            )
-            .into()
+            match &self.document.background {
+                Background::Theme => iced::Gradient::Linear(
+                    iced::gradient::Linear::new(core::f32::consts::PI / 2.0)
+                        .add_stop(0.0, color(palette.background))
+                        .add_stop(1.0, color(palette.background_strong)),
+                )
+                .into(),
+                Background::Solid { color } => rgba(*color).into(),
+                Background::Gradient {
+                    angle_degrees,
+                    stops,
+                } => gradient(*angle_degrees, stops).into(),
+                Background::Image { .. } | Background::Shader { .. } => Color::TRANSPARENT.into(),
+            }
         };
         let surface_color = color(palette.surface);
         let border_color = color(palette.border);
@@ -2071,8 +2193,7 @@ impl App {
                         let content = self.surface_widget(surface, Length::Fill, Length::Fill);
                         let plane = container(stack(vec![content, self.surface_controls()]))
                             .width(Length::Fixed(bounds.width as f32))
-                            .height(Length::Fixed(bounds.height as f32))
-                            .center(Length::Fill);
+                            .height(Length::Fixed(bounds.height as f32));
                         Some(
                             container(plane)
                                 .width(Length::Fill)
@@ -2131,21 +2252,30 @@ impl App {
         };
 
         let mut layers: Vec<Element<'_, Message>> = Vec::new();
-        if let Some(handle) = &self.background {
-            layers.insert(
-                0,
-                image_widget(handle.clone())
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .content_fit(iced::ContentFit::Cover)
-                    .into(),
-            );
-        }
         if self.screensaver_settings.enabled {
             layers.push(screensaver::view(
                 self.screensaver_index,
                 self.screensaver_elapsed,
             ));
+        } else {
+            match &self.document.background {
+                Background::Image { asset, fit } => {
+                    if let Some(handle) = self.background_assets.get(&asset.sha256) {
+                        layers.push(
+                            image_widget(handle.clone())
+                                .width(Length::Fill)
+                                .height(Length::Fill)
+                                .content_fit(background_fit(*fit))
+                                .into(),
+                        );
+                    }
+                }
+                Background::Shader { shader_id, .. } => layers.push(screensaver::view(
+                    screensaver::index_for(*shader_id),
+                    self.screensaver_elapsed,
+                )),
+                Background::Theme | Background::Solid { .. } | Background::Gradient { .. } => {}
+            }
         }
         layers.push(content);
         if self.is_leftmost_surface() {
@@ -2249,7 +2379,9 @@ impl App {
             },
         ));
 
-        if self.screensaver_settings.enabled {
+        if self.screensaver_settings.enabled
+            || matches!(self.document.background, Background::Shader { .. })
+        {
             let attribution_bottom = if self.is_leftmost_surface() {
                 64.0
             } else {
@@ -2448,6 +2580,26 @@ fn load_terminal(
 
 fn color(rgb: [u8; 3]) -> Color {
     Color::from_rgb8(rgb[0], rgb[1], rgb[2])
+}
+
+fn rgba(value: [u8; 4]) -> Color {
+    Color::from_rgba8(value[0], value[1], value[2], f32::from(value[3]) / 255.0)
+}
+
+fn gradient(angle_degrees: f32, stops: &[GradientStop]) -> iced::gradient::Linear {
+    stops.iter().fold(
+        iced::gradient::Linear::new(angle_degrees.to_radians()),
+        |gradient, stop| gradient.add_stop(stop.offset, rgba(stop.color)),
+    )
+}
+
+fn background_fit(fit: BackgroundFit) -> ContentFit {
+    match fit {
+        BackgroundFit::Cover => ContentFit::Cover,
+        BackgroundFit::Contain => ContentFit::Contain,
+        BackgroundFit::Stretch => ContentFit::Fill,
+        BackgroundFit::Center => ContentFit::None,
+    }
 }
 
 fn hostname() -> String {
@@ -2848,6 +3000,26 @@ fn load_content(
             media_type,
             byte_length: metadata.len(),
         },
+    })
+}
+
+fn load_background(path: PathBuf) -> Result<LoadedBackground, Failure> {
+    let path = canonical_regular_file(&path)?;
+    let metadata = fs::metadata(&path).map_err(|error| Failure::invalid(error.to_string()))?;
+    if metadata.len() == 0 || metadata.len() > MAX_IMAGE_BYTES {
+        return Err(Failure::resource(format!(
+            "background image must contain 1 to {MAX_IMAGE_BYTES} bytes"
+        )));
+    }
+    let sha256 = hash_file(&path)?;
+    let (handle, media_type, _) = decode_image(&path)?;
+    Ok(LoadedBackground {
+        asset: AssetRef {
+            sha256,
+            media_type,
+            byte_length: metadata.len(),
+        },
+        handle,
     })
 }
 
@@ -3455,7 +3627,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let animated = app.visible_indicator_id.is_some()
             || app.presence_preview.is_some()
             || app.transition.is_some();
-        let cadence = if app.screensaver_settings.enabled {
+        let background_animated = app.document.background.is_animated();
+        let cadence = if app.screensaver_settings.enabled || background_animated {
             let screensaver = app.screensaver_clock.interval();
             if animated {
                 screensaver.min(Duration::from_millis(16))
@@ -3494,7 +3667,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dock_canvas::control::MeshNode;
+    use dock_canvas::{BackgroundShader, control::MeshNode};
 
     fn test_app() -> App {
         let (_sender, receiver) = mpsc::sync_channel(1);
@@ -3555,6 +3728,74 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn background_updates_are_document_patches_and_unknown_assets_fail() {
+        let mut app = test_app();
+        let document_revision = app.document.revision;
+        let runtime_revision = app.runtime_revision;
+        app.apply_background(Background::Solid {
+            color: [8, 16, 32, 255],
+        })
+        .unwrap();
+        assert_eq!(app.document.revision, document_revision + 1);
+        assert_eq!(app.runtime_revision, runtime_revision + 1);
+        assert_eq!(
+            app.document.background,
+            Background::Solid {
+                color: [8, 16, 32, 255]
+            }
+        );
+
+        let before = app.document.clone();
+        let error = app
+            .apply_background(Background::Image {
+                asset: AssetRef {
+                    sha256: "ab".repeat(32),
+                    media_type: "image/png".into(),
+                    byte_length: 42,
+                },
+                fit: BackgroundFit::Cover,
+            })
+            .unwrap_err();
+        assert!(error.message.contains("has not been imported"));
+        assert_eq!(app.document, before);
+    }
+
+    #[test]
+    fn named_shader_background_uses_bounded_clock_and_static_background_does_not_advance() {
+        let mut app = test_app();
+        let started = Instant::now();
+        app.screensaver_clock = screensaver::FrameClock::new(15, started);
+        app.screensaver_last_frame = Some(started);
+        app.refresh_screensaver(started + Duration::from_millis(100));
+        assert_eq!(app.screensaver_elapsed, Duration::ZERO);
+
+        app.apply_background(Background::Shader {
+            shader_id: BackgroundShader::AuroraDrift,
+            speed: 0.5,
+        })
+        .unwrap();
+        app.screensaver_clock = screensaver::FrameClock::new(15, started);
+        app.screensaver_last_frame = Some(started);
+        app.refresh_screensaver(started + Duration::from_millis(100));
+        assert_eq!(
+            app.screensaver_index,
+            screensaver::index_for(BackgroundShader::AuroraDrift)
+        );
+        assert!(
+            app.screensaver_elapsed >= Duration::from_millis(49)
+                && app.screensaver_elapsed <= Duration::from_millis(51)
+        );
+    }
+
+    #[test]
+    fn background_image_fit_maps_to_iced_without_guessing() {
+        assert_eq!(background_fit(BackgroundFit::Cover), ContentFit::Cover);
+        assert_eq!(background_fit(BackgroundFit::Contain), ContentFit::Contain);
+        assert_eq!(background_fit(BackgroundFit::Stretch), ContentFit::Fill);
+        assert_eq!(background_fit(BackgroundFit::Center), ContentFit::None);
     }
 
     #[test]
