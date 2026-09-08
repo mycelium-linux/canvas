@@ -4,7 +4,9 @@
 //! but cannot read files, load packages, open sockets, launch processes, or
 //! mutate workspace state.
 
-use super::{AssetRef, Error, NodeContent, Result, Scene, SceneNode, Transform3, identifier};
+use super::{
+    AssetRef, Error, NodeContent, Result, Scene, SceneNode, SceneTint, Transform3, identifier,
+};
 use mlua::{Lua, LuaOptions, StdLib, Table, Value, VmState};
 use std::{
     cell::RefCell,
@@ -182,7 +184,7 @@ fn install_canvas_api(
             lua.create_function(move |_, spec: Table| {
                 let node = parse_node(
                     &spec,
-                    &["id", "parent", "translation", "rotation", "scale"],
+                    &["id", "parent", "translation", "rotation", "scale", "tint"],
                     NodeContent::Group,
                 )?;
                 append_node(&group_nodes, max_nodes, node)
@@ -199,7 +201,7 @@ fn install_canvas_api(
                 let text = required_string(&spec, "text")?;
                 let node = parse_node(
                     &spec,
-                    &["id", "parent", "text", "translation", "rotation", "scale"],
+                    &["id", "parent", "text", "translation", "rotation", "scale", "tint"],
                     NodeContent::Text { text },
                 )?;
                 append_node(&text_nodes, max_nodes, node)
@@ -278,11 +280,21 @@ fn append_node(
 
 fn parse_node(spec: &Table, allowed: &[&str], content: NodeContent) -> mlua::Result<SceneNode> {
     reject_unknown_fields(spec, allowed)?;
+    // An unknown role is refused rather than silently falling back to the default:
+    // a typo would otherwise paint an error node the same colour as a healthy one,
+    // which is the failure this whole field exists to prevent.
+    let tint = match spec.get::<Option<String>>("tint")? {
+        Some(name) => SceneTint::parse(&name).ok_or_else(|| {
+            mlua::Error::RuntimeError(format!("Unknown Canvas scene tint: {name}"))
+        })?,
+        None => SceneTint::default(),
+    };
     Ok(SceneNode {
         id: required_string(spec, "id")?,
         parent_id: spec.get("parent")?,
         transform: parse_transform(spec)?,
         content,
+        tint,
     })
 }
 

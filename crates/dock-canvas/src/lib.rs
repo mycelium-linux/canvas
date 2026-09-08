@@ -327,6 +327,70 @@ pub struct SceneNode {
     #[serde(default)]
     pub transform: Transform3,
     pub content: NodeContent,
+    /// Which semantic role this node plays, resolved to a colour by the host.
+    #[serde(default)]
+    pub tint: SceneTint,
+}
+
+/// A colour by meaning rather than by value.
+///
+/// A module says `danger`; the host decides what danger looks like in the active
+/// project theme. An RGB field here would let a module invent colours and undo
+/// the property that makes Coherence worth having — that nobody is stopped from
+/// choosing a colour, the choice simply is not reachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
+pub enum SceneTint {
+    #[default]
+    Text,
+    Muted,
+    Primary,
+    Success,
+    Warning,
+    Danger,
+    Info,
+}
+
+impl SceneTint {
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Muted => "muted",
+            Self::Primary => "primary",
+            Self::Success => "success",
+            Self::Warning => "warning",
+            Self::Danger => "danger",
+            Self::Info => "info",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "text" => Self::Text,
+            "muted" => Self::Muted,
+            "primary" => Self::Primary,
+            "success" => Self::Success,
+            "warning" => Self::Warning,
+            "danger" => Self::Danger,
+            "info" => Self::Info,
+            _ => return None,
+        })
+    }
+
+    /// The palette entry this role resolves to. One place, so a role cannot mean
+    /// two different colours in two different renderers.
+    pub fn resolve(self, palette: &dock_core::ThemePalette) -> [u8; 3] {
+        match self {
+            Self::Text => palette.text,
+            Self::Muted => palette.text_muted,
+            Self::Primary => palette.primary,
+            Self::Success => palette.success,
+            Self::Warning => palette.warning,
+            Self::Danger => palette.danger,
+            Self::Info => palette.info,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

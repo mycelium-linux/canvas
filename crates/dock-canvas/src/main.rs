@@ -3111,7 +3111,7 @@ impl App {
                         let [x, y] = scene_node_position(n.transform.translation, viewport);
                         let font_size =
                             (n.transform.scale[0] * n.transform.scale[1] * 24.0).max(10.0);
-                        container(text(label).size(font_size).color(color(palette.text)))
+                        container(text(label).size(font_size).color(color(n.tint.resolve(&palette))))
                             .width(Length::Shrink)
                             .height(Length::Shrink)
                             .padding(iced::Padding {
