@@ -100,6 +100,11 @@ pub enum Command {
     ScreensaverShader {
         index: usize,
     },
+    OpenDataViz {
+        surface_id: String,
+        file: PathBuf,
+        chart_type: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -592,6 +597,7 @@ pub enum ContentKind {
     Markdown,
     Terminal,
     Scene,
+    DataViz,
 }
 
 impl ControlRequest {
@@ -656,7 +662,8 @@ impl ControlRequest {
             | Command::Shutdown
             | Command::WorkspaceSave { .. }
             | Command::WorkspaceSwitch { .. }
-            | Command::ScreensaverShader { .. } => {}
+            | Command::ScreensaverShader { .. }
+            | Command::OpenDataViz { .. } => {}
         }
         Ok(())
     }
@@ -879,6 +886,17 @@ pub mod text {
                     .parse::<usize>()
                     .map_err(|_| "invalid shader index".into())
                     .map(|index| Command::ScreensaverShader { index })
+            }
+            "open_dataviz" | "dataviz" | "chart" => {
+                req(tokens, 4, "open_dataviz <chart_type> <surface_id> <file>")?;
+                let chart_type = tokens[1].clone();
+                let surface_id = tokens[2].clone();
+                let file = std::path::PathBuf::from(&tokens[3]);
+                Ok(Command::OpenDataViz {
+                    surface_id,
+                    file,
+                    chart_type,
+                })
             }
             "bg" | "theme" => {
                 req(tokens, 2, "bg <project_id>")?;

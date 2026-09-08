@@ -20,9 +20,14 @@ use dock_canvas::{
 };
 use dock_core::{Catalog, ProjectTheme, ThemePalette, desktop::WallpaperRequest, layout::Rect};
 use iced::widget::{
-    container, image as image_widget, markdown, row, scrollable, space, stack, text,
+    canvas, container, image as image_widget, markdown, row, scrollable, space, stack, text,
 };
-use iced::{Color, ContentFit, Element, Length, Point, Size, Subscription, Task, Theme};
+use iced::widget::canvas::{Canvas, Geometry};
+use iced::mouse;
+use iced::{
+    Color, ContentFit, Element, Length, Point, Rectangle, Renderer, Size, Subscription, Task,
+    Theme,
+};
 use image::{ImageReader, Limits};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -109,6 +114,10 @@ enum ContentSource {
     },
     Scene {
         scene: Scene,
+    },
+    DataViz {
+        data: Vec<(f32, f32)>,
+        chart_type: String,
     },
 }
 
@@ -1125,6 +1134,101 @@ impl App {
                     Task::none()
                 }
             }
+            Command::OpenDataViz {
+                surface_id,
+                file,
+                chart_type,
+            } => {
+                let parsed = parse_dataviz_file(&file);
+                match parsed {
+                    Ok(data) => {
+                        let snapshot = SurfaceSnapshot {
+                            id: surface_id.clone(),
+                            title: file.file_name().unwrap_or_default().to_string_lossy().into(),
+                            content: ContentKind::DataViz,
+                            asset_sha256: None,
+                            page_index: None,
+                            page_count: None,
+                            source_pixels: None,
+                            rendered_pixels: None,
+                            display_logical: None,
+                            scale_factor: None,
+                        };
+                        let runtime = RuntimeSurface {
+                            snapshot,
+                            source: ContentSource::DataViz {
+                                data,
+                                chart_type: chart_type.clone(),
+                            },
+                            handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
+                            source_pixels: [1, 1],
+                            media_plan: MediaPlan {
+                                viewport_logical: self.media_viewport(),
+                                source_dimensions: SourceDimensions::RasterPixels(PixelSize {
+                                    width: 1,
+                                    height: 1,
+                                }),
+                                target_px: PixelSize { width: 1, height: 1 },
+                                display_logical: self.media_viewport(),
+                                scale_factor: self.scale_factor,
+                                cache_key: MediaCacheKey {
+                                    source_id: format!("dataviz:{surface_id}"),
+                                    variant: MediaVariant::Raster,
+                                    pixel_size: PixelSize { width: 1, height: 1 },
+                                },
+                            },
+                            upload_pixels: [1, 1],
+                        };
+                        let runtime_title = runtime.snapshot.title.clone();
+                        let runtime_snapshot = runtime.snapshot.clone();
+                        self.decoded.insert(surface_id.clone(), runtime);
+                        self.start_transition();
+                        if !self.document.surfaces.iter().any(|s| s.id == surface_id) {
+                            self.document.surfaces.push(Surface {
+                                id: surface_id.clone(),
+                                title: runtime_title,
+                                content: SurfaceContent::Asset {
+                                    asset: AssetRef {
+                                        sha256: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+                                        media_type: "application/csv".into(),
+                                        byte_length: 1,
+                                    },
+                                },
+                                inputs: Vec::new(),
+                            });
+                        }
+                        let mut placements = match &self.document.layout {
+                            Layout::Canvas { placements } => placements.clone(),
+                            Layout::Surface { surface_id: sid } => vec![Placement {
+                                surface_id: sid.clone(),
+                                bounds: NormalizedRect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 },
+                                layer: 0,
+                            }],
+                            _ => Vec::new(),
+                        };
+                        if !placements.iter().any(|p| p.surface_id == surface_id) {
+                            placements.push(Placement {
+                                surface_id: surface_id.clone(),
+                                bounds: NormalizedRect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 },
+                                layer: placements.len() as i32,
+                            });
+                        }
+                        self.document.layout = Layout::Canvas { placements };
+                        self.bump();
+                        self.status = format!("Opened data viz surface {surface_id}.");
+                        self.answer(
+                            pending,
+                            Outcome::Ok {
+                                receipt: Receipt::SurfaceOpened {
+                                    surface: runtime_snapshot,
+                                },
+                            },
+                        );
+                    }
+                    Err(error) => self.fail(pending, Failure::invalid(error)),
+                }
+                Task::none()
+            }
             Command::ScreensaverShader { index } => {
                 let Some(shader) = screensaver::SHADERS.get(index) else {
                     self.fail(
@@ -1731,6 +1835,21 @@ impl App {
                     .height(height)
                     .into()
             }
+            ContentSource::DataViz { data, chart_type } => {
+                let palette = self.presented_palette();
+                let axis_color = color(palette.text);
+                Canvas::new(ChartProgram {
+                    data: data.clone(),
+                    chart_type: chart_type.clone(),
+                    axis_color,
+                    bar_color: color(palette.primary),
+                    line_color: color(palette.success),
+                    point_color: color(palette.danger),
+                })
+                .width(width)
+                .height(height)
+                .into()
+            }
             _ => image_widget(surface.handle.clone())
                 .content_fit(ContentFit::Contain)
                 .width(width)
@@ -2279,6 +2398,160 @@ fn interaction_engine(frame: Rect) -> InteractionEngine {
         grid_size: Some(8.0),
     })
     .expect("Canvas interaction defaults must remain valid")
+}
+
+fn parse_dataviz_file(file: &Path) -> Result<Vec<(f32, f32)>, String> {
+    let content = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
+    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+    match ext {
+        "csv" => parse_csv(&content),
+        "json" => parse_json_data(&content),
+        "tsv" => parse_csv_with_sep(&content, '\t'),
+        _ => parse_csv(&content),
+    }
+}
+
+fn parse_csv(content: &str) -> Result<Vec<(f32, f32)>, String> {
+    parse_csv_with_sep(content, ',')
+}
+
+fn parse_csv_with_sep(content: &str, sep: char) -> Result<Vec<(f32, f32)>, String> {
+    let mut data = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split(sep).collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let x: f32 = parts[0].trim().parse().map_err(|_| format!("invalid x: {}", parts[0]))?;
+        let y: f32 = parts[1].trim().parse().map_err(|_| format!("invalid y: {}", parts[1]))?;
+        data.push((x, y));
+    }
+    if data.is_empty() {
+        return Err("no data points found".into());
+    }
+    Ok(data)
+}
+
+fn parse_json_data(content: &str) -> Result<Vec<(f32, f32)>, String> {
+    let value: serde_json::Value = serde_json::from_str(content).map_err(|e| e.to_string())?;
+    if let Some(array) = value.as_array() {
+        let mut data = Vec::new();
+        for item in array {
+            if item.get("x").is_some() && item.get("y").is_some() {
+                let x = item["x"].as_f64().ok_or("invalid x")? as f32;
+                let y = item["y"].as_f64().ok_or("invalid y")? as f32;
+                data.push((x, y));
+            }
+        }
+        Ok(data)
+    } else {
+        Err("JSON data must be an array of {x, y} objects".into())
+    }
+}
+
+struct ChartProgram {
+    data: Vec<(f32, f32)>,
+    chart_type: String,
+    axis_color: Color,
+    bar_color: Color,
+    line_color: Color,
+    point_color: Color,
+}
+
+impl<Message> canvas::Program<Message> for ChartProgram {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        if self.data.is_empty() {
+            return Vec::new();
+        }
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let margin = 40.0f32;
+        let stroke = canvas::Stroke::default()
+            .with_width(1.0)
+            .with_color(Color { a: 0.15, ..self.axis_color });
+
+        let min_x = self.data.iter().map(|(x, _)| *x).fold(f32::INFINITY, f32::min);
+        let max_x = self.data.iter().map(|(x, _)| *x).fold(f32::NEG_INFINITY, f32::max);
+        let min_y = self.data.iter().map(|(_, y)| *y).fold(f32::INFINITY, f32::min);
+        let max_y = self.data.iter().map(|(_, y)| *y).fold(f32::NEG_INFINITY, f32::max);
+
+        let plot_w = bounds.width - 2.0 * margin;
+        let plot_h = bounds.height - 2.0 * margin;
+
+        let sx = |x: f32| margin + (x - min_x) / (max_x - min_x).max(1e-6) * plot_w;
+        let sy = |y: f32| bounds.height - margin - (y - min_y) / (max_y - min_y).max(1e-6) * plot_h;
+
+        if plot_w > 0.0 && plot_h > 0.0 {
+            let grid = canvas::Path::line(
+                Point::new(margin, bounds.height - margin),
+                Point::new(bounds.width - margin, bounds.height - margin),
+            );
+            frame.stroke(&grid, stroke);
+            let grid_y = canvas::Path::line(
+                Point::new(margin, margin),
+                Point::new(margin, bounds.height - margin),
+            );
+            frame.stroke(&grid_y, stroke);
+        }
+
+        match self.chart_type.as_str() {
+            "bar" => {
+                let n = self.data.len() as f32;
+                let bar_w = plot_w / (n + 1.0);
+                for (i, (_, y)) in self.data.iter().enumerate() {
+                    let cx = margin + bar_w * (i as f32 + 0.5);
+                    let bh = (*y - min_y) / (max_y - min_y).max(1e-6) * plot_h;
+                    let rect = canvas::Path::rectangle(
+                        Point::new(cx - bar_w * 0.4, bounds.height - margin - bh),
+                        Size::new(bar_w * 0.8, bh.max(1.0)),
+                    );
+                    frame.fill(&rect, self.bar_color);
+                }
+            }
+            "line" => {
+                let line_stroke = canvas::Stroke::default()
+                    .with_width(2.0)
+                    .with_color(self.line_color);
+                for window in self.data.windows(2) {
+                    let path = canvas::Path::line(
+                        Point::new(sx(window[0].0), sy(window[0].1)),
+                        Point::new(sx(window[1].0), sy(window[1].1)),
+                    );
+                    frame.stroke(&path, line_stroke);
+                }
+                for (x, y) in &self.data {
+                    let circle = canvas::Path::circle(Point::new(sx(*x), sy(*y)), 2.5);
+                    frame.fill(&circle, self.line_color);
+                }
+            }
+            "scatter" => {
+                for (x, y) in &self.data {
+                    let circle = canvas::Path::circle(Point::new(sx(*x), sy(*y)), 3.0);
+                    frame.fill(&circle, self.point_color);
+                }
+            }
+            _ => {
+                for (x, y) in &self.data {
+                    let circle = canvas::Path::circle(Point::new(sx(*x), sy(*y)), 2.0);
+                    frame.fill(&circle, self.point_color);
+                }
+            }
+        }
+
+        vec![frame.into_geometry()]
+    }
 }
 
 fn denormalize(bounds: NormalizedRect, frame: Rect) -> LogicalRect {
