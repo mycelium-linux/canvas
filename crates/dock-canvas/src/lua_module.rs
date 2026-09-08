@@ -598,6 +598,7 @@ fn install_widget_api(lua: &Lua, read_theme: bool, theme: ModuleThemeTokens) -> 
         )
         .map_err(lua_error)?;
     lua.globals().set("canvas", canvas).map_err(lua_error)
+}
 
 fn widget_set_text(lua: &Lua, text: &str) -> Result<mlua::Value> {
     let table = lua.create_table().map_err(lua_error)?;

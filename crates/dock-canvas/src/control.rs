@@ -924,9 +924,7 @@ pub mod text {
                     path: std::path::PathBuf::from(&tokens[1]),
                 })
             }
-            "bg-clear" | "bgclear" | "bg-default" => {
-                Ok(Command::ClearBackground)
-            }
+            "bg-clear" | "bgclear" | "bg-default" => Ok(Command::ClearBackground),
             "open_stream" | "stream" => {
                 req(tokens, 3, "open_stream <url> <surface_id>")?;
                 Ok(Command::OpenStream {

@@ -638,7 +638,7 @@ impl WorkspaceDocument {
                 SurfaceContent::Scene { scene } => scene.validate()?,
                 SurfaceContent::Stream { url } => {
                     check(!url.is_empty(), "Stream URL must not be empty")?;
-                },
+                }
             }
         }
 

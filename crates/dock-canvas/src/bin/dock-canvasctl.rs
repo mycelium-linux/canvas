@@ -125,21 +125,27 @@ fn handle_line(line: &str) -> Result<(), String> {
             receipt: Receipt::Snapshot { snapshot },
         } = &reply.outcome
         {
-            if let Some(bounding) = snapshot.display_frames.iter().fold(None, |acc: Option<dock_core::layout::Rect>, display| {
-                match acc {
+            if let Some(bounding) = snapshot.display_frames.iter().fold(
+                None,
+                |acc: Option<dock_core::layout::Rect>, display| match acc {
                     None => Some(*display),
                     Some(mut bbox) => {
                         bbox.x = bbox.x.min(display.x);
                         bbox.y = bbox.y.min(display.y);
-                        let right = (i64::from(bbox.x) + i64::from(bbox.width)).max(i64::from(display.x) + i64::from(display.width));
-                        let bottom = (i64::from(bbox.y) + i64::from(bbox.height)).max(i64::from(display.y) + i64::from(display.height));
+                        let right = (i64::from(bbox.x) + i64::from(bbox.width))
+                            .max(i64::from(display.x) + i64::from(display.width));
+                        let bottom = (i64::from(bbox.y) + i64::from(bbox.height))
+                            .max(i64::from(display.y) + i64::from(display.height));
                         bbox.width = (right - i64::from(bbox.x)) as u32;
                         bbox.height = (bottom - i64::from(bbox.y)) as u32;
                         Some(bbox)
                     }
-                }
-            }) {
-                let request = text::parse_line(&format!("move {} {} {} {}", bounding.x, bounding.y, bounding.width, bounding.height))?;
+                },
+            ) {
+                let request = text::parse_line(&format!(
+                    "move {} {} {} {}",
+                    bounding.x, bounding.y, bounding.width, bounding.height
+                ))?;
                 println!("{}", text::format_reply(&control::send(&request)?));
             } else {
                 println!("ERR no displays found");
