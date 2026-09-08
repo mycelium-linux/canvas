@@ -15,16 +15,16 @@ use dock_canvas::media::{
     plan_pdf_page, plan_raster,
 };
 use dock_canvas::{
-    AssetRef, Background, BackgroundFit, GradientStop, Layout, NodeContent,
-    NormalizedRect, PatchOperation, Placement, SCHEMA_VERSION, Scene, SceneNode, Surface,
-    SurfaceContent, ThemeRef, WorkspaceDocument, WorkspacePatch,
+    AssetRef, Background, BackgroundFit, GradientStop, Layout, NodeContent, NormalizedRect,
+    PatchOperation, Placement, SCHEMA_VERSION, Scene, SceneNode, Surface, SurfaceContent, ThemeRef,
+    WorkspaceDocument, WorkspacePatch,
 };
 use dock_core::{Catalog, ProjectTheme, ThemePalette, desktop::WallpaperRequest, layout::Rect};
 use iced::mouse;
 use iced::widget::canvas::{Canvas, Geometry};
 use iced::widget::{
-    button, canvas, container, image as image_widget, markdown, row, scrollable, space, stack, text,
-    tooltip,
+    button, canvas, container, image as image_widget, markdown, row, scrollable, space, stack,
+    text, tooltip,
 };
 use iced::{
     Color, ContentFit, Element, Length, Point, Rectangle, Renderer, Size, Subscription, Task, Theme,
@@ -1102,10 +1102,29 @@ impl App {
             Command::SetPresence { presence } => {
                 let zone = presence.zone.clone();
                 let occupant_count = presence.occupants.len();
+                let was_occupied = self.presence.as_ref().is_some_and(|p| p.occupied);
                 self.presence = Some(presence);
                 self.presence_received = Some(Instant::now());
-                self.bump();
-                self.status = format!("Updated presence in {zone}.");
+                if !was_occupied && self.presence.as_ref().is_some_and(|p| p.occupied) {
+                    self.screensaver_settings.enabled = false;
+                    self.bump();
+                    self.emit_event("presence_present".to_string());
+                    self.status = "Presence detected — privacy screensaver cleared.".into();
+                } else if was_occupied && !self.presence.as_ref().is_some_and(|p| p.occupied) {
+                    let prev_enabled = self.screensaver_settings.enabled;
+                    if !prev_enabled {
+                        self.screensaver_settings.enabled = true;
+                        self.screensaver_piece_elapsed = Duration::ZERO;
+                        self.screensaver_elapsed = Duration::ZERO;
+                        self.screensaver_last_frame = Some(Instant::now());
+                    }
+                    self.bump();
+                    self.emit_event("presence_away".to_string());
+                    self.status = "User away — privacy screensaver activated.".into();
+                } else {
+                    self.bump();
+                    self.status = format!("Updated presence in {zone}.");
+                }
                 self.answer(
                     pending,
                     Outcome::Ok {
@@ -2106,12 +2125,15 @@ impl App {
         .align_x(iced::alignment::Horizontal::Left)
         .align_y(iced::alignment::Vertical::Top)
         .style(move |_| container::Style {
-            background: Some(Color::from_rgba8(
-                palette.surface[0],
-                palette.surface[1],
-                palette.surface[2],
-                0.78,
-            ).into()),
+            background: Some(
+                Color::from_rgba8(
+                    palette.surface[0],
+                    palette.surface[1],
+                    palette.surface[2],
+                    0.78,
+                )
+                .into(),
+            ),
             border: iced::Border {
                 color: Color::from_rgba8(
                     palette.border[0],
@@ -2161,12 +2183,15 @@ impl App {
         let dock = container(row(items).spacing(8))
             .padding(8)
             .style(move |_| container::Style {
-                background: Some(Color::from_rgba8(
-                    palette.surface[0],
-                    palette.surface[1],
-                    palette.surface[2],
-                    0.82,
-                ).into()),
+                background: Some(
+                    Color::from_rgba8(
+                        palette.surface[0],
+                        palette.surface[1],
+                        palette.surface[2],
+                        0.82,
+                    )
+                    .into(),
+                ),
                 border: iced::Border {
                     color: Color::from_rgba8(
                         palette.border[0],
@@ -2330,7 +2355,12 @@ impl App {
                                     radius: 9.0.into(),
                                 },
                                 shadow: iced::Shadow {
-                                    color: Color::from_rgba8(0, 0, 0, if focused { 0.38 } else { 0.24 }),
+                                    color: Color::from_rgba8(
+                                        0,
+                                        0,
+                                        0,
+                                        if focused { 0.38 } else { 0.24 },
+                                    ),
                                     offset: iced::Vector::new(0.0, if focused { 8.0 } else { 5.0 }),
                                     blur_radius: if focused { 24.0 } else { 16.0 },
                                 },
@@ -4501,6 +4531,77 @@ mod tests {
         assert_eq!(placements[0].bounds.width, 0.4);
         assert_eq!(placements[0].bounds.height, 0.4);
         assert!(app.runtime_revision > before);
+    }
+
+    #[test]
+    fn window_relative_pointer_focuses_and_promotes_on_a_nonzero_display_origin() {
+        let mut app = test_app();
+        app.frame.x = 3_840;
+        app.interaction = interaction_engine(app.frame);
+        app.document.layout = Layout::Canvas {
+            placements: vec![
+                Placement {
+                    surface_id: "lower".into(),
+                    bounds: NormalizedRect {
+                        x: 0.1,
+                        y: 0.1,
+                        width: 0.5,
+                        height: 0.5,
+                    },
+                    layer: 0,
+                },
+                Placement {
+                    surface_id: "upper".into(),
+                    bounds: NormalizedRect {
+                        x: 0.3,
+                        y: 0.3,
+                        width: 0.5,
+                        height: 0.5,
+                    },
+                    layer: 1,
+                },
+            ],
+        };
+        app.handle_mouse(iced::mouse::Event::CursorMoved {
+            position: Point::new(180.0, 180.0),
+        });
+        app.handle_mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left));
+        assert_eq!(app.document.focused_surface_id.as_deref(), Some("lower"));
+        let Layout::Canvas { placements } = &app.document.layout else {
+            panic!("expected Canvas layout");
+        };
+        assert!(placements[0].layer > placements[1].layer);
+    }
+
+    #[test]
+    fn minimized_dock_appears_and_restore_promotes_the_surface() {
+        let mut app = test_app();
+        app.document.surfaces = vec![Surface {
+            id: "invoice".into(),
+            title: "Invoice".into(),
+            content: SurfaceContent::Scene {
+                scene: Scene { nodes: Vec::new() },
+            },
+            inputs: Vec::new(),
+        }];
+        app.document.layout = Layout::Canvas {
+            placements: vec![Placement {
+                surface_id: "invoice".into(),
+                bounds: NormalizedRect {
+                    x: 0.1,
+                    y: 0.1,
+                    width: 0.5,
+                    height: 0.5,
+                },
+                layer: 0,
+            }],
+        };
+        assert!(app.minimized_dock().is_none());
+        app.minimized_surfaces.insert("invoice".into());
+        assert!(app.minimized_dock().is_some());
+        drop(app.update(Message::RestoreSurface("invoice".into())));
+        assert!(app.minimized_surfaces.is_empty());
+        assert_eq!(app.document.focused_surface_id.as_deref(), Some("invoice"));
     }
 
     #[test]
