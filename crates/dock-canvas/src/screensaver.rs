@@ -337,6 +337,13 @@ pub fn attribution(index: usize) -> String {
     format!("{} — {} ({})", shader.name, shader.credit, shader.license)
 }
 
+pub fn index_for(id: BackgroundShader) -> usize {
+    SHADERS
+        .iter()
+        .position(|shader| shader.id == id)
+        .expect("every typed Canvas shader must have a renderer")
+}
+
 pub fn advance_elapsed(
     index: usize,
     elapsed: Duration,
@@ -573,6 +580,7 @@ mod tests {
                 .all(|id| SHADERS.iter().any(|shader| shader.id == *id))
         );
         for (index, shader) in SHADERS.iter().enumerate() {
+            assert_eq!(index_for(shader.id), index);
             assert!(!shader.name.is_empty());
             assert!(shader.wgsl.contains("@fragment"));
             assert!(!shader.credit.is_empty());
