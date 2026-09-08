@@ -399,6 +399,21 @@ mod tests {
             other => panic!("expected chart, got {other:?}"),
         }
     }
+
+    #[test]
+    fn canvas_demo_specs_use_the_production_widget_schema() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/widgets");
+        for name in [
+            "demo-clock.json",
+            "demo-ticker.json",
+            "demo-gauge.json",
+            "demo-meter.json",
+            "demo-status.json",
+        ] {
+            WidgetSpec::from_file(&root.join(name))
+                .unwrap_or_else(|error| panic!("{name} is invalid: {error}"));
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1900,7 +1900,7 @@ impl App {
                     };
                     let runtime = RuntimeSurface {
                         snapshot: snapshot.clone(),
-                        source: ContentSource::Widget { spec },
+                        source: ContentSource::Widget { spec: spec.clone() },
                         handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
                         source_pixels: [1, 1],
                         media_plan: MediaPlan {
@@ -1934,13 +1934,19 @@ impl App {
                     };
                     self.decoded.insert(surface_id.clone(), runtime);
                     self.start_transition();
-                    if !self.document.surfaces.iter().any(|s| s.id == surface_id) {
+                    if let Some(surface) = self
+                        .document
+                        .surfaces
+                        .iter_mut()
+                        .find(|surface| surface.id == surface_id)
+                    {
+                        surface.title = title.clone();
+                        surface.content = SurfaceContent::Widget { spec: spec.clone() };
+                    } else {
                         self.document.surfaces.push(Surface {
                             id: surface_id.clone(),
                             title,
-                            content: SurfaceContent::ProjectResource {
-                                resource_id: format!("widget:{}", surface_id),
-                            },
+                            content: SurfaceContent::Widget { spec: spec.clone() },
                             inputs: Vec::new(),
                         });
                         let mut placements = match &self.document.layout {
@@ -1973,6 +1979,7 @@ impl App {
                         }
                         self.document.layout = Layout::Canvas { placements };
                     }
+                    self.document.revision = self.document.revision.saturating_add(1);
                     self.bump();
                     self.emit_event(format!("widget_opened {surface_id}"));
                     self.status = format!("Opened widget surface {surface_id}.");
@@ -2846,6 +2853,10 @@ impl App {
                     ContentSource::DataViz {
                         chart: chart.clone(),
                     },
+                ),
+                SurfaceContent::Widget { spec } => (
+                    ContentKind::Widget,
+                    ContentSource::Widget { spec: spec.clone() },
                 ),
                 _ => continue,
             };
@@ -7057,6 +7068,54 @@ mod tests {
         ));
         assert_eq!(app.document.project_id, "dock");
         assert_eq!(app.document.chrome.canvas_padding, 21);
+        if let Some(parent) = app.workspace_store_path.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+    }
+
+    #[test]
+    fn widget_surface_survives_workspace_store_and_runtime_rehydration() {
+        let mut app = test_app();
+        let spec = dock_widgets::WidgetSpec::from_json(
+            br#"{"schema_version":1,"id":"demo-meter","kind":"meter","value":0.68,"style":"vu"}"#,
+        )
+        .unwrap();
+        app.document.surfaces.push(Surface {
+            id: "widget-meter".into(),
+            title: "Widget: demo-meter".into(),
+            content: SurfaceContent::Widget { spec: spec.clone() },
+            inputs: Vec::new(),
+        });
+        app.document.layout = Layout::Surface {
+            surface_id: "widget-meter".into(),
+        };
+        app.document.revision += 1;
+
+        let project_id = app.document.project_id.clone();
+        let saved = execute(
+            &mut app,
+            "save-widget-workspace",
+            Command::WorkspaceSave {
+                name: project_id.clone(),
+            },
+        );
+        assert!(matches!(saved.outcome, Outcome::Ok { .. }));
+
+        let stored = workspace_store::load(&app.workspace_store_path, &app.catalog)
+            .unwrap()
+            .get(&project_id)
+            .cloned()
+            .unwrap();
+        app.document = stored;
+        app.decoded.clear();
+        app.ensure_scene_decoded();
+
+        let runtime = app.decoded.get("widget-meter").unwrap();
+        assert_eq!(runtime.snapshot.content, ContentKind::Widget);
+        assert!(matches!(
+            &runtime.source,
+            ContentSource::Widget { spec: restored } if restored == &spec
+        ));
         if let Some(parent) = app.workspace_store_path.parent() {
             let _ = std::fs::remove_dir_all(parent);
         }

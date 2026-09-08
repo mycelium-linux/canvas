@@ -210,6 +210,7 @@ pub enum SurfaceContent {
     ProjectResource { resource_id: String },
     Asset { asset: AssetRef },
     Chart { chart: chart::ChartDocument },
+    Widget { spec: dock_widgets::WidgetSpec },
     Scene { scene: Scene },
     Terminal { resource_id: String },
     Stream { url: String },
@@ -677,6 +678,9 @@ impl WorkspaceDocument {
                 SurfaceContent::Asset { asset } => asset.validate()?,
                 SurfaceContent::Chart { chart } => {
                     chart.validate().map_err(|error| Error(error.to_string()))?
+                }
+                SurfaceContent::Widget { spec } => {
+                    spec.validate().map_err(|error| Error(error.to_string()))?
                 }
                 SurfaceContent::Scene { scene } => scene.validate()?,
                 SurfaceContent::Stream { url } => {

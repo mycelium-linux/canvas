@@ -83,6 +83,25 @@ struct OpenFile {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct OpenWidget {
+    request_id: String,
+    #[serde(default)]
+    expected_revision: Option<u64>,
+    surface_id: String,
+    spec_path: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SaveWorkspace {
+    request_id: String,
+    #[serde(default)]
+    expected_revision: Option<u64>,
+    name: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct RenderMermaid {
     request_id: String,
     #[serde(default)]
@@ -241,6 +260,14 @@ fn tools() -> Vec<Tool> {
             "canvas_open_file",
             "Open a file (image, PDF, Markdown, or rendered Mermaid) as a Canvas surface. Omit expected_revision for fire-and-forget.",
         ),
+        tool::<OpenWidget>(
+            "canvas_open_widget",
+            "Open a validated Dock widget specification as a live Canvas surface. The widget renderer and schema are shared with Lua and native Canvas; omit expected_revision for fire-and-forget.",
+        ),
+        tool::<SaveWorkspace>(
+            "canvas_workspace_save",
+            "Persist the current validated Canvas document under its exact project_id so surfaces, layout, theme, background, and focus survive restart.",
+        ),
         tool::<RenderMermaid>(
             "canvas_mermaid",
             "Render a Mermaid diagram via mmdc (outside the Canvas process) and open the result as a surface. Keeps Canvas thin.",
@@ -376,6 +403,25 @@ fn parse(name: &str, args: Value) -> Result<ControlRequest, String> {
                     path: args.path,
                     title: args.title,
                 },
+            )
+        }
+        "canvas_open_widget" => {
+            let args: OpenWidget = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            (
+                args.request_id,
+                args.expected_revision,
+                Command::OpenWidget {
+                    surface_id: args.surface_id,
+                    spec_path: args.spec_path.into(),
+                },
+            )
+        }
+        "canvas_workspace_save" => {
+            let args: SaveWorkspace = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            (
+                args.request_id,
+                args.expected_revision,
+                Command::WorkspaceSave { name: args.name },
             )
         }
         "canvas_view_patch" => {
@@ -988,6 +1034,22 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(overlays.command, Command::SetOverlays { .. }));
+        let widget = parse(
+            "canvas_open_widget",
+            json!({
+                "request_id":"widget-1",
+                "surface_id":"meter",
+                "spec_path":"/tmp/meter.json"
+            }),
+        )
+        .unwrap();
+        assert!(matches!(widget.command, Command::OpenWidget { .. }));
+        let save = parse(
+            "canvas_workspace_save",
+            json!({"request_id":"save-1","name":"dock"}),
+        )
+        .unwrap();
+        assert!(matches!(save.command, Command::WorkspaceSave { .. }));
         let visibility = parse(
             "canvas_set_visibility",
             json!({"request_id":"visibility-1","visible":false}),
@@ -1002,7 +1064,7 @@ mod tests {
     #[test]
     fn schemas_include_native_document_and_patch_definitions() {
         let tools = tools();
-        assert_eq!(tools.len(), 15);
+        assert_eq!(tools.len(), 17);
         let tool = |name: &str| tools.iter().find(|tool| tool.name == name).unwrap();
         assert!(
             tool("canvas_apply_document").input_schema["$defs"]
@@ -1434,7 +1496,7 @@ mod tests {
                 .unwrap()
         });
         let client = ().serve(client_io).await.unwrap();
-        assert_eq!(client.list_all_tools().await.unwrap().len(), 15);
+        assert_eq!(client.list_all_tools().await.unwrap().len(), 17);
         let result = client
             .call_tool(CallToolRequestParams::new("canvas_inspect"))
             .await

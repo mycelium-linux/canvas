@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "id": "demo-clock",
+  "kind": "clock",
+  "format": "%H:%M:%S"
+}
