@@ -254,6 +254,7 @@ struct App {
     workspaces: BTreeMap<String, WorkspaceDocument>,
     background_assets: BTreeMap<String, iced::widget::image::Handle>,
     events: Vec<String>,
+    presence_orb_visible: bool,
     screensaver_settings: ScreensaverSettings,
     screensaver_clock: screensaver::FrameClock,
     screensaver_index: usize,
@@ -320,8 +321,9 @@ impl App {
             maximized_surfaces: BTreeSet::new(),
             transition: None,
             workspaces: BTreeMap::new(),
-            background_assets: BTreeMap::new(),
             events: Vec::new(),
+            background_assets: BTreeMap::new(),
+            presence_orb_visible: true,
             screensaver_settings: ScreensaverSettings::default(),
             screensaver_clock: screensaver::FrameClock::new(
                 ScreensaverSettings::default().max_fps,
@@ -2460,6 +2462,68 @@ impl App {
         if let Some(dock) = self.minimized_dock() {
             layers.push(dock);
         }
+
+        if self.presence_orb_visible {
+            let palette = self.presented_palette();
+            let orb_color = match &self.presence {
+                Some(p) if p.occupied => Color::from_rgba8(34, 197, 94, 0.85),
+                Some(_) => Color::from_rgba8(239, 68, 68, 0.85),
+                None => Color::from_rgba8(250, 204, 21, 0.85),
+            };
+            let vu_height: f32 = 6.0;
+            let vu_bars = 8;
+            let t = self.screensaver_elapsed.as_secs_f32();
+            let level = ((t * 0.7).sin() * 0.5 + 0.5) * (vu_bars - 2) as f32 + 2.0;
+            let bar_elements: Vec<Element<'_, Message>> = (0..vu_bars)
+                .map(|i| {
+                    let active = i < level as usize;
+                    let h = if active { vu_height * 2.0 } else { vu_height };
+                    let c = if active { color(palette.success) } else { Color { a: 0.2, ..color(palette.text_muted) } };
+                    container(space::horizontal())
+                        .width(Length::Fixed(3.0))
+                        .height(Length::Fixed(h))
+                        .style(move |_| container::Style {
+                            background: Some(c.into()),
+                            ..Default::default()
+                        })
+                        .into()
+                })
+                .collect();
+            let vu = row(bar_elements)
+                .spacing(2)
+                .padding(iced::Padding {
+                    top: 20.0, right: 0.0, bottom: 0.0, left: 40.0,
+                });
+            layers.push(
+                container(vu)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(iced::alignment::Horizontal::Left)
+                    .align_y(iced::alignment::Vertical::Top)
+                    .into(),
+            );
+            layers.push(
+                container(space::horizontal())
+                    .width(Length::Fixed(16.0))
+                    .height(Length::Fixed(16.0))
+                    .style(move |_| container::Style {
+                        background: Some(orb_color.into()),
+                        border: iced::Border {
+                            color: Color { a: 0.4, ..orb_color },
+                            width: 1.0,
+                            radius: 8.0.into(),
+                        },
+                        ..Default::default()
+                    })
+                    .padding(iced::Padding {
+                        top: 12.0, right: 0.0, bottom: 0.0, left: 12.0,
+                    })
+                    .align_x(iced::alignment::Horizontal::Left)
+                    .align_y(iced::alignment::Vertical::Top)
+                    .into(),
+            );
+        }
+
         if self.is_leftmost_surface() {
             let signature = container(text("FPL").size(13).color(Color::WHITE))
                 .padding([8, 12])
