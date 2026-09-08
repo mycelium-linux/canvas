@@ -185,15 +185,43 @@ pub mod theme_hex {
         Ok([byte(0)?, byte(2)?, byte(4)?])
     }
 }
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ThemeMetrics {
     pub space_1: f32,
     pub space_2: f32,
     pub space_3: f32,
     pub space_4: f32,
+    pub space_5: f32,
+    pub radius_xs: f32,
+    pub radius_sm: f32,
+    pub radius_md: f32,
+    pub radius_lg: f32,
+    /// Compatibility alias for the default component radius.
     pub radius: f32,
     pub body: f32,
     pub small: f32,
+    pub large: f32,
+    pub title: f32,
+    pub display: f32,
+}
+
+/// A resolved, renderer-neutral Coherence theme. Consumers select semantic
+/// roles from this value instead of inventing component-local colors or sizes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VisualTheme {
+    pub mode: ThemeMode,
+    pub palette: ThemePalette,
+    pub surface_raised: [u8; 3],
+    pub surface_accent: [u8; 3],
+    pub surface_accent_strong: [u8; 3],
+    pub focus: [u8; 3],
+    pub metrics: ThemeMetrics,
+    pub panel_opacity: f32,
+    pub muted_opacity: f32,
+    pub grid_opacity: f32,
+    pub shadow_opacity: f32,
+    pub shadow_blur: f32,
+    pub shadow_offset_y: f32,
 }
 impl ThemeSelection {
     pub fn coherence(mode: ThemeMode, accent: Accent) -> Self {
@@ -209,6 +237,52 @@ impl ThemeSelection {
 
     pub fn metrics(self) -> ThemeMetrics {
         ThemeMetrics::shared()
+    }
+
+    pub fn visual_theme(self) -> VisualTheme {
+        let mode = self.mode();
+        let palette = self.palette();
+        let (surface_raised, surface_accent, surface_accent_strong, focus) = match self {
+            Self::Coherence {
+                mode: ThemeMode::Light,
+                ..
+            } => (
+                coherence_tokens::light::COLOR_SURFACE_RAISED,
+                coherence_tokens::light::COLOR_SURFACE_ACCENT,
+                coherence_tokens::light::COLOR_SURFACE_ACCENT_STRONG,
+                coherence_tokens::light::COLOR_FOCUS,
+            ),
+            Self::Coherence {
+                mode: ThemeMode::Dark,
+                ..
+            } => (
+                coherence_tokens::dark::COLOR_SURFACE_RAISED,
+                coherence_tokens::dark::COLOR_SURFACE_ACCENT,
+                coherence_tokens::dark::COLOR_SURFACE_ACCENT_STRONG,
+                coherence_tokens::dark::COLOR_FOCUS,
+            ),
+            Self::Palette { .. } => (
+                palette.surface,
+                palette.surface_muted,
+                mix_rgb(palette.surface_muted, palette.primary, 0.24),
+                palette.primary,
+            ),
+        };
+        VisualTheme {
+            mode,
+            palette,
+            surface_raised,
+            surface_accent,
+            surface_accent_strong,
+            focus,
+            metrics: self.metrics(),
+            panel_opacity: 0.92,
+            muted_opacity: 0.68,
+            grid_opacity: 0.24,
+            shadow_opacity: if mode == ThemeMode::Dark { 0.30 } else { 0.16 },
+            shadow_blur: 18.0,
+            shadow_offset_y: 6.0,
+        }
     }
 
     /// Explicit for Coherence themes; inferred from background luminance for
@@ -256,11 +330,25 @@ impl ThemeMetrics {
             space_2: t::SPACE_2,
             space_3: t::SPACE_3,
             space_4: t::SPACE_4,
+            space_5: t::SPACE_5,
+            radius_xs: t::RADIUS_XS,
+            radius_sm: t::RADIUS_SM,
+            radius_md: t::RADIUS_MD,
+            radius_lg: t::RADIUS_LG,
             radius: t::RADIUS_MD,
             body: t::FONT_SIZE_BASE,
             small: t::FONT_SIZE_SM,
+            large: t::FONT_SIZE_LG,
+            title: t::FONT_SIZE_XL,
+            display: t::FONT_SIZE_2XL,
         }
     }
+}
+
+fn mix_rgb(a: [u8; 3], b: [u8; 3], amount: f32) -> [u8; 3] {
+    std::array::from_fn(|index| {
+        (f32::from(a[index]) * (1.0 - amount) + f32::from(b[index]) * amount).round() as u8
+    })
 }
 impl ProjectTheme {
     pub fn palette(self) -> ThemePalette {
@@ -633,6 +721,33 @@ mod tests {
         assert_ne!(a.background, b.background);
         assert_eq!(a.primary, coherence_tokens::dark::COLOR_INFO);
         assert_eq!(b.primary, coherence_tokens::light::COLOR_BRAND);
+    }
+    #[test]
+    fn visual_themes_carry_coherence_beyond_color() {
+        let c = catalog();
+        let dark = c.projects[0].theme.visual_theme();
+        let light = c.projects[1].theme.visual_theme();
+        assert_eq!(
+            dark.surface_raised,
+            coherence_tokens::dark::COLOR_SURFACE_RAISED
+        );
+        assert_eq!(
+            light.surface_accent,
+            coherence_tokens::light::COLOR_SURFACE_ACCENT
+        );
+        assert_ne!(dark.surface_raised, light.surface_raised);
+        assert_eq!(dark.metrics.display, coherence_tokens::dark::FONT_SIZE_2XL);
+        assert_eq!(dark.metrics.radius_lg, coherence_tokens::dark::RADIUS_LG);
+        assert!(dark.shadow_opacity > light.shadow_opacity);
+    }
+    #[test]
+    fn imported_palette_resolves_the_complete_visual_contract() {
+        let palette = catalog().projects[0].theme.palette();
+        let visual = ThemeSelection::Palette { palette }.visual_theme();
+        assert_eq!(visual.palette, palette);
+        assert_eq!(visual.surface_raised, palette.surface);
+        assert_eq!(visual.focus, palette.primary);
+        assert_ne!(visual.surface_accent_strong, palette.surface_muted);
     }
     #[test]
     fn unsupported_schema_and_duplicate_ids_rejected() {

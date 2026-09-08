@@ -30,7 +30,7 @@ use dock_canvas::{
     SurfaceContent, SurfaceTitleMode, ThemeRef, WorkspaceDocument, WorkspacePatch,
 };
 use dock_core::global_hotkey::{GlobalHotkey, HotkeySpec};
-use dock_core::{Catalog, ProjectTheme, ThemePalette, desktop::WallpaperRequest, layout::Rect};
+use dock_core::{Catalog, ThemePalette, VisualTheme, desktop::WallpaperRequest, layout::Rect};
 use iced::mouse;
 use iced::widget::canvas::{Canvas, Geometry};
 use iced::widget::{
@@ -521,6 +521,16 @@ impl App {
             .as_ref()
             .map(|t| t.palette(target))
             .unwrap_or(target)
+    }
+
+    fn presented_visual_theme(&self) -> VisualTheme {
+        let mut visual = self
+            .document
+            .resolved_theme(&self.catalog)
+            .expect("validated Canvas document theme")
+            .visual_theme();
+        visual.palette = self.presented_palette();
+        visual
     }
 
     /// The normalized bounds the view should render for a surface: an
@@ -3089,14 +3099,14 @@ impl App {
             .height(height)
             .into(),
             ContentSource::Terminal { buffer, .. } => {
-                let palette = self.project_theme().palette();
+                let palette = self.project_palette();
                 scrollable(text(buffer).color(color(palette.text)).width(Length::Fill))
                     .width(width)
                     .height(height)
                     .into()
             }
             ContentSource::Scene { scene } => {
-                let palette = self.project_theme().palette();
+                let palette = self.project_palette();
                 let text_nodes: Vec<&SceneNode> = scene
                     .nodes
                     .iter()
@@ -3147,7 +3157,7 @@ impl App {
                 .into()
             }
             ContentSource::Stream { url } => {
-                let palette = self.project_theme().palette();
+                let palette = self.project_palette();
                 container(
                     iced::widget::Column::<Message>::new()
                         .push(
@@ -3162,8 +3172,8 @@ impl App {
                 .into()
             }
             ContentSource::Widget { spec } => {
-                let palette = self.presented_palette();
-                dock_widgets::live::element(spec, &palette)
+                let visual = self.presented_visual_theme();
+                dock_widgets::live::element(spec, &visual)
             }
             ContentSource::Image { .. } | ContentSource::Pdf { .. } => {
                 let view = self.shared_views.get(&surface.snapshot.id);
@@ -3433,14 +3443,6 @@ impl App {
                 surface.media_plan = plan;
             }
         }
-    }
-
-    fn project_theme(&self) -> ProjectTheme {
-        self.document
-            .resolved_theme(&self.catalog)
-            .expect("validated Canvas document theme")
-            .to_project_theme()
-            .expect("project uses a Coherence theme")
     }
 
     fn theme(&self) -> Theme {

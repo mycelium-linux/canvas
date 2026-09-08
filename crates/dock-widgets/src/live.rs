@@ -1,11 +1,12 @@
 //! Live in-canvas widget rendering via iced. Each widget maps a
-//! [`WidgetSpec`](crate::WidgetSpec) plus a theme palette to an iced Element.
+//! [`WidgetSpec`](crate::WidgetSpec) plus a resolved Coherence visual theme to
+//! an iced Element.
 //! This is the same visual language the canvas already uses (VU meter,
 //! presence orb, ticker text) — extracted so Lua, MCP, and the text protocol
 //! all render through one library.
 
 use crate::{ChartType, MeterStyle, StatusLevel, StatusState, WidgetKind, WidgetSpec};
-use dock_core::ThemePalette;
+use dock_core::{ThemePalette, VisualTheme};
 use iced::mouse;
 use iced::widget::canvas::{Geometry, Path};
 use iced::widget::{Canvas, canvas, column, container, row, space, text};
@@ -35,11 +36,13 @@ pub fn ticker_text(symbols: &[String]) -> String {
         .join("  ")
 }
 
-/// Render any widget spec as a fill/fill iced element using the palette.
+/// Render any widget spec using the same semantic theme contract.
 pub fn element<'a, Message: 'a>(
     spec: &'a WidgetSpec,
-    palette: &ThemePalette,
+    visual: &VisualTheme,
 ) -> Element<'a, Message> {
+    let palette = &visual.palette;
+    let metrics = visual.metrics;
     match &spec.kind {
         WidgetKind::Stat {
             label,
@@ -52,25 +55,28 @@ pub fn element<'a, Message: 'a>(
             let accent = state.map_or(color(palette.primary), |state| status_color(state, palette));
             let mut value_line = row![
                 text(format_metric(*value))
-                    .size(42)
+                    .size(metrics.display * 1.5)
                     .color(color(palette.text)),
                 text(unit.clone().unwrap_or_default())
-                    .size(14)
+                    .size(metrics.small)
                     .color(color(palette.text_muted)),
             ]
-            .spacing(6)
+            .spacing(metrics.space_1)
             .align_y(iced::alignment::Vertical::Bottom);
             if let Some(change) = change {
-                value_line = value_line.push(text(format!("{change:+.1}%")).size(13).color(
-                    if *change >= 0.0 {
-                        color(palette.success)
-                    } else {
-                        color(palette.danger)
-                    },
-                ));
+                value_line =
+                    value_line.push(text(format!("{change:+.1}%")).size(metrics.small).color(
+                        if *change >= 0.0 {
+                            color(palette.success)
+                        } else {
+                            color(palette.danger)
+                        },
+                    ));
             }
             let body = column![
-                text(label).size(13).color(color(palette.text_muted)),
+                text(label)
+                    .size(metrics.small)
+                    .color(color(palette.text_muted)),
                 value_line,
                 Canvas::new(SparklineProgram {
                     values: history.clone(),
@@ -79,8 +85,8 @@ pub fn element<'a, Message: 'a>(
                 .width(Length::Fill)
                 .height(Length::Fill),
             ]
-            .spacing(8);
-            panel(body.into(), palette)
+            .spacing(metrics.space_2);
+            panel(body.into(), visual)
         }
         WidgetKind::TimeSeries {
             title,
@@ -95,19 +101,21 @@ pub fn element<'a, Message: 'a>(
                     let c = colors[index % colors.len()];
                     row![
                         status_dot(c, 7.0),
-                        text(&item.label).size(11).color(color(palette.text_muted))
+                        text(&item.label)
+                            .size(metrics.small)
+                            .color(color(palette.text_muted))
                     ]
-                    .spacing(5)
+                    .spacing(metrics.space_1)
                     .into()
                 })
                 .collect::<Vec<Element<'_, Message>>>())
-            .spacing(14);
+            .spacing(metrics.space_3);
             let body = column![
                 row![
-                    text(title).size(14).color(color(palette.text)),
+                    text(title).size(metrics.body).color(color(palette.text)),
                     space::horizontal(),
                     text(unit.clone().unwrap_or_default())
-                        .size(11)
+                        .size(metrics.small)
                         .color(color(palette.text_muted)),
                 ],
                 legend,
@@ -121,13 +129,13 @@ pub fn element<'a, Message: 'a>(
                             .collect())
                         .collect(),
                     colors,
-                    grid: color(palette.border)
+                    grid: with_alpha(color(palette.border), visual.grid_opacity)
                 })
                 .width(Length::Fill)
                 .height(Length::Fill),
             ]
-            .spacing(8);
-            panel(body.into(), palette)
+            .spacing(metrics.space_2);
+            panel(body.into(), visual)
         }
         // A module kind is resolved by the Canvas Lua host before it reaches this
         // crate, which has no Lua runtime of its own. Reaching here is a wiring
@@ -148,11 +156,15 @@ pub fn element<'a, Message: 'a>(
         WidgetKind::Clock { format } => {
             let now = chrono_now();
             let rendered = strftime(&now, format);
-            container(text(rendered).size(72).color(color(palette.text)))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center(Length::Fill)
-                .into()
+            container(
+                text(rendered)
+                    .size(metrics.display * 2.25)
+                    .color(color(palette.text)),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center(Length::Fill)
+            .into()
         }
         WidgetKind::Ticker { symbols } => {
             let quotes = symbols
@@ -160,29 +172,31 @@ pub fn element<'a, Message: 'a>(
                 .map(|symbol| {
                     let (price, change) = mock_price(symbol);
                     column![
-                        text(symbol).size(11).color(color(palette.text_muted)),
+                        text(symbol)
+                            .size(metrics.small)
+                            .color(color(palette.text_muted)),
                         text(format!("${price:.2}"))
-                            .size(20)
+                            .size(metrics.large)
                             .color(color(palette.text)),
-                        text(format!("{change:+.1}%"))
-                            .size(11)
-                            .color(if change >= 0.0 {
+                        text(format!("{change:+.1}%")).size(metrics.small).color(
+                            if change >= 0.0 {
                                 color(palette.success)
                             } else {
                                 color(palette.danger)
-                            }),
+                            }
+                        ),
                     ]
-                    .spacing(2)
+                    .spacing(metrics.space_1)
                     .into()
                 })
                 .collect::<Vec<Element<'_, Message>>>();
-            panel(row(quotes).spacing(28).into(), palette)
+            panel(row(quotes).spacing(metrics.space_5).into(), visual)
         }
         WidgetKind::Status { state } => {
             let orb = match state.unwrap_or(StatusState::Unknown) {
-                StatusState::Present => Color::from_rgba8(34, 197, 94, 0.85),
-                StatusState::Away => Color::from_rgba8(239, 68, 68, 0.85),
-                StatusState::Unknown => Color::from_rgba8(250, 204, 21, 0.85),
+                StatusState::Present => with_alpha(color(palette.success), 0.85),
+                StatusState::Away => with_alpha(color(palette.danger), 0.85),
+                StatusState::Unknown => with_alpha(color(palette.warning), 0.85),
             };
             panel(
                 row![
@@ -192,13 +206,13 @@ pub fn element<'a, Message: 'a>(
                         StatusState::Away => "Unavailable",
                         StatusState::Unknown => "Unknown",
                     })
-                    .size(14)
+                    .size(metrics.body)
                     .color(color(palette.text))
                 ]
-                .spacing(10)
+                .spacing(metrics.space_2)
                 .align_y(iced::alignment::Vertical::Center)
                 .into(),
-                palette,
+                visual,
             )
         }
         WidgetKind::Meter { value, style } => {
@@ -216,7 +230,7 @@ pub fn element<'a, Message: 'a>(
                         color(palette.success)
                     } else {
                         Color {
-                            a: 0.2,
+                            a: visual.muted_opacity * 0.3,
                             ..color(palette.text_muted)
                         }
                     };
@@ -232,12 +246,14 @@ pub fn element<'a, Message: 'a>(
                 .collect();
             panel(
                 column![
-                    text("Level").size(12).color(color(palette.text_muted)),
-                    row(bar_elements).spacing(4)
+                    text("Level")
+                        .size(metrics.small)
+                        .color(color(palette.text_muted)),
+                    row(bar_elements).spacing(metrics.space_1)
                 ]
-                .spacing(12)
+                .spacing(metrics.space_3)
                 .into(),
-                palette,
+                visual,
             )
         }
         WidgetKind::Gauge { value, label } => {
@@ -245,19 +261,28 @@ pub fn element<'a, Message: 'a>(
             let label = label.clone().unwrap_or_default();
             panel(
                 iced::widget::Column::<Message>::new()
-                    .push(text(pct).size(48).color(color(palette.text)))
-                    .push(text(label).size(14).color(color(palette.text_muted)))
+                    .push(
+                        text(pct)
+                            .size(metrics.display * 1.7)
+                            .color(color(palette.text)),
+                    )
+                    .push(
+                        text(label)
+                            .size(metrics.small)
+                            .color(color(palette.text_muted)),
+                    )
                     .push(
                         Canvas::new(GaugeProgram {
                             value: *value,
                             track: color(palette.surface_muted),
                             fill: color(palette.primary),
+                            radius: metrics.radius_sm,
                         })
                         .width(Length::Fill)
                         .height(Length::Fixed(12.0)),
                     )
                     .into(),
-                palette,
+                visual,
             )
         }
         WidgetKind::Histogram {
@@ -267,23 +292,23 @@ pub fn element<'a, Message: 'a>(
         } => panel(
             column![
                 row![
-                    text(title).size(14).color(color(palette.text)),
+                    text(title).size(metrics.body).color(color(palette.text)),
                     space::horizontal(),
                     text(unit.clone().unwrap_or_default())
-                        .size(11)
+                        .size(metrics.small)
                         .color(color(palette.text_muted))
                 ],
                 Canvas::new(HistogramProgram {
                     values: buckets.iter().map(|bucket| bucket.count as f32).collect(),
                     color: color(palette.info),
-                    grid: color(palette.border)
+                    grid: with_alpha(color(palette.border), visual.grid_opacity)
                 })
                 .width(Length::Fill)
                 .height(Length::Fill),
             ]
-            .spacing(8)
+            .spacing(metrics.space_2)
             .into(),
-            palette,
+            visual,
         ),
         WidgetKind::Table {
             title,
@@ -294,80 +319,93 @@ pub fn element<'a, Message: 'a>(
                 .iter()
                 .map(|label| {
                     text(label)
-                        .size(11)
+                        .size(metrics.small)
                         .color(color(palette.text_muted))
                         .width(Length::Fill)
                         .into()
                 })
                 .collect::<Vec<Element<'_, Message>>>());
-            let lines = rows
-                .iter()
-                .take(8)
-                .fold(column![header].spacing(7), |column, values| {
+            let lines = rows.iter().take(8).fold(
+                column![header].spacing(metrics.space_2),
+                |column, values| {
                     column.push(row(values
                         .iter()
                         .map(|value| {
                             text(value)
-                                .size(12)
+                                .size(metrics.small)
                                 .color(color(palette.text))
                                 .width(Length::Fill)
                                 .into()
                         })
                         .collect::<Vec<Element<'_, Message>>>()))
-                });
+                },
+            );
             panel(
-                column![text(title).size(14).color(color(palette.text)), lines]
-                    .spacing(10)
-                    .into(),
-                palette,
+                column![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    lines
+                ]
+                .spacing(metrics.space_2)
+                .into(),
+                visual,
             )
         }
         WidgetKind::EventLog { title, entries } => {
-            let lines = entries
-                .iter()
-                .rev()
-                .take(7)
-                .fold(column![].spacing(7), |column, entry| {
+            let lines = entries.iter().rev().take(7).fold(
+                column![].spacing(metrics.space_2),
+                |column, entry| {
                     column.push(
                         row![
                             status_dot(status_color(entry.level, palette), 7.0),
                             text(&entry.timestamp)
-                                .size(10)
+                                .size(metrics.small)
                                 .color(color(palette.text_muted)),
-                            text(&entry.message).size(12).color(color(palette.text))
+                            text(&entry.message)
+                                .size(metrics.small)
+                                .color(color(palette.text))
                         ]
-                        .spacing(8),
+                        .spacing(metrics.space_2),
                     )
-                });
+                },
+            );
             panel(
-                column![text(title).size(14).color(color(palette.text)), lines]
-                    .spacing(10)
-                    .into(),
-                palette,
+                column![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    lines
+                ]
+                .spacing(metrics.space_2)
+                .into(),
+                visual,
             )
         }
         WidgetKind::NodeSummary { title, nodes } => {
-            let lines = nodes
-                .iter()
-                .take(8)
-                .fold(column![].spacing(7), |column, node| {
-                    column.push(
-                        row![
-                            status_dot(status_color(node.state, palette), 8.0),
-                            text(&node.label).size(12).color(color(palette.text)),
-                            space::horizontal(),
-                            text(node.detail.clone().unwrap_or_default())
-                                .size(11)
-                                .color(color(palette.text_muted))
-                        ]
-                        .spacing(8),
-                    )
-                });
+            let lines =
+                nodes
+                    .iter()
+                    .take(8)
+                    .fold(column![].spacing(metrics.space_2), |column, node| {
+                        column.push(
+                            row![
+                                status_dot(status_color(node.state, palette), 8.0),
+                                text(&node.label)
+                                    .size(metrics.small)
+                                    .color(color(palette.text)),
+                                space::horizontal(),
+                                text(node.detail.clone().unwrap_or_default())
+                                    .size(metrics.small)
+                                    .color(color(palette.text_muted))
+                            ]
+                            .spacing(metrics.space_2),
+                        )
+                    });
             panel(
-                column![text(title).size(14).color(color(palette.text)), lines]
-                    .spacing(10)
-                    .into(),
-                palette,
+                column![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    lines
+                ]
+                .spacing(metrics.space_2)
+                .into(),
+                visual,
             )
         }
         WidgetKind::Chart { .. } => {
@@ -387,20 +425,31 @@ pub fn element<'a, Message: 'a>(
 
 fn panel<'a, Message: 'a>(
     body: Element<'a, Message>,
-    palette: &ThemePalette,
+    visual: &VisualTheme,
 ) -> Element<'a, Message> {
-    let surface = color(palette.surface);
-    let border = color(palette.border);
+    let surface = color(visual.surface_raised);
+    let border = color(visual.palette.border);
+    let metrics = visual.metrics;
+    let panel_opacity = visual.panel_opacity;
+    let muted_opacity = visual.muted_opacity;
+    let shadow_opacity = visual.shadow_opacity;
+    let shadow_offset_y = visual.shadow_offset_y;
+    let shadow_blur = visual.shadow_blur;
     container(body)
-        .padding(16)
+        .padding(metrics.space_4)
         .width(Length::Fill)
         .height(Length::Fill)
         .style(move |_| container::Style {
-            background: Some(Color { a: 0.72, ..surface }.into()),
+            background: Some(with_alpha(surface, panel_opacity).into()),
             border: iced::Border {
-                color: Color { a: 0.72, ..border },
+                color: with_alpha(border, muted_opacity),
                 width: 1.0,
-                radius: 7.0.into(),
+                radius: metrics.radius_lg.into(),
+            },
+            shadow: iced::Shadow {
+                color: Color::from_rgba(0.0, 0.0, 0.0, shadow_opacity),
+                offset: iced::Vector::new(0.0, shadow_offset_y),
+                blur_radius: shadow_blur,
             },
             ..Default::default()
         })
@@ -507,6 +556,7 @@ struct GaugeProgram {
     value: f32,
     track: Color,
     fill: Color,
+    radius: f32,
 }
 
 impl<Message> canvas::Program<Message> for GaugeProgram {
@@ -521,7 +571,7 @@ impl<Message> canvas::Program<Message> for GaugeProgram {
     ) -> Vec<Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         frame.fill(
-            &Path::rounded_rectangle(Point::ORIGIN, bounds.size(), 4.0.into()),
+            &Path::rounded_rectangle(Point::ORIGIN, bounds.size(), self.radius.into()),
             self.track,
         );
         frame.fill(
@@ -531,7 +581,7 @@ impl<Message> canvas::Program<Message> for GaugeProgram {
                     bounds.width * (self.value / 100.0).clamp(0.0, 1.0),
                     bounds.height,
                 ),
-                4.0.into(),
+                self.radius.into(),
             ),
             self.fill,
         );
@@ -564,10 +614,9 @@ impl<Message> canvas::Program<Message> for HistogramProgram {
             let y = bounds.height * row as f32 / 4.0;
             frame.stroke(
                 &Path::line(Point::new(0.0, y), Point::new(bounds.width, y)),
-                canvas::Stroke::default().with_width(1.0).with_color(Color {
-                    a: 0.35,
-                    ..self.grid
-                }),
+                canvas::Stroke::default()
+                    .with_width(1.0)
+                    .with_color(self.grid),
             );
         }
         let width = bounds.width / self.values.len() as f32;
@@ -614,10 +663,9 @@ impl<Message> canvas::Program<Message> for TimeSeriesProgram {
             let y = bounds.height * row as f32 / 4.0;
             frame.stroke(
                 &Path::line(Point::new(0.0, y), Point::new(bounds.width, y)),
-                canvas::Stroke::default().with_width(1.0).with_color(Color {
-                    a: 0.35,
-                    ..self.grid
-                }),
+                canvas::Stroke::default()
+                    .with_width(1.0)
+                    .with_color(self.grid),
             );
         }
         let map = |(x, y): (f32, f32)| {
@@ -642,6 +690,10 @@ impl<Message> canvas::Program<Message> for TimeSeriesProgram {
 
 fn color(rgb: [u8; 3]) -> Color {
     Color::from_rgb8(rgb[0], rgb[1], rgb[2])
+}
+
+fn with_alpha(color: Color, alpha: f32) -> Color {
+    Color { a: alpha, ..color }
 }
 
 /// Minimal strftime subset — enough for clock formats without pulling a
