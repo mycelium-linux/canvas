@@ -7,7 +7,7 @@ license.workspace = true
 [features]
 default = []
 lua-scenes = ["dep:mlua"]
-mcp = ["dep:rmcp", "dep:schemars", "dep:tokio"]
+mcp = ["dep:rmcp", "dep:schemars", "dep:tokio", "dock-widgets/schema"]
 
 [dependencies]
 base64 = "0.22"
