@@ -8,7 +8,12 @@ use iced::widget::shader::{self, Shader};
 use iced::{Element, Length, Rectangle};
 use std::time::{Duration, Instant};
 
-pub const ROTATION_PERIOD: Duration = Duration::from_secs(45);
+const CALM_WORKSPACE_SHADERS: [BackgroundShader; 4] = [
+    BackgroundShader::Tidepool,
+    BackgroundShader::AuroraDrift,
+    BackgroundShader::DuskEmber,
+    BackgroundShader::SlowRipple,
+];
 
 const UNIFORM_WGSL: &str = r#"
 struct Uniforms {
@@ -344,19 +349,29 @@ pub fn index_for(id: BackgroundShader) -> usize {
         .expect("every typed Canvas shader must have a renderer")
 }
 
+/// Resolve one stable privacy visual for a workspace. An explicitly configured
+/// shader wins; otherwise the workspace identity chooses from the deliberately
+/// calm subset without storing a second preference.
+pub fn workspace_index(workspace_id: &str, background: &dock_canvas::Background) -> usize {
+    if let dock_canvas::Background::Shader { shader_id, .. } = background {
+        return index_for(*shader_id);
+    }
+    let hash = workspace_id
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    let shader = CALM_WORKSPACE_SHADERS[hash as usize % CALM_WORKSPACE_SHADERS.len()];
+    index_for(shader)
+}
+
 pub fn advance_elapsed(
     index: usize,
     elapsed: Duration,
     delta: Duration,
     max_delta: Duration,
 ) -> (usize, Duration) {
-    let mut index = index;
-    let mut elapsed = elapsed + delta.min(max_delta);
-    while elapsed >= ROTATION_PERIOD {
-        index = (index + 1) % SHADERS.len();
-        elapsed -= ROTATION_PERIOD;
-    }
-    (index, elapsed)
+    (index, elapsed + delta.min(max_delta))
 }
 
 /// Bounded frame scheduler and rolling cadence meter.
@@ -600,19 +615,32 @@ mod tests {
     }
 
     #[test]
-    fn rotation_advances_only_at_period_boundaries() {
-        let cap = ROTATION_PERIOD * 8;
+    fn active_workspace_never_rotates_shader_family() {
+        let cap = Duration::from_secs(10);
         assert_eq!(
-            advance_elapsed(0, Duration::ZERO, ROTATION_PERIOD / 2, cap),
-            (0, ROTATION_PERIOD / 2)
+            advance_elapsed(0, Duration::ZERO, Duration::from_secs(90), cap),
+            (0, cap)
         );
         assert_eq!(
-            advance_elapsed(0, Duration::ZERO, ROTATION_PERIOD, cap),
-            (1, Duration::ZERO)
+            advance_elapsed(3, Duration::from_secs(30), Duration::from_secs(90), cap),
+            (3, Duration::from_secs(40))
         );
+    }
+
+    #[test]
+    fn workspace_visual_is_deterministic_and_explicit_shader_wins() {
+        let background = dock_canvas::Background::default();
+        let first = workspace_index("ohm", &background);
+        assert_eq!(first, workspace_index("ohm", &background));
+        assert!(CALM_WORKSPACE_SHADERS.contains(&SHADERS[first].id));
+
+        let explicit = dock_canvas::Background::Shader {
+            shader_id: BackgroundShader::Spirales,
+            speed: 0.25,
+        };
         assert_eq!(
-            advance_elapsed(0, Duration::ZERO, ROTATION_PERIOD * 5, cap),
-            (5 % SHADERS.len(), Duration::ZERO)
+            workspace_index("ohm", &explicit),
+            index_for(BackgroundShader::Spirales)
         );
     }
 

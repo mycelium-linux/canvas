@@ -271,7 +271,7 @@ impl App {
     fn new(receiver: PendingReceiver, socket: SocketGuard, frame: Rect) -> Self {
         let catalog = Catalog::bundled().expect("bundled project catalog must remain valid");
         let project_id = catalog.projects[0].id.clone();
-        Self {
+        let mut app = Self {
             catalog,
             document: WorkspaceDocument {
                 schema_version: SCHEMA_VERSION,
@@ -337,7 +337,9 @@ impl App {
             screensaver_last_frame: None,
             screensaver_elapsed: Duration::ZERO,
             screensaver_fps: 0.0,
-        }
+        };
+        app.reset_background_animation();
+        app
     }
 
     /// Capture the presentation just before a workspace change so the view can
@@ -764,7 +766,8 @@ impl App {
                     self.fail(pending, failure);
                     return Task::none();
                 }
-                let background_changed = self.document.background != document.background;
+                let presentation_changed = self.document.id != document.id
+                    || self.document.background != document.background;
                 self.decoded.retain(|id, decoded| {
                     self.document.surfaces.iter().any(|surface| {
                         surface.id == *id
@@ -780,7 +783,7 @@ impl App {
                 self.start_transition();
                 self.document = document;
                 self.ensure_scene_decoded();
-                if background_changed {
+                if presentation_changed {
                     self.reset_background_animation();
                 }
                 self.bump();
@@ -1240,13 +1243,10 @@ impl App {
                         self.fail(pending, failure);
                         return Task::none();
                     }
-                    let background_changed = self.document.background != document.background;
                     self.start_transition();
                     self.document = document;
                     self.ensure_scene_decoded();
-                    if background_changed {
-                        self.reset_background_animation();
-                    }
+                    self.reset_background_animation();
                     self.bump();
                     self.status = format!("Switched to workspace '{name}'.");
                     self.answer(
@@ -1947,9 +1947,8 @@ impl App {
         self.screensaver_piece_elapsed = Duration::ZERO;
         self.screensaver_elapsed = Duration::ZERO;
         self.screensaver_last_frame = Some(Instant::now());
-        if let Background::Shader { shader_id, .. } = &self.document.background {
-            self.screensaver_index = screensaver::index_for(*shader_id);
-        }
+        self.screensaver_index =
+            screensaver::workspace_index(&self.document.id, &self.document.background);
     }
 
     fn rebuild_stack(&mut self) {
