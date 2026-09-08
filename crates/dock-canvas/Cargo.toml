@@ -11,6 +11,7 @@ mcp = ["dep:rmcp", "dep:schemars", "dep:tokio"]
 
 [dependencies]
 base64 = "0.22"
+csv = "1.4"
 dock-control = { path = "../dock-control" }
 dock-core.workspace = true
 iced = { version = "0.14", default-features = false, features = ["wgpu", "tokio", "canvas", "image-without-codecs", "x11", "wayland", "markdown", "highlighter"] }

@@ -1,4 +1,5 @@
 use base64::Engine as _;
+use dock_canvas::chart::{ChartDocument, ChartKind};
 use dock_canvas::control::{
     CONTROL_VERSION, Command, ContentKind, ControlReply, ControlRequest, ErrorCode,
     MAX_ACTIVE_INDICATORS, MAX_CONTROL_MESSAGE, MeshSnapshot, Navigation, Outcome, PresencePreview,
@@ -16,15 +17,15 @@ use dock_canvas::media::{
 };
 use dock_canvas::{
     AssetRef, Background, BackgroundFit, GradientStop, Layout, NodeContent, NormalizedRect,
-    PatchOperation, Placement, SCHEMA_VERSION, Scene, SceneNode, Surface, SurfaceContent, ThemeRef,
-    WorkspaceDocument, WorkspacePatch,
+    PatchOperation, Placement, SCHEMA_VERSION, Scene, SceneNode, Surface, SurfaceChrome,
+    SurfaceContent, SurfaceTitleMode, ThemeRef, WorkspaceDocument, WorkspacePatch,
 };
 use dock_core::{Catalog, ProjectTheme, ThemePalette, desktop::WallpaperRequest, layout::Rect};
 use iced::mouse;
 use iced::widget::canvas::{Canvas, Geometry};
 use iced::widget::{
-    button, canvas, container, image as image_widget, markdown, row, scrollable, space, stack,
-    text, tooltip,
+    button, canvas, container, image as image_widget, markdown, mouse_area, row, scrollable, space,
+    stack, text, tooltip,
 };
 use iced::{
     Color, ContentFit, Element, Length, Point, Rectangle, Renderer, Size, Subscription, Task, Theme,
@@ -117,8 +118,7 @@ enum ContentSource {
         scene: Scene,
     },
     DataViz {
-        data: Vec<(f32, f32)>,
-        chart_type: String,
+        chart: ChartDocument,
     },
     Stream {
         url: String,
@@ -225,6 +225,23 @@ enum WindowAction {
     Maximize,
 }
 
+fn window_action_label(action: WindowAction, maximized: bool) -> &'static str {
+    match action {
+        WindowAction::Close => "Close",
+        WindowAction::Minimize => "Minimize",
+        WindowAction::Maximize if maximized => "Restore",
+        WindowAction::Maximize => "Maximize",
+    }
+}
+
+fn surface_title_visible(mode: SurfaceTitleMode, focused: bool) -> bool {
+    match mode {
+        SurfaceTitleMode::Hidden => false,
+        SurfaceTitleMode::Focused => focused,
+        SurfaceTitleMode::Always => true,
+    }
+}
+
 struct App {
     catalog: Catalog,
     document: WorkspaceDocument,
@@ -280,6 +297,7 @@ impl App {
                 revision: 1,
                 theme: ThemeRef::Project,
                 background: dock_canvas::Background::default(),
+                chrome: SurfaceChrome::default(),
                 surfaces: Vec::new(),
                 layout: Layout::Empty,
                 bindings: Vec::new(),
@@ -349,14 +367,19 @@ impl App {
             Layout::Canvas { placements } => placements
                 .iter()
                 .map(|placement| {
+                    let bounds = if self.maximized_surfaces.contains(&placement.surface_id) {
+                        NormalizedRect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 1.0,
+                            height: 1.0,
+                        }
+                    } else {
+                        placement.bounds
+                    };
                     (
                         placement.surface_id.clone(),
-                        [
-                            placement.bounds.x,
-                            placement.bounds.y,
-                            placement.bounds.width,
-                            placement.bounds.height,
-                        ],
+                        [bounds.x, bounds.y, bounds.width, bounds.height],
                     )
                 })
                 .collect(),
@@ -1374,9 +1397,10 @@ impl App {
                 file,
                 chart_type,
             } => {
-                let parsed = parse_dataviz_file(&file);
+                let parsed = parse_dataviz_file(&file, &chart_type);
                 match parsed {
-                    Ok(data) => {
+                    Ok(chart) => {
+                        let chart_content = chart.clone();
                         let snapshot = SurfaceSnapshot {
                             id: surface_id.clone(),
                             title: file
@@ -1395,10 +1419,7 @@ impl App {
                         };
                         let runtime = RuntimeSurface {
                             snapshot,
-                            source: ContentSource::DataViz {
-                                data,
-                                chart_type: chart_type.clone(),
-                            },
+                            source: ContentSource::DataViz { chart },
                             handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
                             source_pixels: [1, 1],
                             media_plan: MediaPlan {
@@ -1428,16 +1449,22 @@ impl App {
                         let runtime_snapshot = runtime.snapshot.clone();
                         self.decoded.insert(surface_id.clone(), runtime);
                         self.start_transition();
-                        if !self.document.surfaces.iter().any(|s| s.id == surface_id) {
+                        if let Some(surface) = self
+                            .document
+                            .surfaces
+                            .iter_mut()
+                            .find(|surface| surface.id == surface_id)
+                        {
+                            surface.title = runtime_title.clone();
+                            surface.content = SurfaceContent::Chart {
+                                chart: chart_content.clone(),
+                            };
+                        } else {
                             self.document.surfaces.push(Surface {
                                 id: surface_id.clone(),
                                 title: runtime_title,
-                                content: SurfaceContent::Asset {
-                                    asset: AssetRef {
-                                        sha256: "0000000000000000000000000000000000000000000000000000000000000000".into(),
-                                        media_type: "application/csv".into(),
-                                        byte_length: 1,
-                                    },
+                                content: SurfaceContent::Chart {
+                                    chart: chart_content,
                                 },
                                 inputs: Vec::new(),
                             });
@@ -1731,11 +1758,15 @@ impl App {
                     }
                 }
                 WindowAction::Maximize => {
-                    if self.maximized_surfaces.insert(surface_id.clone()) {
-                        self.start_transition();
-                        self.bump();
-                        self.status = format!("Maximized {surface_id}.");
-                    }
+                    self.start_transition();
+                    self.status = if self.maximized_surfaces.remove(&surface_id) {
+                        format!("Restored {surface_id}.")
+                    } else {
+                        self.maximized_surfaces.clear();
+                        self.maximized_surfaces.insert(surface_id.clone());
+                        format!("Maximized {surface_id}.")
+                    };
+                    self.bump();
                 }
             }
             return;
@@ -1789,8 +1820,24 @@ impl App {
             .filter(|placement| !self.minimized_surfaces.contains(&placement.surface_id))
             .map(|placement| SurfaceGeometry {
                 surface_id: placement.surface_id.clone(),
-                bounds: denormalize(placement.bounds, self.frame),
-                z_order: i64::from(placement.layer),
+                bounds: denormalize(
+                    if self.maximized_surfaces.contains(&placement.surface_id) {
+                        NormalizedRect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 1.0,
+                            height: 1.0,
+                        }
+                    } else {
+                        placement.bounds
+                    },
+                    self.frame,
+                ),
+                z_order: if self.maximized_surfaces.contains(&placement.surface_id) {
+                    i64::MAX
+                } else {
+                    i64::from(placement.layer)
+                },
             })
             .collect()
     }
@@ -1802,9 +1849,26 @@ impl App {
             return None;
         };
         let mut placements = placements.iter().collect::<Vec<_>>();
-        placements.sort_by_key(|placement| std::cmp::Reverse(placement.layer));
+        placements.sort_by_key(|placement| {
+            std::cmp::Reverse((
+                self.maximized_surfaces.contains(&placement.surface_id),
+                placement.layer,
+            ))
+        });
         for placement in placements {
-            let bounds = denormalize(placement.bounds, frame);
+            let bounds = denormalize(
+                if self.maximized_surfaces.contains(&placement.surface_id) {
+                    NormalizedRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 1.0,
+                        height: 1.0,
+                    }
+                } else {
+                    placement.bounds
+                },
+                frame,
+            );
             let top = bounds.y;
             let bottom = top + SURFACE_CONTROL_BAR_HEIGHT;
             let left = bounds.x;
@@ -2026,57 +2090,68 @@ impl App {
             if self.decoded.contains_key(&surface.id) {
                 continue;
             }
-            if let SurfaceContent::Scene { scene } = &surface.content {
-                let snapshot = SurfaceSnapshot {
-                    id: surface.id.clone(),
-                    title: surface.title.clone(),
-                    content: ContentKind::Scene,
-                    asset_sha256: None,
-                    page_index: None,
-                    page_count: None,
-                    source_pixels: None,
-                    rendered_pixels: None,
-                    display_logical: None,
-                    scale_factor: None,
-                };
-                let runtime = RuntimeSurface {
-                    snapshot,
-                    source: ContentSource::Scene {
+            let (content, source) = match &surface.content {
+                SurfaceContent::Scene { scene } => (
+                    ContentKind::Scene,
+                    ContentSource::Scene {
                         scene: scene.clone(),
                     },
-                    handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
-                    source_pixels: [1, 1],
-                    media_plan: MediaPlan {
-                        viewport_logical: LogicalSize {
-                            width: 1920.0,
-                            height: 1080.0,
-                        },
-                        source_dimensions: SourceDimensions::RasterPixels(PixelSize {
+                ),
+                SurfaceContent::Chart { chart } => (
+                    ContentKind::DataViz,
+                    ContentSource::DataViz {
+                        chart: chart.clone(),
+                    },
+                ),
+                _ => continue,
+            };
+            let snapshot = SurfaceSnapshot {
+                id: surface.id.clone(),
+                title: surface.title.clone(),
+                content,
+                asset_sha256: None,
+                page_index: None,
+                page_count: None,
+                source_pixels: None,
+                rendered_pixels: None,
+                display_logical: None,
+                scale_factor: None,
+            };
+            let runtime = RuntimeSurface {
+                snapshot,
+                source,
+                handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
+                source_pixels: [1, 1],
+                media_plan: MediaPlan {
+                    viewport_logical: LogicalSize {
+                        width: 1920.0,
+                        height: 1080.0,
+                    },
+                    source_dimensions: SourceDimensions::RasterPixels(PixelSize {
+                        width: 1,
+                        height: 1,
+                    }),
+                    target_px: PixelSize {
+                        width: 1,
+                        height: 1,
+                    },
+                    display_logical: LogicalSize {
+                        width: 1920.0,
+                        height: 1080.0,
+                    },
+                    scale_factor: 1.0,
+                    cache_key: MediaCacheKey {
+                        source_id: "<scene>".to_string(),
+                        variant: MediaVariant::Raster,
+                        pixel_size: PixelSize {
                             width: 1,
                             height: 1,
-                        }),
-                        target_px: PixelSize {
-                            width: 1,
-                            height: 1,
-                        },
-                        display_logical: LogicalSize {
-                            width: 1920.0,
-                            height: 1080.0,
-                        },
-                        scale_factor: 1.0,
-                        cache_key: MediaCacheKey {
-                            source_id: "<scene>".to_string(),
-                            variant: MediaVariant::Raster,
-                            pixel_size: PixelSize {
-                                width: 1,
-                                height: 1,
-                            },
                         },
                     },
-                    upload_pixels: [1, 1],
-                };
-                self.decoded.insert(surface.id.clone(), runtime);
-            }
+                },
+                upload_pixels: [1, 1],
+            };
+            self.decoded.insert(surface.id.clone(), runtime);
         }
     }
 
@@ -2149,16 +2224,19 @@ impl App {
                     .height(height)
                     .into()
             }
-            ContentSource::DataViz { data, chart_type } => {
+            ContentSource::DataViz { chart } => {
                 let palette = self.presented_palette();
-                let axis_color = color(palette.text);
                 Canvas::new(ChartProgram {
-                    data: data.clone(),
-                    chart_type: chart_type.clone(),
-                    axis_color,
-                    bar_color: color(palette.primary),
-                    line_color: color(palette.success),
-                    point_color: color(palette.danger),
+                    chart: chart.clone(),
+                    axis_color: color(palette.text),
+                    muted_color: color(palette.text_muted),
+                    surface_color: color(palette.surface),
+                    series_colors: vec![
+                        color(palette.primary),
+                        color(palette.success),
+                        color(palette.danger),
+                        color(palette.warning),
+                    ],
                 })
                 .width(width)
                 .height(height)
@@ -2187,7 +2265,12 @@ impl App {
         }
     }
 
-    fn surface_controls(&self) -> Element<'_, Message> {
+    fn surface_controls<'a>(
+        &self,
+        title: &'a str,
+        focused: bool,
+        maximized: bool,
+    ) -> Element<'a, Message> {
         let palette = self.presented_palette();
         let dot = |rgb| {
             let fill = color(rgb);
@@ -2204,47 +2287,87 @@ impl App {
                     ..Default::default()
                 })
         };
-        container(
-            row![
-                dot(palette.danger),
-                dot(palette.warning),
-                dot(palette.success)
-            ]
-            .spacing(9),
-        )
-        .padding(iced::Padding {
-            top: 7.0,
-            right: 0.0,
-            bottom: 0.0,
-            left: 8.0,
-        })
-        .width(Length::Fill)
-        .height(Length::Fixed(SURFACE_CONTROL_BAR_HEIGHT as f32))
-        .align_x(iced::alignment::Horizontal::Left)
-        .align_y(iced::alignment::Vertical::Top)
-        .style(move |_| container::Style {
-            background: Some(
-                Color::from_rgba8(
-                    palette.surface[0],
-                    palette.surface[1],
-                    palette.surface[2],
-                    0.78,
+        let control = |rgb, label: &'static str| {
+            tooltip(
+                mouse_area(
+                    container(dot(rgb))
+                        .width(Length::Fixed(SURFACE_CONTROL_HIT_SIZE as f32))
+                        .height(Length::Fixed(SURFACE_CONTROL_BAR_HEIGHT as f32))
+                        .align_x(iced::alignment::Horizontal::Left)
+                        .align_y(iced::alignment::Vertical::Center),
                 )
-                .into(),
+                .interaction(mouse::Interaction::Pointer),
+                container(text(label).size(11)).padding(6),
+                tooltip::Position::Bottom,
+            )
+        };
+        let controls = row![
+            control(
+                palette.danger,
+                window_action_label(WindowAction::Close, maximized)
             ),
-            border: iced::Border {
-                color: Color::from_rgba8(
-                    palette.border[0],
-                    palette.border[1],
-                    palette.border[2],
-                    0.78,
+            control(
+                palette.warning,
+                window_action_label(WindowAction::Minimize, maximized)
+            ),
+            control(
+                palette.success,
+                window_action_label(WindowAction::Maximize, maximized)
+            ),
+        ]
+        .spacing(0)
+        .align_y(iced::alignment::Vertical::Center);
+        let show_title = surface_title_visible(self.document.chrome.title, focused);
+        let bar = if show_title {
+            row![
+                controls,
+                container(text(title).size(11).color(color(palette.text_muted))).padding(
+                    iced::Padding {
+                        top: 0.0,
+                        right: 8.0,
+                        bottom: 0.0,
+                        left: 8.0,
+                    }
+                )
+            ]
+            .align_y(iced::alignment::Vertical::Center)
+        } else {
+            row![controls].align_y(iced::alignment::Vertical::Center)
+        };
+        container(bar)
+            .padding(iced::Padding {
+                top: 0.0,
+                right: 0.0,
+                bottom: 0.0,
+                left: 8.0,
+            })
+            .width(Length::Fill)
+            .height(Length::Fixed(SURFACE_CONTROL_BAR_HEIGHT as f32))
+            .align_x(iced::alignment::Horizontal::Left)
+            .align_y(iced::alignment::Vertical::Top)
+            .style(move |_| container::Style {
+                background: Some(
+                    Color::from_rgba8(
+                        palette.surface[0],
+                        palette.surface[1],
+                        palette.surface[2],
+                        0.78,
+                    )
+                    .into(),
                 ),
-                width: 1.0,
-                radius: 8.0.into(),
-            },
-            ..Default::default()
-        })
-        .into()
+                border: iced::Border {
+                    color: Color::from_rgba8(
+                        palette.border[0],
+                        palette.border[1],
+                        palette.border[2],
+                        0.78,
+                    ),
+                    width: 1.0,
+                    radius: 8.0.into(),
+                },
+                ..Default::default()
+            })
+            .into()
     }
 
     fn minimized_dock(&self) -> Option<Element<'_, Message>> {
@@ -2401,7 +2524,12 @@ impl App {
         let content: Element<'_, Message> = match &self.document.layout {
             Layout::Canvas { placements } => {
                 let mut placements = placements.iter().collect::<Vec<_>>();
-                placements.sort_by_key(|placement| placement.layer);
+                placements.sort_by_key(|placement| {
+                    (
+                        self.maximized_surfaces.contains(&placement.surface_id),
+                        placement.layer,
+                    )
+                });
                 let surfaces = placements
                     .into_iter()
                     .filter_map(|placement| {
@@ -2443,35 +2571,39 @@ impl App {
                         );
                         let focused = self.document.focused_surface_id.as_deref()
                             == Some(placement.surface_id.as_str());
+                        let maximized = self.maximized_surfaces.contains(&placement.surface_id);
                         let edge = if focused {
                             color(palette.primary)
                         } else {
                             border_color
                         };
-                        let plane = container(stack(vec![content, self.surface_controls()]))
-                            .width(Length::Fixed(bounds.width as f32))
-                            .height(Length::Fixed(bounds.height as f32))
-                            .style(move |_| container::Style {
-                                border: iced::Border {
-                                    color: Color {
-                                        a: if focused { 0.88 } else { 0.62 },
-                                        ..edge
-                                    },
-                                    width: if focused { 1.5 } else { 1.0 },
-                                    radius: 9.0.into(),
+                        let plane = container(stack(vec![
+                            content,
+                            self.surface_controls(&surface.snapshot.title, focused, maximized),
+                        ]))
+                        .width(Length::Fixed(bounds.width as f32))
+                        .height(Length::Fixed(bounds.height as f32))
+                        .style(move |_| container::Style {
+                            border: iced::Border {
+                                color: Color {
+                                    a: if focused { 0.88 } else { 0.62 },
+                                    ..edge
                                 },
-                                shadow: iced::Shadow {
-                                    color: Color::from_rgba8(
-                                        0,
-                                        0,
-                                        0,
-                                        if focused { 0.38 } else { 0.24 },
-                                    ),
-                                    offset: iced::Vector::new(0.0, if focused { 8.0 } else { 5.0 }),
-                                    blur_radius: if focused { 24.0 } else { 16.0 },
-                                },
-                                ..Default::default()
-                            });
+                                width: if focused { 1.5 } else { 1.0 },
+                                radius: 9.0.into(),
+                            },
+                            shadow: iced::Shadow {
+                                color: Color::from_rgba8(
+                                    0,
+                                    0,
+                                    0,
+                                    if focused { 0.38 } else { 0.24 },
+                                ),
+                                offset: iced::Vector::new(0.0, if focused { 8.0 } else { 5.0 }),
+                                blur_radius: if focused { 24.0 } else { 16.0 },
+                            },
+                            ..Default::default()
+                        });
                         Some(
                             container(plane)
                                 .width(Length::Fill)
@@ -2522,9 +2654,12 @@ impl App {
                             Length::Fill,
                             self.media_viewport(),
                         );
-                        container(stack(vec![content, self.surface_controls()]))
-                            .center(Length::Fill)
-                            .into()
+                        container(stack(vec![
+                            content,
+                            self.surface_controls(&surface.snapshot.title, true, true),
+                        ]))
+                        .center(Length::Fill)
+                        .into()
                     },
                 ),
         };
@@ -2991,72 +3126,39 @@ fn interaction_engine(frame: Rect) -> InteractionEngine {
     .expect("Canvas interaction defaults must remain valid")
 }
 
-fn parse_dataviz_file(file: &Path) -> Result<Vec<(f32, f32)>, String> {
+fn parse_dataviz_file(file: &Path, chart_type: &str) -> Result<ChartDocument, String> {
     let content = std::fs::read_to_string(file).map_err(|e| e.to_string())?;
-    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let kind = ChartKind::parse(chart_type).map_err(|error| error.to_string())?;
+    let title = file
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Chart");
+    let ext = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
     match ext {
-        "csv" => parse_csv(&content),
-        "json" => parse_json_data(&content),
-        "tsv" => parse_csv_with_sep(&content, '\t'),
-        _ => parse_csv(&content),
-    }
-}
-
-fn parse_csv(content: &str) -> Result<Vec<(f32, f32)>, String> {
-    parse_csv_with_sep(content, ',')
-}
-
-fn parse_csv_with_sep(content: &str, sep: char) -> Result<Vec<(f32, f32)>, String> {
-    let mut data = Vec::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
+        ref extension if extension == "csv" => {
+            dock_canvas::chart::parse_delimited(&content, b',', title, kind)
         }
-        let parts: Vec<&str> = line.split(sep).collect();
-        if parts.len() < 2 {
-            continue;
+        ref extension if extension == "tsv" => {
+            dock_canvas::chart::parse_delimited(&content, b'\t', title, kind)
         }
-        let x: f32 = parts[0]
-            .trim()
-            .parse()
-            .map_err(|_| format!("invalid x: {}", parts[0]))?;
-        let y: f32 = parts[1]
-            .trim()
-            .parse()
-            .map_err(|_| format!("invalid y: {}", parts[1]))?;
-        data.push((x, y));
-    }
-    if data.is_empty() {
-        return Err("no data points found".into());
-    }
-    Ok(data)
-}
-
-fn parse_json_data(content: &str) -> Result<Vec<(f32, f32)>, String> {
-    let value: serde_json::Value = serde_json::from_str(content).map_err(|e| e.to_string())?;
-    if let Some(array) = value.as_array() {
-        let mut data = Vec::new();
-        for item in array {
-            if item.get("x").is_some() && item.get("y").is_some() {
-                let x = item["x"].as_f64().ok_or("invalid x")? as f32;
-                let y = item["y"].as_f64().ok_or("invalid y")? as f32;
-                data.push((x, y));
-            }
+        ref extension if extension == "json" => {
+            dock_canvas::chart::parse_json(&content, title, kind)
         }
-        Ok(data)
-    } else {
-        Err("JSON data must be an array of {x, y} objects".into())
+        _ => return Err("chart file must use .csv, .tsv, or .json".into()),
     }
+    .map_err(|error| error.to_string())
 }
 
 struct ChartProgram {
-    data: Vec<(f32, f32)>,
-    chart_type: String,
+    chart: ChartDocument,
     axis_color: Color,
-    bar_color: Color,
-    line_color: Color,
-    point_color: Color,
+    muted_color: Color,
+    surface_color: Color,
+    series_colors: Vec<Color>,
 }
 
 impl<Message> canvas::Program<Message> for ChartProgram {
@@ -3068,104 +3170,372 @@ impl<Message> canvas::Program<Message> for ChartProgram {
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
-        _cursor: mouse::Cursor,
+        cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        if self.data.is_empty() {
-            return Vec::new();
-        }
         let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let margin = 40.0f32;
-        let stroke = canvas::Stroke::default().with_width(1.0).with_color(Color {
-            a: 0.15,
+        let Some((min_x, max_x, min_y, max_y)) = chart_extents(&self.chart) else {
+            chart_text(
+                &mut frame,
+                "No chart data",
+                Point::new(20.0, 24.0),
+                16.0,
+                self.muted_color,
+                iced::alignment::Horizontal::Left,
+            );
+            return vec![frame.into_geometry()];
+        };
+
+        chart_text(
+            &mut frame,
+            &self.chart.title,
+            Point::new(18.0, 12.0),
+            16.0,
+            self.axis_color,
+            iced::alignment::Horizontal::Left,
+        );
+        let legend = legend_layout(
+            self.chart.series.iter().map(|series| series.name.as_str()),
+            bounds.width.max(1.0),
+        );
+        for (index, item) in legend.items.iter().enumerate() {
+            let color = self.series_colors[index % self.series_colors.len()];
+            frame.fill(
+                &canvas::Path::circle(Point::new(item.x + 4.0, item.y + 6.0), 3.5),
+                color,
+            );
+            chart_text(
+                &mut frame,
+                &item.label,
+                Point::new(item.x + 13.0, item.y),
+                11.0,
+                self.muted_color,
+                iced::alignment::Horizontal::Left,
+            );
+        }
+
+        let left = if bounds.width < 360.0 { 44.0 } else { 58.0 };
+        let right = (bounds.width - 18.0).max(left + 1.0);
+        let top = (48.0 + legend.rows as f32 * 18.0).min(bounds.height * 0.45);
+        let bottom = (bounds.height - 36.0).max(top + 1.0);
+        let plot_width = right - left;
+        let plot_height = bottom - top;
+        if plot_width <= 1.0 || plot_height <= 1.0 {
+            return vec![frame.into_geometry()];
+        }
+
+        let x_ticks = chart_ticks(min_x, max_x, if bounds.width < 420.0 { 3 } else { 5 });
+        let y_ticks = chart_ticks(min_y, max_y, if bounds.height < 300.0 { 3 } else { 5 });
+        let sx = |x: f32| left + (x - min_x) / (max_x - min_x) * plot_width;
+        let sy = |y: f32| bottom - (y - min_y) / (max_y - min_y) * plot_height;
+        let grid_stroke = canvas::Stroke::default().with_width(1.0).with_color(Color {
+            a: 0.14,
             ..self.axis_color
         });
 
-        let min_x = self
-            .data
-            .iter()
-            .map(|(x, _)| *x)
-            .fold(f32::INFINITY, f32::min);
-        let max_x = self
-            .data
-            .iter()
-            .map(|(x, _)| *x)
-            .fold(f32::NEG_INFINITY, f32::max);
-        let min_y = self
-            .data
-            .iter()
-            .map(|(_, y)| *y)
-            .fold(f32::INFINITY, f32::min);
-        let max_y = self
-            .data
-            .iter()
-            .map(|(_, y)| *y)
-            .fold(f32::NEG_INFINITY, f32::max);
-
-        let plot_w = bounds.width - 2.0 * margin;
-        let plot_h = bounds.height - 2.0 * margin;
-
-        let sx = |x: f32| margin + (x - min_x) / (max_x - min_x).max(1e-6) * plot_w;
-        let sy = |y: f32| bounds.height - margin - (y - min_y) / (max_y - min_y).max(1e-6) * plot_h;
-
-        if plot_w > 0.0 && plot_h > 0.0 {
-            let grid = canvas::Path::line(
-                Point::new(margin, bounds.height - margin),
-                Point::new(bounds.width - margin, bounds.height - margin),
+        for tick in &y_ticks {
+            let y = sy(*tick);
+            frame.stroke(
+                &canvas::Path::line(Point::new(left, y), Point::new(right, y)),
+                grid_stroke,
             );
-            frame.stroke(&grid, stroke);
-            let grid_y = canvas::Path::line(
-                Point::new(margin, margin),
-                Point::new(margin, bounds.height - margin),
+            chart_text(
+                &mut frame,
+                &format_chart_value(*tick),
+                Point::new(left - 7.0, y),
+                10.0,
+                self.muted_color,
+                iced::alignment::Horizontal::Right,
             );
-            frame.stroke(&grid_y, stroke);
+        }
+        for tick in &x_ticks {
+            let x = sx(*tick);
+            frame.stroke(
+                &canvas::Path::line(Point::new(x, top), Point::new(x, bottom)),
+                grid_stroke,
+            );
+            chart_text(
+                &mut frame,
+                &format_chart_value(*tick),
+                Point::new(x, bottom + 7.0),
+                10.0,
+                self.muted_color,
+                iced::alignment::Horizontal::Center,
+            );
         }
 
-        match self.chart_type.as_str() {
-            "bar" => {
-                let n = self.data.len() as f32;
-                let bar_w = plot_w / (n + 1.0);
-                for (i, (_, y)) in self.data.iter().enumerate() {
-                    let cx = margin + bar_w * (i as f32 + 0.5);
-                    let bh = (*y - min_y) / (max_y - min_y).max(1e-6) * plot_h;
-                    let rect = canvas::Path::rectangle(
-                        Point::new(cx - bar_w * 0.4, bounds.height - margin - bh),
-                        Size::new(bar_w * 0.8, bh.max(1.0)),
-                    );
-                    frame.fill(&rect, self.bar_color);
+        let y_label = axis_title(&self.chart.y_axis);
+        chart_text(
+            &mut frame,
+            &y_label,
+            Point::new(12.0, top - 20.0),
+            11.0,
+            self.muted_color,
+            iced::alignment::Horizontal::Left,
+        );
+        let x_label = axis_title(&self.chart.x_axis);
+        chart_text(
+            &mut frame,
+            &x_label,
+            Point::new((left + right) / 2.0, bounds.height - 15.0),
+            11.0,
+            self.muted_color,
+            iced::alignment::Horizontal::Center,
+        );
+
+        let total_points = self
+            .chart
+            .series
+            .iter()
+            .map(|series| series.points.len())
+            .sum::<usize>()
+            .max(1);
+        let bar_width = (plot_width / total_points as f32 * 0.72).clamp(2.0, 28.0);
+        for (series_index, series) in self.chart.series.iter().enumerate() {
+            let series_color = self.series_colors[series_index % self.series_colors.len()];
+            match self.chart.kind {
+                ChartKind::Line => {
+                    let stroke = canvas::Stroke::default()
+                        .with_width(2.0)
+                        .with_color(series_color);
+                    for pair in series.points.windows(2) {
+                        frame.stroke(
+                            &canvas::Path::line(
+                                Point::new(sx(pair[0].x), sy(pair[0].y)),
+                                Point::new(sx(pair[1].x), sy(pair[1].y)),
+                            ),
+                            stroke,
+                        );
+                    }
+                    for point in &series.points {
+                        frame.fill(
+                            &canvas::Path::circle(Point::new(sx(point.x), sy(point.y)), 2.7),
+                            series_color,
+                        );
+                    }
+                }
+                ChartKind::Scatter => {
+                    for point in &series.points {
+                        frame.fill(
+                            &canvas::Path::circle(Point::new(sx(point.x), sy(point.y)), 3.4),
+                            series_color,
+                        );
+                    }
+                }
+                ChartKind::Bar => {
+                    let group_offset = (series_index as f32
+                        - (self.chart.series.len() - 1) as f32 / 2.0)
+                        * bar_width;
+                    for point in &series.points {
+                        let x = sx(point.x) + group_offset;
+                        let y = sy(point.y);
+                        let base = sy(min_y.max(0.0));
+                        frame.fill(
+                            &canvas::Path::rectangle(
+                                Point::new(x - bar_width * 0.42, y.min(base)),
+                                Size::new(bar_width * 0.84, (base - y).abs().max(1.0)),
+                            ),
+                            series_color,
+                        );
+                    }
                 }
             }
-            "line" => {
-                let line_stroke = canvas::Stroke::default()
+        }
+
+        if let Some(cursor) = cursor.position_in(bounds)
+            && cursor.x >= left
+            && cursor.x <= right
+            && cursor.y >= top
+            && cursor.y <= bottom
+            && let Some((series_index, point, position)) =
+                nearest_chart_point(&self.chart, cursor, sx, sy, 20.0)
+        {
+            let series = &self.chart.series[series_index];
+            let series_color = self.series_colors[series_index % self.series_colors.len()];
+            frame.fill(&canvas::Path::circle(position, 5.0), self.surface_color);
+            frame.stroke(
+                &canvas::Path::circle(position, 5.0),
+                canvas::Stroke::default()
                     .with_width(2.0)
-                    .with_color(self.line_color);
-                for window in self.data.windows(2) {
-                    let path = canvas::Path::line(
-                        Point::new(sx(window[0].0), sy(window[0].1)),
-                        Point::new(sx(window[1].0), sy(window[1].1)),
-                    );
-                    frame.stroke(&path, line_stroke);
-                }
-                for (x, y) in &self.data {
-                    let circle = canvas::Path::circle(Point::new(sx(*x), sy(*y)), 2.5);
-                    frame.fill(&circle, self.line_color);
-                }
-            }
-            "scatter" => {
-                for (x, y) in &self.data {
-                    let circle = canvas::Path::circle(Point::new(sx(*x), sy(*y)), 3.0);
-                    frame.fill(&circle, self.point_color);
-                }
-            }
-            _ => {
-                for (x, y) in &self.data {
-                    let circle = canvas::Path::circle(Point::new(sx(*x), sy(*y)), 2.0);
-                    frame.fill(&circle, self.point_color);
-                }
-            }
+                    .with_color(series_color),
+            );
+            let value = format!(
+                "{}  {} · {}",
+                series.name,
+                format_axis_value(point.x, self.chart.x_axis.unit.as_deref()),
+                format_axis_value(point.y, self.chart.y_axis.unit.as_deref())
+            );
+            let tooltip_width = (value.chars().count() as f32 * 6.5 + 18.0).min(plot_width);
+            let tooltip_x = (position.x + 12.0).min(right - tooltip_width);
+            let tooltip_y = (position.y - 32.0).max(top + 4.0);
+            frame.fill(
+                &canvas::Path::rounded_rectangle(
+                    Point::new(tooltip_x, tooltip_y),
+                    Size::new(tooltip_width, 24.0),
+                    6.0.into(),
+                ),
+                Color {
+                    a: 0.94,
+                    ..self.surface_color
+                },
+            );
+            chart_text(
+                &mut frame,
+                &value,
+                Point::new(tooltip_x + 9.0, tooltip_y + 5.0),
+                10.0,
+                self.axis_color,
+                iced::alignment::Horizontal::Left,
+            );
         }
 
         vec![frame.into_geometry()]
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct LegendItem {
+    label: String,
+    x: f32,
+    y: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct LegendLayout {
+    items: Vec<LegendItem>,
+    rows: usize,
+}
+
+fn legend_layout<'a>(labels: impl Iterator<Item = &'a str>, width: f32) -> LegendLayout {
+    let available = (width - 36.0).max(80.0);
+    let mut x = 18.0;
+    let mut row = 0usize;
+    let mut items = Vec::new();
+    for label in labels {
+        let item_width = label.chars().count() as f32 * 6.5 + 30.0;
+        if x > 18.0 && x + item_width > available + 18.0 {
+            row += 1;
+            x = 18.0;
+        }
+        items.push(LegendItem {
+            label: label.to_owned(),
+            x,
+            y: 34.0 + row as f32 * 18.0,
+        });
+        x += item_width;
+    }
+    LegendLayout {
+        rows: row + usize::from(!items.is_empty()),
+        items,
+    }
+}
+
+fn chart_extents(chart: &ChartDocument) -> Option<(f32, f32, f32, f32)> {
+    let mut min_x = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for point in chart.series.iter().flat_map(|series| &series.points) {
+        min_x = min_x.min(point.x);
+        max_x = max_x.max(point.x);
+        min_y = min_y.min(point.y);
+        max_y = max_y.max(point.y);
+    }
+    if !min_x.is_finite() {
+        return None;
+    }
+    if min_x == max_x {
+        min_x -= 0.5;
+        max_x += 0.5;
+    }
+    if min_y == max_y {
+        let padding = min_y.abs().max(1.0) * 0.1;
+        min_y -= padding;
+        max_y += padding;
+    }
+    Some((min_x, max_x, min_y, max_y))
+}
+
+fn chart_ticks(min: f32, max: f32, count: usize) -> Vec<f32> {
+    let count = count.max(2);
+    let step = (max - min) / (count - 1) as f32;
+    (0..count).map(|index| min + step * index as f32).collect()
+}
+
+fn nearest_chart_point<F, G>(
+    chart: &ChartDocument,
+    cursor: Point,
+    sx: F,
+    sy: G,
+    maximum_distance: f32,
+) -> Option<(usize, dock_canvas::chart::ChartPoint, Point)>
+where
+    F: Fn(f32) -> f32,
+    G: Fn(f32) -> f32,
+{
+    chart
+        .series
+        .iter()
+        .enumerate()
+        .flat_map(|(series_index, series)| {
+            let sx = &sx;
+            let sy = &sy;
+            series.points.iter().map(move |point| {
+                let position = Point::new(sx(point.x), sy(point.y));
+                let distance = (position.x - cursor.x).hypot(position.y - cursor.y);
+                (distance, series_index, point.clone(), position)
+            })
+        })
+        .filter(|(distance, _, _, _)| *distance <= maximum_distance)
+        .min_by(|left, right| left.0.total_cmp(&right.0))
+        .map(|(_, series_index, point, position)| (series_index, point, position))
+}
+
+fn axis_title(axis: &dock_canvas::chart::ChartAxis) -> String {
+    axis.unit.as_ref().map_or_else(
+        || axis.label.clone(),
+        |unit| format!("{} ({unit})", axis.label),
+    )
+}
+
+fn format_chart_value(value: f32) -> String {
+    if value.abs() >= 1_000_000.0 {
+        format!("{:.1}m", value / 1_000_000.0)
+    } else if value.abs() >= 1_000.0 {
+        format!("{:.1}k", value / 1_000.0)
+    } else if value.abs() >= 10.0 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.1}")
+    }
+}
+
+fn format_axis_value(value: f32, unit: Option<&str>) -> String {
+    let value = format_chart_value(value);
+    unit.map_or(value.clone(), |unit| {
+        if unit == "$" || unit == "£" || unit == "€" {
+            format!("{unit}{value}")
+        } else {
+            format!("{value} {unit}")
+        }
+    })
+}
+
+fn chart_text(
+    frame: &mut canvas::Frame,
+    content: &str,
+    position: Point,
+    size: f32,
+    color: Color,
+    align_x: iced::alignment::Horizontal,
+) {
+    frame.fill_text(canvas::Text {
+        content: content.to_owned(),
+        position,
+        color,
+        size: iced::Pixels(size),
+        align_x: align_x.into(),
+        ..Default::default()
+    });
 }
 
 fn denormalize(bounds: NormalizedRect, frame: Rect) -> LogicalRect {
@@ -4829,6 +5199,14 @@ mod tests {
     #[test]
     fn surface_controls_use_compact_standard_upper_left_hit_targets() {
         let mut app = test_app();
+        app.document.surfaces.push(Surface {
+            id: "sample".into(),
+            title: "Sample".into(),
+            content: SurfaceContent::Scene {
+                scene: Scene { nodes: Vec::new() },
+            },
+            inputs: Vec::new(),
+        });
         app.document.layout = Layout::Canvas {
             placements: vec![Placement {
                 surface_id: "sample".into(),
@@ -4862,5 +5240,55 @@ mod tests {
             y: top + 10.0,
         });
         assert_eq!(app.hit_test_surface_control(), None);
+
+        assert_eq!(
+            window_action_label(WindowAction::Maximize, false),
+            "Maximize"
+        );
+        assert_eq!(window_action_label(WindowAction::Maximize, true), "Restore");
+
+        let original_layout = app.document.layout.clone();
+        app.cursor = Some(LogicalPoint {
+            x: left + 44.0,
+            y: top + 10.0,
+        });
+        app.handle_mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left));
+        assert!(app.maximized_surfaces.contains("sample"));
+        app.cursor = Some(LogicalPoint { x: 44.0, y: 10.0 });
+        assert_eq!(
+            app.hit_test_surface_control(),
+            Some(("sample".into(), WindowAction::Maximize))
+        );
+        app.handle_mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left));
+        assert!(!app.maximized_surfaces.contains("sample"));
+        assert_eq!(app.document.layout, original_layout);
+        assert_eq!(
+            app.transition
+                .as_ref()
+                .and_then(|transition| transition.from_placements.get("sample")),
+            Some(&[0.0, 0.0, 1.0, 1.0])
+        );
+    }
+
+    #[test]
+    fn surface_title_modes_cover_hidden_focused_and_always() {
+        assert!(!surface_title_visible(SurfaceTitleMode::Hidden, false));
+        assert!(!surface_title_visible(SurfaceTitleMode::Hidden, true));
+        assert!(!surface_title_visible(SurfaceTitleMode::Focused, false));
+        assert!(surface_title_visible(SurfaceTitleMode::Focused, true));
+        assert!(surface_title_visible(SurfaceTitleMode::Always, false));
+        assert!(surface_title_visible(SurfaceTitleMode::Always, true));
+    }
+
+    #[test]
+    fn chart_layout_helpers_keep_legends_and_ticks_readable() {
+        let wide = legend_layout(["Revenue", "Cost"].into_iter(), 800.0);
+        assert_eq!(wide.rows, 1);
+        let narrow = legend_layout(["Revenue", "Cost", "Forecast"].into_iter(), 110.0);
+        assert!(narrow.rows > 1);
+        assert_eq!(narrow.items.len(), 3);
+
+        let ticks = chart_ticks(-10.0, 10.0, 5);
+        assert_eq!(ticks, vec![-10.0, -5.0, 0.0, 5.0, 10.0]);
     }
 }

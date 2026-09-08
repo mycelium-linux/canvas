@@ -558,6 +558,7 @@ mod tests {
             revision: 4,
             theme: ThemeRef::Project,
             background: crate::Background::default(),
+            chrome: crate::SurfaceChrome::default(),
             surfaces: vec![Surface {
                 id: "docs".into(),
                 title: "Docs".into(),

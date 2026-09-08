@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, fmt};
 
 pub mod backend;
+pub mod chart;
 pub mod control;
 pub mod hud;
 pub mod interaction;
@@ -80,12 +81,32 @@ pub struct WorkspaceDocument {
     pub theme: ThemeRef,
     #[serde(default)]
     pub background: Background,
+    #[serde(default)]
+    pub chrome: SurfaceChrome,
     pub surfaces: Vec<Surface>,
     pub layout: Layout,
     #[serde(default)]
     pub bindings: Vec<DataBinding>,
     #[serde(default)]
     pub focused_surface_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
+pub struct SurfaceChrome {
+    #[serde(default)]
+    pub title: SurfaceTitleMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
+pub enum SurfaceTitleMode {
+    Hidden,
+    #[default]
+    Focused,
+    Always,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +200,7 @@ pub struct Surface {
 pub enum SurfaceContent {
     ProjectResource { resource_id: String },
     Asset { asset: AssetRef },
+    Chart { chart: chart::ChartDocument },
     Scene { scene: Scene },
     Terminal { resource_id: String },
     Stream { url: String },
@@ -373,6 +395,7 @@ pub enum PatchOperation {
     SetLayout { layout: Layout },
     SetTheme { theme: ThemeRef },
     SetBackground { background: Background },
+    SetChrome { chrome: SurfaceChrome },
     SetFocus { surface_id: Option<String> },
     UpsertBinding { binding: DataBinding },
     RemoveBinding { binding_id: String },
@@ -635,6 +658,9 @@ impl WorkspaceDocument {
                     )?;
                 }
                 SurfaceContent::Asset { asset } => asset.validate()?,
+                SurfaceContent::Chart { chart } => {
+                    chart.validate().map_err(|error| Error(error.to_string()))?
+                }
                 SurfaceContent::Scene { scene } => scene.validate()?,
                 SurfaceContent::Stream { url } => {
                     check(!url.is_empty(), "Stream URL must not be empty")?;
@@ -725,6 +751,7 @@ impl WorkspaceDocument {
                 PatchOperation::SetBackground { background } => {
                     next.background.clone_from(background)
                 }
+                PatchOperation::SetChrome { chrome } => next.chrome = *chrome,
                 PatchOperation::SetFocus { surface_id } => {
                     next.focused_surface_id.clone_from(surface_id)
                 }
@@ -871,6 +898,7 @@ mod tests {
             revision: 1,
             theme: ThemeRef::Project,
             background: crate::Background::default(),
+            chrome: SurfaceChrome::default(),
             surfaces: vec![
                 Surface {
                     id: "browser".into(),
@@ -959,8 +987,10 @@ mod tests {
         let document = document();
         let mut legacy = serde_json::to_value(&document).unwrap();
         legacy.as_object_mut().unwrap().remove("background");
+        legacy.as_object_mut().unwrap().remove("chrome");
         let legacy = WorkspaceDocument::parse(&legacy.to_string(), &catalog).unwrap();
         assert_eq!(legacy.background, Background::Theme);
+        assert_eq!(legacy.chrome.title, SurfaceTitleMode::Focused);
 
         let gradient = Background::Gradient {
             angle_degrees: 125.0,
@@ -994,6 +1024,26 @@ mod tests {
         assert_eq!(
             WorkspaceDocument::parse(&encoded, &catalog).unwrap(),
             applied
+        );
+
+        let chrome_patch = WorkspacePatch {
+            schema_version: SCHEMA_VERSION,
+            workspace_id: applied.id.clone(),
+            base_revision: applied.revision,
+            revision: applied.revision + 1,
+            operations: vec![PatchOperation::SetChrome {
+                chrome: SurfaceChrome {
+                    title: SurfaceTitleMode::Always,
+                },
+            }],
+        };
+        assert_eq!(
+            applied
+                .apply_patch(&chrome_patch, &catalog)
+                .unwrap()
+                .chrome
+                .title,
+            SurfaceTitleMode::Always
         );
 
         let mut invalid = applied.clone();

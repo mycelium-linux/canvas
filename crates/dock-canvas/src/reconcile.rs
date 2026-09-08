@@ -169,6 +169,7 @@ fn replace_project(
         revision: current.revision + 1,
         theme: ThemeRef::Project,
         background: desired.background.clone().unwrap_or_default(),
+        chrome: current.chrome,
         surfaces: sorted_surfaces(&desired.surfaces),
         layout: desired
             .layout
@@ -456,6 +457,7 @@ mod tests {
             revision: 7,
             theme: ThemeRef::Project,
             background: crate::Background::default(),
+            chrome: crate::SurfaceChrome::default(),
             surfaces: vec![
                 resource_surface("docs", "docs"),
                 Surface {

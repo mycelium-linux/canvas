@@ -6,7 +6,8 @@ use dock_canvas::control::{
     self, CONTROL_VERSION, Command, ControlReply, ControlRequest, ErrorCode, Outcome, Receipt, text,
 };
 use dock_canvas::{
-    Layout, NormalizedRect, Placement, SCHEMA_VERSION, WorkspaceDocument, WorkspacePatch,
+    Layout, NormalizedRect, Placement, SCHEMA_VERSION, SurfaceChrome, SurfaceTitleMode,
+    WorkspaceDocument, WorkspacePatch,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -20,6 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("       echo 'move 0 25 1920 1150' | dock-canvasctl");
         eprintln!("       echo 'indicator status speaking \"Socket live\"' | dock-canvasctl");
         eprintln!("       echo 'nav scene-view next' | dock-canvasctl");
+        eprintln!("       echo 'titles focused' | dock-canvasctl");
         eprintln!("       echo 'patch /tmp/patch.json' | dock-canvasctl");
         eprintln!("       echo '{{\"schema_version\":1,...}}' | dock-canvasctl  (JSON mode)");
         std::process::exit(1);
@@ -70,6 +72,9 @@ fn handle_line(line: &str) -> Result<(), String> {
     }
     if tokens[0] == "tile" {
         return handle_tile(&tokens);
+    }
+    if tokens[0] == "titles" {
+        return handle_titles(&tokens);
     }
     if tokens[0] == "minimize" || tokens[0] == "maximize" || tokens[0] == "restore" {
         return handle_window_control(&tokens);
@@ -170,6 +175,37 @@ fn handle_line(line: &str) -> Result<(), String> {
         Ok(reply) => println!("{}", text::format_reply(&reply)),
         Err(e) => println!("ERR {e}"),
     }
+    Ok(())
+}
+
+fn handle_titles(tokens: &[String]) -> Result<(), String> {
+    if tokens.len() != 2 {
+        return Err("usage: titles <hidden|focused|always>".into());
+    }
+    let title = match tokens[1].as_str() {
+        "hidden" => SurfaceTitleMode::Hidden,
+        "focused" => SurfaceTitleMode::Focused,
+        "always" => SurfaceTitleMode::Always,
+        value => return Err(format!("unknown title mode: {value}")),
+    };
+    let state = read_document_state()?;
+    let patch = WorkspacePatch {
+        schema_version: SCHEMA_VERSION,
+        workspace_id: state.workspace_id,
+        base_revision: state.doc_revision,
+        revision: state.doc_revision + 1,
+        operations: vec![dock_canvas::PatchOperation::SetChrome {
+            chrome: SurfaceChrome { title },
+        }],
+    };
+    let request = ControlRequest {
+        schema_version: CONTROL_VERSION,
+        request_id: format!("titles-{}", id()),
+        expected_revision: Some(state.runtime_revision),
+        command: Command::ApplyPatch { patch },
+    };
+    let reply = send_with_retry(&request)?;
+    println!("{}", text::format_reply(&reply));
     Ok(())
 }
 
