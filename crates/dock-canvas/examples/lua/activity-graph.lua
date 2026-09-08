@@ -11,10 +11,10 @@
 -- learns which, which is the point of giving the graph a typed shape rather than
 -- a view per source.
 --
--- Heat is drawn with glyph and scale rather than colour: `canvas.text` takes only
--- id, parent, text, translation, rotation and scale, so a module cannot tint
--- anything. `module.theme` is still read for the mode label, and the day text
--- nodes accept a colour this wants `level` mapped onto the semantic tokens.
+-- Heat is drawn with glyph and scale; outcome is drawn with `tint`, which names a
+-- semantic role rather than a colour. The host resolves it against the active
+-- project palette, so a failed node is red in whatever red this theme uses and
+-- this module never learns the value.
 
 local graph = module.inputs.graph
 
@@ -27,10 +27,10 @@ local function mark(heat)
   return RAMP[1 + math.floor(clamped * (#RAMP - 1) + 0.5)]
 end
 
--- Without colour, the outcome has to be legible in the label itself. A run that
--- failed is the thing you are looking for; it must not read the same as a quiet
--- one that succeeded an hour ago.
-local FLAG = { critical = "!", warning = "?", good = "", neutral = "" }
+-- The level vocabulary the host already has semantic colours for. A run that
+-- failed is the thing you are looking for, and it must not read the same as a
+-- quiet one that succeeded an hour ago.
+local TINT = { critical = "danger", warning = "warning", good = "success", neutral = "text" }
 
 -- Grouping drives layout: one column per family, in first-seen order, so a graph
 -- fed by two owners reads as two bands rather than one cloud.
@@ -56,6 +56,8 @@ for column_index, key in ipairs(order) do
     id = "group-" .. key,
     parent = "activity",
     text = key,
+    -- A heading, not a reading: muted so the nodes carry the eye.
+    tint = "muted",
     translation = { x, 0.16, 0 },
   }
   for row, node in ipairs(columns[key]) do
@@ -65,7 +67,8 @@ for column_index, key in ipairs(order) do
     canvas.text {
       id = "n-" .. node.id,
       parent = "activity",
-      text = mark(heat) .. " " .. node.label .. (FLAG[node.level] or ""),
+      text = mark(heat) .. " " .. node.label,
+      tint = TINT[node.level] or "text",
       -- A node that just fired is briefly larger. The shape of the system stays
       -- readable when nothing is happening, instead of the view going blank.
       scale = { 1 + 0.25 * heat, 1 + 0.25 * heat, 1 },
@@ -84,6 +87,7 @@ for index, edge in ipairs(graph.edges) do
       id = "e-" .. index,
       parent = "activity",
       text = mark(edge.heat),
+      tint = "primary",
       translation = { (from.x + to.x) / 2, (from.y + to.y) / 2, 0 },
     }
   end

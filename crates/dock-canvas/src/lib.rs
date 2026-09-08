@@ -14,6 +14,7 @@ pub mod display;
 pub mod hud;
 pub mod interaction;
 #[cfg(feature = "lua-scenes")]
+pub mod activity;
 pub mod lua_module;
 #[cfg(feature = "lua-scenes")]
 pub mod lua_scene;
