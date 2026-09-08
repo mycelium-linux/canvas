@@ -22,6 +22,16 @@ class SetupTest(unittest.TestCase):
             saved = json.loads(config.read_text())
             self.assertEqual(saved["other"], {"kept": True})
             self.assertEqual([item["id"] for item in saved["connectors"]], ["other", "dock-workspaces"])
+            self.assertEqual(
+                saved["connectors"][1]["capabilities"],
+                [
+                    "workspace.inspect",
+                    "workspace.sync",
+                    "workspace.present",
+                    "canvas.present",
+                    "presence.route",
+                ],
+            )
 
     def test_registration_refuses_foreign_collision(self):
         with tempfile.TemporaryDirectory() as directory:

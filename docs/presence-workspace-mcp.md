@@ -90,6 +90,8 @@ Manual checks:
 
 ```sh
 dock-mac orchestrate displays
+dock-mac orchestrate canvas-sync
+dock-mac orchestrate canvas-switch dock
 dock-mac orchestrate workspaces
 dock-mac orchestrate presence
 fpl-desktop-bridge verify --connector dock-workspaces --local

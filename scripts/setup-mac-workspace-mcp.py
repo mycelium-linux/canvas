@@ -64,7 +64,13 @@ def desired_connector(port: int, token: pathlib.Path) -> dict:
         "command": "",
         "args": [],
         "workingDir": "",
-        "capabilities": ["workspace.inspect", "workspace.present", "presence.route"],
+        "capabilities": [
+            "workspace.inspect",
+            "workspace.sync",
+            "workspace.present",
+            "canvas.present",
+            "presence.route",
+        ],
         "metadata": {
             "adapter": "dock-mac",
             "app": "dock",
