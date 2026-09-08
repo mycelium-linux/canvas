@@ -4,6 +4,7 @@
 //! that data: viewport, attention, navigation, and presentation parameters.
 
 use super::{Error, Result, SCHEMA_VERSION, check, contract, identifier, visible};
+use dock_widgets::WidgetSpec;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -11,6 +12,9 @@ const MAX_VIEW_PARAMETERS: usize = 64;
 const MAX_PARAMETER_VALUES: usize = 256;
 const MAX_VIEW_OPERATIONS: usize = 128;
 const MAX_VIEW_SOURCES: usize = 64;
+/// Placed widgets per view. A surface a person can actually read runs out long
+/// before this; the cap is here so a patch cannot grow a document without bound.
+const MAX_VIEW_WIDGETS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -121,6 +125,23 @@ pub enum ViewParameterValue {
     Set(Vec<String>),
 }
 
+/// A widget instance placed on the view surface.
+///
+/// Presentation Canvas owns, which is why it is not a [`ViewSource`]: a source
+/// names data owned elsewhere and carries a position into it, while a widget is
+/// the drawing itself. Kept in the shared document rather than a store beside it
+/// so placement inherits the revision, patch and conflict rules the rest of the
+/// view already has, and so whatever persists a view persists its widgets.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
+pub struct PlacedWidget {
+    pub spec: WidgetSpec,
+    /// Where on the surface, in the same normalized space as [`ViewRect`].
+    #[serde(default)]
+    pub rect: ViewRect,
+}
+
 /// The exact visual context shared between Canvas, a person, and an agent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -138,6 +159,9 @@ pub struct SharedViewDocument {
     pub navigation: ViewNavigation,
     #[serde(default)]
     pub parameters: BTreeMap<String, ViewParameterValue>,
+    /// Absent in documents written before widgets existed, hence `default`.
+    #[serde(default)]
+    pub widgets: BTreeMap<String, PlacedWidget>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -171,6 +195,17 @@ pub enum ViewOperation {
     SetParameter {
         id: String,
         value: ViewParameterValue,
+    },
+    PlaceWidget {
+        id: String,
+        widget: Box<PlacedWidget>,
+    },
+    MoveWidget {
+        id: String,
+        rect: ViewRect,
+    },
+    RemoveWidget {
+        id: String,
     },
     RemoveParameter {
         id: String,
@@ -212,8 +247,14 @@ impl SharedViewDocument {
         )?;
         check(identifier(&self.id), "Invalid shared view id")?;
         check(self.revision > 0, "Shared view revision must be positive")?;
+        // A view still may not be empty, but a dashboard of a clock and a label is a
+        // real view with nothing external to name, so widgets satisfy this too.
         check(
-            !self.sources.is_empty() && self.sources.len() <= MAX_VIEW_SOURCES,
+            !(self.sources.is_empty() && self.widgets.is_empty()),
+            "Shared view must carry a source or a widget",
+        )?;
+        check(
+            self.sources.len() <= MAX_VIEW_SOURCES,
             "Shared view source count is invalid",
         )?;
         for (id, source) in &self.sources {
@@ -232,6 +273,14 @@ impl SharedViewDocument {
         for (id, value) in &self.parameters {
             check(identifier(id), "Invalid shared view parameter id")?;
             validate_parameter(value)?;
+        }
+        check(
+            self.widgets.len() <= MAX_VIEW_WIDGETS,
+            "Shared view has too many widgets",
+        )?;
+        for (id, widget) in &self.widgets {
+            check(identifier(id), "Invalid shared view widget id")?;
+            validate_placed_widget(widget)?;
         }
         Ok(())
     }
@@ -296,6 +345,27 @@ impl SharedViewDocument {
                     next.parameters.insert(id.clone(), value.clone());
                     continue;
                 }
+                ViewOperation::PlaceWidget { id, widget } => {
+                    check(identifier(id), "Invalid shared view widget id")?;
+                    validate_placed_widget(widget)?;
+                    next.widgets.insert(id.clone(), (**widget).clone());
+                    continue;
+                }
+                ViewOperation::MoveWidget { id, rect } => {
+                    check(identifier(id), "Invalid shared view widget id")?;
+                    rect.validate()?;
+                    let widget = next
+                        .widgets
+                        .get_mut(id)
+                        .ok_or_else(|| Error(format!("Unknown shared view widget: {id}")))?;
+                    widget.rect = *rect;
+                    continue;
+                }
+                ViewOperation::RemoveWidget { id } => {
+                    check(identifier(id), "Invalid shared view widget id")?;
+                    next.widgets.remove(id);
+                    continue;
+                }
                 ViewOperation::RemoveParameter { id } => {
                     check(identifier(id), "Invalid shared view parameter id")?;
                     next.parameters.remove(id);
@@ -311,6 +381,16 @@ impl SharedViewDocument {
         next.validate()?;
         Ok(next)
     }
+}
+
+/// A placed widget is only as valid as its spec, so the widget crate keeps owning
+/// what a spec means and this checks placement.
+fn validate_placed_widget(widget: &PlacedWidget) -> Result<()> {
+    widget
+        .spec
+        .validate()
+        .map_err(|error| Error(format!("Invalid placed widget spec: {error}")))?;
+    widget.rect.validate()
 }
 
 fn validate_source_position(kind: VisualSourceKind, position: SourcePosition) -> Result<()> {
@@ -390,6 +470,7 @@ mod tests {
             attention: None,
             navigation: ViewNavigation::None,
             parameters: BTreeMap::new(),
+            widgets: BTreeMap::new(),
         }
     }
 
@@ -509,5 +590,171 @@ mod tests {
             })
             .unwrap_err();
         assert!(error.0.contains("revision conflict"));
+    }
+}
+
+#[cfg(test)]
+mod placed_widget_tests {
+    use super::*;
+    use dock_widgets::WidgetKind;
+
+    fn text_widget(body: &str) -> PlacedWidget {
+        PlacedWidget {
+            spec: WidgetSpec {
+                schema_version: dock_widgets::WIDGET_SCHEMA_VERSION,
+                id: "w".into(),
+                kind: WidgetKind::Text { text: body.into() },
+                theme: None,
+                refresh_ms: None,
+            },
+            rect: ViewRect {
+                x: 0.0,
+                y: 0.0,
+                width: 0.5,
+                height: 0.5,
+            },
+        }
+    }
+
+    fn widget_only_view() -> SharedViewDocument {
+        SharedViewDocument {
+            schema_version: SCHEMA_VERSION,
+            id: "dash".into(),
+            revision: 1,
+            sources: BTreeMap::new(),
+            viewport: ViewRect::default(),
+            attention: None,
+            navigation: ViewNavigation::None,
+            parameters: BTreeMap::new(),
+            widgets: BTreeMap::from([("clock".into(), text_widget("hello"))]),
+        }
+    }
+
+    fn patch(view: &SharedViewDocument, operations: Vec<ViewOperation>) -> SharedViewPatch {
+        SharedViewPatch {
+            schema_version: SCHEMA_VERSION,
+            view_id: view.id.clone(),
+            base_revision: view.revision,
+            revision: view.revision + 1,
+            operations,
+        }
+    }
+
+    #[test]
+    fn a_view_of_only_widgets_is_a_real_view() {
+        // A dashboard of a clock and a label names nothing external, and refusing it
+        // would push widgets into a store beside the document.
+        widget_only_view().validate().expect("widget-only view");
+    }
+
+    #[test]
+    fn a_view_with_neither_a_source_nor_a_widget_is_still_refused() {
+        let mut view = widget_only_view();
+        view.widgets.clear();
+        assert!(view.validate().is_err(), "an empty view must not validate");
+    }
+
+    #[test]
+    fn placing_moving_and_removing_a_widget_advances_the_revision() {
+        let view = widget_only_view();
+        let placed = view
+            .apply_patch(&patch(
+                &view,
+                vec![ViewOperation::PlaceWidget {
+                    id: "note".into(),
+                    widget: Box::new(text_widget("second")),
+                }],
+            ))
+            .expect("place");
+        assert_eq!(placed.revision, 2);
+        assert_eq!(placed.widgets.len(), 2);
+
+        let moved = placed
+            .apply_patch(&patch(
+                &placed,
+                vec![ViewOperation::MoveWidget {
+                    id: "note".into(),
+                    rect: ViewRect {
+                        x: 0.25,
+                        y: 0.25,
+                        width: 0.25,
+                        height: 0.25,
+                    },
+                }],
+            ))
+            .expect("move");
+        assert_eq!(moved.widgets["note"].rect.x, 0.25);
+        // Moving must not disturb the spec it is moving.
+        assert_eq!(moved.widgets["note"].spec, placed.widgets["note"].spec);
+
+        let removed = moved
+            .apply_patch(&patch(
+                &moved,
+                vec![ViewOperation::RemoveWidget { id: "note".into() }],
+            ))
+            .expect("remove");
+        assert_eq!(removed.widgets.len(), 1);
+        assert_eq!(removed.revision, 4);
+    }
+
+    #[test]
+    fn moving_a_widget_that_is_not_there_fails_rather_than_creating_one() {
+        let view = widget_only_view();
+        let error = view
+            .apply_patch(&patch(
+                &view,
+                vec![ViewOperation::MoveWidget {
+                    id: "absent".into(),
+                    rect: ViewRect::default(),
+                }],
+            ))
+            .expect_err("unknown widget");
+        assert!(
+            error.0.contains("Unknown shared view widget"),
+            "{}",
+            error.0
+        );
+    }
+
+    #[test]
+    fn an_invalid_spec_cannot_be_placed() {
+        let mut widget = text_widget("");
+        widget.spec.kind = WidgetKind::Text {
+            text: String::new(),
+        };
+        let view = widget_only_view();
+        assert!(
+            view.apply_patch(&patch(
+                &view,
+                vec![ViewOperation::PlaceWidget {
+                    id: "bad".into(),
+                    widget: Box::new(widget),
+                }],
+            ))
+            .is_err(),
+            "the widget crate owns what a spec means; an invalid one must not land"
+        );
+    }
+
+    #[test]
+    fn a_document_written_before_widgets_existed_still_loads() {
+        // The field is `default`, so an older document is not a parse error.
+        let json = r#"{"schema_version":1,"id":"old","revision":3,
+            "sources":{"a":{"source":{"owner":"panopticon","id":"m","contract":"map.v1","kind":"stream"},
+            "position":{"kind":"live","observed_sequence":9}}}}"#;
+        let view: SharedViewDocument = serde_json::from_str(json).expect("legacy document");
+        assert!(view.widgets.is_empty());
+        view.validate().expect("legacy documents stay valid");
+    }
+
+    #[test]
+    fn widgets_survive_a_round_trip_through_json() {
+        // Whatever persists a view persists its widgets; this is that guarantee.
+        let view = widget_only_view();
+        let json = serde_json::to_string(&view).expect("serialize");
+        assert_eq!(
+            serde_json::from_str::<SharedViewDocument>(&json).expect("deserialize"),
+            view
+        );
     }
 }

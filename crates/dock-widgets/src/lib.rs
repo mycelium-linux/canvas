@@ -33,6 +33,7 @@ fn err<T>(message: impl Into<String>) -> Result<T> {
 /// Durable widget description. Serializes to JSON; both live and static
 /// renderers consume the same model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WidgetSpec {
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
@@ -55,6 +56,7 @@ fn default_schema_version() -> u32 {
 /// renderer needs; `deny_unknown_fields` keeps specs honest.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum WidgetKind {
     /// Local time. `format` uses strftime-style tokens.
     Clock {
@@ -121,6 +123,7 @@ pub enum WidgetKind {
 /// the canvas one onto this is follow-up, not this change.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum WidgetInput {
     Number { value: f64 },
     Text { value: String },
@@ -131,6 +134,7 @@ pub enum WidgetInput {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SeriesPoint {
     pub x: f64,
     pub y: f64,
@@ -138,6 +142,7 @@ pub struct SeriesPoint {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum StatusLevel {
     Neutral,
     Good,
@@ -162,6 +167,7 @@ fn default_meter_style() -> MeterStyle {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum MeterStyle {
     Led,
     Vu,
@@ -169,6 +175,7 @@ pub enum MeterStyle {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ChartType {
     Bar,
     Line,
@@ -180,6 +187,7 @@ pub enum ChartType {
 /// arbitrary HTML/CSS widget templates through the doc-forge service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum ChartRenderer {
     Plotters,
     Matplotlib,
@@ -188,6 +196,7 @@ pub enum ChartRenderer {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum StatusState {
     Present,
     Away,
