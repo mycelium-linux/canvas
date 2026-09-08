@@ -6,6 +6,7 @@ use dock_canvas::control::{
     StatusIndicator, SurfaceSnapshot,
 };
 use dock_canvas::hud;
+use surface_state::*;
 use dock_canvas::interaction::{
     InteractionConfig, InteractionEngine, InteractionIntent, LogicalPoint, LogicalRect,
     PointerEvent, PointerPhase, SurfaceGeometry,
@@ -54,6 +55,7 @@ mod terminal;
 mod transition;
 mod chart;
 mod dataviz;
+mod surface_state;
 
 const INITIAL_FRAME: Rect = Rect {
     x: 120,
@@ -81,71 +83,6 @@ struct Pending {
 
 type PendingReceiver = Arc<Mutex<Receiver<Pending>>>;
 
-#[derive(Debug, Clone)]
-struct LoadedContent {
-    snapshot: SurfaceSnapshot,
-    source: ContentSource,
-    handle: iced::widget::image::Handle,
-    asset: AssetRef,
-    source_pixels: [u32; 2],
-    media_plan: MediaPlan,
-    upload_pixels: [u32; 2],
-}
-
-#[derive(Debug, Clone)]
-enum ContentSource {
-    Image {
-        _path: PathBuf,
-    },
-    Pdf {
-        path: PathBuf,
-        page_index: u32,
-        page_count: u32,
-    },
-    Markdown {
-        #[allow(dead_code)]
-        path: PathBuf,
-        items: Vec<markdown::Item>,
-    },
-    Terminal {
-        #[allow(dead_code)]
-        master_fd: i32,
-        stdin_fd: i32,
-        #[allow(dead_code)]
-        pid: u32,
-        buffer: String,
-    },
-    Scene {
-        scene: Scene,
-    },
-    DataViz {
-        data: Vec<(f32, f32)>,
-        chart_type: String,
-    },
-    Stream {
-        url: String,
-    },
-}
-
-#[derive(Debug, Clone)]
-struct RuntimeSurface {
-    snapshot: SurfaceSnapshot,
-    source: ContentSource,
-    handle: iced::widget::image::Handle,
-    source_pixels: [u32; 2],
-    media_plan: MediaPlan,
-    upload_pixels: [u32; 2],
-}
-
-struct PresencePreviewVisual {
-    value: PresencePreview,
-    handle: iced::widget::image::Handle,
-    started: Instant,
-    last_frame: Instant,
-}
-
-type ContentLoadResult = Result<LoadedContent, Failure>;
-type PageLoadResult = Result<(iced::widget::image::Handle, [u32; 2], MediaPlan), Failure>;
 
 #[derive(Debug, Clone)]
 struct LoadedBackground {
