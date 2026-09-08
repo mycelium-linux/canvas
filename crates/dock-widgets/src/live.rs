@@ -12,6 +12,8 @@ use iced::widget::canvas::{Geometry, Path};
 use iced::widget::{Canvas, canvas, column, container, row, space, text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
+mod quant;
+
 /// Deterministic mock pricing derived from the symbol — replaced by the live
 /// data source once wired. Kept identical to the Lua module behavior so
 /// surfaces look the same across backends.
@@ -44,6 +46,7 @@ pub fn element<'a, Message: 'a>(
     let palette = &visual.palette;
     let metrics = visual.metrics;
     match &spec.kind {
+        WidgetKind::Quant { widget } => quant::element(widget, visual),
         WidgetKind::Stat {
             label,
             value,

@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+pub mod quant;
+
 pub const WIDGET_SCHEMA_VERSION: u32 = 1;
 const MAX_SPEC_BYTES: u64 = 256 * 1024;
 
@@ -70,6 +72,8 @@ fn default_schema_version() -> u32 {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum WidgetKind {
+    /// Domain-owned quantitative visualizations sharing the common widget shell.
+    Quant { widget: quant::QuantWidget },
     /// Prometheus-style single value with optional trend and retained history.
     Stat {
         label: String,
@@ -328,6 +332,7 @@ impl WidgetSpec {
             ));
         }
         match &self.kind {
+            WidgetKind::Quant { widget } => widget.validate()?,
             WidgetKind::Stat {
                 label,
                 value,
@@ -632,6 +637,7 @@ mod tests {
             "ops-table.json",
             "ops-events.json",
             "ops-nodes.json",
+            "quant-candles.json",
         ] {
             WidgetSpec::from_file(&root.join(name))
                 .unwrap_or_else(|error| panic!("{name} is invalid: {error}"));
