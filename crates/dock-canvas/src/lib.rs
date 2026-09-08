@@ -22,6 +22,7 @@ pub mod map;
 pub mod mcp;
 pub mod media;
 pub mod reconcile;
+pub mod view;
 pub mod workspace_store;
 
 pub const SCHEMA_VERSION: u32 = 1;

@@ -37,3 +37,8 @@ the candidate against the current snapshot in a fresh VM, and swaps source,
 manifest, generation, and retained scene only after the complete result passes
 validation. This keeps the runtime deterministic and lets project/workspace
 documents remain authoritative.
+
+Within the [shared visualization plane](canvas-shared-visualization.md), Lua is
+an adaptive reducer and presentation layer for typed source contracts. It does
+not create a second view state: viewport, attention, navigation, filters, source
+position, and revision remain in the Rust-owned shared view.

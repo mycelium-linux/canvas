@@ -511,7 +511,7 @@ fn install_widget_api(lua: &Lua, read_theme: bool, theme: ModuleThemeTokens) -> 
     widget
         .set(
             "time",
-            lua.create_function(|lua| {
+            lua.create_function(|lua, ()| {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
@@ -541,10 +541,10 @@ fn install_widget_api(lua: &Lua, read_theme: bool, theme: ModuleThemeTokens) -> 
                         "text_muted" => theme_tokens.muted,
                         _ => [128, 128, 128],
                     };
-                    let table = lua.create_table().map_err(lua_error)?;
-                    table.set(1, rgb[0]).map_err(lua_error)?;
-                    table.set(2, rgb[1]).map_err(lua_error)?;
-                    table.set(3, rgb[2]).map_err(lua_error)?;
+                    let table = lua.create_table()?;
+                    table.set(1, rgb[0])?;
+                    table.set(2, rgb[1])?;
+                    table.set(3, rgb[2])?;
                     Ok(table)
                 })
                 .map_err(lua_error)?,
@@ -554,12 +554,12 @@ fn install_widget_api(lua: &Lua, read_theme: bool, theme: ModuleThemeTokens) -> 
 
     lua.globals().set("widget", widget).map_err(lua_error)?;
 
-    let canvas: Table = lua.create_table().map_err(lua_error)?;
+    let canvas: Table = lua.globals().get("canvas").map_err(lua_error)?;
     canvas
         .set(
             "events",
-            lua.create_function(|lua| {
-                let table = lua.create_table().map_err(lua_error)?;
+            lua.create_function(|lua, ()| {
+                let table = lua.create_table()?;
                 Ok(mlua::Value::Table(table))
             })
             .map_err(lua_error)?,
@@ -600,9 +600,9 @@ fn install_widget_api(lua: &Lua, read_theme: bool, theme: ModuleThemeTokens) -> 
     lua.globals().set("canvas", canvas).map_err(lua_error)
 }
 
-fn widget_set_text(lua: &Lua, text: &str) -> Result<mlua::Value> {
-    let table = lua.create_table().map_err(lua_error)?;
-    table.set("text", text).map_err(lua_error)?;
+fn widget_set_text(lua: &Lua, text: &str) -> mlua::Result<mlua::Value> {
+    let table = lua.create_table()?;
+    table.set("text", text)?;
     Ok(mlua::Value::Table(table))
 }
 

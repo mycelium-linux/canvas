@@ -2,13 +2,22 @@
 
 Canvas owns the document, validation and native presentation. MCP is an adapter
 over its existing owner-local control socket, not another renderer or command
-engine. This first slice exposes nine tools:
+engine. The current adapter exposes thirteen tools:
+
+The longer-lived contract is the
+[shared visualization plane](canvas-shared-visualization.md): agent inspection
+and the physical display use the same revisioned view, including its viewport,
+attention, page/playhead, filters, and source position. MCP resolves intent and
+requests state transitions; it does not maintain a private visual context.
 
 - `canvas_inspect`: atomically returns the document and runtime snapshot.
 - `canvas_apply_document`: validates and replaces presentation intent.
 - `canvas_apply_patch`: applies the existing atomic document patch operations.
 - `canvas_close_surface`: removes presentation without stopping background work.
 - `canvas_focus`: brings the Canvas window forward.
+- `canvas_display_target`: selects all connected displays or exact display IDs.
+- `canvas_set_overlays`: places host-local overlays by display role.
+- `canvas_set_visibility`: shows or hides all Canvas host windows atomically.
 - `canvas_navigate`: changes pages in an already-open PDF surface.
 - `canvas_open_file`: opens an image, PDF, or Markdown file through the native
   content loader.
@@ -18,6 +27,8 @@ engine. This first slice exposes nine tools:
   computes the validated state change for an already-resolved workspace intent,
   and applies it with optimistic revision checks. A dry run returns the same
   reconciliation without changing Canvas.
+- `canvas_screenshot`: captures an exact Canvas surface or screen region for
+  agent vision.
 
 MCP input schemas are generated from the Rust document and patch types at build
 time using Schemars. There is no separately maintained JSON dialect. Operations

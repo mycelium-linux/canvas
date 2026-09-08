@@ -5,6 +5,11 @@ project wants to show; native, WebGPU, browser, and future XR adapters decide ho
 to render it. Switching projects means validating and applying another document,
 not reconstructing a desktop with pixel scripts.
 
+Canvas is also the shared visualization plane between a person and agents. A
+revisioned joint view records the exact viewport and attention state both sides
+observe. See [Canvas shared visualization plane](canvas-shared-visualization.md)
+for the source, view, streaming, Lua, and agent-capture boundaries.
+
 `dock-canvas` owns these durable facts:
 
 - the Alfalfa project and resource identities being presented;
