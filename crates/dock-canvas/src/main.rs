@@ -4931,6 +4931,8 @@ fn shared_view_for_loaded(loaded: &LoadedContent) -> Option<SharedViewDocument> 
         attention: None,
         navigation,
         parameters: BTreeMap::new(),
+        // An opened artifact is the whole view; widgets are placed onto it later.
+        widgets: BTreeMap::new(),
     };
     view.validate()
         .expect("loaded image/PDF must produce a valid shared view");
@@ -5662,6 +5664,7 @@ mod tests {
             attention: None,
             navigation: ViewNavigation::None,
             parameters: BTreeMap::new(),
+            widgets: BTreeMap::new(),
         }
     }
 
