@@ -276,6 +276,7 @@ struct App {
     jarvis_hotkey: Option<GlobalHotkey>,
     shortcuts_visible: bool,
     jarvis_visible: bool,
+    hud_visible: bool,
     scale_factor: f64,
     receiver: PendingReceiver,
     _socket: SocketGuard,
@@ -415,6 +416,7 @@ impl App {
             jarvis_hotkey,
             shortcuts_visible: false,
             jarvis_visible: true,
+            hud_visible: true,
             scale_factor: 1.0,
             receiver,
             _socket: socket,
@@ -690,6 +692,18 @@ impl App {
                 Task::none()
             }
             Message::TerminalInput(kbd_event) => {
+                if diagnostics_toggle_requested(&kbd_event) {
+                    self.hud_visible = !self.hud_visible;
+                    self.status = format!(
+                        "Diagnostics {}.",
+                        if self.hud_visible { "shown" } else { "hidden" }
+                    );
+                    self.emit_event(format!(
+                        "diagnostics_overlay {}",
+                        if self.hud_visible { "shown" } else { "hidden" }
+                    ));
+                    return Task::none();
+                }
                 if self.desktop_focused && shortcut_help_requested(&kbd_event) {
                     return self.toggle_shortcut_help();
                 }
@@ -3847,7 +3861,7 @@ impl App {
             .as_ref()
             .map(|mesh| mesh.nodes.as_slice())
             .unwrap_or_default();
-        if self.overlay_on_viewport(self.overlays.system_hud, viewport) {
+        if self.hud_visible && self.overlay_on_viewport(self.overlays.system_hud, viewport) {
             layers.push(hud::view(
                 &self.metrics,
                 mesh_nodes,
@@ -4024,6 +4038,7 @@ fn shortcut_help<'a>(
          Ctrl-← / Ctrl-→        Saved views (reserved)\n\
          \n\
          Canvas\n\
+         F3                     Toggle diagnostics\n\
          Ctrl-1 / 2 / 3         Toggle left / center / right display\n\
          Ctrl-0                 Show Canvas on every display\n\
          {CANVAS_TOGGLE_KEYS:<22} Toggle Canvas\n\
@@ -4160,6 +4175,19 @@ fn shortcut_help_requested(event: &iced::keyboard::Event) -> bool {
             && !modifiers.control()
             && !modifiers.alt()
             && !modifiers.logo()
+    )
+}
+
+fn diagnostics_toggle_requested(event: &iced::keyboard::Event) -> bool {
+    use iced::keyboard::{Event, Key, key::Named};
+    matches!(
+        event,
+        Event::KeyPressed {
+            key: Key::Named(Named::F3),
+            modifiers,
+            repeat: false,
+            ..
+        } if modifiers.is_empty()
     )
 }
 
@@ -6942,6 +6970,29 @@ mod tests {
         assert_eq!(display_shortcut(&pressed("2")), Some(2));
         assert_eq!(display_shortcut(&pressed("3")), Some(3));
         assert_eq!(display_shortcut(&pressed("4")), None);
+    }
+
+    #[test]
+    fn f3_toggles_diagnostics_without_changing_the_workspace() {
+        use iced::keyboard::{Event, Key, Location, Modifiers, key};
+        let f3 = || Event::KeyPressed {
+            key: Key::Named(key::Named::F3),
+            modified_key: Key::Named(key::Named::F3),
+            physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+            location: Location::Standard,
+            modifiers: Modifiers::empty(),
+            text: None,
+            repeat: false,
+        };
+        assert!(diagnostics_toggle_requested(&f3()));
+        let mut app = test_app();
+        let revision = app.document.revision;
+        assert!(app.hud_visible);
+        drop(app.update(Message::TerminalInput(f3())));
+        assert!(!app.hud_visible);
+        assert_eq!(app.document.revision, revision);
+        drop(app.update(Message::TerminalInput(f3())));
+        assert!(app.hud_visible);
     }
 
     #[test]
