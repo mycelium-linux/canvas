@@ -215,9 +215,18 @@ pub enum ViewOperation {
 impl VisualSourceRef {
     pub fn validate(&self) -> Result<()> {
         check(identifier(&self.owner), "Invalid visual source owner")?;
-        check(identifier(&self.id), "Invalid visual source id")?;
+        check(source_identifier(&self.id), "Invalid visual source id")?;
         check(contract(&self.contract), "Invalid visual source contract")
     }
+}
+
+fn source_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.as_bytes()[0].is_ascii_lowercase()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 impl ViewRect {
@@ -574,6 +583,16 @@ mod tests {
             observed_sequence: 1,
         };
         assert!(view.validate().unwrap_err().0.contains("Artifact source"));
+    }
+
+    #[test]
+    fn artifact_source_identity_accepts_a_full_content_digest() {
+        let mut view = image_view();
+        view.sources.get_mut("image").unwrap().source.id = format!("asset-{}", "ab".repeat(32));
+        view.validate().unwrap();
+
+        view.sources.get_mut("image").unwrap().source.id = "asset/../../secret".into();
+        assert!(view.validate().unwrap_err().0.contains("source id"));
     }
 
     #[test]

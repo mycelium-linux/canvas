@@ -1,10 +1,11 @@
 use base64::Engine as _;
 use dock_canvas::chart::{ChartDocument, ChartKind};
 use dock_canvas::control::{
-    CONTROL_VERSION, Command, ContentKind, ControlReply, ControlRequest, ErrorCode,
-    MAX_ACTIVE_INDICATORS, MAX_CONTROL_MESSAGE, MeshSnapshot, Navigation, Outcome, OverlaySettings,
-    OverlayTarget, PresencePreview, PresenceSnapshot, ProjectWorkspaceSnapshot, Receipt,
-    RuntimeSnapshot, ScreensaverSettings, ScreensaverSnapshot, StatusIndicator, SurfaceSnapshot,
+    CONTROL_VERSION, CaptureChromeSnapshot, Command, ContentKind, ControlReply, ControlRequest,
+    ErrorCode, MAX_ACTIVE_INDICATORS, MAX_CONTROL_MESSAGE, MeshSnapshot, MountedViewSnapshot,
+    Navigation, Outcome, OverlaySettings, OverlayTarget, PresencePreview, PresenceSnapshot,
+    ProjectWorkspaceSnapshot, Receipt, RuntimeSnapshot, ScreensaverSettings, ScreensaverSnapshot,
+    StatusIndicator, SurfaceSnapshot,
 };
 use dock_canvas::display::{DisplayInfo, DisplayTopology};
 use dock_canvas::hud;
@@ -16,9 +17,13 @@ use dock_canvas::media::{
     LogicalSize, MediaCacheKey, MediaLimits, MediaPlan, MediaVariant, PixelSize, SourceDimensions,
     plan_pdf_page, plan_raster,
 };
+use dock_canvas::view::{
+    SharedViewDocument, SourcePosition, ViewNavigation, ViewOperation, ViewRect, ViewSource,
+    VisualSourceKind, VisualSourceRef,
+};
 use dock_canvas::workspace_store::{self, WorkspaceStore};
 use dock_canvas::{
-    AssetRef, Background, BackgroundFit, GradientStop, Layout, NodeContent, NormalizedRect,
+    AssetRef, Axis, Background, BackgroundFit, GradientStop, Layout, NodeContent, NormalizedRect,
     PatchOperation, Placement, SCHEMA_VERSION, Scene, SceneNode, Surface, SurfaceChrome,
     SurfaceContent, SurfaceTitleMode, ThemeRef, WorkspaceDocument, WorkspacePatch,
 };
@@ -274,6 +279,7 @@ struct App {
     _socket: SocketGuard,
     windows: BTreeMap<iced::window::Id, Rect>,
     decoded: BTreeMap<String, RuntimeSurface>,
+    shared_views: BTreeMap<String, SharedViewDocument>,
     indicators: BTreeMap<String, StatusIndicator>,
     mesh: Option<MeshSnapshot>,
     presence: Option<PresenceSnapshot>,
@@ -408,6 +414,7 @@ impl App {
             _socket: socket,
             windows: BTreeMap::new(),
             decoded: BTreeMap::new(),
+            shared_views: BTreeMap::new(),
             indicators: BTreeMap::new(),
             mesh: None,
             presence: None,
@@ -695,6 +702,7 @@ impl App {
                     Ok(loaded) => {
                         let id = loaded.snapshot.id.clone();
                         let title = loaded.snapshot.title.clone();
+                        let shared_view = shared_view_for_loaded(&loaded);
                         let surface = Surface {
                             id: id.clone(),
                             title,
@@ -724,6 +732,11 @@ impl App {
                                 upload_pixels: loaded.upload_pixels,
                             },
                         );
+                        if let Some(view) = shared_view {
+                            self.shared_views.insert(id.clone(), view);
+                        } else {
+                            self.shared_views.remove(&id);
+                        }
                         self.document.focused_surface_id = Some(id.clone());
                         self.rebuild_stack();
                         self.bump();
@@ -825,6 +838,12 @@ impl App {
                         surface.media_plan = media_plan;
                         surface.upload_pixels = source_pixels;
                         let page_count = *page_count;
+                        if let Some(view) = self.shared_views.get_mut(&surface_id) {
+                            view.revision = view.revision.saturating_add(1);
+                            view.navigation = ViewNavigation::Page { index: page_index };
+                            view.viewport = ViewRect::default();
+                            view.attention = None;
+                        }
                         self.document.focused_surface_id = Some(surface_id.clone());
                         self.bump();
                         self.status = format!("Page {} of {}.", page_index + 1, page_count);
@@ -1045,20 +1064,10 @@ impl App {
                 }
                 let presentation_changed = self.document.id != document.id
                     || self.document.background != document.background;
-                self.decoded.retain(|id, decoded| {
-                    self.document.surfaces.iter().any(|surface| {
-                        surface.id == *id
-                            && match &surface.content {
-                                SurfaceContent::Asset { asset } => {
-                                    decoded.snapshot.asset_sha256.as_ref() == Some(&asset.sha256)
-                                }
-                                _ => true,
-                            }
-                    })
-                });
                 let workspace_id = document.id.clone();
                 self.start_transition();
                 self.document = document;
+                self.prune_decoded();
                 self.active_project_workspace = None;
                 self.ensure_scene_decoded();
                 if presentation_changed {
@@ -1096,6 +1105,70 @@ impl App {
                             Outcome::Ok {
                                 receipt: Receipt::DocumentApplied {
                                     workspace_id: self.document.id.clone(),
+                                },
+                            },
+                        );
+                    }
+                    Err(error) => self.fail(
+                        pending,
+                        Failure {
+                            code: ErrorCode::Conflict,
+                            message: error.to_string(),
+                        },
+                    ),
+                }
+                Task::none()
+            }
+            Command::PatchView { surface_id, patch } => {
+                if let Some(index) = patch.operations.iter().find_map(|operation| {
+                    if let ViewOperation::SetNavigation {
+                        navigation: ViewNavigation::Page { index },
+                    } = operation
+                    {
+                        Some(*index)
+                    } else {
+                        None
+                    }
+                }) && self
+                    .decoded
+                    .get(&surface_id)
+                    .and_then(|surface| surface.snapshot.page_index)
+                    != Some(index)
+                {
+                    self.fail(
+                        pending,
+                        Failure::unsupported(
+                            "navigate the PDF page before patching its shared viewport",
+                        ),
+                    );
+                    return Task::none();
+                }
+                let Some(current) = self.shared_views.get(&surface_id) else {
+                    self.fail(
+                        pending,
+                        Failure {
+                            code: ErrorCode::NotFound,
+                            message: format!("Canvas surface has no shared view: {surface_id}"),
+                        },
+                    );
+                    return Task::none();
+                };
+                match current.apply_patch(&patch) {
+                    Ok(view) => {
+                        self.shared_views.insert(surface_id.clone(), view.clone());
+                        self.document.focused_surface_id = Some(surface_id.clone());
+                        self.bump();
+                        self.status = format!(
+                            "Shared view {} advanced to revision {}.",
+                            view.id, view.revision
+                        );
+                        self.emit_event(format!("view_patched {} {}", surface_id, view.revision));
+                        self.answer(
+                            pending,
+                            Outcome::Ok {
+                                receipt: Receipt::ViewPatched {
+                                    surface_id,
+                                    view: Box::new(view),
                                 },
                             },
                         );
@@ -1156,6 +1229,7 @@ impl App {
                     .bindings
                     .retain(|binding| binding.target.surface_id != surface_id);
                 self.decoded.remove(&surface_id);
+                self.shared_views.remove(&surface_id);
                 if self.document.focused_surface_id.as_ref() == Some(&surface_id) {
                     self.document.focused_surface_id = self
                         .document
@@ -2222,6 +2296,34 @@ impl App {
                         })
                 })
                 .collect(),
+            surface_bounds: self
+                .document
+                .surfaces
+                .iter()
+                .filter_map(|surface| {
+                    Some((surface.id.clone(), self.surface_screen_bounds(&surface.id)?))
+                })
+                .collect(),
+            views: self
+                .document
+                .surfaces
+                .iter()
+                .filter_map(|surface| {
+                    Some(MountedViewSnapshot {
+                        surface_id: surface.id.clone(),
+                        bounds: self.surface_screen_bounds(&surface.id)?,
+                        view: self.shared_views.get(&surface.id)?.clone(),
+                    })
+                })
+                .collect(),
+            capture_chrome: Some({
+                let palette = self.presented_palette();
+                CaptureChromeSnapshot {
+                    danger: palette.danger,
+                    warning: palette.warning,
+                    success: palette.success,
+                }
+            }),
             active_indicators: self.indicators.values().cloned().collect(),
             mesh: self.mesh.clone(),
             presence: self.presence.clone(),
@@ -2264,6 +2366,51 @@ impl App {
         }
     }
 
+    fn surface_screen_bounds(&self, surface_id: &str) -> Option<Rect> {
+        if self.minimized_surfaces.contains(surface_id) {
+            return None;
+        }
+        let local = match &self.document.layout {
+            Layout::Canvas { placements } => {
+                let placement = placements
+                    .iter()
+                    .find(|placement| placement.surface_id == surface_id)?;
+                let target = if self.maximized_surfaces.contains(surface_id) {
+                    NormalizedRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 1.0,
+                        height: 1.0,
+                    }
+                } else {
+                    placement.bounds
+                };
+                let animated = self.presented_bounds(surface_id, target);
+                visible_surface_bounds(
+                    NormalizedRect {
+                        x: animated[0],
+                        y: animated[1],
+                        width: animated[2],
+                        height: animated[3],
+                    },
+                    self.frame,
+                    self.document.chrome,
+                )
+            }
+            layout => layout_surface_bounds(
+                layout,
+                surface_id,
+                LogicalRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: f64::from(self.frame.width),
+                    height: f64::from(self.frame.height),
+                },
+            )?,
+        };
+        logical_to_screen_rect(local, self.frame)
+    }
+
     fn emit_event(&mut self, event: impl Into<String>) {
         self.events.push(event.into());
         if self.events.len() > 100 {
@@ -2292,6 +2439,7 @@ impl App {
                             .bindings
                             .retain(|b| b.target.surface_id != surface_id);
                         self.decoded.remove(&surface_id);
+                        self.shared_views.remove(&surface_id);
                         self.minimized_surfaces.remove(&surface_id);
                         self.maximized_surfaces.remove(&surface_id);
                         self.rebuild_stack();
@@ -2673,6 +2821,8 @@ impl App {
                     }
             })
         });
+        self.shared_views
+            .retain(|id, _| self.decoded.contains_key(id));
     }
 
     fn ensure_scene_decoded(&mut self) {
@@ -2851,11 +3001,37 @@ impl App {
                 let palette = self.presented_palette();
                 dock_widgets::live::element(spec, &palette)
             }
-            _ => image_widget(surface.handle.clone())
-                .content_fit(ContentFit::Contain)
-                .width(width)
-                .height(height)
-                .into(),
+            ContentSource::Image { .. } | ContentSource::Pdf { .. } => {
+                let view = self.shared_views.get(&surface.snapshot.id);
+                let mut image = image_widget(surface.handle.clone())
+                    .content_fit(ContentFit::Contain)
+                    .width(width)
+                    .height(height);
+                if let Some(view) = view {
+                    image = image.crop(view_crop_pixels(view.viewport, surface.source_pixels));
+                }
+                let picture: Element<'_, Message> = image.into();
+                if let Some(view) = view
+                    && let Some(attention) = &view.attention
+                {
+                    let palette = self.presented_palette();
+                    stack![
+                        picture,
+                        Canvas::new(AttentionProgram {
+                            viewport: view.viewport,
+                            attention: attention.region,
+                            source_pixels: surface.source_pixels,
+                            color: color(palette.primary),
+                            label: attention.label.clone(),
+                        })
+                        .width(width)
+                        .height(height)
+                    ]
+                    .into()
+                } else {
+                    picture
+                }
+            }
         }
     }
 
@@ -3920,6 +4096,111 @@ fn parse_dataviz_file(file: &Path, chart_type: &str) -> Result<ChartDocument, St
     .map_err(|error| error.to_string())
 }
 
+fn view_crop_pixels(viewport: ViewRect, source: [u32; 2]) -> iced::Rectangle<u32> {
+    let width = source[0].max(1);
+    let height = source[1].max(1);
+    let x = (viewport.x * width as f32).floor().max(0.0) as u32;
+    let y = (viewport.y * height as f32).floor().max(0.0) as u32;
+    let right = ((viewport.x + viewport.width) * width as f32)
+        .ceil()
+        .max((x + 1) as f32) as u32;
+    let bottom = ((viewport.y + viewport.height) * height as f32)
+        .ceil()
+        .max((y + 1) as f32) as u32;
+    iced::Rectangle {
+        x: x.min(width - 1),
+        y: y.min(height - 1),
+        width: right.min(width).saturating_sub(x).max(1),
+        height: bottom.min(height).saturating_sub(y).max(1),
+    }
+}
+
+fn attention_geometry(
+    canvas: Size,
+    source: [u32; 2],
+    viewport: ViewRect,
+    attention: ViewRect,
+) -> Option<Rectangle> {
+    let left = attention.x.max(viewport.x);
+    let top = attention.y.max(viewport.y);
+    let right = (attention.x + attention.width).min(viewport.x + viewport.width);
+    let bottom = (attention.y + attention.height).min(viewport.y + viewport.height);
+    if right <= left || bottom <= top {
+        return None;
+    }
+
+    let crop_width = source[0].max(1) as f32 * viewport.width;
+    let crop_height = source[1].max(1) as f32 * viewport.height;
+    let scale = (canvas.width / crop_width).min(canvas.height / crop_height);
+    let drawn_width = crop_width * scale;
+    let drawn_height = crop_height * scale;
+    let offset_x = (canvas.width - drawn_width) / 2.0;
+    let offset_y = (canvas.height - drawn_height) / 2.0;
+    Some(Rectangle {
+        x: offset_x + ((left - viewport.x) / viewport.width) * drawn_width,
+        y: offset_y + ((top - viewport.y) / viewport.height) * drawn_height,
+        width: ((right - left) / viewport.width) * drawn_width,
+        height: ((bottom - top) / viewport.height) * drawn_height,
+    })
+}
+
+struct AttentionProgram {
+    viewport: ViewRect,
+    attention: ViewRect,
+    source_pixels: [u32; 2],
+    color: Color,
+    label: Option<String>,
+}
+
+impl<Message> canvas::Program<Message> for AttentionProgram {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let Some(region) = attention_geometry(
+            bounds.size(),
+            self.source_pixels,
+            self.viewport,
+            self.attention,
+        ) else {
+            return vec![frame.into_geometry()];
+        };
+        let path = canvas::Path::rectangle(region.position(), region.size());
+        frame.fill(
+            &path,
+            Color {
+                a: 0.08,
+                ..self.color
+            },
+        );
+        frame.stroke(
+            &path,
+            canvas::Stroke::default().with_width(2.0).with_color(Color {
+                a: 0.95,
+                ..self.color
+            }),
+        );
+        if let Some(label) = &self.label {
+            chart_text(
+                &mut frame,
+                label,
+                Point::new(region.x + 5.0, (region.y - 18.0).max(4.0)),
+                12.0,
+                self.color,
+                iced::alignment::Horizontal::Left,
+            );
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
 struct ChartProgram {
     chart: ChartDocument,
     axis_color: Color,
@@ -4333,6 +4614,83 @@ fn visible_surface_bounds(
     }
 }
 
+fn layout_surface_bounds(
+    layout: &Layout,
+    surface_id: &str,
+    bounds: LogicalRect,
+) -> Option<LogicalRect> {
+    match layout {
+        Layout::Empty | Layout::Canvas { .. } => None,
+        Layout::Surface {
+            surface_id: candidate,
+        } if candidate == surface_id => Some(bounds),
+        Layout::Surface { .. } => None,
+        Layout::Stack {
+            active_surface_id, ..
+        } if active_surface_id == surface_id => Some(bounds),
+        Layout::Stack { .. } => None,
+        Layout::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } => {
+            let ratio = f64::from(*ratio);
+            let (first_bounds, second_bounds) = match axis {
+                Axis::Horizontal => {
+                    let first_width = bounds.width * ratio;
+                    (
+                        LogicalRect {
+                            width: first_width,
+                            ..bounds
+                        },
+                        LogicalRect {
+                            x: bounds.x + first_width,
+                            width: bounds.width - first_width,
+                            ..bounds
+                        },
+                    )
+                }
+                Axis::Vertical => {
+                    let first_height = bounds.height * ratio;
+                    (
+                        LogicalRect {
+                            height: first_height,
+                            ..bounds
+                        },
+                        LogicalRect {
+                            y: bounds.y + first_height,
+                            height: bounds.height - first_height,
+                            ..bounds
+                        },
+                    )
+                }
+            };
+            layout_surface_bounds(first, surface_id, first_bounds)
+                .or_else(|| layout_surface_bounds(second, surface_id, second_bounds))
+        }
+    }
+}
+
+fn logical_to_screen_rect(bounds: LogicalRect, frame: Rect) -> Option<Rect> {
+    if ![bounds.x, bounds.y, bounds.width, bounds.height]
+        .iter()
+        .all(|value| value.is_finite())
+        || bounds.width <= 0.0
+        || bounds.height <= 0.0
+    {
+        return None;
+    }
+    let local_x = bounds.x.round() as i32;
+    let local_y = bounds.y.round() as i32;
+    Some(Rect {
+        x: frame.x.checked_add(local_x)?,
+        y: frame.y.checked_add(local_y)?,
+        width: bounds.width.ceil().max(1.0) as u32,
+        height: bounds.height.ceil().max(1.0) as u32,
+    })
+}
+
 fn normalize_visible_surface_bounds(
     bounds: LogicalRect,
     frame: Rect,
@@ -4539,6 +4897,44 @@ fn load_content(
             byte_length: metadata.len(),
         },
     })
+}
+
+fn shared_view_for_loaded(loaded: &LoadedContent) -> Option<SharedViewDocument> {
+    let (contract, navigation) = match loaded.snapshot.content {
+        ContentKind::Image => ("image.rgba.v1", ViewNavigation::None),
+        ContentKind::Pdf => (
+            "document.pdf.v1",
+            ViewNavigation::Page {
+                index: loaded.snapshot.page_index.unwrap_or(0),
+            },
+        ),
+        _ => return None,
+    };
+    let source_id = format!("asset-{}", loaded.asset.sha256);
+    let view = SharedViewDocument {
+        schema_version: SCHEMA_VERSION,
+        id: loaded.snapshot.id.clone(),
+        revision: 1,
+        sources: BTreeMap::from([(
+            "content".into(),
+            ViewSource {
+                source: VisualSourceRef {
+                    owner: "dock".into(),
+                    id: source_id,
+                    contract: contract.into(),
+                    kind: VisualSourceKind::Artifact,
+                },
+                position: SourcePosition::Revision { revision: 1 },
+            },
+        )]),
+        viewport: ViewRect::default(),
+        attention: None,
+        navigation,
+        parameters: BTreeMap::new(),
+    };
+    view.validate()
+        .expect("loaded image/PDF must produce a valid shared view");
+    Some(view)
 }
 
 fn load_background(path: PathBuf) -> Result<LoadedBackground, Failure> {
@@ -5245,6 +5641,30 @@ mod tests {
     use super::*;
     use dock_canvas::{BackgroundShader, control::MeshNode};
 
+    fn test_shared_view(id: &str, revision: u64) -> SharedViewDocument {
+        SharedViewDocument {
+            schema_version: SCHEMA_VERSION,
+            id: id.into(),
+            revision,
+            sources: BTreeMap::from([(
+                "content".into(),
+                ViewSource {
+                    source: VisualSourceRef {
+                        owner: "dock".into(),
+                        id: "asset-ab".into(),
+                        contract: "image.rgba.v1".into(),
+                        kind: VisualSourceKind::Artifact,
+                    },
+                    position: SourcePosition::Revision { revision: 1 },
+                },
+            )]),
+            viewport: ViewRect::default(),
+            attention: None,
+            navigation: ViewNavigation::None,
+            parameters: BTreeMap::new(),
+        }
+    }
+
     fn test_app() -> App {
         static NEXT_STORE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let store_id = NEXT_STORE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -5305,6 +5725,131 @@ mod tests {
             ),
             [300.0, 600.0]
         );
+    }
+
+    #[test]
+    fn shared_view_crop_maps_normalized_source_coordinates_to_pixels() {
+        let crop = view_crop_pixels(
+            ViewRect {
+                x: 0.25,
+                y: 0.1,
+                width: 0.5,
+                height: 0.75,
+            },
+            [1200, 800],
+        );
+        assert_eq!(
+            crop,
+            iced::Rectangle {
+                x: 300,
+                y: 80,
+                width: 600,
+                height: 600,
+            }
+        );
+    }
+
+    #[test]
+    fn shared_attention_is_clipped_and_mapped_inside_the_visible_crop() {
+        let geometry = attention_geometry(
+            Size::new(600.0, 400.0),
+            [1200, 800],
+            ViewRect {
+                x: 0.25,
+                y: 0.0,
+                width: 0.5,
+                height: 1.0,
+            },
+            ViewRect {
+                x: 0.1,
+                y: 0.25,
+                width: 0.3,
+                height: 0.5,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            geometry,
+            Rectangle::new(Point::new(150.0, 100.0), Size::new(90.0, 200.0))
+        );
+        assert!(
+            attention_geometry(
+                Size::new(600.0, 400.0),
+                [1200, 800],
+                ViewRect {
+                    x: 0.5,
+                    y: 0.5,
+                    width: 0.5,
+                    height: 0.5,
+                },
+                ViewRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.25,
+                    height: 0.25,
+                },
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn shared_view_patch_changes_the_visible_runtime_state_atomically() {
+        let mut app = test_app();
+        app.document.surfaces = vec![Surface {
+            id: "drawing".into(),
+            title: "Drawing".into(),
+            content: SurfaceContent::Scene {
+                scene: Scene { nodes: Vec::new() },
+            },
+            inputs: Vec::new(),
+        }];
+        app.document.layout = Layout::Canvas {
+            placements: vec![Placement {
+                surface_id: "drawing".into(),
+                bounds: NormalizedRect {
+                    x: 0.1,
+                    y: 0.1,
+                    width: 0.8,
+                    height: 0.8,
+                },
+                layer: 1,
+            }],
+        };
+        app.shared_views
+            .insert("drawing".into(), test_shared_view("drawing", 2));
+
+        let viewport = ViewRect {
+            x: 0.25,
+            y: 0.2,
+            width: 0.5,
+            height: 0.6,
+        };
+        let reply = execute(
+            &mut app,
+            "focus-drawing-region",
+            Command::PatchView {
+                surface_id: "drawing".into(),
+                patch: dock_canvas::view::SharedViewPatch {
+                    schema_version: SCHEMA_VERSION,
+                    view_id: "drawing".into(),
+                    base_revision: 2,
+                    revision: 3,
+                    operations: vec![ViewOperation::SetViewport { viewport }],
+                },
+            },
+        );
+        assert!(matches!(
+            reply.outcome,
+            Outcome::Ok {
+                receipt: Receipt::ViewPatched { .. }
+            }
+        ));
+        let snapshot = app.snapshot();
+        assert_eq!(snapshot.views.len(), 1);
+        assert_eq!(snapshot.views[0].view.revision, 3);
+        assert_eq!(snapshot.views[0].view.viewport, viewport);
+        assert_eq!(snapshot.views[0].bounds, snapshot.surface_bounds["drawing"]);
     }
 
     #[test]

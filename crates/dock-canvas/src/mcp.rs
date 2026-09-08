@@ -4,6 +4,7 @@ use crate::{
     control::{self, Command, ControlReply, ControlRequest, Outcome, OverlaySettings, Receipt},
     display::DisplayTarget,
     reconcile::{self, DesiredWorkspaceState, ReconcileAction, Reconciliation},
+    view::{SharedViewDocument, SharedViewPatch},
 };
 use dock_core::Catalog;
 use rmcp::{
@@ -105,12 +106,25 @@ struct ReconcileIntent {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct PatchSharedView {
+    request_id: String,
+    /// Runtime revision from canvas_inspect.
+    expected_revision: u64,
+    surface_id: String,
+    patch: SharedViewPatch,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ScreenshotParams {
     request_id: String,
     #[serde(default)]
     expected_revision: Option<u64>,
     #[serde(default)]
     surface_id: Option<String>,
+    /// When supplied, reject the capture unless this exact shared view is visible.
+    #[serde(default)]
+    expected_view_revision: Option<u64>,
     #[serde(default)]
     x: Option<i64>,
     #[serde(default)]
@@ -119,6 +133,27 @@ struct ScreenshotParams {
     width: Option<u32>,
     #[serde(default)]
     height: Option<u32>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CaptureSharedView {
+    request_id: String,
+    #[serde(default)]
+    expected_revision: Option<u64>,
+    surface_id: String,
+    view_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct CaptureMetadata {
+    canvas_revision: u64,
+    surface_id: Option<String>,
+    region: dock_core::layout::Rect,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    view: Option<SharedViewDocument>,
+    #[serde(skip)]
+    capture_chrome: Option<control::CaptureChromeSnapshot>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -214,9 +249,17 @@ fn tools() -> Vec<Tool> {
             "canvas_reconcile_intent",
             "Reach a resolved desired workspace state deterministically. Canvas inspects current state, computes the smallest validated change, and applies it through the revisioned owner-local socket. Set dry_run to explain without applying. Project and resource IDs must already be exact and authorized.",
         ),
+        tool::<PatchSharedView>(
+            "canvas_view_patch",
+            "Atomically change the viewport, visible attention, source position, or parameters of a mounted shared view. Use canvas_navigate before changing a PDF page. The physical Canvas and agent capture use the same resulting view revision.",
+        ),
         tool::<ScreenshotParams>(
             "canvas_screenshot",
             "Capture a PNG screenshot of a Canvas surface or screen region. Provide surface_id to capture a specific surface, or x/y/width/height for an absolute screen region. Returns base64-encoded PNG data. Essential for LLM vision workflows: focus a region, screenshot it, inspect details, then zoom further.",
+        ),
+        tool::<CaptureSharedView>(
+            "canvas_view_capture",
+            "Capture the exact visibly mounted shared view revision for agent vision. Fails if the surface is hidden, moved, replaced, or has advanced since inspection. Returns capture metadata followed by PNG image content.",
         ),
     ]
 }
@@ -332,6 +375,17 @@ fn parse(name: &str, args: Value) -> Result<ControlRequest, String> {
                     surface_id: args.surface_id,
                     path: args.path,
                     title: args.title,
+                },
+            )
+        }
+        "canvas_view_patch" => {
+            let args: PatchSharedView = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            (
+                args.request_id,
+                Some(args.expected_revision),
+                Command::PatchView {
+                    surface_id: args.surface_id,
+                    patch: args.patch,
                 },
             )
         }
@@ -488,83 +542,305 @@ impl Canvas {
         }
     }
 
-    async fn screenshot(&self, args: Value) -> Result<CallToolResponse, ErrorData> {
-        let params: ScreenshotParams = serde_json::from_value(args)
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
+    async fn screenshot(
+        &self,
+        args: Value,
+        require_shared_view: bool,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let params = if require_shared_view {
+            let args: CaptureSharedView = serde_json::from_value(args)
+                .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
+            ScreenshotParams {
+                request_id: args.request_id,
+                expected_revision: args.expected_revision,
+                surface_id: Some(args.surface_id),
+                expected_view_revision: Some(args.view_revision),
+                x: None,
+                y: None,
+                width: None,
+                height: None,
+            }
+        } else {
+            serde_json::from_value(args)
+                .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?
+        };
+        let validation = ControlRequest {
+            schema_version: control::CONTROL_VERSION,
+            request_id: params.request_id.clone(),
+            expected_revision: None,
+            command: Command::Inspect,
+        };
+        if let Err(error) = validation.validate() {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(error)]).into());
+        }
+        let Ok(permit) = self.slot.clone().try_acquire_owned() else {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "Canvas is busy; inspect before retrying capture",
+            )])
+            .into());
+        };
         let request = ControlRequest {
             schema_version: control::CONTROL_VERSION,
-            request_id: format!("screenshot-inspect-{}", params.request_id),
-            expected_revision: params.expected_revision,
+            request_id: "mcp-capture-inspect".into(),
+            expected_revision: None,
             command: Command::Inspect,
         };
         let send = self.send.clone();
-        let result = tokio::task::spawn_blocking(move || send(&request))
-            .await
-            .map_err(|_| ErrorData::internal_error("Canvas control worker failed", None))?;
-        let inspect_reply = result.map_err(|e| ErrorData::internal_error(e, None))?;
-
-        let snapshot = match &inspect_reply.outcome {
-            Outcome::Ok {
-                receipt: Receipt::Snapshot { snapshot },
-            } => snapshot,
-            _ => {
-                return Ok(CallToolResult::error(vec![ContentBlock::text(
-                    "Failed to inspect Canvas for screenshot",
-                )])
-                .into());
+        let result = tokio::task::spawn_blocking(move || {
+            // Serialize inspection and capture so this adapter cannot change the
+            // displayed view between the revision check and compositor readback.
+            let _permit = permit;
+            let inspect_reply = send(&request)?;
+            let snapshot = match inspect_reply.outcome {
+                Outcome::Ok {
+                    receipt: Receipt::Snapshot { snapshot },
+                } => snapshot,
+                Outcome::Error { message, .. } => return Err(message),
+                _ => return Err("Canvas returned the wrong screenshot receipt".into()),
+            };
+            let metadata = resolve_capture(&snapshot, &params, require_shared_view)?;
+            let png_bytes = capture_region(metadata.region, &params.request_id)?;
+            if metadata.surface_id.is_some() {
+                let chrome = metadata
+                    .capture_chrome
+                    .ok_or("Canvas runtime did not provide capture verification colors")?;
+                verify_surface_chrome(&png_bytes, metadata.region, chrome)?;
+            }
+            let verify_request = ControlRequest {
+                schema_version: control::CONTROL_VERSION,
+                request_id: "mcp-capture-verify".into(),
+                expected_revision: None,
+                command: Command::Inspect,
+            };
+            let verify_reply = send(&verify_request)?;
+            let verify_snapshot = match verify_reply.outcome {
+                Outcome::Ok {
+                    receipt: Receipt::Snapshot { snapshot },
+                } => snapshot,
+                Outcome::Error { message, .. } => return Err(message),
+                _ => return Err("Canvas returned the wrong screenshot verification receipt".into()),
+            };
+            let verified = resolve_capture(&verify_snapshot, &params, require_shared_view)?;
+            if verified.surface_id != metadata.surface_id
+                || verified.region != metadata.region
+                || verified.view != metadata.view
+            {
+                return Err("Canvas changed while the screen capture was being read".into());
+            }
+            Ok::<_, String>((metadata, png_bytes))
+        })
+        .await
+        .map_err(|_| ErrorData::internal_error("Canvas capture worker failed", None))?;
+        let (metadata, png_bytes) = match result {
+            Ok(result) => result,
+            Err(error) => {
+                return Ok(CallToolResult::error(vec![ContentBlock::text(error)]).into());
             }
         };
-
-        let (screen_x, screen_y, screen_w, screen_h) = if params.surface_id.is_some() {
-            (
-                snapshot.frame.x as i64,
-                snapshot.frame.y as i64,
-                snapshot.frame.width,
-                snapshot.frame.height,
-            )
-        } else {
-            (
-                params.x.unwrap_or(snapshot.frame.x as i64),
-                params.y.unwrap_or(snapshot.frame.y as i64),
-                params.width.unwrap_or(snapshot.frame.width),
-                params.height.unwrap_or(snapshot.frame.height),
-            )
-        };
-
-        let temp_path =
-            std::env::temp_dir().join(format!("canvas_screenshot_{}.png", std::process::id()));
-
-        #[cfg(target_os = "macos")]
-        let _ = std::process::Command::new("screencapture")
-            .args([
-                "-R",
-                &format!("{screen_x},{screen_y},{screen_w},{screen_h}"),
-                "-t",
-                "png",
-                &temp_path.to_string_lossy(),
-            ])
-            .output();
-
-        #[cfg(not(target_os = "macos"))]
-        let _ = std::process::Command::new("grim")
-            .args([
-                &format!("{screen_x},{screen_y} {screen_w}x{screen_h}"),
-                &temp_path.to_string_lossy(),
-            ])
-            .output();
-
-        let png_bytes = std::fs::read(&temp_path)
-            .map_err(|e| ErrorData::internal_error(format!("Screenshot failed: {e}"), None))?;
-        let _ = std::fs::remove_file(&temp_path);
-
         let encoded = {
             use base64::Engine as _;
             base64::engine::general_purpose::STANDARD.encode(&png_bytes)
         };
+        let metadata = serde_json::to_string(&metadata)
+            .map_err(|_| ErrorData::internal_error("Capture metadata encoding failed", None))?;
 
-        Ok(CallToolResult::success(vec![ContentBlock::image(encoded, "image/png")]).into())
+        Ok(CallToolResult::success(vec![
+            ContentBlock::text(metadata),
+            ContentBlock::image(encoded, "image/png"),
+        ])
+        .into())
     }
+}
+
+fn resolve_capture(
+    snapshot: &control::RuntimeSnapshot,
+    params: &ScreenshotParams,
+    require_shared_view: bool,
+) -> Result<CaptureMetadata, String> {
+    if !snapshot.visible {
+        return Err("Canvas is hidden; show it before capturing the displayed view".into());
+    }
+    if let Some(expected) = params.expected_revision
+        && expected != snapshot.revision
+    {
+        return Err(format!(
+            "Canvas revision conflict: expected {expected}, current {}",
+            snapshot.revision
+        ));
+    }
+
+    let (region, view) = if let Some(surface_id) = &params.surface_id {
+        if params.x.is_some()
+            || params.y.is_some()
+            || params.width.is_some()
+            || params.height.is_some()
+        {
+            return Err("Choose surface_id or an absolute region, not both".into());
+        }
+        let region = snapshot
+            .surface_bounds
+            .get(surface_id)
+            .copied()
+            .ok_or_else(|| format!("Canvas surface is not visibly mounted: {surface_id}"))?;
+        let mounted = snapshot
+            .views
+            .iter()
+            .find(|mounted| mounted.surface_id == *surface_id);
+        if let Some(mounted) = mounted
+            && mounted.bounds != region
+        {
+            return Err(format!(
+                "Canvas snapshot has inconsistent bounds for shared view: {surface_id}"
+            ));
+        }
+        if require_shared_view && mounted.is_none() {
+            return Err(format!(
+                "Canvas surface has no mounted shared view: {surface_id}"
+            ));
+        }
+        let view = mounted.map(|mounted| mounted.view.clone());
+        if let Some(expected) = params.expected_view_revision {
+            let current = view.as_ref().ok_or_else(|| {
+                format!("Canvas surface has no mounted shared view: {surface_id}")
+            })?;
+            if expected != current.revision {
+                return Err(format!(
+                    "Shared view revision conflict for {surface_id}: expected {expected}, current {}",
+                    current.revision
+                ));
+            }
+        }
+        (region, view)
+    } else {
+        if require_shared_view || params.expected_view_revision.is_some() {
+            return Err("A shared view capture requires surface_id".into());
+        }
+        let x = params.x.unwrap_or(i64::from(snapshot.frame.x));
+        let y = params.y.unwrap_or(i64::from(snapshot.frame.y));
+        (
+            dock_core::layout::Rect {
+                x: i32::try_from(x).map_err(|_| "Capture x coordinate is out of range")?,
+                y: i32::try_from(y).map_err(|_| "Capture y coordinate is out of range")?,
+                width: params.width.unwrap_or(snapshot.frame.width),
+                height: params.height.unwrap_or(snapshot.frame.height),
+            },
+            None,
+        )
+    };
+    if region.width == 0 || region.height == 0 || region.width > 16_384 || region.height > 16_384 {
+        return Err("Capture dimensions must be between 1 and 16384 pixels".into());
+    }
+    Ok(CaptureMetadata {
+        canvas_revision: snapshot.revision,
+        surface_id: params.surface_id.clone(),
+        region,
+        view,
+        capture_chrome: snapshot.capture_chrome,
+    })
+}
+
+fn verify_surface_chrome(
+    png_bytes: &[u8],
+    region: dock_core::layout::Rect,
+    chrome: control::CaptureChromeSnapshot,
+) -> Result<(), String> {
+    let image = image::load_from_memory_with_format(png_bytes, image::ImageFormat::Png)
+        .map_err(|error| format!("Captured PNG is invalid: {error}"))?
+        .to_rgba8();
+    let scale_x = image.width() as f32 / region.width.max(1) as f32;
+    let scale_y = image.height() as f32 / region.height.max(1) as f32;
+    let sample = |logical_x: f32, logical_y: f32| -> [u8; 3] {
+        let center_x = (logical_x * scale_x).round() as i32;
+        let center_y = (logical_y * scale_y).round() as i32;
+        let radius = ((2.0 * scale_x.min(scale_y)).round() as i32).max(1);
+        let mut total = [0_u32; 3];
+        let mut count = 0_u32;
+        for y in center_y - radius..=center_y + radius {
+            for x in center_x - radius..=center_x + radius {
+                if x >= 0 && y >= 0 && x < image.width() as i32 && y < image.height() as i32 {
+                    let pixel = image.get_pixel(x as u32, y as u32).0;
+                    for channel in 0..3 {
+                        total[channel] += u32::from(pixel[channel]);
+                    }
+                    count += 1;
+                }
+            }
+        }
+        if count == 0 {
+            return [0; 3];
+        }
+        [
+            (total[0] / count) as u8,
+            (total[1] / count) as u8,
+            (total[2] / count) as u8,
+        ]
+    };
+    let observed = [sample(12.5, 14.0), sample(30.5, 14.0), sample(48.5, 14.0)];
+    let expected = [chrome.danger, chrome.warning, chrome.success];
+    let matches = observed
+        .into_iter()
+        .zip(expected)
+        .all(|(actual, expected)| {
+            actual
+                .into_iter()
+                .zip(expected)
+                .all(|(actual, expected)| actual.abs_diff(expected) <= 56)
+        });
+    if !matches {
+        return Err(
+            "Captured pixels do not contain the requested Canvas surface chrome; the surface may be occluded or on another desktop"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn capture_region(region: dock_core::layout::Rect, request_id: &str) -> Result<Vec<u8>, String> {
+    let temp_path = std::env::temp_dir().join(format!(
+        "canvas-screenshot-{}-{request_id}.png",
+        std::process::id()
+    ));
+    #[cfg(target_os = "macos")]
+    let output = {
+        let geometry = format!(
+            "{},{},{},{}",
+            region.x, region.y, region.width, region.height
+        );
+        std::process::Command::new("screencapture")
+            .args(["-x", "-R", &geometry, "-t", "png"])
+            .arg(&temp_path)
+            .output()
+            .map_err(|error| format!("Could not start macOS screen capture: {error}"))?
+    };
+
+    #[cfg(not(target_os = "macos"))]
+    let output = {
+        let geometry = format!(
+            "{},{} {}x{}",
+            region.x, region.y, region.width, region.height
+        );
+        std::process::Command::new("grim")
+            .args(["-g", &geometry])
+            .arg(&temp_path)
+            .output()
+            .map_err(|error| format!("Could not start Wayland screen capture: {error}"))?
+    };
+
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(format!(
+            "Screen capture failed with status {}",
+            output.status
+        ));
+    }
+    let png_bytes =
+        std::fs::read(&temp_path).map_err(|error| format!("Could not read captured PNG: {error}"));
+    let _ = std::fs::remove_file(&temp_path);
+    let png_bytes = png_bytes?;
+    if png_bytes.is_empty() {
+        return Err("Screen capture returned an empty PNG".into());
+    }
+    Ok(png_bytes)
 }
 
 impl ServerHandler for Canvas {
@@ -598,7 +874,10 @@ impl ServerHandler for Canvas {
             return self.reconcile_intent(arguments).await;
         }
         if request.name == "canvas_screenshot" {
-            return self.screenshot(arguments).await;
+            return self.screenshot(arguments, false).await;
+        }
+        if request.name == "canvas_view_capture" {
+            return self.screenshot(arguments, true).await;
         }
         let request = match parse(&request.name, arguments) {
             Ok(request) => request,
@@ -723,7 +1002,7 @@ mod tests {
     #[test]
     fn schemas_include_native_document_and_patch_definitions() {
         let tools = tools();
-        assert_eq!(tools.len(), 13);
+        assert_eq!(tools.len(), 15);
         let tool = |name: &str| tools.iter().find(|tool| tool.name == name).unwrap();
         assert!(
             tool("canvas_apply_document").input_schema["$defs"]
@@ -743,6 +1022,234 @@ mod tests {
             tool("canvas_reconcile_intent").input_schema["$defs"]
                 .get("DesiredWorkspaceState")
                 .is_some()
+        );
+        assert!(
+            tool("canvas_view_patch").input_schema["$defs"]
+                .get("SharedViewPatch")
+                .is_some()
+        );
+        assert!(
+            tool("canvas_view_capture").input_schema["properties"]["view_revision"].is_object()
+        );
+    }
+
+    fn capture_snapshot() -> control::RuntimeSnapshot {
+        use crate::view::{
+            SourcePosition, ViewRect, ViewSource, VisualSourceKind, VisualSourceRef,
+        };
+        use std::collections::BTreeMap;
+
+        let bounds = dock_core::layout::Rect {
+            x: 220,
+            y: 90,
+            width: 960,
+            height: 640,
+        };
+        let view = SharedViewDocument {
+            schema_version: crate::SCHEMA_VERSION,
+            id: "document-view".into(),
+            revision: 7,
+            sources: BTreeMap::from([(
+                "content".into(),
+                ViewSource {
+                    source: VisualSourceRef {
+                        owner: "dock".into(),
+                        id: format!("asset-{}", "ab".repeat(32)),
+                        contract: "document.pdf.v1".into(),
+                        kind: VisualSourceKind::Artifact,
+                    },
+                    position: SourcePosition::Revision { revision: 1 },
+                },
+            )]),
+            viewport: ViewRect {
+                x: 0.2,
+                y: 0.1,
+                width: 0.5,
+                height: 0.6,
+            },
+            attention: None,
+            navigation: crate::view::ViewNavigation::Page { index: 3 },
+            parameters: BTreeMap::new(),
+        };
+        control::RuntimeSnapshot {
+            workspace_id: "workspace".into(),
+            project_id: "dock".into(),
+            revision: 42,
+            frame: dock_core::layout::Rect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            focused_surface_id: Some("document-view".into()),
+            surfaces: Vec::new(),
+            surface_bounds: BTreeMap::from([("document-view".into(), bounds)]),
+            views: vec![control::MountedViewSnapshot {
+                surface_id: "document-view".into(),
+                bounds,
+                view,
+            }],
+            capture_chrome: Some(control::CaptureChromeSnapshot {
+                danger: [240, 80, 90],
+                warning: [240, 190, 70],
+                success: [70, 210, 120],
+            }),
+            active_indicators: Vec::new(),
+            mesh: None,
+            presence: None,
+            presence_preview_active: false,
+            screensaver: Default::default(),
+            workspaces: Vec::new(),
+            workspace_summaries: Vec::new(),
+            minimized_surface_ids: Vec::new(),
+            maximized_surface_ids: Vec::new(),
+            events: Vec::new(),
+            display_frames: Vec::new(),
+            displays: Vec::new(),
+            selected_display_ids: Vec::new(),
+            overlays: Default::default(),
+            visible: true,
+        }
+    }
+
+    #[test]
+    fn shared_view_capture_resolves_the_exact_visible_surface_and_revision() {
+        let snapshot = capture_snapshot();
+        let params = ScreenshotParams {
+            request_id: "capture-document".into(),
+            expected_revision: Some(42),
+            surface_id: Some("document-view".into()),
+            expected_view_revision: Some(7),
+            x: None,
+            y: None,
+            width: None,
+            height: None,
+        };
+
+        let capture = resolve_capture(&snapshot, &params, true).unwrap();
+        assert_eq!(capture.region, snapshot.surface_bounds["document-view"]);
+        let view = capture.view.unwrap();
+        assert_eq!(view.revision, 7);
+        assert_eq!(
+            view.navigation,
+            crate::view::ViewNavigation::Page { index: 3 }
+        );
+        assert!(matches!(
+            view.sources["content"].position,
+            crate::view::SourcePosition::Revision { revision: 1 }
+        ));
+    }
+
+    #[test]
+    fn shared_view_capture_rejects_stale_hidden_and_unmounted_state() {
+        let mut snapshot = capture_snapshot();
+        let params = ScreenshotParams {
+            request_id: "capture-document".into(),
+            expected_revision: Some(42),
+            surface_id: Some("document-view".into()),
+            expected_view_revision: Some(6),
+            x: None,
+            y: None,
+            width: None,
+            height: None,
+        };
+        assert!(
+            resolve_capture(&snapshot, &params, true)
+                .unwrap_err()
+                .contains("expected 6")
+        );
+
+        snapshot.visible = false;
+        assert!(
+            resolve_capture(&snapshot, &params, true)
+                .unwrap_err()
+                .contains("hidden")
+        );
+        snapshot.visible = true;
+        snapshot.surface_bounds.clear();
+        assert!(
+            resolve_capture(&snapshot, &params, true)
+                .unwrap_err()
+                .contains("not visibly mounted")
+        );
+    }
+
+    #[test]
+    fn surface_screenshot_uses_surface_bounds_instead_of_the_canvas_frame() {
+        let snapshot = capture_snapshot();
+        let params = ScreenshotParams {
+            request_id: "capture-surface".into(),
+            expected_revision: None,
+            surface_id: Some("document-view".into()),
+            expected_view_revision: None,
+            x: None,
+            y: None,
+            width: None,
+            height: None,
+        };
+        let capture = resolve_capture(&snapshot, &params, false).unwrap();
+        assert_eq!(capture.region.x, 220);
+        assert_eq!(capture.region.y, 90);
+        assert_eq!(capture.region.width, 960);
+        assert_eq!(capture.region.height, 640);
+    }
+
+    #[test]
+    fn surface_capture_verifies_existing_chrome_pixels() {
+        use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
+        use std::io::Cursor;
+
+        let chrome = control::CaptureChromeSnapshot {
+            danger: [240, 80, 90],
+            warning: [240, 190, 70],
+            success: [70, 210, 120],
+        };
+        let mut image = RgbaImage::from_pixel(200, 100, Rgba([20, 24, 30, 255]));
+        for (center, color) in [
+            (13, chrome.danger),
+            (31, chrome.warning),
+            (49, chrome.success),
+        ] {
+            for y in 10..=18 {
+                for x in center - 4..=center + 4 {
+                    image.put_pixel(x, y, Rgba([color[0], color[1], color[2], 255]));
+                }
+            }
+        }
+        let mut png = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(image)
+            .write_to(&mut png, ImageFormat::Png)
+            .unwrap();
+        verify_surface_chrome(
+            png.get_ref(),
+            dock_core::layout::Rect {
+                x: 0,
+                y: 0,
+                width: 200,
+                height: 100,
+            },
+            chrome,
+        )
+        .unwrap();
+
+        let wallpaper = RgbaImage::from_pixel(200, 100, Rgba([70, 80, 60, 255]));
+        let mut png = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(wallpaper)
+            .write_to(&mut png, ImageFormat::Png)
+            .unwrap();
+        assert!(
+            verify_surface_chrome(
+                png.get_ref(),
+                dock_core::layout::Rect {
+                    x: 0,
+                    y: 0,
+                    width: 200,
+                    height: 100,
+                },
+                chrome,
+            )
+            .unwrap_err()
+            .contains("surface chrome")
         );
     }
 
@@ -820,6 +1327,9 @@ mod tests {
                                         },
                                         focused_surface_id: state.focused_surface_id.clone(),
                                         surfaces: Vec::new(),
+                                        surface_bounds: Default::default(),
+                                        views: Vec::new(),
+                                        capture_chrome: None,
                                         active_indicators: Vec::new(),
                                         mesh: None,
                                         presence: None,
@@ -923,7 +1433,7 @@ mod tests {
                 .unwrap()
         });
         let client = ().serve(client_io).await.unwrap();
-        assert_eq!(client.list_all_tools().await.unwrap().len(), 13);
+        assert_eq!(client.list_all_tools().await.unwrap().len(), 15);
         let result = client
             .call_tool(CallToolRequestParams::new("canvas_inspect"))
             .await
