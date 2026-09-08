@@ -3743,10 +3743,14 @@ fn normalize_visible_surface_bounds(
     chrome: SurfaceChrome,
 ) -> NormalizedRect {
     let (padding, inner_width, inner_height, gap_inset) = surface_layout_metrics(frame, chrome);
-    let x = ((bounds.x - gap_inset - padding) / inner_width).clamp(0.0, 1.0);
-    let y = ((bounds.y - gap_inset - padding) / inner_height).clamp(0.0, 1.0);
-    let width = ((bounds.width + gap_inset * 2.0) / inner_width).clamp(0.0, 1.0 - x);
-    let height = ((bounds.height + gap_inset * 2.0) / inner_height).clamp(0.0, 1.0 - y);
+    // Horizontal positions may be negative when a surface is parked partly
+    // offscreen. The interaction engine has already kept a usable section of
+    // its top bar reachable, so clamping the origin here would turn the move
+    // into a resize by shortening the stored width to the workspace edge.
+    let x = (bounds.x - gap_inset - padding) / inner_width;
+    let y = ((bounds.y - gap_inset - padding) / inner_height).max(0.0);
+    let width = ((bounds.width + gap_inset * 2.0) / inner_width).clamp(f64::EPSILON, 1.0);
+    let height = ((bounds.height + gap_inset * 2.0) / inner_height).clamp(f64::EPSILON, 1.0);
     NormalizedRect {
         x: x as f32,
         y: y as f32,
@@ -5546,6 +5550,17 @@ mod tests {
             normalize_visible_surface_bounds(left_visible, frame, chrome),
             left
         );
+
+        let parked = LogicalRect {
+            x: -200.0,
+            ..left_visible
+        };
+        let normalized = normalize_visible_surface_bounds(parked, frame, chrome);
+        assert!(normalized.x < 0.0);
+        assert_eq!(normalized.width, left.width);
+        let visible = visible_surface_bounds(normalized, frame, chrome);
+        assert!((visible.x - parked.x).abs() < 0.001);
+        assert!((visible.width - parked.width).abs() < 0.001);
     }
 
     #[test]
