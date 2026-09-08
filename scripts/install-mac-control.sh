@@ -18,7 +18,9 @@ if [[ -e "$app" ]]; then
 fi
 cd "$repo"
 cargo build --release -p dock-control
-dock_target="${CARGO_TARGET_DIR:-target}"
+# Cargo owns where artifacts land: CARGO_TARGET_DIR, or build.target-dir in a cargo
+# config, can point it away from ./target. Ask cargo rather than assume.
+dock_target="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)"
 mkdir -p "$HOME/Applications"
 stage="$(mktemp -d "$HOME/Applications/.dock-control.XXXXXX")"
 trap 'rm -rf "$stage"' EXIT
