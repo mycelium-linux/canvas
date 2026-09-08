@@ -462,6 +462,7 @@ impl App {
             Message::RestoreSurface(surface_id) => {
                 if self.minimized_surfaces.remove(&surface_id) {
                     self.start_transition();
+                    let revision = self.runtime_revision;
                     self.apply_interaction_intents(vec![
                         InteractionIntent::Focus {
                             surface_id: surface_id.clone(),
@@ -470,6 +471,9 @@ impl App {
                             surface_id: surface_id.clone(),
                         },
                     ]);
+                    if self.runtime_revision == revision {
+                        self.bump();
+                    }
                     self.status = format!("Restored {surface_id}.");
                     self.emit_event(format!("surface_restored {surface_id}"));
                 }
@@ -1599,7 +1603,10 @@ impl App {
                 measured_fps: self.screensaver_clock.measured_fps(),
             },
             workspaces: self.workspaces.keys().cloned().collect(),
+            minimized_surface_ids: self.minimized_surfaces.iter().cloned().collect(),
+            maximized_surface_ids: self.maximized_surfaces.iter().cloned().collect(),
             events: self.events.clone(),
+            display_frames: self.display_frames.clone(),
         }
     }
 
@@ -4599,9 +4606,12 @@ mod tests {
         assert!(app.minimized_dock().is_none());
         app.minimized_surfaces.insert("invoice".into());
         assert!(app.minimized_dock().is_some());
+        assert_eq!(app.snapshot().minimized_surface_ids, ["invoice"]);
+        let revision = app.runtime_revision;
         drop(app.update(Message::RestoreSurface("invoice".into())));
         assert!(app.minimized_surfaces.is_empty());
         assert_eq!(app.document.focused_surface_id.as_deref(), Some("invoice"));
+        assert!(app.runtime_revision > revision);
     }
 
     #[test]

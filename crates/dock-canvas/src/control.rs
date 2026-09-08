@@ -555,7 +555,13 @@ pub struct RuntimeSnapshot {
     #[serde(default)]
     pub workspaces: Vec<String>,
     #[serde(default)]
+    pub minimized_surface_ids: Vec<String>,
+    #[serde(default)]
+    pub maximized_surface_ids: Vec<String>,
+    #[serde(default)]
     pub events: Vec<String>,
+    #[serde(default)]
+    pub display_frames: Vec<Rect>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -1094,7 +1100,7 @@ pub mod text {
                         snapshot.active_indicators.len()
                     ),
                     Receipt::Snapshot { snapshot } => format!(
-                        "project={} frame={},{},{},{} surfaces={} indicators={} events={}",
+                        "project={} frame={},{},{},{} surfaces={} indicators={} events={} displays={}",
                         snapshot.project_id,
                         snapshot.frame.x,
                         snapshot.frame.y,
@@ -1102,7 +1108,8 @@ pub mod text {
                         snapshot.frame.height,
                         snapshot.surfaces.len(),
                         snapshot.active_indicators.len(),
-                        snapshot.events.len()
+                        snapshot.events.len(),
+                        snapshot.display_frames.len()
                     ),
                     Receipt::DocumentApplied { workspace_id } => {
                         format!("document={}", workspace_id)
