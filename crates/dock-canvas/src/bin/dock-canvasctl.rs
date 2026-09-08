@@ -22,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("       echo 'indicator status speaking \"Socket live\"' | dock-canvasctl");
         eprintln!("       echo 'nav scene-view next' | dock-canvasctl");
         eprintln!("       echo 'titles focused' | dock-canvasctl");
+        eprintln!("       echo 'spacing 12 8' | dock-canvasctl");
         eprintln!("       echo 'patch /tmp/patch.json' | dock-canvasctl");
         eprintln!("       echo '{{\"schema_version\":1,...}}' | dock-canvasctl  (JSON mode)");
         std::process::exit(1);
@@ -75,6 +76,9 @@ fn handle_line(line: &str) -> Result<(), String> {
     }
     if tokens[0] == "titles" {
         return handle_titles(&tokens);
+    }
+    if tokens[0] == "spacing" {
+        return handle_spacing(&tokens);
     }
     if tokens[0] == "minimize" || tokens[0] == "maximize" || tokens[0] == "restore" {
         return handle_window_control(&tokens);
@@ -195,12 +199,50 @@ fn handle_titles(tokens: &[String]) -> Result<(), String> {
         base_revision: state.doc_revision,
         revision: state.doc_revision + 1,
         operations: vec![dock_canvas::PatchOperation::SetChrome {
-            chrome: SurfaceChrome { title },
+            chrome: SurfaceChrome {
+                title,
+                ..state.chrome
+            },
         }],
     };
     let request = ControlRequest {
         schema_version: CONTROL_VERSION,
         request_id: format!("titles-{}", id()),
+        expected_revision: Some(state.runtime_revision),
+        command: Command::ApplyPatch { patch },
+    };
+    let reply = send_with_retry(&request)?;
+    println!("{}", text::format_reply(&reply));
+    Ok(())
+}
+
+fn handle_spacing(tokens: &[String]) -> Result<(), String> {
+    if tokens.len() != 3 {
+        return Err("usage: spacing <canvas_padding> <surface_gap>".into());
+    }
+    let canvas_padding = tokens[1]
+        .parse::<u16>()
+        .map_err(|_| "canvas padding must be a nonnegative integer".to_string())?;
+    let surface_gap = tokens[2]
+        .parse::<u16>()
+        .map_err(|_| "surface gap must be a nonnegative integer".to_string())?;
+    let state = read_document_state()?;
+    let patch = WorkspacePatch {
+        schema_version: SCHEMA_VERSION,
+        workspace_id: state.workspace_id,
+        base_revision: state.doc_revision,
+        revision: state.doc_revision + 1,
+        operations: vec![dock_canvas::PatchOperation::SetChrome {
+            chrome: SurfaceChrome {
+                title: state.chrome.title,
+                canvas_padding,
+                surface_gap,
+            },
+        }],
+    };
+    let request = ControlRequest {
+        schema_version: CONTROL_VERSION,
+        request_id: format!("spacing-{}", id()),
         expected_revision: Some(state.runtime_revision),
         command: Command::ApplyPatch { patch },
     };
@@ -390,6 +432,7 @@ struct DocumentState {
     surfaces: Vec<String>,
     focused: Option<String>,
     workspace_id: String,
+    chrome: SurfaceChrome,
 }
 
 fn handle_open_terminal(tokens: &[String]) -> Result<(), String> {
@@ -476,6 +519,7 @@ fn read_document_state() -> Result<DocumentState, String> {
                 surfaces,
                 focused: document.focused_surface_id.clone(),
                 workspace_id: document.id.clone(),
+                chrome: document.chrome,
             })
         }
         _ => Err(format_reply_error(&reply)),

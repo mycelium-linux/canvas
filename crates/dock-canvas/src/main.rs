@@ -24,8 +24,8 @@ use dock_core::{Catalog, ProjectTheme, ThemePalette, desktop::WallpaperRequest, 
 use iced::mouse;
 use iced::widget::canvas::{Canvas, Geometry};
 use iced::widget::{
-    button, canvas, container, image as image_widget, markdown, mouse_area, row, scrollable, space,
-    stack, text, tooltip,
+    button, canvas, column, container, image as image_widget, markdown, mouse_area, row,
+    scrollable, space, stack, text, tooltip,
 };
 use iced::{
     Color, ContentFit, Element, Length, Point, Rectangle, Renderer, Size, Subscription, Task, Theme,
@@ -1820,7 +1820,7 @@ impl App {
             .filter(|placement| !self.minimized_surfaces.contains(&placement.surface_id))
             .map(|placement| SurfaceGeometry {
                 surface_id: placement.surface_id.clone(),
-                bounds: denormalize(
+                bounds: visible_surface_bounds(
                     if self.maximized_surfaces.contains(&placement.surface_id) {
                         NormalizedRect {
                             x: 0.0,
@@ -1832,6 +1832,7 @@ impl App {
                         placement.bounds
                     },
                     self.frame,
+                    self.document.chrome,
                 ),
                 z_order: if self.maximized_surfaces.contains(&placement.surface_id) {
                     i64::MAX
@@ -1856,7 +1857,7 @@ impl App {
             ))
         });
         for placement in placements {
-            let bounds = denormalize(
+            let bounds = visible_surface_bounds(
                 if self.maximized_surfaces.contains(&placement.surface_id) {
                     NormalizedRect {
                         x: 0.0,
@@ -1868,6 +1869,7 @@ impl App {
                     placement.bounds
                 },
                 frame,
+                self.document.chrome,
             );
             let top = bounds.y;
             let bottom = top + SURFACE_CONTROL_BAR_HEIGHT;
@@ -1927,6 +1929,7 @@ impl App {
                 }
                 InteractionIntent::SetBounds { surface_id, bounds } => {
                     let frame = self.frame;
+                    let chrome = self.document.chrome;
                     let Layout::Canvas { placements } = &mut self.document.layout else {
                         continue;
                     };
@@ -1934,7 +1937,7 @@ impl App {
                         .iter_mut()
                         .find(|placement| placement.surface_id == surface_id)
                     {
-                        let normalized = normalize(bounds, frame);
+                        let normalized = normalize_visible_surface_bounds(bounds, frame, chrome);
                         if placement.bounds != normalized {
                             placement.bounds = normalized;
                             changed = true;
@@ -2550,7 +2553,7 @@ impl App {
                                 placement.bounds
                             };
                             let animated = self.presented_bounds(&placement.surface_id, target);
-                            denormalize(
+                            visible_surface_bounds(
                                 NormalizedRect {
                                     x: animated[0],
                                     y: animated[1],
@@ -2558,6 +2561,7 @@ impl App {
                                     height: animated[3],
                                 },
                                 self.frame,
+                                self.document.chrome,
                             )
                         };
                         let content = self.surface_widget(
@@ -2566,7 +2570,7 @@ impl App {
                             Length::Fill,
                             LogicalSize {
                                 width: bounds.width.max(1.0),
-                                height: bounds.height.max(1.0),
+                                height: (bounds.height - SURFACE_CONTROL_BAR_HEIGHT).max(1.0),
                             },
                         );
                         let focused = self.document.focused_surface_id.as_deref()
@@ -2577,10 +2581,10 @@ impl App {
                         } else {
                             border_color
                         };
-                        let plane = container(stack(vec![
-                            content,
+                        let plane = container(column![
                             self.surface_controls(&surface.snapshot.title, focused, maximized),
-                        ]))
+                            content,
+                        ])
                         .width(Length::Fixed(bounds.width as f32))
                         .height(Length::Fixed(bounds.height as f32))
                         .style(move |_| container::Style {
@@ -2648,16 +2652,14 @@ impl App {
                                 .height(Length::Fill)
                                 .into();
                         }
-                        let content = self.surface_widget(
-                            surface,
-                            Length::Fill,
-                            Length::Fill,
-                            self.media_viewport(),
-                        );
-                        container(stack(vec![
-                            content,
+                        let mut viewport = self.media_viewport();
+                        viewport.height = (viewport.height - SURFACE_CONTROL_BAR_HEIGHT).max(1.0);
+                        let content =
+                            self.surface_widget(surface, Length::Fill, Length::Fill, viewport);
+                        container(column![
                             self.surface_controls(&surface.snapshot.title, true, true),
-                        ]))
+                            content,
+                        ])
                         .center(Length::Fill)
                         .into()
                     },
@@ -3538,21 +3540,49 @@ fn chart_text(
     });
 }
 
-fn denormalize(bounds: NormalizedRect, frame: Rect) -> LogicalRect {
+fn surface_layout_metrics(frame: Rect, chrome: SurfaceChrome) -> (f64, f64, f64, f64) {
+    let frame_width = f64::from(frame.width.max(1));
+    let frame_height = f64::from(frame.height.max(1));
+    let padding = f64::from(chrome.canvas_padding).min((frame_width / 4.0).min(frame_height / 4.0));
+    let inner_width = (frame_width - padding * 2.0).max(1.0);
+    let inner_height = (frame_height - padding * 2.0).max(1.0);
+    (
+        padding,
+        inner_width,
+        inner_height,
+        f64::from(chrome.surface_gap) / 2.0,
+    )
+}
+
+fn visible_surface_bounds(
+    bounds: NormalizedRect,
+    frame: Rect,
+    chrome: SurfaceChrome,
+) -> LogicalRect {
+    let (padding, inner_width, inner_height, gap_inset) = surface_layout_metrics(frame, chrome);
     LogicalRect {
-        x: f64::from(bounds.x) * f64::from(frame.width),
-        y: f64::from(bounds.y) * f64::from(frame.height),
-        width: f64::from(bounds.width) * f64::from(frame.width),
-        height: f64::from(bounds.height) * f64::from(frame.height),
+        x: padding + f64::from(bounds.x) * inner_width + gap_inset,
+        y: padding + f64::from(bounds.y) * inner_height + gap_inset,
+        width: (f64::from(bounds.width) * inner_width - gap_inset * 2.0).max(1.0),
+        height: (f64::from(bounds.height) * inner_height - gap_inset * 2.0).max(1.0),
     }
 }
 
-fn normalize(bounds: LogicalRect, frame: Rect) -> NormalizedRect {
+fn normalize_visible_surface_bounds(
+    bounds: LogicalRect,
+    frame: Rect,
+    chrome: SurfaceChrome,
+) -> NormalizedRect {
+    let (padding, inner_width, inner_height, gap_inset) = surface_layout_metrics(frame, chrome);
+    let x = ((bounds.x - gap_inset - padding) / inner_width).clamp(0.0, 1.0);
+    let y = ((bounds.y - gap_inset - padding) / inner_height).clamp(0.0, 1.0);
+    let width = ((bounds.width + gap_inset * 2.0) / inner_width).clamp(0.0, 1.0 - x);
+    let height = ((bounds.height + gap_inset * 2.0) / inner_height).clamp(0.0, 1.0 - y);
     NormalizedRect {
-        x: (bounds.x / f64::from(frame.width.max(1))) as f32,
-        y: (bounds.y / f64::from(frame.height.max(1))) as f32,
-        width: (bounds.width / f64::from(frame.width.max(1))) as f32,
-        height: (bounds.height / f64::from(frame.height.max(1))) as f32,
+        x: x as f32,
+        y: y as f32,
+        width: width as f32,
+        height: height as f32,
     }
 }
 
@@ -5290,5 +5320,36 @@ mod tests {
 
         let ticks = chart_ticks(-10.0, 10.0, 5);
         assert_eq!(ticks, vec![-10.0, -5.0, 0.0, 5.0, 10.0]);
+    }
+
+    #[test]
+    fn workspace_spacing_round_trips_and_reveals_background() {
+        let frame = Rect {
+            x: 3_840,
+            y: 0,
+            width: 1_000,
+            height: 800,
+        };
+        let chrome = SurfaceChrome {
+            title: SurfaceTitleMode::Focused,
+            canvas_padding: 12,
+            surface_gap: 8,
+        };
+        let left = NormalizedRect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.5,
+            height: 1.0,
+        };
+        let right = NormalizedRect { x: 0.5, ..left };
+        let left_visible = visible_surface_bounds(left, frame, chrome);
+        let right_visible = visible_surface_bounds(right, frame, chrome);
+        assert_eq!(left_visible.x, 16.0);
+        assert_eq!(left_visible.y, 16.0);
+        assert_eq!(right_visible.x - (left_visible.x + left_visible.width), 8.0);
+        assert_eq!(
+            normalize_visible_surface_bounds(left_visible, frame, chrome),
+            left
+        );
     }
 }

@@ -25,6 +25,8 @@ pub mod reconcile;
 pub const SCHEMA_VERSION: u32 = 1;
 const MAX_ITEMS: usize = 1_024;
 const MAX_GRADIENT_STOPS: usize = 8;
+pub const MAX_CANVAS_PADDING: u16 = 96;
+pub const MAX_SURFACE_GAP: u16 = 48;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error(pub String);
@@ -97,6 +99,10 @@ pub struct WorkspaceDocument {
 pub struct SurfaceChrome {
     #[serde(default)]
     pub title: SurfaceTitleMode,
+    #[serde(default)]
+    pub canvas_padding: u16,
+    #[serde(default)]
+    pub surface_gap: u16,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -611,6 +617,14 @@ impl WorkspaceDocument {
         check(self.revision > 0, "Workspace revision must be positive")?;
         self.background.validate()?;
         check(
+            self.chrome.canvas_padding <= MAX_CANVAS_PADDING,
+            format!("Canvas padding exceeds {MAX_CANVAS_PADDING}"),
+        )?;
+        check(
+            self.chrome.surface_gap <= MAX_SURFACE_GAP,
+            format!("Surface gap exceeds {MAX_SURFACE_GAP}"),
+        )?;
+        check(
             self.surfaces.len() <= MAX_ITEMS && self.bindings.len() <= MAX_ITEMS,
             "Workspace has too many surfaces or bindings",
         )?;
@@ -991,6 +1005,8 @@ mod tests {
         let legacy = WorkspaceDocument::parse(&legacy.to_string(), &catalog).unwrap();
         assert_eq!(legacy.background, Background::Theme);
         assert_eq!(legacy.chrome.title, SurfaceTitleMode::Focused);
+        assert_eq!(legacy.chrome.canvas_padding, 0);
+        assert_eq!(legacy.chrome.surface_gap, 0);
 
         let gradient = Background::Gradient {
             angle_degrees: 125.0,
@@ -1034,6 +1050,7 @@ mod tests {
             operations: vec![PatchOperation::SetChrome {
                 chrome: SurfaceChrome {
                     title: SurfaceTitleMode::Always,
+                    ..SurfaceChrome::default()
                 },
             }],
         };
@@ -1044,6 +1061,16 @@ mod tests {
                 .chrome
                 .title,
             SurfaceTitleMode::Always
+        );
+
+        let mut invalid_spacing = applied.clone();
+        invalid_spacing.chrome.canvas_padding = MAX_CANVAS_PADDING + 1;
+        assert!(
+            invalid_spacing
+                .validate(&catalog)
+                .unwrap_err()
+                .to_string()
+                .contains("padding")
         );
 
         let mut invalid = applied.clone();
