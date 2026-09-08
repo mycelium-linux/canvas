@@ -3,6 +3,7 @@
 //! The shader renders directly inside iced's render pass. No frame is copied
 //! back to the CPU and no per-frame image handle is allocated.
 
+use dock_canvas::BackgroundShader;
 use iced::widget::shader::{self, Shader};
 use iced::{Element, Length, Rectangle};
 use std::time::{Duration, Instant};
@@ -271,6 +272,7 @@ fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 
 #[derive(Debug)]
 pub struct ShaderPiece {
+    pub id: BackgroundShader,
     pub name: &'static str,
     pub wgsl: &'static str,
     pub credit: &'static str,
@@ -279,42 +281,49 @@ pub struct ShaderPiece {
 
 pub const SHADERS: &[ShaderPiece] = &[
     ShaderPiece {
+        id: BackgroundShader::Tidepool,
         name: "Tidepool",
         wgsl: TIDEPOOL,
         credit: "FPL",
         license: "MIT",
     },
     ShaderPiece {
+        id: BackgroundShader::AuroraDrift,
         name: "Aurora Drift",
         wgsl: AURORA_DRIFT,
         credit: "FPL",
         license: "MIT",
     },
     ShaderPiece {
+        id: BackgroundShader::DuskEmber,
         name: "Dusk Ember",
         wgsl: DUSK_EMBER,
         credit: "FPL",
         license: "MIT",
     },
     ShaderPiece {
+        id: BackgroundShader::SlowRipple,
         name: "Slow Ripple",
         wgsl: SLOW_RIPPLE,
         credit: "FPL",
         license: "MIT",
     },
     ShaderPiece {
+        id: BackgroundShader::Spirales,
         name: "Spirales",
         wgsl: SPIRAL,
         credit: "Danilo Guanabara (ShaderToy)",
         license: "MIT",
     },
     ShaderPiece {
+        id: BackgroundShader::FloatingRectangles,
         name: "Floating Rectangles",
         wgsl: FLOATING_RECT,
         credit: "ShaderToy",
         license: "MIT",
     },
     ShaderPiece {
+        id: BackgroundShader::SmokeRings,
         name: "Smoke Rings",
         wgsl: SMOKE_RINGS,
         credit: "Sebastien Berube & Noztol (ShaderToy)",
@@ -556,7 +565,12 @@ mod tests {
 
     #[test]
     fn manifest_is_complete_and_credited() {
-        assert!(!SHADERS.is_empty());
+        assert_eq!(SHADERS.len(), BackgroundShader::ALL.len());
+        assert!(
+            BackgroundShader::ALL
+                .iter()
+                .all(|id| SHADERS.iter().any(|shader| shader.id == *id))
+        );
         for (index, shader) in SHADERS.iter().enumerate() {
             assert!(!shader.name.is_empty());
             assert!(shader.wgsl.contains("@fragment"));

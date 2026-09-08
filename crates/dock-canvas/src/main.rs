@@ -260,6 +260,7 @@ impl App {
                 project_id,
                 revision: 1,
                 theme: ThemeRef::Project,
+                background: dock_canvas::Background::default(),
                 surfaces: Vec::new(),
                 layout: Layout::Empty,
                 bindings: Vec::new(),
