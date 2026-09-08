@@ -71,6 +71,7 @@ pub enum ResizeHandle {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HitRegion {
     Body,
+    TopBar,
     Resize { handle: ResizeHandle },
 }
 
@@ -106,6 +107,9 @@ pub struct InteractionConfig {
     pub workspace_bounds: LogicalRect,
     pub minimum_surface_size: LogicalPoint,
     pub resize_handle_size: f64,
+    /// Height of the draggable window chrome. The remaining body belongs to
+    /// the embedded surface after it has been focused and promoted.
+    pub top_bar_height: f64,
     pub snap_distance: f64,
     /// Grid spacing. `None` disables grid snapping while retaining workspace
     /// edge snapping.
@@ -199,7 +203,13 @@ impl InteractionEngine {
         if self.active.is_some() {
             return Ok(Vec::new());
         }
-        let Some(hit) = hit_test(surfaces, event.position, self.config.resize_handle_size)? else {
+        let Some(hit) = hit_test(
+            surfaces,
+            event.position,
+            self.config.resize_handle_size,
+            self.config.top_bar_height,
+        )?
+        else {
             return Ok(Vec::new());
         };
         let surface = surfaces
@@ -207,6 +217,17 @@ impl InteractionEngine {
             .find(|surface| surface.surface_id == hit.surface_id)
             .ok_or(InteractionError("hit surface disappeared"))?;
         let surface_id = surface.surface_id.clone();
+        let mut intents = vec![
+            InteractionIntent::Focus {
+                surface_id: surface_id.clone(),
+            },
+            InteractionIntent::PromoteToFront {
+                surface_id: surface_id.clone(),
+            },
+        ];
+        if hit.region == HitRegion::Body {
+            return Ok(intents);
+        }
         self.active = Some(ActiveGesture {
             pointer_id: event.pointer_id,
             surface_id: surface_id.clone(),
@@ -215,18 +236,11 @@ impl InteractionEngine {
             original_bounds: surface.bounds,
             current_bounds: surface.bounds,
         });
-        Ok(vec![
-            InteractionIntent::Focus {
-                surface_id: surface_id.clone(),
-            },
-            InteractionIntent::PromoteToFront {
-                surface_id: surface_id.clone(),
-            },
-            InteractionIntent::CapturePointer {
-                pointer_id: event.pointer_id,
-                surface_id,
-            },
-        ])
+        intents.push(InteractionIntent::CapturePointer {
+            pointer_id: event.pointer_id,
+            surface_id,
+        });
+        Ok(intents)
     }
 
     fn update(
@@ -288,11 +302,17 @@ pub fn hit_test(
     surfaces: &[SurfaceGeometry],
     point: LogicalPoint,
     resize_handle_size: f64,
+    top_bar_height: f64,
 ) -> Result<Option<HitTarget>, InteractionError> {
     validate_point(point)?;
     if !resize_handle_size.is_finite() || resize_handle_size < 0.0 {
         return Err(InteractionError(
             "resize handle size must be finite and non-negative",
+        ));
+    }
+    if !top_bar_height.is_finite() || top_bar_height < 0.0 {
+        return Err(InteractionError(
+            "top bar height must be finite and non-negative",
         ));
     }
     for surface in surfaces {
@@ -304,9 +324,19 @@ pub fn hit_test(
         .enumerate()
         .filter(|(_, surface)| surface.bounds.contains(point))
         .max_by_key(|(index, surface)| (surface.z_order, *index));
-    Ok(hit.map(|(_, surface)| HitTarget {
-        surface_id: surface.surface_id.clone(),
-        region: resize_region(surface.bounds, point, resize_handle_size),
+    Ok(hit.map(|(_, surface)| {
+        let resize = resize_region(surface.bounds, point, resize_handle_size);
+        let region = if matches!(resize, HitRegion::Resize { .. }) {
+            resize
+        } else if point.y <= surface.bounds.y + top_bar_height {
+            HitRegion::TopBar
+        } else {
+            HitRegion::Body
+        };
+        HitTarget {
+            surface_id: surface.surface_id.clone(),
+            region,
+        }
     }))
 }
 
@@ -316,8 +346,9 @@ fn manipulate(
     point: LogicalPoint,
 ) -> LogicalRect {
     match active.region {
-        HitRegion::Body => move_rect(config, active, point),
+        HitRegion::TopBar => move_rect(config, active, point),
         HitRegion::Resize { handle } => resize_rect(config, active, point, handle),
+        HitRegion::Body => active.current_bounds,
     }
 }
 
@@ -556,6 +587,11 @@ fn validate_config(config: InteractionConfig) -> Result<(), InteractionError> {
             "resize handle size must be finite and non-negative",
         ));
     }
+    if !config.top_bar_height.is_finite() || config.top_bar_height < 0.0 {
+        return Err(InteractionError(
+            "top bar height must be finite and non-negative",
+        ));
+    }
     if !config.snap_distance.is_finite() || config.snap_distance < 0.0 {
         return Err(InteractionError(
             "snap distance must be finite and non-negative",
@@ -655,6 +691,7 @@ mod tests {
             workspace_bounds: rect(0.0, 0.0, 1_000.0, 800.0),
             minimum_surface_size: point(100.0, 80.0),
             resize_handle_size: 10.0,
+            top_bar_height: 24.0,
             snap_distance: 8.0,
             grid_size: Some(50.0),
         }
@@ -676,14 +713,14 @@ mod tests {
             surface("front-last", rect(40.0, 40.0, 200.0, 200.0), 2),
         ];
         assert_eq!(
-            hit_test(&surfaces, point(100.0, 100.0), 10.0).unwrap(),
+            hit_test(&surfaces, point(100.0, 100.0), 10.0, 24.0).unwrap(),
             Some(HitTarget {
                 surface_id: "front-last".to_owned(),
                 region: HitRegion::Body,
             })
         );
         assert_eq!(
-            hit_test(&surfaces, point(40.0, 40.0), 10.0).unwrap(),
+            hit_test(&surfaces, point(40.0, 40.0), 10.0, 24.0).unwrap(),
             Some(HitTarget {
                 surface_id: "front-last".to_owned(),
                 region: HitRegion::Resize {
@@ -691,10 +728,17 @@ mod tests {
                 },
             })
         );
+        assert_eq!(
+            hit_test(&surfaces, point(100.0, 55.0), 10.0, 24.0).unwrap(),
+            Some(HitTarget {
+                surface_id: "front-last".to_owned(),
+                region: HitRegion::TopBar,
+            })
+        );
     }
 
     #[test]
-    fn click_focuses_promotes_captures_and_releases() {
+    fn content_click_focuses_and_promotes_without_capturing() {
         let surfaces = vec![surface("card", rect(100.0, 100.0, 300.0, 200.0), 1)];
         let mut engine = InteractionEngine::new(config()).unwrap();
         assert_eq!(
@@ -708,20 +752,43 @@ mod tests {
                 InteractionIntent::PromoteToFront {
                     surface_id: "card".to_owned(),
                 },
-                InteractionIntent::CapturePointer {
-                    pointer_id: 4,
-                    surface_id: "card".to_owned(),
-                },
             ]
         );
+        assert_eq!(engine.captured_pointer(), None);
+        assert!(
+            engine
+                .handle(event(4, PointerPhase::Release, 200.0, 180.0), &surfaces)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(engine.captured_pointer(), None);
+    }
+
+    #[test]
+    fn top_bar_drag_captures_and_moves_surface() {
+        let surfaces = vec![surface("card", rect(100.0, 100.0, 300.0, 200.0), 1)];
+        let mut engine = InteractionEngine::new(config()).unwrap();
+        let pressed = engine
+            .handle(event(4, PointerPhase::Press, 200.0, 115.0), &surfaces)
+            .unwrap();
+        assert!(matches!(
+            pressed.as_slice(),
+            [
+                InteractionIntent::Focus { .. },
+                InteractionIntent::PromoteToFront { .. },
+                InteractionIntent::CapturePointer { pointer_id: 4, .. }
+            ]
+        ));
         assert_eq!(engine.captured_pointer(), Some(4));
         assert_eq!(
             engine
-                .handle(event(4, PointerPhase::Release, 200.0, 180.0), &surfaces)
+                .handle(event(4, PointerPhase::Move, 250.0, 165.0), &surfaces)
                 .unwrap(),
-            vec![InteractionIntent::ReleasePointer { pointer_id: 4 }]
+            vec![InteractionIntent::SetBounds {
+                surface_id: "card".to_owned(),
+                bounds: rect(150.0, 150.0, 300.0, 200.0),
+            }]
         );
-        assert_eq!(engine.captured_pointer(), None);
     }
 
     #[test]
@@ -729,7 +796,7 @@ mod tests {
         let surfaces = vec![surface("card", rect(100.0, 100.0, 300.0, 200.0), 1)];
         let mut engine = InteractionEngine::new(config()).unwrap();
         engine
-            .handle(event(8, PointerPhase::Press, 200.0, 180.0), &surfaces)
+            .handle(event(8, PointerPhase::Press, 200.0, 115.0), &surfaces)
             .unwrap();
         let intents = engine
             .handle(event(8, PointerPhase::Move, 2_000.0, 2_000.0), &surfaces)
@@ -748,10 +815,10 @@ mod tests {
         let surfaces = vec![surface("card", rect(113.0, 113.0, 200.0, 200.0), 1)];
         let mut engine = InteractionEngine::new(config()).unwrap();
         engine
-            .handle(event(1, PointerPhase::Press, 200.0, 200.0), &surfaces)
+            .handle(event(1, PointerPhase::Press, 200.0, 125.0), &surfaces)
             .unwrap();
         let intents = engine
-            .handle(event(1, PointerPhase::Move, 234.0, 234.0), &surfaces)
+            .handle(event(1, PointerPhase::Move, 234.0, 159.0), &surfaces)
             .unwrap();
         assert_eq!(
             intents,
@@ -763,10 +830,10 @@ mod tests {
 
         let mut edge_engine = InteractionEngine::new(config()).unwrap();
         edge_engine
-            .handle(event(2, PointerPhase::Press, 200.0, 200.0), &surfaces)
+            .handle(event(2, PointerPhase::Press, 200.0, 125.0), &surfaces)
             .unwrap();
         let edge = edge_engine
-            .handle(event(2, PointerPhase::Move, 92.0, 92.0), &surfaces)
+            .handle(event(2, PointerPhase::Move, 92.0, 17.0), &surfaces)
             .unwrap();
         assert_eq!(
             edge,
@@ -807,7 +874,7 @@ mod tests {
         let surfaces = vec![surface("card", rect(100.0, 100.0, 300.0, 200.0), 1)];
         let mut engine = InteractionEngine::new(config()).unwrap();
         engine
-            .handle(event(5, PointerPhase::Press, 200.0, 180.0), &surfaces)
+            .handle(event(5, PointerPhase::Press, 200.0, 115.0), &surfaces)
             .unwrap();
         assert!(
             engine
