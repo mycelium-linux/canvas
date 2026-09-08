@@ -15,6 +15,7 @@ use dock_canvas::media::{
     LogicalSize, MediaCacheKey, MediaLimits, MediaPlan, MediaVariant, PixelSize, SourceDimensions,
     plan_pdf_page, plan_raster,
 };
+use dock_canvas::workspace_store::{self, WorkspaceStore};
 use dock_canvas::{
     AssetRef, Background, BackgroundFit, GradientStop, Layout, NodeContent, NormalizedRect,
     PatchOperation, Placement, SCHEMA_VERSION, Scene, SceneNode, Surface, SurfaceChrome,
@@ -271,7 +272,8 @@ struct App {
     minimized_surfaces: BTreeSet<String>,
     maximized_surfaces: BTreeSet<String>,
     transition: Option<transition::Transition>,
-    workspaces: BTreeMap<String, WorkspaceDocument>,
+    workspaces: WorkspaceStore,
+    workspace_store_path: PathBuf,
     background_assets: BTreeMap<String, iced::widget::image::Handle>,
     events: Vec<String>,
     presence_orb_visible: bool,
@@ -285,8 +287,15 @@ struct App {
 }
 
 impl App {
-    fn new(receiver: PendingReceiver, socket: SocketGuard, frame: Rect) -> Self {
+    fn new(
+        receiver: PendingReceiver,
+        socket: SocketGuard,
+        frame: Rect,
+        workspace_store_path: PathBuf,
+    ) -> Result<Self, String> {
         let catalog = Catalog::bundled().expect("bundled project catalog must remain valid");
+        let workspaces = workspace_store::load(&workspace_store_path, &catalog)
+            .map_err(|error| error.to_string())?;
         let project_id = catalog.projects[0].id.clone();
         let mut app = Self {
             catalog,
@@ -341,7 +350,8 @@ impl App {
             minimized_surfaces: BTreeSet::new(),
             maximized_surfaces: BTreeSet::new(),
             transition: None,
-            workspaces: BTreeMap::new(),
+            workspaces,
+            workspace_store_path,
             events: Vec::new(),
             background_assets: BTreeMap::new(),
             presence_orb_visible: true,
@@ -357,7 +367,7 @@ impl App {
             screensaver_fps: 0.0,
         };
         app.reset_background_animation();
-        app
+        Ok(app)
     }
 
     /// Capture the presentation just before a workspace change so the view can
@@ -1249,9 +1259,27 @@ impl App {
                 Task::none()
             }
             Command::WorkspaceSave { name } => {
-                self.workspaces.insert(name.clone(), self.document.clone());
+                if name != self.document.project_id {
+                    self.fail(
+                        pending,
+                        Failure::invalid(format!(
+                            "project workspace name must equal project_id {:?}",
+                            self.document.project_id
+                        )),
+                    );
+                    return Task::none();
+                }
+                let mut next = self.workspaces.clone();
+                next.upsert(self.document.clone());
+                if let Err(error) =
+                    workspace_store::save(&self.workspace_store_path, &next, &self.catalog)
+                {
+                    self.fail(pending, Failure::resource(error.to_string()));
+                    return Task::none();
+                }
+                self.workspaces = next;
                 self.bump();
-                self.status = format!("Saved workspace '{name}'.");
+                self.status = format!("Saved project workspace '{name}'.");
                 self.answer(
                     pending,
                     Outcome::Ok {
@@ -1261,11 +1289,24 @@ impl App {
                 Task::none()
             }
             Command::WorkspaceSwitch { name } => {
-                if let Some(document) = self.workspaces.get(&name).cloned() {
+                if self.workspaces.get(&name).is_some() {
+                    let mut next = self.workspaces.clone();
+                    next.upsert(self.document.clone());
+                    if let Err(error) =
+                        workspace_store::save(&self.workspace_store_path, &next, &self.catalog)
+                    {
+                        self.fail(pending, Failure::resource(error.to_string()));
+                        return Task::none();
+                    }
+                    let document = next
+                        .get(&name)
+                        .cloned()
+                        .expect("validated project workspace disappeared");
                     if let Err(failure) = self.ensure_background_available(&document) {
                         self.fail(pending, failure);
                         return Task::none();
                     }
+                    self.workspaces = next;
                     self.start_transition();
                     self.document = document;
                     self.ensure_scene_decoded();
@@ -1711,7 +1752,7 @@ impl App {
                 settings: self.screensaver_settings,
                 measured_fps: self.screensaver_clock.measured_fps(),
             },
-            workspaces: self.workspaces.keys().cloned().collect(),
+            workspaces: self.workspaces.project_ids().map(str::to_owned).collect(),
             minimized_surface_ids: self.minimized_surfaces.iter().cloned().collect(),
             maximized_surface_ids: self.maximized_surfaces.iter().cloned().collect(),
             events: self.events.clone(),
@@ -4375,6 +4416,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let (receiver, socket) = start_server()?;
     let initial_frame = platform::preferred_canvas_frame(INITIAL_FRAME);
+    let workspace_store_path = workspace_store::default_path()?;
     let boot_receiver = Arc::clone(&receiver);
     let boot_socket = Arc::new(Mutex::new(Some(socket)));
     iced::application(
@@ -4385,7 +4427,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .take()
                 .expect("Canvas can only boot once");
             (
-                App::new(Arc::clone(&boot_receiver), socket, initial_frame),
+                App::new(
+                    Arc::clone(&boot_receiver),
+                    socket,
+                    initial_frame,
+                    workspace_store_path.clone(),
+                )
+                .expect("Canvas project workspace store must remain valid"),
                 iced::window::oldest().map(Message::WindowReady),
             )
         },
@@ -4439,6 +4487,8 @@ mod tests {
     use dock_canvas::{BackgroundShader, control::MeshNode};
 
     fn test_app() -> App {
+        static NEXT_STORE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let store_id = NEXT_STORE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (_sender, receiver) = mpsc::sync_channel(1);
         App::new(
             Arc::new(Mutex::new(receiver)),
@@ -4449,7 +4499,14 @@ mod tests {
                 )),
             },
             INITIAL_FRAME,
+            std::env::temp_dir()
+                .join(format!(
+                    "dock-canvas-test-workspaces-{}-{store_id}",
+                    std::process::id(),
+                ))
+                .join("workspaces.json"),
         )
+        .unwrap()
     }
 
     fn execute(app: &mut App, request_id: &str, command: Command) -> ControlReply {
@@ -5351,5 +5408,73 @@ mod tests {
             normalize_visible_surface_bounds(left_visible, frame, chrome),
             left
         );
+    }
+
+    #[test]
+    fn project_workspace_switch_saves_outgoing_state_and_restores_it() {
+        let mut app = test_app();
+        let wrong = execute(
+            &mut app,
+            "save-wrong-label",
+            Command::WorkspaceSave {
+                name: "studio".into(),
+            },
+        );
+        assert!(matches!(wrong.outcome, Outcome::Error { .. }));
+
+        let dock = app.document.project_id.clone();
+        let saved = execute(
+            &mut app,
+            "save-dock",
+            Command::WorkspaceSave { name: dock.clone() },
+        );
+        assert!(matches!(saved.outcome, Outcome::Ok { .. }));
+
+        let studio = WorkspaceDocument {
+            schema_version: SCHEMA_VERSION,
+            id: "studio-workspace".into(),
+            project_id: "studio".into(),
+            revision: 1,
+            theme: ThemeRef::Project,
+            background: Background::default(),
+            chrome: SurfaceChrome::default(),
+            surfaces: Vec::new(),
+            layout: Layout::Empty,
+            bindings: Vec::new(),
+            focused_surface_id: None,
+        };
+        app.workspaces.upsert(studio);
+        workspace_store::save(&app.workspace_store_path, &app.workspaces, &app.catalog).unwrap();
+        app.document.chrome.canvas_padding = 21;
+
+        let switched = execute(
+            &mut app,
+            "switch-studio",
+            Command::WorkspaceSwitch {
+                name: "studio".into(),
+            },
+        );
+        assert!(matches!(switched.outcome, Outcome::Ok { .. }));
+        assert_eq!(app.document.project_id, "studio");
+        assert_eq!(
+            workspace_store::load(&app.workspace_store_path, &app.catalog)
+                .unwrap()
+                .get(&dock)
+                .unwrap()
+                .chrome
+                .canvas_padding,
+            21
+        );
+
+        drop(execute(
+            &mut app,
+            "switch-dock",
+            Command::WorkspaceSwitch { name: dock },
+        ));
+        assert_eq!(app.document.project_id, "dock");
+        assert_eq!(app.document.chrome.canvas_padding, 21);
+        if let Some(parent) = app.workspace_store_path.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
     }
 }

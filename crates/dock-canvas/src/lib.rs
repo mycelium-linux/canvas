@@ -21,6 +21,7 @@ pub mod map;
 pub mod mcp;
 pub mod media;
 pub mod reconcile;
+pub mod workspace_store;
 
 pub const SCHEMA_VERSION: u32 = 1;
 const MAX_ITEMS: usize = 1_024;
