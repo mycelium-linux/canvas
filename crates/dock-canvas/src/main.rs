@@ -1359,6 +1359,10 @@ impl App {
                 task
             }
             Command::Focus => {
+                if let Err(error) = platform::make_windows_shareable() {
+                    self.fail(pending, Failure::platform(error));
+                    return Task::none();
+                }
                 self.bump();
                 self.status = "Canvas focused.".into();
                 self.answer(
@@ -5277,6 +5281,15 @@ mod platform {
     }
 
     #[cfg(target_os = "macos")]
+    pub(super) fn canvas_collection_behavior() -> objc2_app_kit::NSWindowCollectionBehavior {
+        use objc2_app_kit::NSWindowCollectionBehavior;
+
+        NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::FullScreenAuxiliary
+            | NSWindowCollectionBehavior::Stationary
+    }
+
+    #[cfg(target_os = "macos")]
     pub fn make_windows_shareable() -> Result<(), String> {
         use objc2_app_kit::{NSApplication, NSWindowSharingType};
         use objc2_foundation::MainThreadMarker;
@@ -5286,6 +5299,7 @@ mod platform {
         application.setPresentationOptions(canvas_presentation_options());
         for window in application.windows().iter() {
             window.setSharingType(NSWindowSharingType::NSWindowSharingReadOnly);
+            unsafe { window.setCollectionBehavior(canvas_collection_behavior()) };
         }
         Ok(())
     }
@@ -7171,6 +7185,17 @@ mod tests {
         assert!(!settings.decorations);
         assert!(!settings.exit_on_close_request);
         assert!(settings.visible);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn canvas_windows_join_every_macos_space() {
+        use objc2_app_kit::NSWindowCollectionBehavior;
+
+        let behavior = platform::canvas_collection_behavior();
+        assert!(behavior.contains(NSWindowCollectionBehavior::CanJoinAllSpaces));
+        assert!(behavior.contains(NSWindowCollectionBehavior::FullScreenAuxiliary));
+        assert!(behavior.contains(NSWindowCollectionBehavior::Stationary));
     }
 
     #[test]
