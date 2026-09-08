@@ -122,44 +122,15 @@ fn handle_line(line: &str) -> Result<(), String> {
         return Ok(());
     }
     if tokens[0] == "move" && tokens.len() == 2 && tokens[1] == "all" {
-        // Span all displays
-        let req = ControlRequest {
+        let request = ControlRequest {
             schema_version: CONTROL_VERSION,
             request_id: format!("move-all-{}", id()),
             expected_revision: None,
-            command: Command::Inspect,
+            command: Command::SetDisplayTarget {
+                target: dock_canvas::display::DisplayTarget::All,
+            },
         };
-        let reply = control::send(&req)?;
-        if let Outcome::Ok {
-            receipt: Receipt::Snapshot { snapshot },
-        } = &reply.outcome
-        {
-            if let Some(bounding) = snapshot.display_frames.iter().fold(
-                None,
-                |acc: Option<dock_core::layout::Rect>, display| match acc {
-                    None => Some(*display),
-                    Some(mut bbox) => {
-                        bbox.x = bbox.x.min(display.x);
-                        bbox.y = bbox.y.min(display.y);
-                        let right = (i64::from(bbox.x) + i64::from(bbox.width))
-                            .max(i64::from(display.x) + i64::from(display.width));
-                        let bottom = (i64::from(bbox.y) + i64::from(bbox.height))
-                            .max(i64::from(display.y) + i64::from(display.height));
-                        bbox.width = (right - i64::from(bbox.x)) as u32;
-                        bbox.height = (bottom - i64::from(bbox.y)) as u32;
-                        Some(bbox)
-                    }
-                },
-            ) {
-                let request = text::parse_line(&format!(
-                    "move {} {} {} {}",
-                    bounding.x, bounding.y, bounding.width, bounding.height
-                ))?;
-                println!("{}", text::format_reply(&control::send(&request)?));
-            } else {
-                println!("ERR no displays found");
-            }
-        }
+        println!("{}", text::format_reply(&control::send(&request)?));
         return Ok(());
     }
 

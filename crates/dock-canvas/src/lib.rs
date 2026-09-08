@@ -10,6 +10,7 @@ use std::{collections::BTreeSet, fmt};
 pub mod backend;
 pub mod chart;
 pub mod control;
+pub mod display;
 pub mod hud;
 pub mod interaction;
 #[cfg(feature = "lua-scenes")]

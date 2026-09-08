@@ -1,7 +1,8 @@
 //! Thin MCP adapter over the permission-checked owner-local Canvas socket.
 use crate::{
     WorkspaceDocument, WorkspacePatch,
-    control::{self, Command, ControlReply, ControlRequest, Outcome, Receipt},
+    control::{self, Command, ControlReply, ControlRequest, Outcome, OverlaySettings, Receipt},
+    display::DisplayTarget,
     reconcile::{self, DesiredWorkspaceState, ReconcileAction, Reconciliation},
 };
 use dock_core::Catalog;
@@ -120,6 +121,33 @@ struct ScreenshotParams {
     height: Option<u32>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SetDisplayTarget {
+    request_id: String,
+    #[serde(default)]
+    expected_revision: Option<u64>,
+    target: DisplayTarget,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SetOverlays {
+    request_id: String,
+    #[serde(default)]
+    expected_revision: Option<u64>,
+    overlays: OverlaySettings,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SetVisibility {
+    request_id: String,
+    #[serde(default)]
+    expected_revision: Option<u64>,
+    visible: bool,
+}
+
 #[derive(Serialize)]
 struct IntentResult {
     reconciliation: Reconciliation,
@@ -157,6 +185,18 @@ fn tools() -> Vec<Tool> {
         tool::<Inspect>(
             "canvas_focus",
             "Bring the Canvas window forward. Does not change document content, launch applications, or select a surface.",
+        ),
+        tool::<SetDisplayTarget>(
+            "canvas_display_target",
+            "Present the shared Canvas desktop on all connected displays or an exact list of display IDs from canvas_inspect. The workspace document and surface state remain shared across the selected display windows.",
+        ),
+        tool::<SetOverlays>(
+            "canvas_set_overlays",
+            "Set deterministic host-local placement for the presence rail, face preview, compact orb, system HUD, and FPL mark. Each overlay may be hidden, shown on all displays, or anchored to the leftmost or rightmost selected display.",
+        ),
+        tool::<SetVisibility>(
+            "canvas_set_visibility",
+            "Show or hide every native window in the shared Canvas presentation while preserving the workspace and selected displays.",
         ),
         tool::<NavigateSurface>(
             "canvas_navigate",
@@ -223,6 +263,36 @@ fn parse(name: &str, args: Value) -> Result<ControlRequest, String> {
         "canvas_focus" => {
             serde_json::from_value::<Inspect>(args).map_err(|e| e.to_string())?;
             ("mcp-focus".into(), None, Command::Focus)
+        }
+        "canvas_display_target" => {
+            let args: SetDisplayTarget = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            (
+                args.request_id,
+                args.expected_revision,
+                Command::SetDisplayTarget {
+                    target: args.target,
+                },
+            )
+        }
+        "canvas_set_overlays" => {
+            let args: SetOverlays = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            (
+                args.request_id,
+                args.expected_revision,
+                Command::SetOverlays {
+                    overlays: args.overlays,
+                },
+            )
+        }
+        "canvas_set_visibility" => {
+            let args: SetVisibility = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            (
+                args.request_id,
+                args.expected_revision,
+                Command::SetVisibility {
+                    visible: args.visible,
+                },
+            )
         }
         "canvas_navigate" => {
             let args: NavigateSurface = serde_json::from_value(args).map_err(|e| e.to_string())?;
@@ -607,25 +677,70 @@ mod tests {
         .unwrap();
         assert_eq!(request.expected_revision, Some(4));
         assert!(matches!(request.command, Command::ApplyPatch { .. }));
+        let target = parse(
+            "canvas_display_target",
+            json!({
+                "request_id":"span-1",
+                "expected_revision":4,
+                "target":{"kind":"exact","display_ids":["left","right"]}
+            }),
+        )
+        .unwrap();
+        assert_eq!(target.expected_revision, Some(4));
+        assert!(matches!(
+            target.command,
+            Command::SetDisplayTarget {
+                target: DisplayTarget::Exact { .. }
+            }
+        ));
+        let overlays = parse(
+            "canvas_set_overlays",
+            json!({
+                "request_id":"overlays-1",
+                "overlays":{
+                    "presence_rail":"leftmost",
+                    "presence_preview":"leftmost",
+                    "presence_orb":"hidden",
+                    "system_hud":"rightmost",
+                    "fpl_mark":"leftmost",
+                    "shortcut_help":"center"
+                }
+            }),
+        )
+        .unwrap();
+        assert!(matches!(overlays.command, Command::SetOverlays { .. }));
+        let visibility = parse(
+            "canvas_set_visibility",
+            json!({"request_id":"visibility-1","visible":false}),
+        )
+        .unwrap();
+        assert_eq!(
+            visibility.command,
+            Command::SetVisibility { visible: false }
+        );
     }
 
     #[test]
     fn schemas_include_native_document_and_patch_definitions() {
         let tools = tools();
-        assert_eq!(tools.len(), 10);
+        assert_eq!(tools.len(), 13);
+        let tool = |name: &str| tools.iter().find(|tool| tool.name == name).unwrap();
         assert!(
-            tools[1].input_schema["$defs"]
+            tool("canvas_apply_document").input_schema["$defs"]
                 .get("WorkspaceDocument")
                 .is_some()
         );
         assert!(
-            tools[2].input_schema["$defs"]
+            tool("canvas_apply_patch").input_schema["$defs"]
                 .get("PatchOperation")
                 .is_some()
         );
-        assert_eq!(tools[2].input_schema["additionalProperties"], false);
+        assert_eq!(
+            tool("canvas_apply_patch").input_schema["additionalProperties"],
+            false
+        );
         assert!(
-            tools[8].input_schema["$defs"]
+            tool("canvas_reconcile_intent").input_schema["$defs"]
                 .get("DesiredWorkspaceState")
                 .is_some()
         );
@@ -716,6 +831,10 @@ mod tests {
                                         maximized_surface_ids: Vec::new(),
                                         events: Vec::new(),
                                         display_frames: Vec::new(),
+                                        displays: Vec::new(),
+                                        selected_display_ids: Vec::new(),
+                                        overlays: Default::default(),
+                                        visible: true,
                                     },
                                 },
                             },
@@ -804,7 +923,7 @@ mod tests {
                 .unwrap()
         });
         let client = ().serve(client_io).await.unwrap();
-        assert_eq!(client.list_all_tools().await.unwrap().len(), 10);
+        assert_eq!(client.list_all_tools().await.unwrap().len(), 13);
         let result = client
             .call_tool(CallToolRequestParams::new("canvas_inspect"))
             .await

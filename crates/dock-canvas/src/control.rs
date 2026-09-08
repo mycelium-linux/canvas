@@ -1,6 +1,9 @@
 //! Bounded control protocol for a long-lived Canvas runtime.
 
-use crate::{Background, ThemeRef, WorkspaceDocument, WorkspacePatch};
+use crate::{
+    Background, ThemeRef, WorkspaceDocument, WorkspacePatch,
+    display::{DisplayInfo, DisplayTarget},
+};
 use dock_core::{
     ThemeSelection,
     desktop::{Wallpaper, WallpaperReceipt, WallpaperRequest},
@@ -62,6 +65,15 @@ pub enum Command {
     SetFrame {
         frame: Rect,
     },
+    SetDisplayTarget {
+        target: DisplayTarget,
+    },
+    SetOverlays {
+        overlays: OverlaySettings,
+    },
+    SetVisibility {
+        visible: bool,
+    },
     Focus,
     Navigate {
         surface_id: String,
@@ -100,6 +112,10 @@ pub enum Command {
     OpenStream {
         surface_id: String,
         url: String,
+    },
+    OpenWidget {
+        surface_id: String,
+        spec_path: PathBuf,
     },
     WorkspaceSave {
         name: String,
@@ -525,6 +541,16 @@ pub enum Receipt {
     FrameSet {
         frame: Rect,
     },
+    DisplayTargetSet {
+        display_ids: Vec<String>,
+        frame: Rect,
+    },
+    OverlaysSet {
+        overlays: OverlaySettings,
+    },
+    VisibilitySet {
+        visible: bool,
+    },
     Focused,
     Navigated {
         surface_id: String,
@@ -607,6 +633,57 @@ pub struct RuntimeSnapshot {
     pub events: Vec<String>,
     #[serde(default)]
     pub display_frames: Vec<Rect>,
+    #[serde(default)]
+    pub displays: Vec<DisplayInfo>,
+    #[serde(default)]
+    pub selected_display_ids: Vec<String>,
+    #[serde(default)]
+    pub overlays: OverlaySettings,
+    #[serde(default = "default_true")]
+    pub visible: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Host-local placement policy for runtime overlays. This remains separate
+/// from the portable workspace document and can be driven by Lua, MCP, or the
+/// raw socket without duplicating renderer placement logic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
+pub struct OverlaySettings {
+    pub presence_rail: OverlayTarget,
+    pub presence_preview: OverlayTarget,
+    pub presence_orb: OverlayTarget,
+    pub system_hud: OverlayTarget,
+    pub fpl_mark: OverlayTarget,
+    pub shortcut_help: OverlayTarget,
+}
+
+impl Default for OverlaySettings {
+    fn default() -> Self {
+        Self {
+            presence_rail: OverlayTarget::Leftmost,
+            presence_preview: OverlayTarget::Leftmost,
+            presence_orb: OverlayTarget::Hidden,
+            system_hud: OverlayTarget::Rightmost,
+            fpl_mark: OverlayTarget::Leftmost,
+            shortcut_help: OverlayTarget::Center,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
+pub enum OverlayTarget {
+    Hidden,
+    All,
+    Leftmost,
+    Center,
+    Rightmost,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -668,6 +745,7 @@ pub enum ContentKind {
     Scene,
     Stream,
     DataViz,
+    Widget,
 }
 
 impl ControlRequest {
@@ -700,6 +778,24 @@ impl ControlRequest {
                 }
             }
             Command::SetFrame { frame } => validate_frame(*frame)?,
+            Command::SetDisplayTarget { target } => match target {
+                DisplayTarget::All => {}
+                DisplayTarget::Exact { display_ids } => {
+                    if display_ids.is_empty() || display_ids.len() > crate::display::MAX_DISPLAYS {
+                        return Err("display target must contain 1-16 IDs".into());
+                    }
+                    let mut unique = std::collections::BTreeSet::new();
+                    if display_ids.iter().any(|id| {
+                        id.is_empty()
+                            || id.len() > 128
+                            || id.chars().any(char::is_control)
+                            || !unique.insert(id.as_str())
+                    }) {
+                        return Err("display target IDs must be bounded and unique".into());
+                    }
+                }
+            },
+            Command::SetOverlays { .. } | Command::SetVisibility { .. } => {}
             Command::SetTheme { project_id } => {
                 if !identifier(project_id) {
                     return Err("invalid project id".into());
@@ -753,7 +849,8 @@ impl ControlRequest {
             | Command::OpenDataViz { .. }
             | Command::SetBackground { .. }
             | Command::ClearBackground
-            | Command::OpenStream { .. } => {}
+            | Command::OpenStream { .. }
+            | Command::OpenWidget { .. } => {}
         }
         Ok(())
     }
@@ -957,6 +1054,8 @@ pub mod text {
         match tokens[0].as_str() {
             "inspect" | "info" => Ok(Command::Inspect),
             "focus" => Ok(Command::Focus),
+            "show" => Ok(Command::SetVisibility { visible: true }),
+            "hide" => Ok(Command::SetVisibility { visible: false }),
             "shutdown" => Ok(Command::Shutdown),
             "ws-save" | "workspace-save" | "save-ws" => {
                 req(tokens, 2, "ws-save <name>")?;
@@ -1002,6 +1101,13 @@ pub mod text {
                     url: tokens[1].clone(),
                 })
             }
+            "open_widget" | "widget" => {
+                req(tokens, 3, "open_widget <spec_path> <surface_id>")?;
+                Ok(Command::OpenWidget {
+                    surface_id: tokens[2].clone(),
+                    spec_path: std::path::PathBuf::from(&tokens[1]),
+                })
+            }
             "bg" | "theme" => {
                 req(tokens, 2, "bg <project_id>")?;
                 if !identifier(&tokens[1]) {
@@ -1021,6 +1127,20 @@ pub mod text {
                         height: parse_u32(&tokens[4])?,
                     },
                 })
+            }
+            "display-target" | "displays-use" => {
+                req(tokens, 2, "display-target <all|display-id...>")?;
+                let target = if tokens[1] == "all" {
+                    if tokens.len() != 2 {
+                        return Err("display-target all takes no display IDs".into());
+                    }
+                    DisplayTarget::All
+                } else {
+                    DisplayTarget::Exact {
+                        display_ids: tokens[1..].to_vec(),
+                    }
+                };
+                Ok(Command::SetDisplayTarget { target })
             }
             "close" | "rm" => {
                 req(tokens, 2, "close <surface_id>")?;
@@ -1183,7 +1303,7 @@ pub mod text {
                         snapshot.active_indicators.len()
                     ),
                     Receipt::Snapshot { snapshot } => format!(
-                        "project={} frame={},{},{},{} surfaces={} indicators={} events={} displays={}",
+                        "project={} frame={},{},{},{} surfaces={} indicators={} events={} displays={} visible={}",
                         snapshot.project_id,
                         snapshot.frame.x,
                         snapshot.frame.y,
@@ -1192,7 +1312,8 @@ pub mod text {
                         snapshot.surfaces.len(),
                         snapshot.active_indicators.len(),
                         snapshot.events.len(),
-                        snapshot.display_frames.len()
+                        snapshot.display_frames.len(),
+                        snapshot.visible
                     ),
                     Receipt::DocumentApplied { workspace_id } => {
                         format!("document={}", workspace_id)
@@ -1207,6 +1328,19 @@ pub mod text {
                         "frame={},{},{},{}",
                         frame.x, frame.y, frame.width, frame.height
                     ),
+                    Receipt::DisplayTargetSet { display_ids, frame } => format!(
+                        "displays={} frame={},{},{},{}",
+                        display_ids.join(","),
+                        frame.x,
+                        frame.y,
+                        frame.width,
+                        frame.height
+                    ),
+                    Receipt::OverlaysSet { overlays } => format!(
+                        "overlays presence={:?} hud={:?}",
+                        overlays.presence_rail, overlays.system_hud
+                    ),
+                    Receipt::VisibilitySet { visible } => format!("visible={visible}"),
                     Receipt::Focused => "focused".to_string(),
                     Receipt::Navigated {
                         surface_id,
@@ -1624,9 +1758,33 @@ mod tests {
         let req = parse_line("focus").unwrap();
         assert_eq!(req.command, Command::Focus);
 
+        assert_eq!(
+            parse_line("hide").unwrap().command,
+            Command::SetVisibility { visible: false }
+        );
+        assert_eq!(
+            parse_line("show").unwrap().command,
+            Command::SetVisibility { visible: true }
+        );
+
         let req = parse_line("rev 8 focus").unwrap();
         assert_eq!(req.expected_revision, Some(8));
         assert_eq!(req.command, Command::Focus);
+
+        assert_eq!(
+            parse_line("display-target all").unwrap().command,
+            Command::SetDisplayTarget {
+                target: DisplayTarget::All
+            }
+        );
+        assert_eq!(
+            parse_line("display-target left right").unwrap().command,
+            Command::SetDisplayTarget {
+                target: DisplayTarget::Exact {
+                    display_ids: vec!["left".into(), "right".into()]
+                }
+            }
+        );
 
         let req = parse_line("move 0 25 1920 1150").unwrap();
         match req.command {
@@ -1712,6 +1870,25 @@ mod tests {
         assert!(parse_line("").is_err());
         assert!(parse_line("# just a comment").is_err());
         assert!(parse_line("bogus").is_err());
+    }
+
+    #[test]
+    fn overlay_policy_round_trips_as_a_bounded_control_command() {
+        let overlays = OverlaySettings::default();
+        let request = ControlRequest {
+            schema_version: CONTROL_VERSION,
+            request_id: "overlay-policy".into(),
+            expected_revision: Some(4),
+            command: Command::SetOverlays { overlays },
+        };
+        request.validate().unwrap();
+        let json = serde_json::to_string(&request).unwrap();
+        let decoded: ControlRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, request);
+        assert_eq!(
+            serde_json::to_value(overlays).unwrap()["shortcut_help"],
+            "center"
+        );
     }
 
     #[test]

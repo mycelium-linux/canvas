@@ -2,10 +2,11 @@ use base64::Engine as _;
 use dock_canvas::chart::{ChartDocument, ChartKind};
 use dock_canvas::control::{
     CONTROL_VERSION, Command, ContentKind, ControlReply, ControlRequest, ErrorCode,
-    MAX_ACTIVE_INDICATORS, MAX_CONTROL_MESSAGE, MeshSnapshot, Navigation, Outcome, PresencePreview,
-    PresenceSnapshot, ProjectWorkspaceSnapshot, Receipt, RuntimeSnapshot, ScreensaverSettings,
-    ScreensaverSnapshot, StatusIndicator, SurfaceSnapshot,
+    MAX_ACTIVE_INDICATORS, MAX_CONTROL_MESSAGE, MeshSnapshot, Navigation, Outcome, OverlaySettings,
+    OverlayTarget, PresencePreview, PresenceSnapshot, ProjectWorkspaceSnapshot, Receipt,
+    RuntimeSnapshot, ScreensaverSettings, ScreensaverSnapshot, StatusIndicator, SurfaceSnapshot,
 };
+use dock_canvas::display::{DisplayInfo, DisplayTopology};
 use dock_canvas::hud;
 use dock_canvas::interaction::{
     HitRegion, InteractionConfig, InteractionEngine, InteractionIntent, LogicalPoint, LogicalRect,
@@ -21,6 +22,7 @@ use dock_canvas::{
     PatchOperation, Placement, SCHEMA_VERSION, Scene, SceneNode, Surface, SurfaceChrome,
     SurfaceContent, SurfaceTitleMode, ThemeRef, WorkspaceDocument, WorkspacePatch,
 };
+use dock_core::global_hotkey::{GlobalHotkey, HotkeySpec};
 use dock_core::{Catalog, ProjectTheme, ThemePalette, desktop::WallpaperRequest, layout::Rect};
 use iced::mouse;
 use iced::widget::canvas::{Canvas, Geometry};
@@ -74,6 +76,10 @@ const SURFACE_CONTROL_HIT_SIZE: f64 = 18.0;
 const SURFACE_CONTROL_INSET: f64 = 4.0;
 const SURFACE_RESIZE_HANDLE_SIZE: f64 = 10.0;
 const SURFACE_TOP_BAR_GRAB_WIDTH: f64 = 72.0;
+const CANVAS_TOGGLE_KEYS: &str = "Ctrl-Option-C";
+const JARVIS_TOGGLE_KEYS: &str = "Ctrl-Option-J";
+const SHORTCUT_HELP_KEYS: &str = "Ctrl-Option-?";
+const FOCUSED_HELP_KEYS: &str = "?";
 
 #[derive(Debug, Clone)]
 struct Pending {
@@ -126,6 +132,9 @@ enum ContentSource {
     Stream {
         url: String,
     },
+    Widget {
+        spec: dock_widgets::WidgetSpec,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -158,10 +167,10 @@ struct LoadedBackground {
 enum Message {
     Tick,
     WindowReady(iced::window::Id),
-    WindowEvent(iced::window::Event),
-    MouseEvent(iced::mouse::Event),
+    WindowEvent(iced::window::Id, iced::window::Event),
+    MouseEvent(iced::window::Id, iced::mouse::Event),
     RestoreSurface(String),
-    ScaleFactorChanged(f32),
+    ScaleFactorChanged(iced::window::Id, f32),
     ContentLoaded {
         pending: Box<Pending>,
         result: Box<ContentLoadResult>,
@@ -251,10 +260,19 @@ struct App {
     runtime_revision: u64,
     frame: Rect,
     display_frames: Vec<Rect>,
+    displays: Vec<DisplayInfo>,
+    selected_display_ids: Vec<String>,
+    canvas_visible: bool,
+    overlays: OverlaySettings,
+    visibility_hotkey: Option<GlobalHotkey>,
+    shortcuts_hotkey: Option<GlobalHotkey>,
+    jarvis_hotkey: Option<GlobalHotkey>,
+    shortcuts_visible: bool,
+    jarvis_visible: bool,
     scale_factor: f64,
     receiver: PendingReceiver,
     _socket: SocketGuard,
-    window: Option<iced::window::Id>,
+    windows: BTreeMap<iced::window::Id, Rect>,
     decoded: BTreeMap<String, RuntimeSurface>,
     indicators: BTreeMap<String, StatusIndicator>,
     mesh: Option<MeshSnapshot>,
@@ -270,6 +288,8 @@ struct App {
     status: String,
     interaction: InteractionEngine,
     cursor: Option<LogicalPoint>,
+    cursor_window: Option<iced::window::Id>,
+    desktop_focused: bool,
     primary_pointer_down: bool,
     minimized_surfaces: BTreeSet<String>,
     maximized_surfaces: BTreeSet<String>,
@@ -279,7 +299,6 @@ struct App {
     active_project_workspace: Option<String>,
     background_assets: BTreeMap<String, iced::widget::image::Handle>,
     events: Vec<String>,
-    presence_orb_visible: bool,
     screensaver_settings: ScreensaverSettings,
     screensaver_clock: screensaver::FrameClock,
     screensaver_index: usize,
@@ -310,6 +329,53 @@ impl App {
         let active_project_workspace = restored_document
             .as_ref()
             .map(|document| document.project_id.clone());
+        let displays = platform::displays().unwrap_or_default();
+        let display_frames = displays.iter().map(|display| display.frame).collect();
+        let selected_display_ids = displays
+            .iter()
+            .find(|display| display.frame == frame)
+            .map(|display| vec![display.id.clone()])
+            .unwrap_or_default();
+        let mut shortcut_errors = Vec::new();
+        let visibility_hotkey = match GlobalHotkey::register(HotkeySpec {
+            signature: *b"Cnvs",
+            id: 1,
+            key_code: 0x08,                   // kVK_ANSI_C
+            modifiers: (1 << 11) | (1 << 12), // optionKey | controlKey
+            label: CANVAS_TOGGLE_KEYS,
+        }) {
+            Ok(hotkey) => Some(hotkey),
+            Err(error) => {
+                shortcut_errors.push(error);
+                None
+            }
+        };
+        let shortcuts_hotkey = match GlobalHotkey::register(HotkeySpec {
+            signature: *b"Cnvs",
+            id: 2,
+            key_code: 0x2c,                              // kVK_ANSI_Slash
+            modifiers: (1 << 9) | (1 << 11) | (1 << 12), // shift | option | control
+            label: SHORTCUT_HELP_KEYS,
+        }) {
+            Ok(hotkey) => Some(hotkey),
+            Err(error) => {
+                shortcut_errors.push(error);
+                None
+            }
+        };
+        let jarvis_hotkey = match GlobalHotkey::register(HotkeySpec {
+            signature: *b"Cnvs",
+            id: 3,
+            key_code: 0x26,                   // kVK_ANSI_J
+            modifiers: (1 << 11) | (1 << 12), // optionKey | controlKey
+            label: JARVIS_TOGGLE_KEYS,
+        }) {
+            Ok(hotkey) => Some(hotkey),
+            Err(error) => {
+                shortcut_errors.push(error);
+                None
+            }
+        };
         let mut app = Self {
             catalog,
             document: restored_document.unwrap_or_else(|| WorkspaceDocument {
@@ -327,11 +393,20 @@ impl App {
             }),
             runtime_revision: 1,
             frame,
-            display_frames: platform::display_frames().unwrap_or_default(),
+            display_frames,
+            displays,
+            selected_display_ids,
+            canvas_visible: true,
+            overlays: OverlaySettings::default(),
+            visibility_hotkey,
+            shortcuts_hotkey,
+            jarvis_hotkey,
+            shortcuts_visible: false,
+            jarvis_visible: true,
             scale_factor: 1.0,
             receiver,
             _socket: socket,
-            window: None,
+            windows: BTreeMap::new(),
             decoded: BTreeMap::new(),
             indicators: BTreeMap::new(),
             mesh: None,
@@ -356,9 +431,18 @@ impl App {
             metrics_last: Instant::now(),
             system: sysinfo::System::new(),
             networks: sysinfo::Networks::new(),
-            status: "Canvas is ready for socket commands.".into(),
+            status: if shortcut_errors.is_empty() {
+                "Canvas is ready; Ctrl+Option+C toggles its displays.".into()
+            } else {
+                format!(
+                    "Canvas is ready; unavailable shortcut(s): {}",
+                    shortcut_errors.join("; ")
+                )
+            },
             interaction: interaction_engine(frame),
             cursor: None,
+            cursor_window: None,
+            desktop_focused: false,
             primary_pointer_down: false,
             minimized_surfaces: BTreeSet::new(),
             maximized_surfaces: BTreeSet::new(),
@@ -368,7 +452,6 @@ impl App {
             active_project_workspace,
             events: Vec::new(),
             background_assets: BTreeMap::new(),
-            presence_orb_visible: true,
             screensaver_settings: ScreensaverSettings::default(),
             screensaver_clock: screensaver::FrameClock::new(
                 ScreensaverSettings::default().max_fps,
@@ -451,6 +534,18 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick => {
+                let toggle_visibility = self
+                    .visibility_hotkey
+                    .as_ref()
+                    .is_some_and(GlobalHotkey::poll_pressed);
+                let toggle_shortcuts = self
+                    .shortcuts_hotkey
+                    .as_ref()
+                    .is_some_and(GlobalHotkey::poll_pressed);
+                let toggle_jarvis = self
+                    .jarvis_hotkey
+                    .as_ref()
+                    .is_some_and(GlobalHotkey::poll_pressed);
                 if self.metrics_last.elapsed() >= METRICS_REFRESH {
                     self.refresh_metrics();
                 }
@@ -463,35 +558,61 @@ impl App {
                     self.bump();
                 }
                 self.refresh_terminal();
-                self.drain_commands()
+                let mut tasks = vec![self.drain_commands()];
+                if toggle_visibility {
+                    tasks.push(self.set_canvas_visible(!self.canvas_visible));
+                }
+                if toggle_shortcuts {
+                    tasks.push(self.toggle_shortcut_help());
+                }
+                if toggle_jarvis {
+                    self.jarvis_visible = !self.jarvis_visible;
+                    self.bump();
+                    self.emit_event(format!(
+                        "jarvis_overlay {}",
+                        if self.jarvis_visible {
+                            "shown"
+                        } else {
+                            "hidden"
+                        }
+                    ));
+                }
+                Task::batch(tasks)
             }
             Message::WindowReady(window) => {
-                self.window = Some(window);
                 if let Err(error) = platform::make_windows_shareable() {
                     self.status = format!("Canvas capture setup failed: {error}");
                     eprintln!("{}", self.status);
                 }
+                let frame = self.windows.get(&window).copied().unwrap_or(self.frame);
                 iced::window::set_mode(window, iced::window::Mode::Windowed)
                     .chain(iced::window::move_to(
                         window,
-                        Point::new(self.frame.x as f32, self.frame.y as f32),
+                        Point::new(frame.x as f32, frame.y as f32),
                     ))
                     .chain(iced::window::resize(
                         window,
-                        Size::new(self.frame.width as f32, self.frame.height as f32),
+                        Size::new(frame.width as f32, frame.height as f32),
                     ))
-                    .chain(iced::window::scale_factor(window).map(Message::ScaleFactorChanged))
+                    .chain(
+                        iced::window::scale_factor(window)
+                            .map(move |scale| Message::ScaleFactorChanged(window, scale)),
+                    )
             }
-            Message::WindowEvent(event) => {
+            Message::WindowEvent(window, event) => {
                 let mut metrics_changed = false;
                 match event {
                     iced::window::Event::Moved(point) => {
-                        self.frame.x = point.x.round() as i32;
-                        self.frame.y = point.y.round() as i32;
+                        if let Some(frame) = self.windows.get_mut(&window) {
+                            frame.x = point.x.round() as i32;
+                            frame.y = point.y.round() as i32;
+                        }
                     }
                     iced::window::Event::Resized(size) => {
-                        self.frame.width = size.width.round().max(1.0) as u32;
-                        self.frame.height = size.height.round().max(1.0) as u32;
+                        if let Some(frame) = self.windows.get_mut(&window) {
+                            frame.width = size.width.round().max(1.0) as u32;
+                            frame.height = size.height.round().max(1.0) as u32;
+                        }
                         metrics_changed = true;
                     }
                     iced::window::Event::Rescaled(scale) => {
@@ -508,12 +629,13 @@ impl App {
                 }
                 Task::none()
             }
-            Message::MouseEvent(event) => {
-                self.handle_mouse(event);
+            Message::MouseEvent(window, event) => {
+                self.handle_mouse(window, event);
                 Task::none()
             }
             Message::RestoreSurface(surface_id) => {
                 if self.minimized_surfaces.remove(&surface_id) {
+                    self.desktop_focused = false;
                     self.start_transition();
                     let revision = self.runtime_revision;
                     self.apply_interaction_intents(vec![
@@ -532,7 +654,7 @@ impl App {
                 }
                 Task::none()
             }
-            Message::ScaleFactorChanged(scale) => {
+            Message::ScaleFactorChanged(_window, scale) => {
                 self.scale_factor = f64::from(scale);
                 self.replan_rasters();
                 Task::none()
@@ -545,6 +667,12 @@ impl App {
                 Task::none()
             }
             Message::TerminalInput(kbd_event) => {
+                if self.desktop_focused && shortcut_help_requested(&kbd_event) {
+                    return self.toggle_shortcut_help();
+                }
+                if let Some(direction) = workspace_cycle_direction(&kbd_event) {
+                    return self.cycle_project_workspace(direction);
+                }
                 #[allow(clippy::collapsible_if)]
                 if let Some(surface) = self
                     .document
@@ -753,6 +881,109 @@ impl App {
         Task::batch(pending.into_iter().map(|pending| self.execute(pending)))
     }
 
+    fn replace_host_windows(&mut self, frames: impl IntoIterator<Item = Rect>) -> Task<Message> {
+        let mut tasks = self
+            .windows
+            .keys()
+            .copied()
+            .map(iced::window::close)
+            .collect::<Vec<Task<Message>>>();
+        self.windows.clear();
+        for frame in frames {
+            let (window, open) = iced::window::open(canvas_window_settings(frame));
+            self.windows.insert(window, frame);
+            tasks.push(open.map(Message::WindowReady));
+        }
+        Task::batch(tasks)
+    }
+
+    fn selected_display_frames(&self) -> Vec<Rect> {
+        let frames = self
+            .selected_display_ids
+            .iter()
+            .filter_map(|id| self.displays.iter().find(|display| display.id == *id))
+            .map(|display| display.frame)
+            .collect::<Vec<_>>();
+        if frames.is_empty() {
+            vec![self.frame]
+        } else {
+            frames
+        }
+    }
+
+    fn cycle_project_workspace(&mut self, direction: i32) -> Task<Message> {
+        let projects = self
+            .workspaces
+            .project_ids()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if projects.len() < 2 {
+            self.status = "No other project workspace is available.".into();
+            return Task::none();
+        }
+        let current = projects
+            .iter()
+            .position(|project| project == &self.document.project_id)
+            .unwrap_or(0) as i32;
+        let next = (current + direction).rem_euclid(projects.len() as i32) as usize;
+        let (reply, _replies) = mpsc::sync_channel(1);
+        self.execute(Pending {
+            request: ControlRequest {
+                schema_version: CONTROL_VERSION,
+                request_id: "key-workspace".into(),
+                expected_revision: Some(self.runtime_revision),
+                command: Command::WorkspaceSwitch {
+                    name: projects[next].clone(),
+                },
+            },
+            reply,
+        })
+    }
+
+    fn set_canvas_visible(&mut self, visible: bool) -> Task<Message> {
+        if self.canvas_visible == visible {
+            return Task::none();
+        }
+        self.canvas_visible = visible;
+        self.bump();
+        self.emit_event(format!(
+            "canvas_visibility {}",
+            if visible { "shown" } else { "hidden" }
+        ));
+        if visible {
+            self.status = "Canvas is visible on its selected displays.".into();
+            self.replace_host_windows(self.selected_display_frames())
+        } else {
+            self.status = "Canvas is hidden; Ctrl+Option+C restores it.".into();
+            let tasks = self
+                .windows
+                .keys()
+                .copied()
+                .map(iced::window::close)
+                .collect::<Vec<Task<Message>>>();
+            self.windows.clear();
+            Task::batch(tasks)
+        }
+    }
+
+    fn toggle_shortcut_help(&mut self) -> Task<Message> {
+        self.shortcuts_visible = !self.shortcuts_visible;
+        self.bump();
+        self.emit_event(format!(
+            "shortcut_help {}",
+            if self.shortcuts_visible {
+                "shown"
+            } else {
+                "hidden"
+            }
+        ));
+        if self.shortcuts_visible && !self.canvas_visible {
+            self.set_canvas_visible(true)
+        } else {
+            Task::none()
+        }
+    }
+
     fn execute(&mut self, pending: Pending) -> Task<Message> {
         if let Err(message) = pending.request.validate() {
             self.fail(pending, Failure::invalid(message));
@@ -954,6 +1185,12 @@ impl App {
                     return Task::none();
                 }
                 self.frame = frame;
+                self.selected_display_ids = self
+                    .displays
+                    .iter()
+                    .find(|display| display.frame == frame)
+                    .map(|display| vec![display.id.clone()])
+                    .unwrap_or_default();
                 if self.interaction.captured_pointer().is_none() {
                     self.interaction = interaction_engine(frame);
                 }
@@ -969,17 +1206,83 @@ impl App {
                         receipt: Receipt::FrameSet { frame },
                     },
                 );
-                self.window.map_or_else(Task::none, |window| {
-                    iced::window::set_mode(window, iced::window::Mode::Windowed)
-                        .chain(iced::window::move_to(
-                            window,
-                            Point::new(frame.x as f32, frame.y as f32),
-                        ))
-                        .chain(iced::window::resize(
-                            window,
-                            Size::new(frame.width as f32, frame.height as f32),
-                        ))
-                })
+                if self.canvas_visible {
+                    self.replace_host_windows([frame])
+                } else {
+                    Task::none()
+                }
+            }
+            Command::SetDisplayTarget { target } => {
+                let topology = match DisplayTopology::new(self.displays.clone()) {
+                    Ok(topology) => topology,
+                    Err(error) => {
+                        self.fail(pending, Failure::platform(error));
+                        return Task::none();
+                    }
+                };
+                let resolved = match topology.resolve(&target) {
+                    Ok(resolved) => resolved,
+                    Err(error) => {
+                        self.fail(pending, Failure::invalid(error));
+                        return Task::none();
+                    }
+                };
+                let frames = resolved
+                    .display_ids
+                    .iter()
+                    .filter_map(|id| topology.get(id).map(|display| display.frame))
+                    .collect::<Vec<_>>();
+                self.frame = resolved.frame;
+                self.selected_display_ids = resolved.display_ids.clone();
+                if self.interaction.captured_pointer().is_none() {
+                    self.interaction = interaction_engine(self.frame);
+                }
+                self.replan_rasters();
+                self.bump();
+                self.status = format!(
+                    "Canvas spans {} connected display(s) at {},{} {}x{}.",
+                    resolved.display_ids.len(),
+                    resolved.frame.x,
+                    resolved.frame.y,
+                    resolved.frame.width,
+                    resolved.frame.height
+                );
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::DisplayTargetSet {
+                            display_ids: resolved.display_ids,
+                            frame: resolved.frame,
+                        },
+                    },
+                );
+                if self.canvas_visible {
+                    self.replace_host_windows(frames)
+                } else {
+                    Task::none()
+                }
+            }
+            Command::SetOverlays { overlays } => {
+                self.overlays = overlays;
+                self.bump();
+                self.status = "Updated Canvas overlay placement.".into();
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::OverlaysSet { overlays },
+                    },
+                );
+                Task::none()
+            }
+            Command::SetVisibility { visible } => {
+                let task = self.set_canvas_visible(visible);
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::VisibilitySet { visible },
+                    },
+                );
+                task
             }
             Command::Focus => {
                 self.bump();
@@ -990,8 +1293,7 @@ impl App {
                         receipt: Receipt::Focused,
                     },
                 );
-                self.window
-                    .map_or_else(Task::none, iced::window::gain_focus)
+                Task::batch(self.windows.keys().copied().map(iced::window::gain_focus))
             }
             Command::Navigate { surface_id, target } => {
                 let Some(surface) = self.decoded.get(&surface_id) else {
@@ -1500,6 +1802,115 @@ impl App {
                 );
                 Task::none()
             }
+            Command::OpenWidget {
+                surface_id,
+                spec_path,
+            } => match dock_widgets::WidgetSpec::from_file(&spec_path) {
+                Ok(spec) => {
+                    let title = format!("Widget: {}", spec.id);
+                    let snapshot = SurfaceSnapshot {
+                        id: surface_id.clone(),
+                        title: title.clone(),
+                        content: ContentKind::Widget,
+                        asset_sha256: None,
+                        page_index: None,
+                        page_count: None,
+                        source_pixels: None,
+                        rendered_pixels: None,
+                        display_logical: None,
+                        scale_factor: None,
+                    };
+                    let runtime = RuntimeSurface {
+                        snapshot: snapshot.clone(),
+                        source: ContentSource::Widget { spec },
+                        handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
+                        source_pixels: [1, 1],
+                        media_plan: MediaPlan {
+                            viewport_logical: LogicalSize {
+                                width: 1920.0,
+                                height: 1080.0,
+                            },
+                            source_dimensions: SourceDimensions::RasterPixels(PixelSize {
+                                width: 1,
+                                height: 1,
+                            }),
+                            target_px: PixelSize {
+                                width: 1,
+                                height: 1,
+                            },
+                            display_logical: LogicalSize {
+                                width: 1920.0,
+                                height: 1080.0,
+                            },
+                            scale_factor: 1.0,
+                            cache_key: MediaCacheKey {
+                                source_id: format!("widget:{surface_id}"),
+                                variant: MediaVariant::Raster,
+                                pixel_size: PixelSize {
+                                    width: 1,
+                                    height: 1,
+                                },
+                            },
+                        },
+                        upload_pixels: [1, 1],
+                    };
+                    self.decoded.insert(surface_id.clone(), runtime);
+                    self.start_transition();
+                    if !self.document.surfaces.iter().any(|s| s.id == surface_id) {
+                        self.document.surfaces.push(Surface {
+                            id: surface_id.clone(),
+                            title,
+                            content: SurfaceContent::ProjectResource {
+                                resource_id: format!("widget:{}", surface_id),
+                            },
+                            inputs: Vec::new(),
+                        });
+                        let mut placements = match &self.document.layout {
+                            Layout::Canvas { placements } => placements.clone(),
+                            Layout::Surface { surface_id: sid } => {
+                                vec![Placement {
+                                    surface_id: sid.clone(),
+                                    bounds: NormalizedRect {
+                                        x: 0.0,
+                                        y: 0.0,
+                                        width: 1.0,
+                                        height: 1.0,
+                                    },
+                                    layer: 0,
+                                }]
+                            }
+                            _ => Vec::new(),
+                        };
+                        if !placements.iter().any(|p| p.surface_id == surface_id) {
+                            placements.push(Placement {
+                                surface_id: surface_id.clone(),
+                                bounds: NormalizedRect {
+                                    x: 0.0,
+                                    y: 0.0,
+                                    width: 1.0,
+                                    height: 1.0,
+                                },
+                                layer: placements.len() as i32,
+                            });
+                        }
+                        self.document.layout = Layout::Canvas { placements };
+                    }
+                    self.bump();
+                    self.emit_event(format!("widget_opened {surface_id}"));
+                    self.status = format!("Opened widget surface {surface_id}.");
+                    self.answer(
+                        pending,
+                        Outcome::Ok {
+                            receipt: Receipt::SurfaceOpened { surface: snapshot },
+                        },
+                    );
+                    Task::none()
+                }
+                Err(error) => {
+                    self.fail(pending, Failure::invalid(error.0));
+                    Task::none()
+                }
+            },
             Command::OpenDataViz {
                 surface_id,
                 file,
@@ -1846,6 +2257,10 @@ impl App {
             maximized_surface_ids: self.maximized_surfaces.iter().cloned().collect(),
             events: self.events.clone(),
             display_frames: self.display_frames.clone(),
+            displays: self.displays.clone(),
+            selected_display_ids: self.selected_display_ids.clone(),
+            overlays: self.overlays,
+            visible: self.canvas_visible,
         }
     }
 
@@ -1856,12 +2271,19 @@ impl App {
         }
     }
 
-    fn handle_mouse(&mut self, event: iced::mouse::Event) {
+    fn handle_mouse(&mut self, window: iced::window::Id, event: iced::mouse::Event) {
         use iced::mouse::{Button, Event};
+
+        let viewport = self.windows.get(&window).copied().unwrap_or(self.frame);
+        let offset = LogicalPoint {
+            x: f64::from(viewport.x - self.frame.x),
+            y: f64::from(viewport.y - self.frame.y),
+        };
 
         if let Event::ButtonPressed(Button::Left) = &event
             && let Some((surface_id, action)) = self.hit_test_surface_control()
         {
+            self.desktop_focused = false;
             match action {
                 WindowAction::Close => {
                     if self.document.surfaces.iter().any(|s| s.id == surface_id) {
@@ -1905,9 +2327,10 @@ impl App {
         let phase = match event {
             Event::CursorMoved { position } => {
                 self.cursor = Some(LogicalPoint {
-                    x: f64::from(position.x),
-                    y: f64::from(position.y),
+                    x: f64::from(position.x) + offset.x,
+                    y: f64::from(position.y) + offset.y,
                 });
+                self.cursor_window = Some(window);
                 self.primary_pointer_down.then_some(PointerPhase::Move)
             }
             Event::ButtonPressed(Button::Left) => {
@@ -1918,8 +2341,11 @@ impl App {
                 self.primary_pointer_down = false;
                 Some(PointerPhase::Release)
             }
-            Event::CursorLeft if !self.primary_pointer_down => {
+            Event::CursorLeft
+                if !self.primary_pointer_down && self.cursor_window == Some(window) =>
+            {
                 self.cursor = None;
+                self.cursor_window = None;
                 None
             }
             _ => None,
@@ -1936,7 +2362,12 @@ impl App {
             },
             &surfaces,
         ) {
-            Ok(intents) => self.apply_interaction_intents(intents),
+            Ok(intents) => {
+                if phase == PointerPhase::Press {
+                    self.desktop_focused = intents.is_empty();
+                }
+                self.apply_interaction_intents(intents);
+            }
             Err(error) => self.status = format!("Canvas pointer rejected: {error}"),
         }
     }
@@ -2029,7 +2460,10 @@ impl App {
         None
     }
 
-    fn pointer_interaction(&self) -> mouse::Interaction {
+    fn pointer_interaction(&self, window: iced::window::Id) -> mouse::Interaction {
+        if self.cursor_window != Some(window) {
+            return mouse::Interaction::None;
+        }
         if self.hit_test_surface_control().is_some() {
             return mouse::Interaction::Pointer;
         }
@@ -2056,6 +2490,7 @@ impl App {
         for intent in intents {
             match intent {
                 InteractionIntent::Focus { surface_id } => {
+                    self.desktop_focused = false;
                     if self.document.focused_surface_id.as_ref() != Some(&surface_id) {
                         self.document.focused_surface_id = Some(surface_id);
                         changed = true;
@@ -2412,6 +2847,10 @@ impl App {
                 .height(Length::Fill)
                 .into()
             }
+            ContentSource::Widget { spec } => {
+                let palette = self.presented_palette();
+                dock_widgets::live::element(spec, &palette)
+            }
             _ => image_widget(surface.handle.clone())
                 .content_fit(ContentFit::Contain)
                 .width(width)
@@ -2651,7 +3090,10 @@ impl App {
         )
     }
 
-    fn view(&self) -> Element<'_, Message> {
+    fn view(&self, window: iced::window::Id) -> Element<'_, Message> {
+        let viewport = self.windows.get(&window).copied().unwrap_or(self.frame);
+        let viewport_x = f64::from(viewport.x - self.frame.x);
+        let viewport_y = f64::from(viewport.y - self.frame.y);
         let palette = self.presented_palette();
         let background: iced::Background = if self.screensaver_settings.enabled {
             Color::TRANSPARENT.into()
@@ -2716,6 +3158,18 @@ impl App {
                                 self.document.chrome,
                             )
                         };
+                        let bounds = LogicalRect {
+                            x: bounds.x - viewport_x,
+                            y: bounds.y - viewport_y,
+                            ..bounds
+                        };
+                        if bounds.right() <= 0.0
+                            || bounds.bottom() <= 0.0
+                            || bounds.x >= f64::from(viewport.width)
+                            || bounds.y >= f64::from(viewport.height)
+                        {
+                            return None;
+                        }
                         let content = self.surface_widget(
                             surface,
                             Length::Fill,
@@ -2849,7 +3303,7 @@ impl App {
             layers.push(dock);
         }
 
-        if self.presence_orb_visible {
+        if self.jarvis_visible && self.overlay_on_viewport(self.overlays.presence_orb, viewport) {
             let palette = self.presented_palette();
             let orb_color = match &self.presence {
                 Some(p) if p.occupied => Color::from_rgba8(34, 197, 94, 0.85),
@@ -2924,7 +3378,7 @@ impl App {
             );
         }
 
-        if self.is_leftmost_surface() {
+        if self.overlay_on_viewport(self.overlays.fpl_mark, viewport) {
             let signature = container(text("FPL").size(13).color(Color::WHITE))
                 .padding([8, 12])
                 .style(move |_| container::Style {
@@ -2985,13 +3439,19 @@ impl App {
             voice: color(palette.warning),
             warning: color(palette.danger),
         };
-        if let Some(snapshot) = self.presence.as_ref() {
+        if self.jarvis_visible
+            && self.overlay_on_viewport(self.overlays.presence_rail, viewport)
+            && let Some(snapshot) = self.presence.as_ref()
+        {
             let stale = self.presence_received.is_none_or(|received| {
                 received.elapsed() >= Duration::from_millis(snapshot.expires_after_ms)
             });
             layers.push(presence::rail(snapshot, stale, presence_palette));
         }
-        if let Some(preview) = self.presence_preview.as_ref() {
+        if self.jarvis_visible
+            && self.overlay_on_viewport(self.overlays.presence_preview, viewport)
+            && let Some(preview) = self.presence_preview.as_ref()
+        {
             layers.push(presence::preview(
                 presence::Preview {
                     value: &preview.value,
@@ -3007,28 +3467,40 @@ impl App {
             .as_ref()
             .map(|mesh| mesh.nodes.as_slice())
             .unwrap_or_default();
-        layers.push(hud::view(
-            &self.metrics,
-            mesh_nodes,
-            hud::HudPalette {
-                panel: Color {
-                    a: 0.94,
-                    ..surface_color
+        if self.overlay_on_viewport(self.overlays.system_hud, viewport) {
+            layers.push(hud::view(
+                &self.metrics,
+                mesh_nodes,
+                hud::HudPalette {
+                    panel: Color {
+                        a: 0.94,
+                        ..surface_color
+                    },
+                    border: border_color,
+                    text: text_color,
+                    muted,
+                    primary: color(palette.primary),
+                    success: color(palette.success),
+                    warning: color(palette.warning),
+                    danger: color(palette.danger),
                 },
-                border: border_color,
-                text: text_color,
+            ));
+        }
+
+        if self.shortcuts_visible && self.overlay_on_viewport(self.overlays.shortcut_help, viewport)
+        {
+            layers.push(shortcut_help(
+                surface_color,
+                border_color,
+                text_color,
                 muted,
-                primary: color(palette.primary),
-                success: color(palette.success),
-                warning: color(palette.warning),
-                danger: color(palette.danger),
-            },
-        ));
+            ));
+        }
 
         if self.screensaver_settings.enabled
             || matches!(self.document.background, Background::Shader { .. })
         {
-            let attribution_bottom = if self.is_leftmost_surface() {
+            let attribution_bottom = if self.overlay_on_viewport(self.overlays.fpl_mark, viewport) {
                 64.0
             } else {
                 18.0
@@ -3099,17 +3571,110 @@ impl App {
                     ..Default::default()
                 }),
         )
-        .interaction(self.pointer_interaction())
+        .interaction(self.pointer_interaction(window))
         .into()
     }
 
-    fn is_leftmost_surface(&self) -> bool {
-        self.display_frames
+    fn overlay_on_viewport(&self, target: OverlayTarget, viewport: Rect) -> bool {
+        let mut selected = self
+            .selected_display_ids
             .iter()
-            .map(|display| display.x)
-            .min()
-            .is_some_and(|leftmost| self.frame.x == leftmost)
+            .filter_map(|id| self.displays.iter().find(|display| display.id == *id))
+            .map(|display| display.frame);
+        match target {
+            OverlayTarget::Hidden => false,
+            OverlayTarget::All => true,
+            OverlayTarget::Leftmost => selected
+                .by_ref()
+                .map(|frame| frame.x)
+                .min()
+                .is_none_or(|x| viewport.x == x),
+            OverlayTarget::Center => {
+                let frames = selected.collect::<Vec<_>>();
+                if frames.is_empty() {
+                    true
+                } else {
+                    let left = frames
+                        .iter()
+                        .map(|frame| frame.x)
+                        .min()
+                        .unwrap_or(viewport.x);
+                    let right = frames
+                        .iter()
+                        .map(|frame| frame.x + frame.width as i32)
+                        .max()
+                        .unwrap_or(viewport.x + viewport.width as i32);
+                    let center = f64::from(left + right) / 2.0;
+                    frames
+                        .into_iter()
+                        .min_by(|first, second| {
+                            let first_center = f64::from(first.x) + f64::from(first.width) / 2.0;
+                            let second_center = f64::from(second.x) + f64::from(second.width) / 2.0;
+                            (first_center - center)
+                                .abs()
+                                .total_cmp(&(second_center - center).abs())
+                                .then_with(|| first.x.cmp(&second.x))
+                        })
+                        .is_none_or(|frame| frame == viewport)
+                }
+            }
+            OverlayTarget::Rightmost => selected
+                .map(|frame| frame.x)
+                .max()
+                .is_none_or(|x| viewport.x == x),
+        }
     }
+}
+
+fn shortcut_help<'a>(
+    surface: Color,
+    border: Color,
+    text_color: Color,
+    muted: Color,
+) -> Element<'a, Message> {
+    let title = text("KEYBOARD").size(13).color(muted);
+    let shortcuts = text(format!(
+        "Clipboard\n\
+         Ctrl-X                 Cut\n\
+         Ctrl-C                 Copy\n\
+         Ctrl-V                 Paste\n\
+         \n\
+         Workspaces\n\
+         Ctrl-↑ / Ctrl-↓        Swap project workspace\n\
+         Ctrl-← / Ctrl-→        Saved views (reserved)\n\
+         \n\
+         Canvas\n\
+         {CANVAS_TOGGLE_KEYS:<22} Toggle Canvas\n\
+         {JARVIS_TOGGLE_KEYS:<22} Toggle JARVIS presence\n\
+         {FOCUSED_HELP_KEYS:<22} Toggle Help (Canvas focused)\n\
+         {SHORTCUT_HELP_KEYS:<22} Toggle Help globally"
+    ))
+    .font(iced::Font::MONOSPACE)
+    .size(15)
+    .line_height(iced::widget::text::LineHeight::Relative(1.55))
+    .color(text_color);
+    let panel = container(column![title, shortcuts].spacing(14))
+        .width(Length::Fixed(620.0))
+        .padding(24)
+        .style(move |_| container::Style {
+            background: Some(Color { a: 0.97, ..surface }.into()),
+            border: iced::Border {
+                color: border,
+                width: 1.0,
+                radius: 14.0.into(),
+            },
+            shadow: iced::Shadow {
+                color: Color::from_rgba8(0, 0, 0, 0.42),
+                offset: iced::Vector::new(0.0, 14.0),
+                blur_radius: 44.0,
+            },
+            ..Default::default()
+        });
+    container(panel)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center(Length::Fill)
+        .into()
 }
 
 fn render_mermaid(source: &Path, surface_id: &str) -> Result<PathBuf, Failure> {
@@ -3160,6 +3725,37 @@ fn key_to_bytes(event: &iced::keyboard::Event) -> Vec<u8> {
         }
         _ => Vec::new(),
     }
+}
+
+fn workspace_cycle_direction(event: &iced::keyboard::Event) -> Option<i32> {
+    use iced::keyboard::{Event, Key, key::Named};
+    let Event::KeyPressed { key, modifiers, .. } = event else {
+        return None;
+    };
+    if !modifiers.control() || modifiers.alt() || modifiers.logo() {
+        return None;
+    }
+    match key {
+        Key::Named(Named::ArrowUp) => Some(-1),
+        Key::Named(Named::ArrowDown) => Some(1),
+        _ => None,
+    }
+}
+
+fn shortcut_help_requested(event: &iced::keyboard::Event) -> bool {
+    use iced::keyboard::Event;
+    matches!(
+        event,
+        Event::KeyPressed {
+            text: Some(text),
+            modifiers,
+            repeat: false,
+            ..
+        } if text.as_str() == "?"
+            && !modifiers.control()
+            && !modifiers.alt()
+            && !modifiers.logo()
+    )
 }
 
 fn load_terminal(
@@ -4238,6 +4834,7 @@ fn set_wallpaper(
 }
 
 mod platform {
+    use dock_canvas::display::DisplayInfo;
     use dock_core::desktop::WallpaperRequest;
     use dock_core::layout::Rect;
 
@@ -4260,13 +4857,27 @@ mod platform {
     }
 
     #[cfg(target_os = "macos")]
-    pub fn display_frames() -> Result<Vec<Rect>, String> {
+    pub fn displays() -> Result<Vec<DisplayInfo>, String> {
         match dock_control::request(dock_control::Operation::Displays)? {
-            dock_control::Response::Displays { displays } => {
-                Ok(displays.iter().map(canvas_frame).collect())
-            }
+            dock_control::Response::Displays { displays } => Ok(displays
+                .iter()
+                .map(|display| DisplayInfo {
+                    id: display.id.clone(),
+                    name: display.name.clone(),
+                    frame: canvas_frame(display),
+                    primary: display.primary,
+                })
+                .collect()),
             _ => Err("Dock Control did not return display geometry".into()),
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn display_frames() -> Result<Vec<Rect>, String> {
+        Ok(displays()?
+            .into_iter()
+            .map(|display| display.frame)
+            .collect())
     }
 
     #[cfg(target_os = "macos")]
@@ -4286,6 +4897,11 @@ mod platform {
     #[cfg(not(target_os = "macos"))]
     pub fn make_windows_shareable() -> Result<(), String> {
         Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn displays() -> Result<Vec<DisplayInfo>, String> {
+        Ok(Vec::new())
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -4540,8 +5156,8 @@ fn write_reply(stream: &mut impl Write, reply: &ControlReply) {
     }
 }
 
-fn daemon_view(app: &App, _window: iced::window::Id) -> Element<'_, Message> {
-    app.view()
+fn daemon_view(app: &App, window: iced::window::Id) -> Element<'_, Message> {
+    app.view(window)
 }
 
 fn daemon_theme(app: &App, _window: iced::window::Id) -> Theme {
@@ -4576,14 +5192,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("Canvas boot lock poisoned")
                 .take()
                 .expect("Canvas can only boot once");
-            let app = App::new(
+            let mut app = App::new(
                 Arc::clone(&boot_receiver),
                 socket,
                 initial_frame,
                 workspace_store_path.clone(),
             )
             .expect("Canvas project workspace store must remain valid");
-            let (_, open) = iced::window::open(canvas_window_settings(initial_frame));
+            let (window, open) = iced::window::open(canvas_window_settings(initial_frame));
+            app.windows.insert(window, initial_frame);
             (app, open.map(Message::WindowReady))
         },
         App::update,
@@ -4608,9 +5225,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         Subscription::batch([
             iced::time::every(cadence).map(|_| Message::Tick),
-            iced::event::listen_with(|event, _, _| match event {
-                iced::Event::Window(event) => Some(Message::WindowEvent(event)),
-                iced::Event::Mouse(event) => Some(Message::MouseEvent(event)),
+            iced::event::listen_with(|event, _, window| match event {
+                iced::Event::Window(event) => Some(Message::WindowEvent(window, event)),
+                iced::Event::Mouse(event) => Some(Message::MouseEvent(window, event)),
                 iced::Event::Keyboard(event) => Some(Message::TerminalInput(event)),
                 _ => None,
             }),
@@ -5268,6 +5885,179 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn display_target_opens_one_host_window_per_display_over_one_shared_frame() {
+        let mut app = test_app();
+        app.displays = (0..3)
+            .map(|index| DisplayInfo {
+                id: format!("display-{index}"),
+                name: format!("Display {index}"),
+                frame: Rect {
+                    x: index * 1_920,
+                    y: 0,
+                    width: 1_920,
+                    height: 1_200,
+                },
+                primary: index == 0,
+            })
+            .collect();
+        app.display_frames = app.displays.iter().map(|display| display.frame).collect();
+
+        let reply = execute(
+            &mut app,
+            "span-all",
+            Command::SetDisplayTarget {
+                target: dock_canvas::display::DisplayTarget::All,
+            },
+        );
+        assert!(matches!(
+            reply.outcome,
+            Outcome::Ok {
+                receipt: Receipt::DisplayTargetSet { .. }
+            }
+        ));
+        assert_eq!(app.windows.len(), 3);
+        assert_eq!(
+            app.frame,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 5_760,
+                height: 1_200,
+            }
+        );
+        assert_eq!(
+            app.snapshot().selected_display_ids,
+            ["display-0", "display-1", "display-2"]
+        );
+
+        let before = app.frame;
+        let rejected = execute(
+            &mut app,
+            "unknown-display",
+            Command::SetDisplayTarget {
+                target: dock_canvas::display::DisplayTarget::Exact {
+                    display_ids: vec!["missing".into()],
+                },
+            },
+        );
+        assert!(matches!(rejected.outcome, Outcome::Error { .. }));
+        assert_eq!(app.frame, before);
+    }
+
+    #[test]
+    fn overlays_anchor_to_the_selected_edge_displays() {
+        let mut app = test_app();
+        app.displays = vec![
+            DisplayInfo {
+                id: "left".into(),
+                name: "Left".into(),
+                frame: Rect {
+                    x: -1_920,
+                    y: 0,
+                    width: 1_920,
+                    height: 1_200,
+                },
+                primary: false,
+            },
+            DisplayInfo {
+                id: "middle".into(),
+                name: "Middle".into(),
+                frame: Rect {
+                    x: 0,
+                    y: 0,
+                    width: 1_920,
+                    height: 1_200,
+                },
+                primary: true,
+            },
+            DisplayInfo {
+                id: "right".into(),
+                name: "Right".into(),
+                frame: Rect {
+                    x: 1_920,
+                    y: 0,
+                    width: 1_920,
+                    height: 1_200,
+                },
+                primary: false,
+            },
+        ];
+        app.selected_display_ids = vec!["left".into(), "middle".into(), "right".into()];
+
+        assert!(app.overlay_on_viewport(OverlayTarget::Leftmost, app.displays[0].frame));
+        assert!(!app.overlay_on_viewport(OverlayTarget::Leftmost, app.displays[1].frame));
+        assert!(app.overlay_on_viewport(OverlayTarget::Rightmost, app.displays[2].frame));
+        assert!(!app.overlay_on_viewport(OverlayTarget::Rightmost, app.displays[1].frame));
+        assert!(app.overlay_on_viewport(OverlayTarget::Center, app.displays[1].frame));
+        assert!(!app.overlay_on_viewport(OverlayTarget::Center, app.displays[0].frame));
+        assert!(app.overlay_on_viewport(OverlayTarget::All, app.displays[1].frame));
+        assert!(!app.overlay_on_viewport(OverlayTarget::Hidden, app.displays[0].frame));
+    }
+
+    #[test]
+    fn plain_question_mark_opens_help_only_from_desktop_focus() {
+        use iced::keyboard::{Event, Key, Location, Modifiers, key};
+        let question = || Event::KeyPressed {
+            key: Key::Character("?".into()),
+            modified_key: Key::Character("?".into()),
+            physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+            location: Location::Standard,
+            modifiers: Modifiers::SHIFT,
+            text: Some("?".into()),
+            repeat: false,
+        };
+        let mut app = test_app();
+        app.desktop_focused = false;
+        drop(app.update(Message::TerminalInput(question())));
+        assert!(!app.shortcuts_visible);
+
+        app.desktop_focused = true;
+        drop(app.update(Message::TerminalInput(question())));
+        assert!(app.shortcuts_visible);
+    }
+
+    #[test]
+    fn canvas_visibility_closes_and_recreates_every_selected_host_window() {
+        let mut app = test_app();
+        app.displays = (0..3)
+            .map(|index| DisplayInfo {
+                id: format!("display-{index}"),
+                name: format!("Display {index}"),
+                frame: Rect {
+                    x: index * 1_920,
+                    y: 0,
+                    width: 1_920,
+                    height: 1_200,
+                },
+                primary: index == 0,
+            })
+            .collect();
+        app.selected_display_ids = vec!["display-0".into(), "display-1".into(), "display-2".into()];
+        drop(app.replace_host_windows(app.selected_display_frames()));
+        assert_eq!(app.windows.len(), 3);
+
+        let hidden = execute(&mut app, "hide", Command::SetVisibility { visible: false });
+        assert!(matches!(
+            hidden.outcome,
+            Outcome::Ok {
+                receipt: Receipt::VisibilitySet { visible: false }
+            }
+        ));
+        assert!(!app.snapshot().visible);
+        assert!(app.windows.is_empty());
+
+        let shown = execute(&mut app, "show", Command::SetVisibility { visible: true });
+        assert!(matches!(
+            shown.outcome,
+            Outcome::Ok {
+                receipt: Receipt::VisibilitySet { visible: true }
+            }
+        ));
+        assert!(app.snapshot().visible);
+        assert_eq!(app.windows.len(), 3);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn canvas_uses_complete_display_instead_of_reserving_system_chrome() {
@@ -5355,6 +6145,8 @@ mod tests {
     fn window_relative_pointer_focuses_and_promotes_on_a_nonzero_display_origin() {
         let mut app = test_app();
         app.frame.x = 3_840;
+        let window = iced::window::Id::unique();
+        app.windows.insert(window, app.frame);
         app.interaction = interaction_engine(app.frame);
         app.document.layout = Layout::Canvas {
             placements: vec![
@@ -5380,15 +6172,76 @@ mod tests {
                 },
             ],
         };
-        app.handle_mouse(iced::mouse::Event::CursorMoved {
-            position: Point::new(180.0, 180.0),
-        });
-        app.handle_mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left));
+        app.handle_mouse(
+            window,
+            iced::mouse::Event::CursorMoved {
+                position: Point::new(180.0, 180.0),
+            },
+        );
+        app.handle_mouse(
+            window,
+            iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+        );
         assert_eq!(app.document.focused_surface_id.as_deref(), Some("lower"));
         let Layout::Canvas { placements } = &app.document.layout else {
             panic!("expected Canvas layout");
         };
         assert!(placements[0].layer > placements[1].layer);
+    }
+
+    #[test]
+    fn pointer_on_second_display_uses_shared_virtual_desktop_coordinates() {
+        let mut app = test_app();
+        app.frame = Rect {
+            x: 0,
+            y: 0,
+            width: 3_840,
+            height: 1_200,
+        };
+        app.interaction = interaction_engine(app.frame);
+        let right = iced::window::Id::unique();
+        app.windows.insert(
+            right,
+            Rect {
+                x: 1_920,
+                y: 0,
+                width: 1_920,
+                height: 1_200,
+            },
+        );
+        app.document.layout = Layout::Canvas {
+            placements: vec![Placement {
+                surface_id: "right-surface".into(),
+                bounds: NormalizedRect {
+                    x: 0.5,
+                    y: 0.1,
+                    width: 0.3,
+                    height: 0.5,
+                },
+                layer: 0,
+            }],
+        };
+        app.handle_mouse(
+            right,
+            iced::mouse::Event::CursorMoved {
+                position: Point::new(200.0, 240.0),
+            },
+        );
+        app.handle_mouse(
+            right,
+            iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+        );
+        assert_eq!(
+            app.cursor,
+            Some(LogicalPoint {
+                x: 2_120.0,
+                y: 240.0
+            })
+        );
+        assert_eq!(
+            app.document.focused_surface_id.as_deref(),
+            Some("right-surface")
+        );
     }
 
     #[test]
@@ -5428,6 +6281,8 @@ mod tests {
     #[test]
     fn surface_controls_use_compact_standard_upper_left_hit_targets() {
         let mut app = test_app();
+        let window = iced::window::Id::unique();
+        app.windows.insert(window, app.frame);
         app.document.surfaces.push(Surface {
             id: "sample".into(),
             title: "Sample".into(),
@@ -5481,14 +6336,20 @@ mod tests {
             x: left + 44.0,
             y: top + 10.0,
         });
-        app.handle_mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left));
+        app.handle_mouse(
+            window,
+            iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+        );
         assert!(app.maximized_surfaces.contains("sample"));
         app.cursor = Some(LogicalPoint { x: 44.0, y: 10.0 });
         assert_eq!(
             app.hit_test_surface_control(),
             Some(("sample".into(), WindowAction::Maximize))
         );
-        app.handle_mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left));
+        app.handle_mouse(
+            window,
+            iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+        );
         assert!(!app.maximized_surfaces.contains("sample"));
         assert_eq!(app.document.layout, original_layout);
         assert_eq!(
