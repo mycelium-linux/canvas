@@ -1070,6 +1070,7 @@ mod tests {
             attention: None,
             navigation: crate::view::ViewNavigation::Page { index: 3 },
             parameters: BTreeMap::new(),
+            widgets: BTreeMap::new(),
         };
         control::RuntimeSnapshot {
             workspace_id: "workspace".into(),
