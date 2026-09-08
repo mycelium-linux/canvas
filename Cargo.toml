@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/dock-canvas", "crates/dock-core", "crates/dock-linux", "crates/dock-mac", "crates/dock-control"]
+members = ["crates/dock-canvas", "crates/dock-core", "crates/dock-linux", "crates/dock-mac", "crates/dock-control", "crates/dock-widgets"]
 default-members = ["crates/dock-core", "crates/dock-linux", "crates/dock-mac"]
 exclude = ["vendor/coherence-tokens"]
 resolver = "2"

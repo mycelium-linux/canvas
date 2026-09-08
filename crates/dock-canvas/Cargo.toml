@@ -13,6 +13,7 @@ mcp = ["dep:rmcp", "dep:schemars", "dep:tokio"]
 base64 = "0.22"
 csv = "1.4"
 dock-control = { path = "../dock-control" }
+dock-widgets = { path = "../dock-widgets", features = ["live"] }
 dock-core.workspace = true
 iced = { version = "0.14", default-features = false, features = ["wgpu", "tokio", "canvas", "image-without-codecs", "x11", "wayland", "markdown", "highlighter"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
