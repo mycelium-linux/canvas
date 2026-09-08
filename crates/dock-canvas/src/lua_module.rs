@@ -14,7 +14,11 @@ use super::{
 use dock_core::{Accent, ProjectTheme, ThemeMode};
 use mlua::{Lua, Table};
 use serde::{Deserialize, Serialize};
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+};
 
 pub const MODULE_SCHEMA_VERSION: u32 = 1;
 const MAX_DECLARATIONS: usize = 64;
@@ -62,6 +66,8 @@ pub enum InputKind {
     Boolean,
     Series,
     Status,
+    /// A topology with recency on it. See [`GraphSnapshot`].
+    Graph,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,7 +110,62 @@ pub enum ModuleInputValue {
     Boolean(bool),
     Series(Vec<SeriesPoint>),
     Status { level: StatusLevel, label: String },
+    Graph(GraphSnapshot),
 }
+
+/// A graph and how recently each part of it did something.
+///
+/// The shape exists because a live activity view is topology plus recency, not a
+/// stream of drawings: Elmers reads its structure once and the stream only says
+/// which node fired. Sending the structure every frame would put the whole shop
+/// on the wire many times a second to move one highlight.
+///
+/// `heat` is computed by the host, not decayed here, because a module cannot keep
+/// state — each invocation gets a fresh VM and only the resulting scene is
+/// retained. The host owns what is recent; the module owns what recent looks like.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphSnapshot {
+    pub nodes: Vec<GraphNode>,
+    #[serde(default)]
+    pub edges: Vec<GraphEdge>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphNode {
+    /// Namespaced by kind, the way Elmers uses `w:` for a workflow and `c:` for a
+    /// capability, so two owners can share one graph without colliding.
+    pub id: String,
+    pub label: String,
+    /// Which family this belongs to, for grouping and legends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// 0 for idle, 1 for just fired. Host-computed decay.
+    pub heat: f32,
+    /// What the last thing to happen here was, in the vocabulary the theme
+    /// already has semantic colours for.
+    #[serde(default = "neutral_level")]
+    pub level: StatusLevel,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphEdge {
+    pub from: String,
+    pub to: String,
+    /// A call travelling this edge, decaying the same way a node does.
+    pub heat: f32,
+}
+
+fn neutral_level() -> StatusLevel {
+    StatusLevel::Neutral
+}
+
+/// Ceilings. A view a person can read runs out long before these; they exist so a
+/// misbehaving source cannot make the renderer the failure.
+const MAX_GRAPH_NODES: usize = 512;
+const MAX_GRAPH_EDGES: usize = 2048;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -689,6 +750,34 @@ fn input_value_to_lua(lua: &Lua, value: &ModuleInputValue) -> Result<mlua::Value
             table.set("label", label.as_str()).map_err(lua_error)?;
             mlua::Value::Table(table)
         }
+        ModuleInputValue::Graph(graph) => {
+            let table = lua.create_table().map_err(lua_error)?;
+            let nodes = lua.create_table().map_err(lua_error)?;
+            for (index, node) in graph.nodes.iter().enumerate() {
+                let value = lua.create_table().map_err(lua_error)?;
+                value.set("id", node.id.as_str()).map_err(lua_error)?;
+                value.set("label", node.label.as_str()).map_err(lua_error)?;
+                value.set("heat", f64::from(node.heat)).map_err(lua_error)?;
+                value
+                    .set("level", node.level.wire_name())
+                    .map_err(lua_error)?;
+                if let Some(group) = &node.group {
+                    value.set("group", group.as_str()).map_err(lua_error)?;
+                }
+                nodes.set(index + 1, value).map_err(lua_error)?;
+            }
+            let edges = lua.create_table().map_err(lua_error)?;
+            for (index, edge) in graph.edges.iter().enumerate() {
+                let value = lua.create_table().map_err(lua_error)?;
+                value.set("from", edge.from.as_str()).map_err(lua_error)?;
+                value.set("to", edge.to.as_str()).map_err(lua_error)?;
+                value.set("heat", f64::from(edge.heat)).map_err(lua_error)?;
+                edges.set(index + 1, value).map_err(lua_error)?;
+            }
+            table.set("nodes", nodes).map_err(lua_error)?;
+            table.set("edges", edges).map_err(lua_error)?;
+            mlua::Value::Table(table)
+        }
     })
 }
 
@@ -897,6 +986,7 @@ impl ModuleInputValue {
             Self::Boolean(_) => InputKind::Boolean,
             Self::Series(_) => InputKind::Series,
             Self::Status { .. } => InputKind::Status,
+            Self::Graph(_) => InputKind::Graph,
         }
     }
 
@@ -914,6 +1004,36 @@ impl ModuleInputValue {
             ),
             Self::Status { label, .. } => {
                 ensure(visible(label), "Canvas Lua status label must be printable")
+            }
+            Self::Graph(graph) => {
+                ensure(
+                    graph.nodes.len() <= MAX_GRAPH_NODES && graph.edges.len() <= MAX_GRAPH_EDGES,
+                    "Canvas Lua graph exceeds its node or edge limit",
+                )?;
+                let mut node_ids = BTreeSet::new();
+                for node in &graph.nodes {
+                    ensure(
+                        identifier(&node.id)
+                            && visible(&node.label)
+                            && node.group.as_ref().is_none_or(|group| visible(group))
+                            && node.heat.is_finite()
+                            && (0.0..=1.0).contains(&node.heat)
+                            && node_ids.insert(node.id.as_str()),
+                        "Canvas Lua graph nodes require unique IDs, printable labels, and heat in 0..1",
+                    )?;
+                }
+                let mut edges = BTreeSet::new();
+                for edge in &graph.edges {
+                    ensure(
+                        node_ids.contains(edge.from.as_str())
+                            && node_ids.contains(edge.to.as_str())
+                            && edge.heat.is_finite()
+                            && (0.0..=1.0).contains(&edge.heat)
+                            && edges.insert((edge.from.as_str(), edge.to.as_str())),
+                        "Canvas Lua graph edges require known endpoints, unique pairs, and heat in 0..1",
+                    )?;
+                }
+                Ok(())
             }
         }
     }
@@ -997,6 +1117,72 @@ mod tests {
             &module.retained().scene.nodes[1].content,
             super::super::NodeContent::Text { text } if text == "███"
         ));
+    }
+
+    fn activity_graph() -> GraphSnapshot {
+        GraphSnapshot {
+            nodes: vec![
+                GraphNode {
+                    id: "workflow".into(),
+                    label: "Invoice workflow".into(),
+                    group: Some("workflows".into()),
+                    heat: 0.9,
+                    level: StatusLevel::Good,
+                },
+                GraphNode {
+                    id: "connector".into(),
+                    label: "MCP bridge".into(),
+                    group: Some("connectors".into()),
+                    heat: 0.6,
+                    level: StatusLevel::Warning,
+                },
+            ],
+            edges: vec![GraphEdge {
+                from: "workflow".into(),
+                to: "connector".into(),
+                heat: 0.7,
+            }],
+        }
+    }
+
+    #[test]
+    fn activity_graph_module_renders_host_owned_topology_and_recency() {
+        let manifest =
+            ModuleManifest::parse(include_str!("../examples/lua/activity-graph.json")).unwrap();
+        let module = LuaModule::load(
+            manifest,
+            include_str!("../examples/lua/activity-graph.lua"),
+            ModuleInputSnapshot {
+                revision: 7,
+                values: BTreeMap::from([(
+                    "graph".into(),
+                    ModuleInputValue::Graph(activity_graph()),
+                )]),
+            },
+            theme(),
+            BTreeMap::new(),
+            LuaSceneCapabilities::default(),
+            LuaSceneLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(module.retained().input_revision, 7);
+        assert!(module.retained().scene.nodes.len() >= 5);
+    }
+
+    #[test]
+    fn activity_graph_rejects_ambiguous_or_dangling_topology() {
+        let mut duplicate = activity_graph();
+        duplicate.nodes.push(duplicate.nodes[0].clone());
+        assert!(ModuleInputValue::Graph(duplicate).validate().is_err());
+
+        let mut dangling = activity_graph();
+        dangling.edges[0].to = "missing".into();
+        assert!(ModuleInputValue::Graph(dangling).validate().is_err());
+
+        let mut invalid_heat = activity_graph();
+        invalid_heat.nodes[0].heat = f32::NAN;
+        assert!(ModuleInputValue::Graph(invalid_heat).validate().is_err());
     }
 
     #[test]

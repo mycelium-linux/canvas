@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "activity-graph",
+  "title": "Live activity",
+  "inputs": [
+    { "id": "graph", "kind": "graph", "required": true }
+  ],
+  "capabilities": {
+    "write_scene": true,
+    "read_inputs": ["graph"],
+    "read_theme": true
+  }
+}
