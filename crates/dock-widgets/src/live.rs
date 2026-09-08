@@ -41,6 +41,17 @@ pub fn element<'a, Message: 'a>(
     palette: &ThemePalette,
 ) -> Element<'a, Message> {
     match &spec.kind {
+        // A module kind is resolved by the Canvas Lua host before it reaches this
+        // crate, which has no Lua runtime of its own. Reaching here is a wiring
+        // bug, and `element` cannot return an error — so say so on screen rather
+        // than render an innocent blank that looks like a working empty widget.
+        WidgetKind::Module { module, .. } => {
+            container(text(format!("unresolved module: {module}")).color(color(palette.text)))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center(Length::Fill)
+                .into()
+        }
         WidgetKind::Text { text: body } => container(text(body).color(color(palette.text)))
             .width(Length::Fill)
             .height(Length::Fill)
