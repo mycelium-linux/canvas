@@ -23,8 +23,7 @@ pub mod reconcile;
 
 pub const SCHEMA_VERSION: u32 = 1;
 const MAX_ITEMS: usize = 1_024;
-const MAX_GRADIENT_STOPS: usize = 16;
-pub const BUILT_IN_SHADER_IDS: &[&str] = &["tidepool", "aurora-drift", "dusk-ember", "slow-ripple"];
+const MAX_GRADIENT_STOPS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error(pub String);
@@ -107,7 +106,7 @@ pub enum Background {
         color: [u8; 4],
     },
     Gradient {
-        shape: GradientShape,
+        angle_degrees: f32,
         stops: Vec<GradientStop>,
     },
     Image {
@@ -115,17 +114,34 @@ pub enum Background {
         fit: BackgroundFit,
     },
     Shader {
-        shader_id: String,
+        shader_id: BackgroundShader,
         speed: f32,
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
-pub enum GradientShape {
-    Linear { angle_degrees: f32 },
-    Radial { center: [f32; 2], radius: f32 },
+pub enum BackgroundShader {
+    Tidepool,
+    AuroraDrift,
+    DuskEmber,
+    SlowRipple,
+    Spirales,
+    FloatingRectangles,
+    SmokeRings,
+}
+
+impl BackgroundShader {
+    pub const ALL: [Self; 7] = [
+        Self::Tidepool,
+        Self::AuroraDrift,
+        Self::DuskEmber,
+        Self::SlowRipple,
+        Self::Spirales,
+        Self::FloatingRectangles,
+        Self::SmokeRings,
+    ];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -140,11 +156,10 @@ pub struct GradientStop {
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum BackgroundFit {
-    Fill,
-    Fit,
+    Cover,
+    Contain,
     Stretch,
     Center,
-    Tile,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -388,24 +403,14 @@ impl Background {
     fn validate(&self) -> Result<()> {
         match self {
             Self::Theme | Self::Solid { .. } => Ok(()),
-            Self::Gradient { shape, stops } => {
-                match shape {
-                    GradientShape::Linear { angle_degrees } => {
-                        check(angle_degrees.is_finite(), "Gradient angle must be finite")?
-                    }
-                    GradientShape::Radial { center, radius } => check(
-                        center
-                            .iter()
-                            .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
-                            && radius.is_finite()
-                            && *radius > 0.0
-                            && *radius <= 2.0,
-                        "Radial gradient center and radius are outside normalized bounds",
-                    )?,
-                }
+            Self::Gradient {
+                angle_degrees,
+                stops,
+            } => {
+                check(angle_degrees.is_finite(), "Gradient angle must be finite")?;
                 check(
                     (2..=MAX_GRADIENT_STOPS).contains(&stops.len()),
-                    "Gradient must contain 2 to 16 stops",
+                    "Gradient must contain 2 to 8 stops",
                 )?;
                 let mut previous = None;
                 for stop in stops {
@@ -426,16 +431,10 @@ impl Background {
                     "Canvas background assets must be images",
                 )
             }
-            Self::Shader { shader_id, speed } => {
-                check(
-                    BUILT_IN_SHADER_IDS.contains(&shader_id.as_str()),
-                    format!("Unknown Canvas background shader: {shader_id}"),
-                )?;
-                check(
-                    speed.is_finite() && (0.0..=4.0).contains(speed),
-                    "Canvas background shader speed must be between zero and four",
-                )
-            }
+            Self::Shader { speed, .. } => check(
+                speed.is_finite() && (0.0..=4.0).contains(speed),
+                "Canvas background shader speed must be between zero and four",
+            ),
         }
     }
 }
@@ -960,9 +959,7 @@ mod tests {
         assert_eq!(legacy.background, Background::Theme);
 
         let gradient = Background::Gradient {
-            shape: GradientShape::Linear {
-                angle_degrees: 125.0,
-            },
+            angle_degrees: 125.0,
             stops: vec![
                 GradientStop {
                     offset: 0.0,
@@ -997,10 +994,7 @@ mod tests {
 
         let mut invalid = applied.clone();
         invalid.background = Background::Gradient {
-            shape: GradientShape::Radial {
-                center: [0.5, 0.5],
-                radius: 0.8,
-            },
+            angle_degrees: 45.0,
             stops: vec![
                 GradientStop {
                     offset: 0.7,
@@ -1019,17 +1013,13 @@ mod tests {
                 .to_string()
                 .contains("ordered")
         );
-        invalid.background = Background::Shader {
-            shader_id: "downloaded-code".into(),
-            speed: 1.0,
-        };
-        assert!(
-            invalid
-                .validate(&catalog)
-                .unwrap_err()
-                .to_string()
-                .contains("Unknown")
-        );
+        let mut encoded = serde_json::to_value(&invalid).unwrap();
+        encoded["background"] = serde_json::json!({
+            "kind": "shader",
+            "shader_id": "downloaded-code",
+            "speed": 1.0
+        });
+        assert!(serde_json::from_value::<WorkspaceDocument>(encoded).is_err());
     }
 
     #[test]
@@ -1037,14 +1027,14 @@ mod tests {
         assert!(!Background::Theme.is_animated());
         assert!(
             !Background::Shader {
-                shader_id: "tidepool".into(),
+                shader_id: BackgroundShader::Tidepool,
                 speed: 0.0,
             }
             .is_animated()
         );
         assert!(
             Background::Shader {
-                shader_id: "tidepool".into(),
+                shader_id: BackgroundShader::Tidepool,
                 speed: 0.75,
             }
             .is_animated()
