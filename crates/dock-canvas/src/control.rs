@@ -95,6 +95,10 @@ pub enum Command {
         path: PathBuf,
     },
     ClearBackground,
+    OpenStream {
+        surface_id: String,
+        url: String,
+    },
     WorkspaceSave {
         name: String,
     },
@@ -609,6 +613,7 @@ pub enum ContentKind {
     Markdown,
     Terminal,
     Scene,
+    Stream,
     DataViz,
 }
 
@@ -677,7 +682,8 @@ impl ControlRequest {
             | Command::ScreensaverShader { .. }
             | Command::OpenDataViz { .. }
             | Command::SetBackground { .. }
-            | Command::ClearBackground => {}
+            | Command::ClearBackground
+            | Command::OpenStream { .. } => {}
         }
         Ok(())
     }
@@ -918,7 +924,16 @@ pub mod text {
                     path: std::path::PathBuf::from(&tokens[1]),
                 })
             }
-            "bg-clear" | "bgclear" | "bg-default" => Ok(Command::ClearBackground),
+            "bg-clear" | "bgclear" | "bg-default" => {
+                Ok(Command::ClearBackground)
+            }
+            "open_stream" | "stream" => {
+                req(tokens, 3, "open_stream <url> <surface_id>")?;
+                Ok(Command::OpenStream {
+                    surface_id: tokens[2].clone(),
+                    url: tokens[1].clone(),
+                })
+            }
             "bg" | "theme" => {
                 req(tokens, 2, "bg <project_id>")?;
                 if !identifier(&tokens[1]) {

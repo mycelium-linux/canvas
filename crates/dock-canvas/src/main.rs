@@ -120,6 +120,9 @@ enum ContentSource {
         data: Vec<(f32, f32)>,
         chart_type: String,
     },
+    Stream {
+        url: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1289,6 +1292,83 @@ impl App {
                 self.emit_event("background_changed theme".to_string());
                 Task::none()
             }
+            Command::OpenStream { surface_id, url } => {
+                let snapshot = SurfaceSnapshot {
+                    id: surface_id.clone(),
+                    title: format!("Stream: {url}"),
+                    content: ContentKind::Stream,
+                    asset_sha256: None,
+                    page_index: None,
+                    page_count: None,
+                    source_pixels: None,
+                    rendered_pixels: None,
+                    display_logical: None,
+                    scale_factor: None,
+                };
+                let runtime = RuntimeSurface {
+                    snapshot,
+                    source: ContentSource::Stream { url: url.clone() },
+                    handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
+                    source_pixels: [1, 1],
+                    media_plan: MediaPlan {
+                        viewport_logical: LogicalSize {
+                            width: 1920.0,
+                            height: 1080.0,
+                        },
+                        source_dimensions: SourceDimensions::RasterPixels(PixelSize {
+                            width: 1,
+                            height: 1,
+                        }),
+                        target_px: PixelSize {
+                            width: 1,
+                            height: 1,
+                        },
+                        display_logical: LogicalSize {
+                            width: 1920.0,
+                            height: 1080.0,
+                        },
+                        scale_factor: 1.0,
+                        cache_key: MediaCacheKey {
+                            source_id: format!("stream:{surface_id}"),
+                            variant: MediaVariant::Raster,
+                            pixel_size: PixelSize {
+                                width: 1,
+                                height: 1,
+                            },
+                        },
+                    },
+                    upload_pixels: [1, 1],
+                };
+                self.decoded.insert(surface_id.clone(), runtime);
+                self.start_transition();
+                self.bump();
+                self.emit_event(format!("stream_opened {surface_id}"));
+                self.status = format!("Opened stream {url} on {surface_id}.");
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::SurfaceOpened {
+                            surface: self
+                                .decoded
+                                .get(&surface_id)
+                                .map(|s| s.snapshot.clone())
+                                .unwrap_or_else(|| SurfaceSnapshot {
+                                    id: surface_id.clone(),
+                                    title: format!("Stream: {url}"),
+                                    content: ContentKind::Stream,
+                                    asset_sha256: None,
+                                    page_index: None,
+                                    page_count: None,
+                                    source_pixels: None,
+                                    rendered_pixels: None,
+                                    display_logical: None,
+                                    scale_factor: None,
+                                }),
+                        },
+                    },
+                );
+                Task::none()
+            }
             Command::OpenDataViz {
                 surface_id,
                 file,
@@ -2020,6 +2100,7 @@ impl App {
         surface: &'a RuntimeSurface,
         width: Length,
         height: Length,
+        viewport: LogicalSize,
     ) -> Element<'a, Message> {
         match &surface.source {
             ContentSource::Markdown { items, .. } => container(
@@ -2049,13 +2130,7 @@ impl App {
                         let NodeContent::Text { text: label } = &n.content else {
                             return container(text("")).into();
                         };
-                        let [w, h] = surface.snapshot.display_logical.unwrap_or([1920.0, 1080.0]);
-                        let width_px = w as f32;
-                        let height_px = h as f32;
-                        let x_frac = (n.transform.translation[0] + 4.0) / 8.0;
-                        let y_frac = 1.0 - (n.transform.translation[1] + 4.0) / 8.0;
-                        let x = (x_frac * width_px).max(0.0);
-                        let y = (y_frac * height_px).max(0.0);
+                        let [x, y] = scene_node_position(n.transform.translation, viewport);
                         let font_size =
                             (n.transform.scale[0] * n.transform.scale[1] * 24.0).max(10.0);
                         container(text(label).size(font_size).color(color(palette.text)))
@@ -2088,6 +2163,21 @@ impl App {
                 })
                 .width(width)
                 .height(height)
+                .into()
+            }
+            ContentSource::Stream { url } => {
+                let palette = self.project_theme().palette();
+                container(
+                    iced::widget::Column::<Message>::new()
+                        .push(
+                            text("Connecting to stream...")
+                                .size(20)
+                                .color(color(palette.text)),
+                        )
+                        .push(text(url.clone()).size(12).color(color(palette.text_muted))),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill)
                 .into()
             }
             _ => image_widget(surface.handle.clone())
@@ -2343,7 +2433,15 @@ impl App {
                                 self.frame,
                             )
                         };
-                        let content = self.surface_widget(surface, Length::Fill, Length::Fill);
+                        let content = self.surface_widget(
+                            surface,
+                            Length::Fill,
+                            Length::Fill,
+                            LogicalSize {
+                                width: bounds.width.max(1.0),
+                                height: bounds.height.max(1.0),
+                            },
+                        );
                         let focused = self.document.focused_surface_id.as_deref()
                             == Some(placement.surface_id.as_str());
                         let edge = if focused {
@@ -2419,11 +2517,11 @@ impl App {
                                 .height(Length::Fill)
                                 .into();
                         }
-                        let width = Length::Fixed(surface.media_plan.display_logical.width as f32);
                         let content = self.surface_widget(
                             surface,
-                            width,
-                            Length::Fixed(surface.media_plan.display_logical.height as f32),
+                            Length::Fill,
+                            Length::Fill,
+                            self.media_viewport(),
                         );
                         container(stack(vec![content, self.surface_controls()]))
                             .center(Length::Fill)
@@ -2478,7 +2576,14 @@ impl App {
                 .map(|i| {
                     let active = i < level as usize;
                     let h = if active { vu_height * 2.0 } else { vu_height };
-                    let c = if active { color(palette.success) } else { Color { a: 0.2, ..color(palette.text_muted) } };
+                    let c = if active {
+                        color(palette.success)
+                    } else {
+                        Color {
+                            a: 0.2,
+                            ..color(palette.text_muted)
+                        }
+                    };
                     container(space::horizontal())
                         .width(Length::Fixed(3.0))
                         .height(Length::Fixed(h))
@@ -2489,11 +2594,12 @@ impl App {
                         .into()
                 })
                 .collect();
-            let vu = row(bar_elements)
-                .spacing(2)
-                .padding(iced::Padding {
-                    top: 20.0, right: 0.0, bottom: 0.0, left: 40.0,
-                });
+            let vu = row(bar_elements).spacing(2).padding(iced::Padding {
+                top: 20.0,
+                right: 0.0,
+                bottom: 0.0,
+                left: 40.0,
+            });
             layers.push(
                 container(vu)
                     .width(Length::Fill)
@@ -2509,14 +2615,20 @@ impl App {
                     .style(move |_| container::Style {
                         background: Some(orb_color.into()),
                         border: iced::Border {
-                            color: Color { a: 0.4, ..orb_color },
+                            color: Color {
+                                a: 0.4,
+                                ..orb_color
+                            },
                             width: 1.0,
                             radius: 8.0.into(),
                         },
                         ..Default::default()
                     })
                     .padding(iced::Padding {
-                        top: 12.0, right: 0.0, bottom: 0.0, left: 12.0,
+                        top: 12.0,
+                        right: 0.0,
+                        bottom: 0.0,
+                        left: 12.0,
                     })
                     .align_x(iced::alignment::Horizontal::Left)
                     .align_y(iced::alignment::Vertical::Top)
@@ -2873,6 +2985,7 @@ fn interaction_engine(frame: Rect) -> InteractionEngine {
         },
         minimum_surface_size: LogicalPoint { x: 160.0, y: 120.0 },
         resize_handle_size: 10.0,
+        top_bar_height: SURFACE_CONTROL_BAR_HEIGHT,
         snap_distance: 12.0,
         grid_size: Some(8.0),
     })
@@ -3072,6 +3185,17 @@ fn normalize(bounds: LogicalRect, frame: Rect) -> NormalizedRect {
         width: (bounds.width / f64::from(frame.width.max(1))) as f32,
         height: (bounds.height / f64::from(frame.height.max(1))) as f32,
     }
+}
+
+fn scene_node_position(translation: [f32; 3], viewport: LogicalSize) -> [f32; 2] {
+    let width = viewport.width.max(1.0) as f32;
+    let height = viewport.height.max(1.0) as f32;
+    let x_fraction = (translation[0] + 4.0) / 8.0;
+    let y_fraction = 1.0 - (translation[1] + 4.0) / 8.0;
+    [
+        (x_fraction * width).max(0.0),
+        (y_fraction * height).max(0.0),
+    ]
 }
 
 fn apply_plan_diagnostics(
@@ -3941,6 +4065,31 @@ mod tests {
             reply,
         }));
         replies.recv().unwrap()
+    }
+
+    #[test]
+    fn nested_scene_coordinates_reflow_with_surface_aspect_ratio() {
+        let translation = [2.0, -2.0, 0.0];
+        assert_eq!(
+            scene_node_position(
+                translation,
+                LogicalSize {
+                    width: 800.0,
+                    height: 400.0,
+                },
+            ),
+            [600.0, 300.0]
+        );
+        assert_eq!(
+            scene_node_position(
+                translation,
+                LogicalSize {
+                    width: 400.0,
+                    height: 800.0,
+                },
+            ),
+            [300.0, 600.0]
+        );
     }
 
     #[test]

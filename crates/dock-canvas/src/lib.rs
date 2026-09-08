@@ -181,6 +181,7 @@ pub enum SurfaceContent {
     Asset { asset: AssetRef },
     Scene { scene: Scene },
     Terminal { resource_id: String },
+    Stream { url: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -635,6 +636,9 @@ impl WorkspaceDocument {
                 }
                 SurfaceContent::Asset { asset } => asset.validate()?,
                 SurfaceContent::Scene { scene } => scene.validate()?,
+                SurfaceContent::Stream { url } => {
+                    check(!url.is_empty(), "Stream URL must not be empty")?;
+                },
             }
         }
 
