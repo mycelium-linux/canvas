@@ -625,6 +625,7 @@ mod placed_widget_tests {
                 kind: WidgetKind::Text { text: body.into() },
                 theme: None,
                 refresh_ms: None,
+                chrome: dock_widgets::WidgetChrome::DragOnly,
             },
             rect: ViewRect {
                 x: 0.0,

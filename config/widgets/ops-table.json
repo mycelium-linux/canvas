@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "id": "ops-targets",
+  "kind": "table",
+  "title": "Scrape targets",
+  "columns": ["Target", "State", "Last scrape"],
+  "rows": [["canvas", "healthy", "8s"], ["mcp-bridge", "healthy", "12s"], ["elmers", "degraded", "31s"]]
+}

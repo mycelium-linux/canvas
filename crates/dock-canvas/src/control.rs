@@ -1,8 +1,8 @@
 //! Bounded control protocol for a long-lived Canvas runtime.
 
 use crate::{
-    Background, ThemeRef, WorkspaceDocument, WorkspacePatch,
-    display::{DisplayInfo, DisplayTarget},
+    Background, NormalizedRect, ThemeRef, WorkspaceDocument, WorkspacePatch,
+    display::{DisplayInfo, DisplayRegion, DisplayTarget},
     view::{SharedViewDocument, SharedViewPatch},
 };
 use dock_core::{
@@ -25,6 +25,7 @@ pub const MAX_PRESENCE_FACES: usize = 8;
 pub const MAX_PROJECT_WORKSPACES: usize = 512;
 pub const DEFAULT_SCREENSAVER_FPS: u16 = 30;
 pub const MAX_SCREENSAVER_FPS: u16 = 60;
+pub const MAX_SURFACE_PLACEMENT_MARGIN: u16 = 256;
 const MAX_INDICATOR_TITLE_BYTES: usize = 128;
 const MAX_INDICATOR_CAPTION_BYTES: usize = 512;
 const MAX_INDICATOR_DETAIL_BYTES: usize = 512;
@@ -73,6 +74,13 @@ pub enum Command {
     },
     SetDisplayTarget {
         target: DisplayTarget,
+    },
+    PlaceSurface {
+        surface_id: String,
+        display_ordinal: usize,
+        region: DisplayRegion,
+        #[serde(default = "default_surface_margin")]
+        margin: u16,
     },
     SetOverlays {
         overlays: OverlaySettings,
@@ -236,6 +244,10 @@ impl ScreensaverSettings {
 
 const fn default_screensaver_fps() -> u16 {
     DEFAULT_SCREENSAVER_FPS
+}
+
+const fn default_surface_margin() -> u16 {
+    24
 }
 
 impl StatusIndicator {
@@ -555,6 +567,11 @@ pub enum Receipt {
         display_ids: Vec<String>,
         frame: Rect,
     },
+    SurfacePlaced {
+        surface_id: String,
+        display_id: String,
+        bounds: NormalizedRect,
+    },
     OverlaysSet {
         overlays: OverlaySettings,
     },
@@ -829,7 +846,39 @@ impl ControlRequest {
                         return Err("display target IDs must be bounded and unique".into());
                     }
                 }
+                DisplayTarget::Ordinals { ordinals } => {
+                    if ordinals.is_empty() || ordinals.len() > crate::display::MAX_DISPLAYS {
+                        return Err("display ordinals must contain 1-16 values".into());
+                    }
+                    let mut unique = std::collections::BTreeSet::new();
+                    if ordinals.iter().any(|ordinal| !unique.insert(*ordinal))
+                        || (ordinals.contains(&0) && ordinals != &[0])
+                    {
+                        return Err(
+                            "display ordinals must be unique; 0 means all and must be used alone"
+                                .into(),
+                        );
+                    }
+                }
             },
+            Command::PlaceSurface {
+                surface_id,
+                display_ordinal,
+                margin,
+                ..
+            } => {
+                if !identifier(surface_id) {
+                    return Err("invalid Canvas surface id".into());
+                }
+                if *display_ordinal == 0 || *display_ordinal > crate::display::MAX_DISPLAYS {
+                    return Err("display ordinal must be between 1 and 16".into());
+                }
+                if *margin > MAX_SURFACE_PLACEMENT_MARGIN {
+                    return Err(format!(
+                        "surface placement margin must not exceed {MAX_SURFACE_PLACEMENT_MARGIN}"
+                    ));
+                }
+            }
             Command::SetOverlays { .. } | Command::SetVisibility { .. } => {}
             Command::SetTheme { project_id } => {
                 if !identifier(project_id) {
@@ -1374,6 +1423,11 @@ pub mod text {
                         frame.width,
                         frame.height
                     ),
+                    Receipt::SurfacePlaced {
+                        surface_id,
+                        display_id,
+                        ..
+                    } => format!("placed={surface_id} display={display_id}"),
                     Receipt::OverlaysSet { overlays } => format!(
                         "overlays presence={:?} hud={:?}",
                         overlays.presence_rail, overlays.system_hud

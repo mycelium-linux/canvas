@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "id": "ops-latency",
+  "kind": "histogram",
+  "title": "Request latency",
+  "unit": "ms",
+  "buckets": [
+    {"upper_bound":5,"count":18},{"upper_bound":10,"count":42},{"upper_bound":25,"count":91},{"upper_bound":50,"count":74},{"upper_bound":100,"count":38},{"upper_bound":250,"count":14},{"upper_bound":500,"count":4}
+  ]
+}

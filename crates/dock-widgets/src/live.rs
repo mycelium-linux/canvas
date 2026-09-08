@@ -4,11 +4,11 @@
 //! presence orb, ticker text) — extracted so Lua, MCP, and the text protocol
 //! all render through one library.
 
-use crate::{ChartType, MeterStyle, StatusState, WidgetKind, WidgetSpec};
+use crate::{ChartType, MeterStyle, StatusLevel, StatusState, WidgetKind, WidgetSpec};
 use dock_core::ThemePalette;
 use iced::mouse;
 use iced::widget::canvas::{Geometry, Path};
-use iced::widget::{canvas, container, row, space, text};
+use iced::widget::{Canvas, canvas, column, container, row, space, text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 /// Deterministic mock pricing derived from the symbol — replaced by the live
@@ -41,6 +41,94 @@ pub fn element<'a, Message: 'a>(
     palette: &ThemePalette,
 ) -> Element<'a, Message> {
     match &spec.kind {
+        WidgetKind::Stat {
+            label,
+            value,
+            unit,
+            change,
+            state,
+            history,
+        } => {
+            let accent = state.map_or(color(palette.primary), |state| status_color(state, palette));
+            let mut value_line = row![
+                text(format_metric(*value))
+                    .size(42)
+                    .color(color(palette.text)),
+                text(unit.clone().unwrap_or_default())
+                    .size(14)
+                    .color(color(palette.text_muted)),
+            ]
+            .spacing(6)
+            .align_y(iced::alignment::Vertical::Bottom);
+            if let Some(change) = change {
+                value_line = value_line.push(text(format!("{change:+.1}%")).size(13).color(
+                    if *change >= 0.0 {
+                        color(palette.success)
+                    } else {
+                        color(palette.danger)
+                    },
+                ));
+            }
+            let body = column![
+                text(label).size(13).color(color(palette.text_muted)),
+                value_line,
+                Canvas::new(SparklineProgram {
+                    values: history.clone(),
+                    color: accent
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .spacing(8);
+            panel(body.into(), palette)
+        }
+        WidgetKind::TimeSeries {
+            title,
+            series,
+            unit,
+        } => {
+            let colors = series_colors(palette);
+            let legend = row(series
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let c = colors[index % colors.len()];
+                    row![
+                        status_dot(c, 7.0),
+                        text(&item.label).size(11).color(color(palette.text_muted))
+                    ]
+                    .spacing(5)
+                    .into()
+                })
+                .collect::<Vec<Element<'_, Message>>>())
+            .spacing(14);
+            let body = column![
+                row![
+                    text(title).size(14).color(color(palette.text)),
+                    space::horizontal(),
+                    text(unit.clone().unwrap_or_default())
+                        .size(11)
+                        .color(color(palette.text_muted)),
+                ],
+                legend,
+                Canvas::new(TimeSeriesProgram {
+                    series: series
+                        .iter()
+                        .map(|item| item
+                            .points
+                            .iter()
+                            .map(|point| (point.x as f32, point.y as f32))
+                            .collect())
+                        .collect(),
+                    colors,
+                    grid: color(palette.border)
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .spacing(8);
+            panel(body.into(), palette)
+        }
         // A module kind is resolved by the Canvas Lua host before it reaches this
         // crate, which has no Lua runtime of its own. Reaching here is a wiring
         // bug, and `element` cannot return an error — so say so on screen rather
@@ -67,11 +155,28 @@ pub fn element<'a, Message: 'a>(
                 .into()
         }
         WidgetKind::Ticker { symbols } => {
-            container(text(ticker_text(symbols)).color(color(palette.text)))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center(Length::Fill)
-                .into()
+            let quotes = symbols
+                .iter()
+                .map(|symbol| {
+                    let (price, change) = mock_price(symbol);
+                    column![
+                        text(symbol).size(11).color(color(palette.text_muted)),
+                        text(format!("${price:.2}"))
+                            .size(20)
+                            .color(color(palette.text)),
+                        text(format!("{change:+.1}%"))
+                            .size(11)
+                            .color(if change >= 0.0 {
+                                color(palette.success)
+                            } else {
+                                color(palette.danger)
+                            }),
+                    ]
+                    .spacing(2)
+                    .into()
+                })
+                .collect::<Vec<Element<'_, Message>>>();
+            panel(row(quotes).spacing(28).into(), palette)
         }
         WidgetKind::Status { state } => {
             let orb = match state.unwrap_or(StatusState::Unknown) {
@@ -79,19 +184,22 @@ pub fn element<'a, Message: 'a>(
                 StatusState::Away => Color::from_rgba8(239, 68, 68, 0.85),
                 StatusState::Unknown => Color::from_rgba8(250, 204, 21, 0.85),
             };
-            container(space::horizontal())
-                .width(Length::Fixed(16.0))
-                .height(Length::Fixed(16.0))
-                .style(move |_| container::Style {
-                    background: Some(orb.into()),
-                    border: iced::Border {
-                        color: Color { a: 0.4, ..orb },
-                        width: 1.0,
-                        radius: 8.0.into(),
-                    },
-                    ..Default::default()
-                })
-                .into()
+            panel(
+                row![
+                    status_dot(orb, 12.0),
+                    text(match state.unwrap_or(StatusState::Unknown) {
+                        StatusState::Present => "Healthy",
+                        StatusState::Away => "Unavailable",
+                        StatusState::Unknown => "Unknown",
+                    })
+                    .size(14)
+                    .color(color(palette.text))
+                ]
+                .spacing(10)
+                .align_y(iced::alignment::Vertical::Center)
+                .into(),
+                palette,
+            )
         }
         WidgetKind::Meter { value, style } => {
             let bars = 8usize;
@@ -122,24 +230,145 @@ pub fn element<'a, Message: 'a>(
                         .into()
                 })
                 .collect();
-            container(row(bar_elements).spacing(2))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center(Length::Fill)
-                .into()
+            panel(
+                column![
+                    text("Level").size(12).color(color(palette.text_muted)),
+                    row(bar_elements).spacing(4)
+                ]
+                .spacing(12)
+                .into(),
+                palette,
+            )
         }
         WidgetKind::Gauge { value, label } => {
             let pct = format!("{:.0}%", value);
             let label = label.clone().unwrap_or_default();
-            container(
+            panel(
                 iced::widget::Column::<Message>::new()
                     .push(text(pct).size(48).color(color(palette.text)))
-                    .push(text(label).size(14).color(color(palette.text_muted))),
+                    .push(text(label).size(14).color(color(palette.text_muted)))
+                    .push(
+                        Canvas::new(GaugeProgram {
+                            value: *value,
+                            track: color(palette.surface_muted),
+                            fill: color(palette.primary),
+                        })
+                        .width(Length::Fill)
+                        .height(Length::Fixed(12.0)),
+                    )
+                    .into(),
+                palette,
             )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center(Length::Fill)
-            .into()
+        }
+        WidgetKind::Histogram {
+            title,
+            buckets,
+            unit,
+        } => panel(
+            column![
+                row![
+                    text(title).size(14).color(color(palette.text)),
+                    space::horizontal(),
+                    text(unit.clone().unwrap_or_default())
+                        .size(11)
+                        .color(color(palette.text_muted))
+                ],
+                Canvas::new(HistogramProgram {
+                    values: buckets.iter().map(|bucket| bucket.count as f32).collect(),
+                    color: color(palette.info),
+                    grid: color(palette.border)
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .spacing(8)
+            .into(),
+            palette,
+        ),
+        WidgetKind::Table {
+            title,
+            columns,
+            rows,
+        } => {
+            let header = row(columns
+                .iter()
+                .map(|label| {
+                    text(label)
+                        .size(11)
+                        .color(color(palette.text_muted))
+                        .width(Length::Fill)
+                        .into()
+                })
+                .collect::<Vec<Element<'_, Message>>>());
+            let lines = rows
+                .iter()
+                .take(8)
+                .fold(column![header].spacing(7), |column, values| {
+                    column.push(row(values
+                        .iter()
+                        .map(|value| {
+                            text(value)
+                                .size(12)
+                                .color(color(palette.text))
+                                .width(Length::Fill)
+                                .into()
+                        })
+                        .collect::<Vec<Element<'_, Message>>>()))
+                });
+            panel(
+                column![text(title).size(14).color(color(palette.text)), lines]
+                    .spacing(10)
+                    .into(),
+                palette,
+            )
+        }
+        WidgetKind::EventLog { title, entries } => {
+            let lines = entries
+                .iter()
+                .rev()
+                .take(7)
+                .fold(column![].spacing(7), |column, entry| {
+                    column.push(
+                        row![
+                            status_dot(status_color(entry.level, palette), 7.0),
+                            text(&entry.timestamp)
+                                .size(10)
+                                .color(color(palette.text_muted)),
+                            text(&entry.message).size(12).color(color(palette.text))
+                        ]
+                        .spacing(8),
+                    )
+                });
+            panel(
+                column![text(title).size(14).color(color(palette.text)), lines]
+                    .spacing(10)
+                    .into(),
+                palette,
+            )
+        }
+        WidgetKind::NodeSummary { title, nodes } => {
+            let lines = nodes
+                .iter()
+                .take(8)
+                .fold(column![].spacing(7), |column, node| {
+                    column.push(
+                        row![
+                            status_dot(status_color(node.state, palette), 8.0),
+                            text(&node.label).size(12).color(color(palette.text)),
+                            space::horizontal(),
+                            text(node.detail.clone().unwrap_or_default())
+                                .size(11)
+                                .color(color(palette.text_muted))
+                        ]
+                        .spacing(8),
+                    )
+                });
+            panel(
+                column![text(title).size(14).color(color(palette.text)), lines]
+                    .spacing(10)
+                    .into(),
+                palette,
+            )
         }
         WidgetKind::Chart { .. } => {
             // Live charts reuse the canvas ChartProgram; the widgets crate
@@ -153,6 +382,261 @@ pub fn element<'a, Message: 'a>(
             .center(Length::Fill)
             .into()
         }
+    }
+}
+
+fn panel<'a, Message: 'a>(
+    body: Element<'a, Message>,
+    palette: &ThemePalette,
+) -> Element<'a, Message> {
+    let surface = color(palette.surface);
+    let border = color(palette.border);
+    container(body)
+        .padding(16)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_| container::Style {
+            background: Some(Color { a: 0.72, ..surface }.into()),
+            border: iced::Border {
+                color: Color { a: 0.72, ..border },
+                width: 1.0,
+                radius: 7.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+fn status_dot<'a, Message: 'a>(fill: Color, size: f32) -> Element<'a, Message> {
+    container(space::horizontal())
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
+        .style(move |_| container::Style {
+            background: Some(fill.into()),
+            border: iced::Border {
+                color: Color { a: 0.35, ..fill },
+                width: 1.0,
+                radius: (size / 2.0).into(),
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+fn status_color(level: StatusLevel, palette: &ThemePalette) -> Color {
+    color(match level {
+        StatusLevel::Neutral => palette.info,
+        StatusLevel::Good => palette.success,
+        StatusLevel::Warning => palette.warning,
+        StatusLevel::Critical => palette.danger,
+    })
+}
+
+fn series_colors(palette: &ThemePalette) -> Vec<Color> {
+    vec![
+        color(palette.primary),
+        color(palette.success),
+        color(palette.info),
+        color(palette.warning),
+        color(palette.danger),
+    ]
+}
+
+fn format_metric(value: f64) -> String {
+    let abs = value.abs();
+    if abs >= 1_000_000_000.0 {
+        format!("{:.1}B", value / 1_000_000_000.0)
+    } else if abs >= 1_000_000.0 {
+        format!("{:.1}M", value / 1_000_000.0)
+    } else if abs >= 1_000.0 {
+        format!("{:.1}k", value / 1_000.0)
+    } else if value.fract().abs() < 0.001 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.2}")
+    }
+}
+
+struct SparklineProgram {
+    values: Vec<f32>,
+    color: Color,
+}
+
+impl<Message> canvas::Program<Message> for SparklineProgram {
+    type State = ();
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        if self.values.len() < 2 {
+            return Vec::new();
+        }
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let min = self.values.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = self
+            .values
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        let point = |index: usize, value: f32| {
+            Point::new(
+                index as f32 / (self.values.len() - 1) as f32 * bounds.width,
+                bounds.height - (value - min) / (max - min).max(1e-6) * bounds.height,
+            )
+        };
+        for index in 1..self.values.len() {
+            frame.stroke(
+                &Path::line(
+                    point(index - 1, self.values[index - 1]),
+                    point(index, self.values[index]),
+                ),
+                canvas::Stroke::default()
+                    .with_width(2.0)
+                    .with_color(self.color),
+            );
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
+struct GaugeProgram {
+    value: f32,
+    track: Color,
+    fill: Color,
+}
+
+impl<Message> canvas::Program<Message> for GaugeProgram {
+    type State = ();
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        frame.fill(
+            &Path::rounded_rectangle(Point::ORIGIN, bounds.size(), 4.0.into()),
+            self.track,
+        );
+        frame.fill(
+            &Path::rounded_rectangle(
+                Point::ORIGIN,
+                Size::new(
+                    bounds.width * (self.value / 100.0).clamp(0.0, 1.0),
+                    bounds.height,
+                ),
+                4.0.into(),
+            ),
+            self.fill,
+        );
+        vec![frame.into_geometry()]
+    }
+}
+
+struct HistogramProgram {
+    values: Vec<f32>,
+    color: Color,
+    grid: Color,
+}
+
+impl<Message> canvas::Program<Message> for HistogramProgram {
+    type State = ();
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        if self.values.is_empty() {
+            return Vec::new();
+        }
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let max = self.values.iter().copied().fold(0.0, f32::max).max(1e-6);
+        for row in 1..4 {
+            let y = bounds.height * row as f32 / 4.0;
+            frame.stroke(
+                &Path::line(Point::new(0.0, y), Point::new(bounds.width, y)),
+                canvas::Stroke::default().with_width(1.0).with_color(Color {
+                    a: 0.35,
+                    ..self.grid
+                }),
+            );
+        }
+        let width = bounds.width / self.values.len() as f32;
+        for (index, value) in self.values.iter().enumerate() {
+            let height = value / max * bounds.height;
+            frame.fill(
+                &Path::rectangle(
+                    Point::new(index as f32 * width + 1.0, bounds.height - height),
+                    Size::new((width - 2.0).max(1.0), height),
+                ),
+                self.color,
+            );
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
+struct TimeSeriesProgram {
+    series: Vec<Vec<(f32, f32)>>,
+    colors: Vec<Color>,
+    grid: Color,
+}
+
+impl<Message> canvas::Program<Message> for TimeSeriesProgram {
+    type State = ();
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let points = self.series.iter().flatten().copied().collect::<Vec<_>>();
+        if points.len() < 2 {
+            return Vec::new();
+        }
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let min_x = points.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
+        let max_x = points.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
+        let min_y = points.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
+        let max_y = points.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
+        for row in 0..=4 {
+            let y = bounds.height * row as f32 / 4.0;
+            frame.stroke(
+                &Path::line(Point::new(0.0, y), Point::new(bounds.width, y)),
+                canvas::Stroke::default().with_width(1.0).with_color(Color {
+                    a: 0.35,
+                    ..self.grid
+                }),
+            );
+        }
+        let map = |(x, y): (f32, f32)| {
+            Point::new(
+                (x - min_x) / (max_x - min_x).max(1e-6) * bounds.width,
+                bounds.height - (y - min_y) / (max_y - min_y).max(1e-6) * bounds.height,
+            )
+        };
+        for (index, series) in self.series.iter().enumerate() {
+            for pair in series.windows(2) {
+                frame.stroke(
+                    &Path::line(map(pair[0]), map(pair[1])),
+                    canvas::Stroke::default()
+                        .with_width(2.0)
+                        .with_color(self.colors[index % self.colors.len()]),
+                );
+            }
+        }
+        vec![frame.into_geometry()]
     }
 }
 

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "id": "ops-throughput",
+  "kind": "time_series",
+  "title": "Request throughput",
+  "unit": "req/s",
+  "series": [
+    {"label":"api","points":[{"x":0,"y":118},{"x":1,"y":126},{"x":2,"y":121},{"x":3,"y":142},{"x":4,"y":151},{"x":5,"y":147},{"x":6,"y":164}]},
+    {"label":"worker","points":[{"x":0,"y":76},{"x":1,"y":81},{"x":2,"y":79},{"x":3,"y":88},{"x":4,"y":91},{"x":5,"y":96},{"x":6,"y":101}]}
+  ]
+}

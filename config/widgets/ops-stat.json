@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "id": "ops-cpu",
+  "kind": "stat",
+  "label": "CPU saturation",
+  "value": 33.2,
+  "unit": "%",
+  "change": -4.8,
+  "state": "good",
+  "history": [42, 45, 39, 52, 47, 44, 38, 36, 33]
+}

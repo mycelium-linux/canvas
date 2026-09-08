@@ -46,6 +46,18 @@ pub struct WidgetSpec {
     /// Refresh hint for live data in milliseconds. Static renderers ignore it.
     #[serde(default)]
     pub refresh_ms: Option<u64>,
+    /// Window treatment when this widget is opened as a movable Canvas surface.
+    #[serde(default)]
+    pub chrome: WidgetChrome,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum WidgetChrome {
+    Standard,
+    #[default]
+    DragOnly,
 }
 
 fn default_schema_version() -> u32 {
@@ -58,6 +70,26 @@ fn default_schema_version() -> u32 {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum WidgetKind {
+    /// Prometheus-style single value with optional trend and retained history.
+    Stat {
+        label: String,
+        value: f64,
+        #[serde(default)]
+        unit: Option<String>,
+        #[serde(default)]
+        change: Option<f64>,
+        #[serde(default)]
+        state: Option<StatusLevel>,
+        #[serde(default)]
+        history: Vec<f32>,
+    },
+    /// One or more bounded time series. Connectors replace the retained points.
+    TimeSeries {
+        title: String,
+        series: Vec<MetricSeries>,
+        #[serde(default)]
+        unit: Option<String>,
+    },
     /// Local time. `format` uses strftime-style tokens.
     Clock {
         #[serde(default = "default_clock_format")]
@@ -77,6 +109,29 @@ pub enum WidgetKind {
         value: f32,
         #[serde(default = "default_meter_style")]
         style: MeterStyle,
+    },
+    /// Prometheus histogram buckets rendered as an operational distribution.
+    Histogram {
+        title: String,
+        buckets: Vec<HistogramBucket>,
+        #[serde(default)]
+        unit: Option<String>,
+    },
+    /// Compact read-only table for labels, targets, and query results.
+    Table {
+        title: String,
+        columns: Vec<String>,
+        rows: Vec<Vec<String>>,
+    },
+    /// Recent alert/event/log lines with explicit severity.
+    EventLog {
+        title: String,
+        entries: Vec<EventEntry>,
+    },
+    /// Compact health summary for nodes, agents, or DAG stages.
+    NodeSummary {
+        title: String,
+        nodes: Vec<NodeSummaryItem>,
     },
     /// Data chart. `source` points at CSV/TSV/JSON; `renderer` selects the
     /// external pipeline for static output (plotters native by default).
@@ -138,6 +193,41 @@ pub enum WidgetInput {
 pub struct SeriesPoint {
     pub x: f64,
     pub y: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MetricSeries {
+    pub label: String,
+    pub points: Vec<SeriesPoint>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct HistogramBucket {
+    pub upper_bound: f64,
+    pub count: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct EventEntry {
+    pub timestamp: String,
+    pub message: String,
+    pub level: StatusLevel,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct NodeSummaryItem {
+    pub label: String,
+    pub state: StatusLevel,
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,6 +328,48 @@ impl WidgetSpec {
             ));
         }
         match &self.kind {
+            WidgetKind::Stat {
+                label,
+                value,
+                unit,
+                change,
+                history,
+                ..
+            } => {
+                bounded_label(label, "stat label")?;
+                optional_label(unit, "stat unit")?;
+                check(value.is_finite(), "stat value must be finite")?;
+                check(
+                    change.is_none_or(f64::is_finite),
+                    "stat change must be finite",
+                )?;
+                validate_f32_series(history, "stat history")?;
+            }
+            WidgetKind::TimeSeries {
+                title,
+                series,
+                unit,
+            } => {
+                bounded_label(title, "time series title")?;
+                optional_label(unit, "time series unit")?;
+                check(
+                    !series.is_empty() && series.len() <= 12,
+                    "time series requires 1-12 series",
+                )?;
+                for item in series {
+                    bounded_label(&item.label, "series label")?;
+                    check(
+                        !item.points.is_empty() && item.points.len() <= MAX_SERIES_POINTS,
+                        "series requires 1-4096 points",
+                    )?;
+                    check(
+                        item.points
+                            .iter()
+                            .all(|point| point.x.is_finite() && point.y.is_finite()),
+                        "series points must be finite",
+                    )?;
+                }
+            }
             WidgetKind::Ticker { symbols } => {
                 check(!symbols.is_empty(), "ticker requires at least one symbol")?;
                 check(
@@ -253,6 +385,69 @@ impl WidgetSpec {
                 value.is_finite() && (0.0..=1.0).contains(value),
                 "meter value must be finite within 0..1",
             )?,
+            WidgetKind::Histogram {
+                title,
+                buckets,
+                unit,
+            } => {
+                bounded_label(title, "histogram title")?;
+                optional_label(unit, "histogram unit")?;
+                check(
+                    !buckets.is_empty() && buckets.len() <= 128,
+                    "histogram requires 1-128 buckets",
+                )?;
+                check(
+                    buckets.iter().all(|bucket| {
+                        bucket.upper_bound.is_finite()
+                            && bucket.count.is_finite()
+                            && bucket.count >= 0.0
+                    }),
+                    "histogram buckets must be finite and non-negative",
+                )?;
+            }
+            WidgetKind::Table {
+                title,
+                columns,
+                rows,
+            } => {
+                bounded_label(title, "table title")?;
+                check(
+                    !columns.is_empty() && columns.len() <= 12,
+                    "table requires 1-12 columns",
+                )?;
+                check(rows.len() <= 256, "table exceeds 256 rows")?;
+                for column in columns {
+                    bounded_label(column, "table column")?;
+                }
+                check(
+                    rows.iter().all(|row| row.len() == columns.len()),
+                    "table rows must match column count",
+                )?;
+                check(
+                    rows.iter()
+                        .flatten()
+                        .all(|cell| cell.len() <= MAX_INPUT_TEXT_BYTES),
+                    "table cell exceeds 4096 bytes",
+                )?;
+            }
+            WidgetKind::EventLog { title, entries } => {
+                bounded_label(title, "event log title")?;
+                check(entries.len() <= 256, "event log exceeds 256 entries")?;
+                check(
+                    entries.iter().all(|entry| {
+                        entry.timestamp.len() <= 64 && entry.message.len() <= MAX_INPUT_TEXT_BYTES
+                    }),
+                    "event log entry is too large",
+                )?;
+            }
+            WidgetKind::NodeSummary { title, nodes } => {
+                bounded_label(title, "node summary title")?;
+                check(nodes.len() <= 256, "node summary exceeds 256 nodes")?;
+                for node in nodes {
+                    bounded_label(&node.label, "node label")?;
+                    optional_label(&node.detail, "node detail")?;
+                }
+            }
             WidgetKind::Chart { source, .. } => check(
                 !source.as_os_str().is_empty(),
                 "chart requires a data source path",
@@ -333,6 +528,28 @@ fn check(condition: bool, message: &str) -> Result<()> {
     if condition { Ok(()) } else { err(message) }
 }
 
+fn bounded_label(value: &str, name: &str) -> Result<()> {
+    check(
+        !value.is_empty() && value.len() <= 128,
+        &format!("{name} must contain 1-128 bytes"),
+    )
+}
+
+fn optional_label(value: &Option<String>, name: &str) -> Result<()> {
+    if let Some(value) = value {
+        bounded_label(value, name)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_f32_series(values: &[f32], name: &str) -> Result<()> {
+    check(
+        values.len() <= MAX_SERIES_POINTS && values.iter().all(|value| value.is_finite()),
+        &format!("{name} must contain at most 4096 finite points"),
+    )
+}
+
 #[cfg(feature = "live")]
 pub mod live;
 
@@ -409,10 +626,40 @@ mod tests {
             "demo-gauge.json",
             "demo-meter.json",
             "demo-status.json",
+            "ops-stat.json",
+            "ops-timeseries.json",
+            "ops-histogram.json",
+            "ops-table.json",
+            "ops-events.json",
+            "ops-nodes.json",
         ] {
             WidgetSpec::from_file(&root.join(name))
                 .unwrap_or_else(|error| panic!("{name} is invalid: {error}"));
         }
+    }
+
+    #[test]
+    fn operational_inputs_are_bounded_and_drag_only_by_default() {
+        let stat = WidgetSpec::from_json(
+            br#"{"id":"cpu","kind":"stat","label":"CPU","value":42,"history":[1,2,3]}"#,
+        )
+        .unwrap();
+        assert_eq!(stat.chrome, WidgetChrome::DragOnly);
+
+        let oversized_rows = vec![vec!["ok".to_string()]; 257];
+        let invalid = WidgetSpec {
+            schema_version: WIDGET_SCHEMA_VERSION,
+            id: "too-many-rows".into(),
+            kind: WidgetKind::Table {
+                title: "Targets".into(),
+                columns: vec!["State".into()],
+                rows: oversized_rows,
+            },
+            theme: None,
+            refresh_ms: None,
+            chrome: WidgetChrome::DragOnly,
+        };
+        assert!(invalid.validate().is_err());
     }
 }
 

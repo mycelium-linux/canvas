@@ -1,9 +1,12 @@
 //! Renderer-neutral display targeting and virtual desktop projection.
 
-use crate::interaction::{LogicalPoint, LogicalRect};
+use crate::{
+    NormalizedRect,
+    interaction::{LogicalPoint, LogicalRect},
+};
 use dock_core::layout::Rect;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_DISPLAYS: usize = 16;
 
@@ -21,7 +24,81 @@ pub struct DisplayInfo {
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum DisplayTarget {
     All,
-    Exact { display_ids: Vec<String> },
+    Exact {
+        display_ids: Vec<String>,
+    },
+    /// One-based displays ordered left-to-right, then top-to-bottom. `0` means all.
+    Ordinals {
+        ordinals: Vec<usize>,
+    },
+}
+
+/// A coarse, deterministic destination inside one physical display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
+pub enum DisplayRegion {
+    Full,
+    Left,
+    Right,
+    Top,
+    Bottom,
+    Center,
+}
+
+impl DisplayRegion {
+    pub fn normalized_bounds(
+        self,
+        display: Rect,
+        desktop: Rect,
+        margin: u16,
+    ) -> Result<NormalizedRect, String> {
+        let margin = f64::from(margin);
+        let width = f64::from(display.width);
+        let height = f64::from(display.height);
+        if margin * 2.0 >= width || margin * 2.0 >= height {
+            return Err("display placement margin leaves no usable area".into());
+        }
+        let (x, y, region_width, region_height) = match self {
+            Self::Full => (margin, margin, width - margin * 2.0, height - margin * 2.0),
+            Self::Left => (
+                margin,
+                margin,
+                width * 0.5 - margin * 1.5,
+                height - margin * 2.0,
+            ),
+            Self::Right => (
+                width * 0.5 + margin * 0.5,
+                margin,
+                width * 0.5 - margin * 1.5,
+                height - margin * 2.0,
+            ),
+            Self::Top => (
+                margin,
+                margin,
+                width - margin * 2.0,
+                height * 0.5 - margin * 1.5,
+            ),
+            Self::Bottom => (
+                margin,
+                height * 0.5 + margin * 0.5,
+                width - margin * 2.0,
+                height * 0.5 - margin * 1.5,
+            ),
+            Self::Center => (width * 0.15, height * 0.12, width * 0.7, height * 0.76),
+        };
+        if region_width <= 0.0 || region_height <= 0.0 {
+            return Err("display placement region is too small for its margin".into());
+        }
+        let desktop_width = f64::from(desktop.width.max(1));
+        let desktop_height = f64::from(desktop.height.max(1));
+        Ok(NormalizedRect {
+            x: ((f64::from(display.x - desktop.x) + x) / desktop_width) as f32,
+            y: ((f64::from(display.y - desktop.y) + y) / desktop_height) as f32,
+            width: (region_width / desktop_width) as f32,
+            height: (region_height / desktop_height) as f32,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,11 +151,36 @@ impl DisplayTopology {
                 }
                 display_ids.clone()
             }
+            DisplayTarget::Ordinals { ordinals } => {
+                if ordinals.is_empty() || ordinals.len() > MAX_DISPLAYS {
+                    return Err(format!(
+                        "display ordinals must contain 1-{MAX_DISPLAYS} values"
+                    ));
+                }
+                if ordinals == &[0] {
+                    self.displays.keys().cloned().collect::<Vec<_>>()
+                } else {
+                    if ordinals.contains(&0) {
+                        return Err("display ordinal 0 must be used alone".into());
+                    }
+                    let mut ordered = self.displays.values().collect::<Vec<_>>();
+                    ordered.sort_by_key(|display| (display.frame.x, display.frame.y));
+                    let mut seen = BTreeSet::new();
+                    let mut ids = Vec::with_capacity(ordinals.len());
+                    for ordinal in ordinals {
+                        if !seen.insert(*ordinal) {
+                            return Err("display target contains duplicate ordinals".into());
+                        }
+                        let display = ordered.get(ordinal - 1).ok_or_else(|| {
+                            format!("display ordinal {ordinal} is disconnected or unknown")
+                        })?;
+                        ids.push(display.id.clone());
+                    }
+                    ids
+                }
+            }
         };
         let selected = ids.iter().map(|id| &self.displays[id]).collect::<Vec<_>>();
-        if !connected(&selected) {
-            return Err("selected displays must form one connected desktop".into());
-        }
         Ok(ResolvedDisplayTarget {
             frame: bounding_frame(selected.iter().map(|display| display.frame))?,
             display_ids: ids,
@@ -135,34 +237,6 @@ fn validate_display(display: &DisplayInfo) -> Result<(), String> {
         .and_then(|_| display.frame.y.checked_add_unsigned(display.frame.height))
         .ok_or_else(|| "display geometry overflows desktop coordinates".to_string())?;
     Ok(())
-}
-
-fn connected(displays: &[&DisplayInfo]) -> bool {
-    let mut visited = vec![false; displays.len()];
-    let mut queue = VecDeque::from([0]);
-    visited[0] = true;
-    while let Some(index) = queue.pop_front() {
-        for candidate in 0..displays.len() {
-            if !visited[candidate]
-                && frames_touch_or_overlap(displays[index].frame, displays[candidate].frame)
-            {
-                visited[candidate] = true;
-                queue.push_back(candidate);
-            }
-        }
-    }
-    visited.into_iter().all(|value| value)
-}
-
-fn frames_touch_or_overlap(a: Rect, b: Rect) -> bool {
-    let a_right = i64::from(a.x) + i64::from(a.width);
-    let b_right = i64::from(b.x) + i64::from(b.width);
-    let a_bottom = i64::from(a.y) + i64::from(a.height);
-    let b_bottom = i64::from(b.y) + i64::from(b.height);
-    i64::from(a.x) <= b_right
-        && i64::from(b.x) <= a_right
-        && i64::from(a.y) <= b_bottom
-        && i64::from(b.y) <= a_bottom
 }
 
 fn bounding_frame(frames: impl Iterator<Item = Rect>) -> Result<Rect, String> {
@@ -259,7 +333,29 @@ mod tests {
     }
 
     #[test]
-    fn unknown_duplicate_and_disconnected_targets_fail() {
+    fn display_regions_resolve_inside_one_screen_of_a_shared_desktop() {
+        let desktop = Rect {
+            x: -1920,
+            y: 0,
+            width: 5760,
+            height: 1200,
+        };
+        let right = display("right", 1920, 0).frame;
+        let bounds = DisplayRegion::Full
+            .normalized_bounds(right, desktop, 24)
+            .unwrap();
+        assert!(bounds.x > 2.0 / 3.0);
+        assert!(bounds.x + bounds.width < 1.0);
+        assert!((bounds.y - 0.02).abs() < 0.001);
+        assert!(
+            DisplayRegion::Full
+                .normalized_bounds(right, desktop, 700)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn unknown_and_duplicate_targets_fail_but_disjoint_screens_are_supported() {
         let topology =
             DisplayTopology::new(vec![display("left", 0, 0), display("island", 5000, 0)]).unwrap();
         for target in [
@@ -269,9 +365,21 @@ mod tests {
             DisplayTarget::Exact {
                 display_ids: vec!["left".into(), "left".into()],
             },
-            DisplayTarget::All,
+            DisplayTarget::Ordinals {
+                ordinals: vec![0, 1],
+            },
         ] {
             assert!(topology.resolve(&target).is_err());
         }
+        assert!(topology.resolve(&DisplayTarget::All).is_ok());
+        assert_eq!(
+            topology
+                .resolve(&DisplayTarget::Ordinals {
+                    ordinals: vec![1, 2],
+                })
+                .unwrap()
+                .display_ids,
+            ["left", "island"]
+        );
     }
 }

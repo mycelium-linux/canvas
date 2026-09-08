@@ -2,7 +2,7 @@
 use crate::{
     WorkspaceDocument, WorkspacePatch,
     control::{self, Command, ControlReply, ControlRequest, Outcome, OverlaySettings, Receipt},
-    display::DisplayTarget,
+    display::{DisplayRegion, DisplayTarget},
     reconcile::{self, DesiredWorkspaceState, ReconcileAction, Reconciliation},
     view::{SharedViewDocument, SharedViewPatch},
 };
@@ -186,6 +186,25 @@ struct SetDisplayTarget {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct PlaceSurface {
+    request_id: String,
+    /// Runtime revision from canvas_inspect.
+    expected_revision: u64,
+    surface_id: String,
+    /// One-based display ordered left-to-right, then top-to-bottom.
+    display_ordinal: usize,
+    region: DisplayRegion,
+    /// Physical inset in logical pixels. Defaults to 24 and is capped at 256.
+    #[serde(default = "default_placement_margin")]
+    margin: u16,
+}
+
+const fn default_placement_margin() -> u16 {
+    24
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SetOverlays {
     request_id: String,
     #[serde(default)]
@@ -242,7 +261,11 @@ fn tools() -> Vec<Tool> {
         ),
         tool::<SetDisplayTarget>(
             "canvas_display_target",
-            "Present the shared Canvas desktop on all connected displays or an exact list of display IDs from canvas_inspect. The workspace document and surface state remain shared across the selected display windows.",
+            "Present Canvas on all displays, exact display IDs, or one-based left-to-right display ordinals. Ordinal 0 means all; combinations such as [1,3] are supported. Inspect returns display geometry so agents can place work on a screen without disturbing another view.",
+        ),
+        tool::<PlaceSurface>(
+            "canvas_place_surface",
+            "Place one existing surface into a coarse region of a physical display while preserving every other surface. Display ordinals are one-based from left to right. The target display is shown automatically if needed. Requires the runtime revision from canvas_inspect.",
         ),
         tool::<SetOverlays>(
             "canvas_set_overlays",
@@ -341,6 +364,19 @@ fn parse(name: &str, args: Value) -> Result<ControlRequest, String> {
                 args.expected_revision,
                 Command::SetDisplayTarget {
                     target: args.target,
+                },
+            )
+        }
+        "canvas_place_surface" => {
+            let args: PlaceSurface = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            (
+                args.request_id,
+                Some(args.expected_revision),
+                Command::PlaceSurface {
+                    surface_id: args.surface_id,
+                    display_ordinal: args.display_ordinal,
+                    region: args.region,
+                    margin: args.margin,
                 },
             )
         }
@@ -1018,6 +1054,25 @@ mod tests {
                 target: DisplayTarget::Exact { .. }
             }
         ));
+        let placement = parse(
+            "canvas_place_surface",
+            json!({
+                "request_id":"place-1",
+                "expected_revision":4,
+                "surface_id":"invoice",
+                "display_ordinal":1,
+                "region":"full"
+            }),
+        )
+        .unwrap();
+        assert!(matches!(
+            placement.command,
+            Command::PlaceSurface {
+                display_ordinal: 1,
+                margin: 24,
+                ..
+            }
+        ));
         let overlays = parse(
             "canvas_set_overlays",
             json!({
@@ -1064,7 +1119,7 @@ mod tests {
     #[test]
     fn schemas_include_native_document_and_patch_definitions() {
         let tools = tools();
-        assert_eq!(tools.len(), 17);
+        assert_eq!(tools.len(), 18);
         let tool = |name: &str| tools.iter().find(|tool| tool.name == name).unwrap();
         assert!(
             tool("canvas_apply_document").input_schema["$defs"]
@@ -1496,7 +1551,7 @@ mod tests {
                 .unwrap()
         });
         let client = ().serve(client_io).await.unwrap();
-        assert_eq!(client.list_all_tools().await.unwrap().len(), 17);
+        assert_eq!(client.list_all_tools().await.unwrap().len(), 18);
         let result = client
             .call_tool(CallToolRequestParams::new("canvas_inspect"))
             .await

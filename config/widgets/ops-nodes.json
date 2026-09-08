@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "id": "ops-nodes",
+  "kind": "node_summary",
+  "title": "Compute mesh",
+  "nodes": [
+    {"label":"Avery's Mac Studio","state":"good","detail":"local"},
+    {"label":"Agora One","state":"good","detail":"gpu"},
+    {"label":"MCP Bridge","state":"warning","detail":"252 ms"},
+    {"label":"Elmer's","state":"neutral","detail":"streaming"}
+  ]
+}

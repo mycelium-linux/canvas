@@ -7,7 +7,9 @@ use dock_canvas::control::{
     ProjectWorkspaceSnapshot, Receipt, RuntimeSnapshot, ScreensaverSettings, ScreensaverSnapshot,
     StatusIndicator, SurfaceSnapshot,
 };
-use dock_canvas::display::{DisplayInfo, DisplayTopology};
+use dock_canvas::display::{
+    DisplayInfo, DisplayRegion, DisplayTarget, DisplayTopology, ResolvedDisplayTarget,
+};
 use dock_canvas::hud;
 use dock_canvas::interaction::{
     HitRegion, InteractionConfig, InteractionEngine, InteractionIntent, LogicalPoint, LogicalRect,
@@ -337,6 +339,10 @@ impl App {
             .map(|document| document.project_id.clone());
         let displays = platform::displays().unwrap_or_default();
         let display_frames = displays.iter().map(|display| display.frame).collect();
+        let desktop_frame = DisplayTopology::new(displays.clone())
+            .and_then(|topology| topology.resolve(&DisplayTarget::All))
+            .map(|resolved| resolved.frame)
+            .unwrap_or(frame);
         let selected_display_ids = displays
             .iter()
             .find(|display| display.frame == frame)
@@ -398,7 +404,7 @@ impl App {
                 focused_surface_id: None,
             }),
             runtime_revision: 1,
-            frame,
+            frame: desktop_frame,
             display_frames,
             displays,
             selected_display_ids,
@@ -446,7 +452,7 @@ impl App {
                     shortcut_errors.join("; ")
                 )
             },
-            interaction: interaction_engine(frame),
+            interaction: interaction_engine(desktop_frame),
             cursor: None,
             cursor_window: None,
             desktop_focused: false,
@@ -679,6 +685,9 @@ impl App {
                 }
                 if let Some(direction) = workspace_cycle_direction(&kbd_event) {
                     return self.cycle_project_workspace(direction);
+                }
+                if let Some(ordinal) = display_shortcut(&kbd_event) {
+                    return self.toggle_display_ordinal(ordinal);
                 }
                 #[allow(clippy::collapsible_if)]
                 if let Some(surface) = self
@@ -928,6 +937,134 @@ impl App {
         } else {
             frames
         }
+    }
+
+    fn apply_display_target(
+        &mut self,
+        target: &DisplayTarget,
+    ) -> Result<(ResolvedDisplayTarget, Task<Message>), Failure> {
+        let topology = DisplayTopology::new(self.displays.clone()).map_err(Failure::platform)?;
+        let resolved = topology.resolve(target).map_err(Failure::invalid)?;
+        let frames = resolved
+            .display_ids
+            .iter()
+            .filter_map(|id| topology.get(id).map(|display| display.frame))
+            .collect::<Vec<_>>();
+        self.selected_display_ids = resolved.display_ids.clone();
+        self.bump();
+        self.status = format!(
+            "Canvas spans {} display(s) at {},{} {}x{}.",
+            resolved.display_ids.len(),
+            resolved.frame.x,
+            resolved.frame.y,
+            resolved.frame.width,
+            resolved.frame.height
+        );
+        let task = if self.canvas_visible {
+            self.replace_host_windows(frames)
+        } else {
+            Task::none()
+        };
+        Ok((resolved, task))
+    }
+
+    fn toggle_display_ordinal(&mut self, ordinal: usize) -> Task<Message> {
+        let target = if ordinal == 0 {
+            DisplayTarget::All
+        } else {
+            let mut ordered = self.displays.iter().collect::<Vec<_>>();
+            ordered.sort_by_key(|display| (display.frame.x, display.frame.y));
+            let Some(display) = ordered.get(ordinal - 1) else {
+                self.status = format!("Display {ordinal} is not connected.");
+                return Task::none();
+            };
+            let mut ids = self.selected_display_ids.clone();
+            if let Some(index) = ids.iter().position(|id| id == &display.id) {
+                if ids.len() == 1 {
+                    self.status = "Canvas must remain on at least one display; use the global Canvas toggle to hide all.".into();
+                    return Task::none();
+                }
+                ids.remove(index);
+            } else {
+                ids.push(display.id.clone());
+            }
+            DisplayTarget::Exact { display_ids: ids }
+        };
+        match self.apply_display_target(&target) {
+            Ok((_resolved, task)) => task,
+            Err(failure) => {
+                self.status = format!("Display selection rejected: {}", failure.message);
+                Task::none()
+            }
+        }
+    }
+
+    fn place_surface_on_display(
+        &mut self,
+        surface_id: &str,
+        display_ordinal: usize,
+        region: DisplayRegion,
+        margin: u16,
+    ) -> Result<(String, NormalizedRect, Task<Message>), Failure> {
+        if !self
+            .document
+            .surfaces
+            .iter()
+            .any(|surface| surface.id == surface_id)
+        {
+            return Err(Failure {
+                code: ErrorCode::NotFound,
+                message: format!("unknown Canvas surface: {surface_id}"),
+            });
+        }
+        let mut ordered = self.displays.clone();
+        ordered.sort_by_key(|display| (display.frame.x, display.frame.y));
+        let display = ordered
+            .get(display_ordinal.saturating_sub(1))
+            .ok_or_else(|| Failure::invalid(format!("display {display_ordinal} is not connected")))?
+            .clone();
+        let bounds = region
+            .normalized_bounds(display.frame, self.frame, margin)
+            .map_err(Failure::invalid)?;
+        let mut task = Task::none();
+        if !self.selected_display_ids.contains(&display.id) {
+            let mut ids = self.selected_display_ids.clone();
+            ids.push(display.id.clone());
+            let (_, display_task) =
+                self.apply_display_target(&DisplayTarget::Exact { display_ids: ids })?;
+            task = display_task;
+        }
+        let mut placements = flatten_layout(&self.document.layout);
+        let next_layer = placements
+            .iter()
+            .map(|placement| placement.layer)
+            .max()
+            .unwrap_or(-1)
+            .saturating_add(1);
+        if let Some(placement) = placements
+            .iter_mut()
+            .find(|placement| placement.surface_id == surface_id)
+        {
+            placement.bounds = bounds;
+            placement.layer = next_layer;
+        } else {
+            placements.push(Placement {
+                surface_id: surface_id.into(),
+                bounds,
+                layer: next_layer,
+            });
+        }
+        self.start_transition();
+        self.document.layout = Layout::Canvas { placements };
+        self.document.focused_surface_id = Some(surface_id.into());
+        self.document.revision = self.document.revision.saturating_add(1);
+        self.bump();
+        self.status = format!("Placed {surface_id} on display {display_ordinal} ({region:?}).");
+        self.emit_event(format!(
+            "surface_placed {surface_id} display={} region={region:?}",
+            display.id
+        ));
+        Ok((display.id, bounds, task))
     }
 
     fn cycle_project_workspace(&mut self, direction: i32) -> Task<Message> {
@@ -1287,40 +1424,13 @@ impl App {
                 }
             }
             Command::SetDisplayTarget { target } => {
-                let topology = match DisplayTopology::new(self.displays.clone()) {
-                    Ok(topology) => topology,
-                    Err(error) => {
-                        self.fail(pending, Failure::platform(error));
+                let (resolved, task) = match self.apply_display_target(&target) {
+                    Ok(result) => result,
+                    Err(failure) => {
+                        self.fail(pending, failure);
                         return Task::none();
                     }
                 };
-                let resolved = match topology.resolve(&target) {
-                    Ok(resolved) => resolved,
-                    Err(error) => {
-                        self.fail(pending, Failure::invalid(error));
-                        return Task::none();
-                    }
-                };
-                let frames = resolved
-                    .display_ids
-                    .iter()
-                    .filter_map(|id| topology.get(id).map(|display| display.frame))
-                    .collect::<Vec<_>>();
-                self.frame = resolved.frame;
-                self.selected_display_ids = resolved.display_ids.clone();
-                if self.interaction.captured_pointer().is_none() {
-                    self.interaction = interaction_engine(self.frame);
-                }
-                self.replan_rasters();
-                self.bump();
-                self.status = format!(
-                    "Canvas spans {} connected display(s) at {},{} {}x{}.",
-                    resolved.display_ids.len(),
-                    resolved.frame.x,
-                    resolved.frame.y,
-                    resolved.frame.width,
-                    resolved.frame.height
-                );
                 self.answer(
                     pending,
                     Outcome::Ok {
@@ -1330,11 +1440,37 @@ impl App {
                         },
                     },
                 );
-                if self.canvas_visible {
-                    self.replace_host_windows(frames)
-                } else {
-                    Task::none()
-                }
+                task
+            }
+            Command::PlaceSurface {
+                surface_id,
+                display_ordinal,
+                region,
+                margin,
+            } => {
+                let (display_id, bounds, task) = match self.place_surface_on_display(
+                    &surface_id,
+                    display_ordinal,
+                    region,
+                    margin,
+                ) {
+                    Ok(result) => result,
+                    Err(failure) => {
+                        self.fail(pending, failure);
+                        return Task::none();
+                    }
+                };
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::SurfacePlaced {
+                            surface_id,
+                            display_id,
+                            bounds,
+                        },
+                    },
+                );
+                task
             }
             Command::SetOverlays { overlays } => {
                 self.overlays = overlays;
@@ -2563,6 +2699,14 @@ impl App {
             .collect()
     }
 
+    fn widget_chrome(&self, surface_id: &str) -> Option<dock_widgets::WidgetChrome> {
+        let surface = self.decoded.get(surface_id)?;
+        match &surface.source {
+            ContentSource::Widget { spec } => Some(spec.chrome),
+            _ => None,
+        }
+    }
+
     fn hit_test_surface_control(&self) -> Option<(String, WindowAction)> {
         let position = self.cursor?;
         let frame = self.frame;
@@ -2577,6 +2721,11 @@ impl App {
             ))
         });
         for placement in placements {
+            if self.widget_chrome(&placement.surface_id)
+                == Some(dock_widgets::WidgetChrome::DragOnly)
+            {
+                continue;
+            }
             let bounds = visible_surface_bounds(
                 if self.maximized_surfaces.contains(&placement.surface_id) {
                     NormalizedRect {
@@ -3055,6 +3204,7 @@ impl App {
         title: &'a str,
         focused: bool,
         maximized: bool,
+        widget_chrome: Option<dock_widgets::WidgetChrome>,
     ) -> Element<'a, Message> {
         let palette = self.presented_palette();
         let dot = |rgb| {
@@ -3086,6 +3236,33 @@ impl App {
                 tooltip::Position::Bottom,
             )
         };
+        if widget_chrome == Some(dock_widgets::WidgetChrome::DragOnly) {
+            let grip = container(space::horizontal())
+                .width(Length::Fixed(34.0))
+                .height(Length::Fixed(3.0))
+                .style(move |_| container::Style {
+                    background: Some(
+                        Color::from_rgba8(
+                            palette.border_strong[0],
+                            palette.border_strong[1],
+                            palette.border_strong[2],
+                            if focused { 0.72 } else { 0.42 },
+                        )
+                        .into(),
+                    ),
+                    border: iced::Border {
+                        radius: 2.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                });
+            return container(grip)
+                .width(Length::Fill)
+                .height(Length::Fixed(SURFACE_CONTROL_BAR_HEIGHT as f32))
+                .center_x(Length::Fill)
+                .align_y(iced::alignment::Vertical::Center)
+                .into();
+        }
         let controls = row![
             control(
                 palette.danger,
@@ -3379,7 +3556,12 @@ impl App {
                             border_color
                         };
                         let plane = container(column![
-                            self.surface_controls(&surface.snapshot.title, focused, maximized),
+                            self.surface_controls(
+                                &surface.snapshot.title,
+                                focused,
+                                maximized,
+                                self.widget_chrome(&placement.surface_id),
+                            ),
                             content,
                         ])
                         .width(Length::Fixed(bounds.width as f32))
@@ -3454,7 +3636,12 @@ impl App {
                         let content =
                             self.surface_widget(surface, Length::Fill, Length::Fill, viewport);
                         container(column![
-                            self.surface_controls(&surface.snapshot.title, true, true),
+                            self.surface_controls(
+                                &surface.snapshot.title,
+                                true,
+                                true,
+                                self.widget_chrome(&surface.snapshot.id),
+                            ),
                             content,
                         ])
                         .center(Length::Fill)
@@ -3835,6 +4022,8 @@ fn shortcut_help<'a>(
          Ctrl-← / Ctrl-→        Saved views (reserved)\n\
          \n\
          Canvas\n\
+         Ctrl-1 / 2 / 3         Toggle left / center / right display\n\
+         Ctrl-0                 Show Canvas on every display\n\
          {CANVAS_TOGGLE_KEYS:<22} Toggle Canvas\n\
          {JARVIS_TOGGLE_KEYS:<22} Toggle JARVIS presence\n\
          {FOCUSED_HELP_KEYS:<22} Toggle Help (Canvas focused)\n\
@@ -3929,6 +4118,29 @@ fn workspace_cycle_direction(event: &iced::keyboard::Event) -> Option<i32> {
     match key {
         Key::Named(Named::ArrowUp) => Some(-1),
         Key::Named(Named::ArrowDown) => Some(1),
+        _ => None,
+    }
+}
+
+fn display_shortcut(event: &iced::keyboard::Event) -> Option<usize> {
+    use iced::keyboard::{Event, Key};
+    let Event::KeyPressed {
+        key,
+        modifiers,
+        repeat: false,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    if !modifiers.control() || modifiers.alt() || modifiers.logo() {
+        return None;
+    }
+    match key.as_ref() {
+        Key::Character("0") => Some(0),
+        Key::Character("1") => Some(1),
+        Key::Character("2") => Some(2),
+        Key::Character("3") => Some(3),
         _ => None,
     }
 }
@@ -4627,6 +4839,78 @@ fn visible_surface_bounds(
         width: (f64::from(bounds.width) * inner_width - gap_inset * 2.0).max(1.0),
         height: (f64::from(bounds.height) * inner_height - gap_inset * 2.0).max(1.0),
     }
+}
+
+fn flatten_layout(layout: &Layout) -> Vec<Placement> {
+    fn visit(layout: &Layout, bounds: NormalizedRect, placements: &mut Vec<Placement>) {
+        match layout {
+            Layout::Empty => {}
+            Layout::Surface { surface_id } => placements.push(Placement {
+                surface_id: surface_id.clone(),
+                bounds,
+                layer: placements.len() as i32,
+            }),
+            Layout::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => {
+                let ratio = ratio.clamp(0.0, 1.0);
+                let (first_bounds, second_bounds) = match axis {
+                    Axis::Horizontal => (
+                        NormalizedRect {
+                            width: bounds.width * ratio,
+                            ..bounds
+                        },
+                        NormalizedRect {
+                            x: bounds.x + bounds.width * ratio,
+                            width: bounds.width * (1.0 - ratio),
+                            ..bounds
+                        },
+                    ),
+                    Axis::Vertical => (
+                        NormalizedRect {
+                            height: bounds.height * ratio,
+                            ..bounds
+                        },
+                        NormalizedRect {
+                            y: bounds.y + bounds.height * ratio,
+                            height: bounds.height * (1.0 - ratio),
+                            ..bounds
+                        },
+                    ),
+                };
+                visit(first, first_bounds, placements);
+                visit(second, second_bounds, placements);
+            }
+            Layout::Stack { surface_ids, .. } => {
+                for surface_id in surface_ids {
+                    placements.push(Placement {
+                        surface_id: surface_id.clone(),
+                        bounds,
+                        layer: placements.len() as i32,
+                    });
+                }
+            }
+            Layout::Canvas {
+                placements: existing,
+            } => placements.extend(existing.iter().cloned()),
+        }
+    }
+
+    let mut placements = Vec::new();
+    visit(
+        layout,
+        NormalizedRect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
+        &mut placements,
+    );
+    placements
 }
 
 fn layout_surface_bounds(
@@ -5697,7 +5981,7 @@ mod tests {
         static NEXT_STORE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let store_id = NEXT_STORE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (_sender, receiver) = mpsc::sync_channel(1);
-        App::new(
+        let mut app = App::new(
             Arc::new(Mutex::new(receiver)),
             SocketGuard {
                 path: std::env::temp_dir().join(format!(
@@ -5713,7 +5997,10 @@ mod tests {
                 ))
                 .join("workspaces.json"),
         )
-        .unwrap()
+        .unwrap();
+        app.frame = INITIAL_FRAME;
+        app.interaction = interaction_engine(INITIAL_FRAME);
+        app
     }
 
     fn execute(app: &mut App, request_id: &str, command: Command) -> ControlReply {
@@ -6475,6 +6762,12 @@ mod tests {
             })
             .collect();
         app.display_frames = app.displays.iter().map(|display| display.frame).collect();
+        app.frame = Rect {
+            x: 0,
+            y: 0,
+            width: 5_760,
+            height: 1_200,
+        };
 
         let reply = execute(
             &mut app,
@@ -6516,6 +6809,137 @@ mod tests {
         );
         assert!(matches!(rejected.outcome, Outcome::Error { .. }));
         assert_eq!(app.frame, before);
+
+        drop(app.toggle_display_ordinal(2));
+        assert_eq!(
+            app.selected_display_ids,
+            ["display-0", "display-2"],
+            "non-contiguous displays remain independently selectable"
+        );
+        assert_eq!(app.windows.len(), 2);
+        drop(app.toggle_display_ordinal(0));
+        assert_eq!(app.selected_display_ids.len(), 3);
+    }
+
+    #[test]
+    fn placing_on_left_preserves_ops_on_right_and_shows_both_displays() {
+        let mut app = test_app();
+        app.displays = (0..3)
+            .map(|index| DisplayInfo {
+                id: format!("display-{index}"),
+                name: format!("Display {index}"),
+                frame: Rect {
+                    x: index * 1_920,
+                    y: 0,
+                    width: 1_920,
+                    height: 1_200,
+                },
+                primary: index == 0,
+            })
+            .collect();
+        app.display_frames = app.displays.iter().map(|display| display.frame).collect();
+        app.frame = Rect {
+            x: 0,
+            y: 0,
+            width: 5_760,
+            height: 1_200,
+        };
+        app.selected_display_ids = vec!["display-2".into()];
+        app.document.surfaces = ["ops", "pdf"]
+            .into_iter()
+            .map(|id| Surface {
+                id: id.into(),
+                title: id.into(),
+                content: SurfaceContent::Stream {
+                    url: format!("https://example.com/{id}"),
+                },
+                inputs: Vec::new(),
+            })
+            .collect();
+        let ops_bounds = NormalizedRect {
+            x: 0.68,
+            y: 0.08,
+            width: 0.30,
+            height: 0.84,
+        };
+        app.document.layout = Layout::Canvas {
+            placements: vec![
+                Placement {
+                    surface_id: "ops".into(),
+                    bounds: ops_bounds,
+                    layer: 0,
+                },
+                Placement {
+                    surface_id: "pdf".into(),
+                    bounds: NormalizedRect {
+                        x: 0.4,
+                        y: 0.2,
+                        width: 0.2,
+                        height: 0.6,
+                    },
+                    layer: 1,
+                },
+            ],
+        };
+
+        let reply = execute(
+            &mut app,
+            "place-pdf-left",
+            Command::PlaceSurface {
+                surface_id: "pdf".into(),
+                display_ordinal: 1,
+                region: DisplayRegion::Full,
+                margin: 24,
+            },
+        );
+        assert!(matches!(
+            reply.outcome,
+            Outcome::Ok {
+                receipt: Receipt::SurfacePlaced {
+                    ref surface_id,
+                    ref display_id,
+                    ..
+                }
+            } if surface_id == "pdf" && display_id == "display-0"
+        ));
+        assert!(app.selected_display_ids.contains(&"display-0".into()));
+        assert!(app.selected_display_ids.contains(&"display-2".into()));
+        let Layout::Canvas { placements } = &app.document.layout else {
+            panic!("placement converts the workspace to free-form layout")
+        };
+        assert_eq!(
+            placements
+                .iter()
+                .find(|placement| placement.surface_id == "ops")
+                .unwrap()
+                .bounds,
+            ops_bounds
+        );
+        let pdf = placements
+            .iter()
+            .find(|placement| placement.surface_id == "pdf")
+            .unwrap();
+        assert!(pdf.bounds.x < 1.0 / 3.0);
+        assert!(pdf.bounds.width < 1.0 / 3.0);
+    }
+
+    #[test]
+    fn control_number_shortcuts_map_to_display_ordinals() {
+        use iced::keyboard::{Event, Key, Location, Modifiers, key};
+        let pressed = |number: &'static str| Event::KeyPressed {
+            key: Key::Character(number.into()),
+            modified_key: Key::Character(number.into()),
+            physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+            location: Location::Standard,
+            modifiers: Modifiers::CTRL,
+            text: Some(number.into()),
+            repeat: false,
+        };
+        assert_eq!(display_shortcut(&pressed("0")), Some(0));
+        assert_eq!(display_shortcut(&pressed("1")), Some(1));
+        assert_eq!(display_shortcut(&pressed("2")), Some(2));
+        assert_eq!(display_shortcut(&pressed("3")), Some(3));
+        assert_eq!(display_shortcut(&pressed("4")), None);
     }
 
     #[test]
@@ -6931,6 +7355,24 @@ mod tests {
                 .and_then(|transition| transition.from_placements.get("sample")),
             Some(&[0.0, 0.0, 1.0, 1.0])
         );
+
+        let spec = dock_widgets::WidgetSpec::from_json(
+            br#"{"id":"cpu","kind":"stat","label":"CPU","value":33}"#,
+        )
+        .unwrap();
+        app.document.surfaces[0].content = SurfaceContent::Widget { spec };
+        app.decoded.clear();
+        app.ensure_scene_decoded();
+        app.cursor = Some(LogicalPoint {
+            x: left + 8.0,
+            y: top + 10.0,
+        });
+        assert_eq!(
+            app.widget_chrome("sample"),
+            Some(dock_widgets::WidgetChrome::DragOnly)
+        );
+        assert_eq!(app.hit_test_surface_control(), None);
+        assert_eq!(app.interaction_surfaces()[0].surface_id, "sample");
     }
 
     #[test]
