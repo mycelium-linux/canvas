@@ -1013,8 +1013,325 @@ mod known_kind_tests {
     }
 }
 
+/// How much room a widget kind needs, in logical pixels.
+///
+/// Two numbers, because one is not enough. `min` is where the content stops
+/// being readable — below it a widget should degrade rather than squash.
+/// `comfortable` is what a layout should aim for; beyond it most kinds gain
+/// nothing, which is what makes it safe to give leftover space to the kinds
+/// that do.
+///
+/// Both are derived from [`ThemeMetrics`] rather than written as constants, so
+/// they follow the type scale instead of drifting from it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SizeHint {
+    pub min_width: f32,
+    pub min_height: f32,
+    pub comfortable_width: f32,
+    pub comfortable_height: f32,
+    /// Width divided by height this kind reads best at, when a layout has slack
+    /// to spend. A preference, never a lock: charts deliberately reflow rather
+    /// than preserving a ratio.
+    pub preferred_aspect: f32,
+}
+
+impl SizeHint {
+    fn new(
+        min_width: f32,
+        min_height: f32,
+        comfortable_width: f32,
+        comfortable_height: f32,
+        preferred_aspect: f32,
+    ) -> Self {
+        Self {
+            min_width,
+            min_height,
+            comfortable_width,
+            comfortable_height,
+            preferred_aspect,
+        }
+    }
+}
+
+/// The room a widget needs to stay readable.
+///
+/// Digits are roughly 0.6em wide, so a value rendered at `hero` needs about
+/// `hero * 0.6` per character; the widths below assume five or six characters
+/// plus a unit, which covers `100.0%`, `23.6 W` and `154173`.
+pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> SizeHint {
+    let pad = metrics.space_4 * 2.0;
+    let gap = metrics.space_2;
+    // The chrome every panelled widget carries: a title line and a footer line.
+    let chrome = metrics.body + metrics.small + gap * 2.0 + pad;
+    let hero = metrics.display * 1.5;
+    let digit = 0.6;
+    match kind {
+        // A number and its label. Gains nothing from height, so comfortable is
+        // close to min; extra room here is room a chart could have used.
+        WidgetKind::Stat { .. } => SizeHint::new(
+            hero * digit * 5.0,
+            hero + metrics.small * 2.0 + gap * 2.0 + pad,
+            hero * digit * 7.0,
+            hero + metrics.small * 2.0 + gap * 3.0 + pad,
+            1.6,
+        ),
+        // A dial reads as a dial only while it is roughly square.
+        WidgetKind::Gauge { .. } | WidgetKind::Meter { .. } => {
+            let side = metrics.display * 1.7 + metrics.small + pad;
+            SizeHint::new(side * 0.8, side * 0.8, side, side, 1.0)
+        }
+        WidgetKind::Clock { .. } => {
+            let hero = metrics.display * 2.25;
+            SizeHint::new(
+                hero * digit * 5.0,
+                hero + pad,
+                hero * digit * 8.0,
+                hero + pad,
+                2.4,
+            )
+        }
+        // Below roughly 48px of plot area a line is a smear rather than a shape,
+        // and 180 is the point budget a snapshot is thinned to, so a pixel per
+        // point is the width at which detail stops being thrown away.
+        WidgetKind::TimeSeries { .. } | WidgetKind::Histogram { .. } => {
+            SizeHint::new(180.0, 48.0 + chrome, 320.0, 140.0 + chrome, 2.4)
+        }
+        // Bars need a label gutter plus a readable bar; rows below `small` * 2
+        // stop being separable.
+        WidgetKind::RankedBar { .. } | WidgetKind::StackedBar { .. } => {
+            let row = metrics.small * 2.0;
+            SizeHint::new(220.0, row * 3.0 + chrome, 360.0, row * 6.0 + chrome, 2.0)
+        }
+        // A cell smaller than this is a colour with no shape; four rows is the
+        // fewest that reads as a matrix rather than a bar chart.
+        WidgetKind::Heatmap { .. } => {
+            let cell = metrics.small * 0.7;
+            SizeHint::new(
+                cell * 12.0 + 60.0,
+                cell * 4.0 + chrome,
+                cell * 24.0 + 80.0,
+                cell * 8.0 + chrome,
+                2.0,
+            )
+        }
+        WidgetKind::StateTimeline { .. } | WidgetKind::SloBurnRate { .. } => {
+            let lane = metrics.small * 2.2;
+            SizeHint::new(240.0, lane * 2.0 + chrome, 420.0, lane * 4.0 + chrome, 3.0)
+        }
+        // Rows of text: a header and three rows, or the space is better spent
+        // elsewhere.
+        WidgetKind::Table { .. } | WidgetKind::EventLog { .. } | WidgetKind::NodeSummary { .. } => {
+            let row = metrics.small * 1.6;
+            SizeHint::new(240.0, row * 4.0 + chrome, 420.0, row * 8.0 + chrome, 1.8)
+        }
+        WidgetKind::Ticker { .. } => SizeHint::new(
+            200.0,
+            metrics.large * 3.0 + pad,
+            480.0,
+            metrics.large * 3.5 + pad,
+            4.0,
+        ),
+        WidgetKind::Status { .. } => {
+            let side = metrics.body * 3.0 + pad;
+            SizeHint::new(side, side * 0.7, side * 1.6, side * 0.8, 1.6)
+        }
+        WidgetKind::Text { .. } => SizeHint::new(
+            metrics.body * 12.0,
+            metrics.body * 3.0 + pad,
+            metrics.body * 24.0,
+            metrics.body * 6.0 + pad,
+            1.6,
+        ),
+        // Unknown extents: a chart's source and a module's renderer both decide
+        // their own content, so give them a generous, chart-shaped default
+        // rather than pretending to know.
+        WidgetKind::Chart { .. } | WidgetKind::Quant { .. } | WidgetKind::Module { .. } => {
+            SizeHint::new(220.0, 140.0, 420.0, 260.0, 1.6)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    fn metrics() -> canvas_core::ThemeMetrics {
+        canvas_core::ThemeSelection::coherence(
+            canvas_core::ThemeMode::Dark,
+            canvas_core::Accent::Brand,
+        )
+        .visual_theme()
+        .metrics
+    }
+
+    fn every_kind() -> Vec<WidgetKind> {
+        vec![
+            WidgetKind::Stat {
+                label: "l".into(),
+                value: 1.0,
+                unit: None,
+                change: None,
+                state: None,
+                history: Vec::new(),
+            },
+            WidgetKind::Gauge {
+                value: 1.0,
+                label: None,
+            },
+            WidgetKind::Meter {
+                value: 0.5,
+                style: MeterStyle::Led,
+            },
+            WidgetKind::Clock {
+                format: "%H".into(),
+            },
+            WidgetKind::TimeSeries {
+                title: "t".into(),
+                series: Vec::new(),
+                unit: None,
+            },
+            WidgetKind::Histogram {
+                title: "t".into(),
+                buckets: Vec::new(),
+                unit: None,
+            },
+            WidgetKind::RankedBar {
+                title: "t".into(),
+                bars: Vec::new(),
+                unit: None,
+            },
+            WidgetKind::StackedBar {
+                title: "t".into(),
+                series: Vec::new(),
+                bars: Vec::new(),
+                unit: None,
+            },
+            WidgetKind::Heatmap {
+                title: "t".into(),
+                rows: Vec::new(),
+                columns: Vec::new(),
+                values: Vec::new(),
+                unit: None,
+            },
+            WidgetKind::StateTimeline {
+                title: "t".into(),
+                lanes: Vec::new(),
+            },
+            WidgetKind::Table {
+                title: "t".into(),
+                columns: Vec::new(),
+                rows: Vec::new(),
+            },
+            WidgetKind::EventLog {
+                title: "t".into(),
+                entries: Vec::new(),
+            },
+            WidgetKind::Ticker {
+                symbols: vec!["A".into()],
+            },
+            WidgetKind::Status { state: None },
+            WidgetKind::Text { text: "x".into() },
+        ]
+    }
+
+    #[test]
+    fn comfortable_is_never_smaller_than_min() {
+        let m = metrics();
+        for kind in every_kind() {
+            let h = size_hint(&kind, &m);
+            assert!(h.comfortable_width >= h.min_width, "{kind:?} width");
+            assert!(h.comfortable_height >= h.min_height, "{kind:?} height");
+        }
+    }
+
+    #[test]
+    fn every_minimum_leaves_room_for_the_content_it_frames() {
+        // A minimum smaller than the panel's own padding plus one line of text
+        // is a minimum that guarantees an unreadable widget.
+        let m = metrics();
+        let floor = m.space_4 * 2.0 + m.small;
+        for kind in every_kind() {
+            let h = size_hint(&kind, &m);
+            assert!(
+                h.min_height > floor,
+                "{kind:?} min_height {} <= {floor}",
+                h.min_height
+            );
+            assert!(
+                h.min_width > floor,
+                "{kind:?} min_width {} <= {floor}",
+                h.min_width
+            );
+        }
+    }
+
+    #[test]
+    fn minimums_follow_the_type_scale_rather_than_being_pasted_constants() {
+        // Doubling the type scale must grow the value-led kinds. If it does not,
+        // someone replaced a derivation with a literal and the hint will drift
+        // from what is actually rendered.
+        let mut big = metrics();
+        big.display *= 2.0;
+        big.small *= 2.0;
+        big.body *= 2.0;
+        for kind in [
+            WidgetKind::Stat {
+                label: "l".into(),
+                value: 1.0,
+                unit: None,
+                change: None,
+                state: None,
+                history: Vec::new(),
+            },
+            WidgetKind::Gauge {
+                value: 1.0,
+                label: None,
+            },
+            WidgetKind::Clock {
+                format: "%H".into(),
+            },
+        ] {
+            let small = size_hint(&kind, &metrics());
+            let large = size_hint(&kind, &big);
+            assert!(
+                large.min_height > small.min_height,
+                "{kind:?} ignored the type scale"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dial_stays_square_and_a_series_stays_wide() {
+        // Aspect is a preference a layout spends slack on, so the ordering
+        // between kinds is what matters, not the exact ratios.
+        let m = metrics();
+        let gauge = size_hint(
+            &WidgetKind::Gauge {
+                value: 1.0,
+                label: None,
+            },
+            &m,
+        );
+        let series = size_hint(
+            &WidgetKind::TimeSeries {
+                title: "t".into(),
+                series: Vec::new(),
+                unit: None,
+            },
+            &m,
+        );
+        assert!(
+            (gauge.preferred_aspect - 1.0).abs() < 0.2,
+            "a dial should be roughly square"
+        );
+        assert!(
+            series.preferred_aspect > gauge.preferred_aspect,
+            "a series wants to be wider than a dial"
+        );
+        assert!(
+            series.min_width > series.min_height,
+            "a series minimum should be landscape"
+        );
+    }
     use super::*;
 
     #[test]
