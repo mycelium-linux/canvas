@@ -4695,14 +4695,16 @@ fn theme_picker_requested(event: &iced::keyboard::Event) -> bool {
 
 fn project_picker_requested(event: &iced::keyboard::Event) -> bool {
     use iced::keyboard::{Event, Key};
+    // Key::Character carries a SmolStr, so the literal is compared rather than
+    // pattern-matched.
     matches!(
         event,
         Event::KeyPressed {
-            key: Key::Character("p"),
+            key: Key::Character(character),
             modifiers,
             repeat: false,
             ..
-        } if modifiers.control() && !modifiers.alt() && !modifiers.logo()
+        } if character == "p" && modifiers.control() && !modifiers.alt() && !modifiers.logo()
     )
 }
 

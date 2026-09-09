@@ -9,7 +9,7 @@ use crate::{
 };
 use std::path::{Path, PathBuf};
 
-pub const NAMES: &[&str] = &["bifrost/runtime", "elmers/now"];
+pub const NAMES: &[&str] = &["bifrost/runtime", "elmers/now", "fleet/runtime"];
 
 pub fn load(name: &str) -> Result<SharedViewDocument> {
     let relative = view_path(name)?;
@@ -28,6 +28,7 @@ pub fn load(name: &str) -> Result<SharedViewDocument> {
     let source = match name {
         "bifrost/runtime" => include_str!("../../../config/views/bifrost-runtime.json"),
         "elmers/now" => include_str!("../../../config/views/elmers-now.json"),
+        "fleet/runtime" => include_str!("../../../config/views/fleet-runtime.json"),
         _ => return Err(Error(format!("Unknown operational view: {name}"))),
     };
     let document: SharedViewDocument = serde_json::from_str(source)

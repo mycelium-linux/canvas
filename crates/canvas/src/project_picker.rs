@@ -115,7 +115,7 @@ impl ProjectPicker {
         Action::Consumed
     }
 
-    pub fn view<'a, Message: 'a>(&self, catalog: &Catalog, current: &str) -> Element<'a, Message> {
+    pub fn view<'a, Message: 'a>(&self, catalog: &'a Catalog, current: &str) -> Element<'a, Message> {
         let matches = self.matches(catalog);
         let palette = catalog
             .projects
@@ -201,7 +201,7 @@ fn fuzzy_score(query: &str, project: &Project) -> Option<u32> {
     if id.contains(&query) || name.contains(&query) {
         return Some(20);
     }
-    let mut subsequence_score = None;
+    let mut subsequence_score: Option<u32> = None;
     for candidate in [&id, &name] {
         let mut position = 0;
         let mut gaps = 0;
