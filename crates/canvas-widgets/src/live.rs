@@ -494,6 +494,15 @@ pub fn element<'a, Message: 'a>(
                         .collect::<Vec<Element<'_, Message>>>()))
                 },
             );
+            let lines = if let Some(overflow) = overflow_label(rows.len(), 8, "rows") {
+                lines.push(
+                    text(overflow)
+                        .size(metrics.small)
+                        .color(color(palette.warning)),
+                )
+            } else {
+                lines
+            };
             panel(
                 spec,
                 column![
@@ -523,6 +532,15 @@ pub fn element<'a, Message: 'a>(
                     )
                 },
             );
+            let lines = if let Some(overflow) = overflow_label(entries.len(), 7, "events") {
+                lines.push(
+                    text(overflow)
+                        .size(metrics.small)
+                        .color(color(palette.warning)),
+                )
+            } else {
+                lines
+            };
             panel(
                 spec,
                 column![
@@ -554,6 +572,15 @@ pub fn element<'a, Message: 'a>(
                             .spacing(metrics.space_2),
                         )
                     });
+            let lines = if let Some(overflow) = overflow_label(nodes.len(), 8, "nodes") {
+                lines.push(
+                    text(overflow)
+                        .size(metrics.small)
+                        .color(color(palette.warning)),
+                )
+            } else {
+                lines
+            };
             panel(
                 spec,
                 column![
@@ -700,6 +727,15 @@ fn data_state_label(state: WidgetDataState) -> &'static str {
         WidgetDataState::Disconnected => "Disconnected",
         WidgetDataState::Error => "Source error",
     }
+}
+
+/// Return a visible disclosure when a bounded operational list is clipped.
+/// Silent truncation makes an executive view look complete when it is not.
+fn overflow_label(total: usize, shown: usize, noun: &str) -> Option<String> {
+    total
+        .checked_sub(shown)
+        .filter(|remaining| *remaining > 0)
+        .map(|remaining| format!("+{remaining} more {noun}"))
 }
 
 fn data_state_color(state: WidgetDataState, palette: &ThemePalette) -> Color {
@@ -1429,5 +1465,18 @@ mod tests {
         assert_eq!(strftime(&now, "%H:%M:%S"), "14:03:07");
         assert_eq!(strftime(&now, "100%%"), "100%");
         assert_eq!(strftime(&now, "%Q"), "%Q");
+    }
+
+    #[test]
+    fn bounded_lists_disclose_hidden_items() {
+        assert_eq!(overflow_label(8, 8, "rows"), None);
+        assert_eq!(
+            overflow_label(9, 8, "rows").as_deref(),
+            Some("+1 more rows")
+        );
+        assert_eq!(
+            overflow_label(12, 7, "events").as_deref(),
+            Some("+5 more events")
+        );
     }
 }
