@@ -886,8 +886,10 @@ mod tests {
         let once: Vec<_> = ids.iter().map(|id| workspace_theme(id)).collect();
         let twice: Vec<_> = ids.iter().map(|id| workspace_theme(id)).collect();
         assert_eq!(once, twice, "a folder's accent must be stable across syncs");
+        // Not a set: `ThemeSelection` is deliberately only `PartialEq`, and what
+        // this asserts is that the folders differ, not that they can be ordered.
         assert!(
-            once.iter().collect::<std::collections::BTreeSet<_>>().len() > 1,
+            once.iter().any(|theme| *theme != once[0]),
             "the folders must not all look the same"
         );
     }
@@ -1002,12 +1004,20 @@ mod tests {
                 "workspace_activate",
                 json!({"project_id":"dock","target":"primary"}),
             ),
+            // Creating a desktop syncs, so it contends for presentation like
+            // the rest and must refuse before it writes anything.
+            (
+                "canvas_workspace_create",
+                json!({"workspace_id":"scratch","name":"Scratch"}),
+            ),
         ] {
             assert!(execute(name, &args)
                 .unwrap_err()
                 .contains("presentation is busy"));
         }
-        assert_eq!(tools().len(), 10);
+        // Pinned so a new tool is a decision, not an accident: anything added
+        // here has to be considered against the presentation lock above.
+        assert_eq!(tools().len(), 11);
     }
 
     #[test]

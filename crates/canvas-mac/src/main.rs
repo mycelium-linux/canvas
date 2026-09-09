@@ -663,7 +663,7 @@ impl App {
                                 return Err(
                                     "Session control is not connected for this resource yet."
                                         .into(),
-                                )
+                                );
                             }
                         }
                         let out = command.output().map_err(|e| e.to_string())?;
@@ -1053,6 +1053,24 @@ fn parse_area(value: &str) -> Result<Rect, String> {
         _ => Err("Work area must be x,y,width,height with positive dimensions".into()),
     }
 }
+/// Every desktop a person can jump to: the bundled entries, the portfolio
+/// folders Alfalfa seeded, and any ad hoc desktop made since.
+///
+/// Filtered to those with a saved workspace, so the switcher offers somewhere
+/// that actually exists rather than a definition with nothing behind it.
+fn desktop_catalog(base: &Catalog) -> Result<Catalog, String> {
+    let path = canvas::workspace_store::default_path().map_err(|e| e.to_string())?;
+    let store = canvas::workspace_store::load(&path, base).map_err(|e| e.to_string())?;
+    let mut catalog = store.effective_catalog(base).map_err(|e| e.to_string())?;
+    catalog
+        .projects
+        .retain(|project| store.projects.contains_key(&project.id));
+    if catalog.projects.is_empty() {
+        return Err("No saved Canvas desktops".into());
+    }
+    Ok(catalog)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.as_slice() == ["mcp-serve"] {
@@ -1145,7 +1163,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => {
                 return Err(
                     "usage: canvas-mac bridge status mac|agora | pair mac|agora PROJECT".into(),
-                )
+                );
             }
         };
         let result = match args.get(1).map(String::as_str) {
@@ -1322,10 +1340,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{{\"ok\":true}}");
         return Ok(());
     }
-    let catalog = if args.first().map(String::as_str) == Some("--catalog") {
+    let base = if args.first().map(String::as_str) == Some("--catalog") {
         Catalog::load(args.get(1).ok_or("missing catalog path")?)?
     } else {
         Catalog::bundled()?
+    };
+    // The switcher lists the desktops that exist, not the two in the bundled
+    // config file. Alfalfa's portfolio seeds them and ad hoc ones are added by
+    // hand; the store holds the union, because sync is additive and never
+    // deletes. Reading the bundled catalog here is why Ctrl+Option+Space only
+    // ever offered Dock and Studio.
+    //
+    // A missing or unreadable store falls back to the bundled catalog rather
+    // than failing to launch: an unopenable switcher is worse than a short one.
+    let catalog = match desktop_catalog(&base) {
+        Ok(catalog) => catalog,
+        Err(_) => base,
     };
     if catalog.projects.is_empty() {
         return Err("Catalog needs at least one project".into());
@@ -1510,6 +1540,9 @@ mod compact_tests {
         let rejected =
             canvas_mac::remote::rpc("dock", "desktop-text", &["must not type".into()], None);
         assert!(rejected.is_err());
-        println!("Compact Enter received {marker}; same session {}; automatic completion takeover and Escape acknowledged; desktop input rejected.",id.unwrap());
+        println!(
+            "Compact Enter received {marker}; same session {}; automatic completion takeover and Escape acknowledged; desktop input rejected.",
+            id.unwrap()
+        );
     }
 }
