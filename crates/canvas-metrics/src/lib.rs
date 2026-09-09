@@ -386,27 +386,29 @@ pub fn envelope(
         (None, None) => (Unavailable::Stale, None),
         (None, Some(result)) => match classify(result) {
             Some(reason) => (reason, None),
-            None => match widget_fitted(spec, result, MAX_DATAGRAM.saturating_sub(ENVELOPE_OVERHEAD)) {
-                Some((widget, thinned)) => {
-                    let _ = thinned;
-                    let data = json!({
-                        "state": "ready",
-                        "source": source,
-                        "observed_at": observed_at,
-                        "window": window,
-                    });
-                    return Ok(json!({
-                        "schema_version": STREAM_SCHEMA_VERSION,
-                        "owner": owner,
-                        "stream": stream,
-                        "contract": CONTRACT,
-                        "sequence": sequence,
-                        "emitted_at_ms": now_ms,
-                        "payload": {"widget": widget, "data": data},
-                    }));
+            None => {
+                match widget_fitted(spec, result, MAX_DATAGRAM.saturating_sub(ENVELOPE_OVERHEAD)) {
+                    Some((widget, thinned)) => {
+                        let _ = thinned;
+                        let data = json!({
+                            "state": "ready",
+                            "source": source,
+                            "observed_at": observed_at,
+                            "window": window,
+                        });
+                        return Ok(json!({
+                            "schema_version": STREAM_SCHEMA_VERSION,
+                            "owner": owner,
+                            "stream": stream,
+                            "contract": CONTRACT,
+                            "sequence": sequence,
+                            "emitted_at_ms": now_ms,
+                            "payload": {"widget": widget, "data": data},
+                        }));
+                    }
+                    None => (Unavailable::NoData, None),
                 }
-                None => (Unavailable::NoData, None),
-            },
+            }
         },
     };
     // A widget with no fresh sample keeps whatever surface it already has; only
@@ -573,9 +575,21 @@ mod tests {
             ("heatmap", range(2000)),
             ("ranked_bar", instant("1")),
         ] {
-            let event = envelope("bifrost/some-long-source-name", &spec(kind), Some(&result), 1, 0, "2026-09-09T00:00:00Z", "30m").unwrap();
+            let event = envelope(
+                "bifrost/some-long-source-name",
+                &spec(kind),
+                Some(&result),
+                1,
+                0,
+                "2026-09-09T00:00:00Z",
+                "30m",
+            )
+            .unwrap();
             let bytes = serde_json::to_vec(&event).unwrap().len();
-            assert!(bytes <= MAX_DATAGRAM, "{kind}: {bytes} bytes exceeds {MAX_DATAGRAM}");
+            assert!(
+                bytes <= MAX_DATAGRAM,
+                "{kind}: {bytes} bytes exceeds {MAX_DATAGRAM}"
+            );
         }
     }
 
@@ -649,7 +663,15 @@ mod tests {
         // Canvas drops a mutation whose kind differs from the surface, so a
         // gauge going no-data must stay a gauge.
         let empty = json!({"ok":true,"data":{"data":{"result":[]}}});
-        for kind in ["stat", "gauge", "time_series", "heatmap", "ranked_bar", "event_log", "slo_burn_rate"] {
+        for kind in [
+            "stat",
+            "gauge",
+            "time_series",
+            "heatmap",
+            "ranked_bar",
+            "event_log",
+            "slo_burn_rate",
+        ] {
             let mut s = spec(kind);
             s.kind = kind.into();
             let event = envelope("bifrost/x", &s, Some(&empty), 1, 0, "t", "now").unwrap();
