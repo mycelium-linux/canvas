@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "id": "bifrost-runtime",
+  "revision": 1,
+  "sources": {
+    "metrics": {
+      "source": {"owner": "bifrost", "id": "runtime-metrics", "contract": "canvas.prometheus.v1", "kind": "stream"},
+      "position": {"kind": "live", "observed_sequence": 0}
+    }
+  },
+  "widgets": {
+    "health": {"rect":{"x":0.0,"y":0.0,"width":0.2,"height":0.2},"spec":{"id":"health","kind":"stat","label":"Backend health","value":0,"state":"neutral","data":{"state":"loading","source":"prometheus:bifrost/health","window":"now"}}},
+    "queues": {"rect":{"x":0.21,"y":0.0,"width":0.49,"height":0.45},"spec":{"id":"queues","kind":"time_series","title":"Queue depth","series":[{"label":"waiting","points":[{"x":0,"y":0}]}],"data":{"state":"loading","source":"prometheus:bifrost/queue","window":"30m"}}},
+    "cache": {"rect":{"x":0.71,"y":0.0,"width":0.29,"height":0.2},"spec":{"id":"cache","kind":"gauge","value":0,"label":"Prefix cache hit ratio","data":{"state":"loading","source":"prometheus:bifrost/cache","window":"5m"}}},
+    "tokens": {"rect":{"x":0.0,"y":0.21,"width":0.2,"height":0.24},"spec":{"id":"tokens","kind":"stat","label":"Token throughput","value":0,"unit":"tok/s","history":[],"data":{"state":"loading","source":"prometheus:bifrost/tokens","window":"5m"}}},
+    "latency": {"rect":{"x":0.71,"y":0.21,"width":0.29,"height":0.44},"spec":{"id":"latency","kind":"heatmap","title":"Latency quantiles","rows":["TTFT","E2E"],"columns":["p50","p90","p99"],"values":[[0,0,0],[0,0,0]],"unit":"ms","data":{"state":"loading","source":"prometheus:bifrost/latency","window":"15m"}}},
+    "fallbacks": {"rect":{"x":0.0,"y":0.46,"width":0.49,"height":0.54},"spec":{"id":"fallbacks","kind":"event_log","title":"Fallbacks and paid calls","entries":[],"data":{"state":"loading","source":"prometheus:bifrost/fallbacks","window":"1h"}}},
+    "cost": {"rect":{"x":0.5,"y":0.46,"width":0.2,"height":0.24},"spec":{"id":"cost","kind":"stat","label":"Paid-call cost","value":0,"unit":"USD","data":{"state":"loading","source":"prometheus:bifrost/cost","window":"24h"}}},
+    "burn": {"rect":{"x":0.5,"y":0.71,"width":0.5,"height":0.29},"spec":{"id":"burn","kind":"slo_burn_rate","title":"Serving error budget","objective":99.9,"windows":[{"label":"5m","burn_rate":0},{"label":"1h","burn_rate":0},{"label":"6h","burn_rate":0}],"data":{"state":"loading","source":"prometheus:bifrost/slo","window":"6h"}}}
+  }
+}

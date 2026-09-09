@@ -24,6 +24,7 @@ pub mod map;
 #[cfg(all(feature = "mcp", unix))]
 pub mod mcp;
 pub mod media;
+pub mod operational_views;
 pub mod reconcile;
 pub mod screensaver;
 #[cfg(feature = "lua-scenes")]

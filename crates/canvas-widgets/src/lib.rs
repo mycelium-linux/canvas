@@ -156,6 +156,41 @@ pub enum WidgetKind {
         #[serde(default)]
         unit: Option<String>,
     },
+    /// Dense row/column intensity matrix for latency, load, and correlation.
+    Heatmap {
+        title: String,
+        rows: Vec<String>,
+        columns: Vec<String>,
+        values: Vec<Vec<f64>>,
+        #[serde(default)]
+        unit: Option<String>,
+    },
+    /// Ranked categorical values, highest first at render time.
+    RankedBar {
+        title: String,
+        bars: Vec<BarValue>,
+        #[serde(default)]
+        unit: Option<String>,
+    },
+    /// Part-to-whole values for a small set of categories and series.
+    StackedBar {
+        title: String,
+        series: Vec<String>,
+        bars: Vec<StackedBarValue>,
+        #[serde(default)]
+        unit: Option<String>,
+    },
+    /// Bounded state intervals grouped into named lanes.
+    StateTimeline {
+        title: String,
+        lanes: Vec<StateLane>,
+    },
+    /// Error-budget consumption across operational windows.
+    SloBurnRate {
+        title: String,
+        objective: f64,
+        windows: Vec<BurnRateWindow>,
+    },
     /// Compact read-only table for labels, targets, and query results.
     Table {
         title: String,
@@ -268,6 +303,51 @@ pub struct MetricSeries {
 pub struct HistogramBucket {
     pub upper_bound: f64,
     pub count: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct BarValue {
+    pub label: String,
+    pub value: f64,
+    #[serde(default)]
+    pub state: Option<StatusLevel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct StackedBarValue {
+    pub label: String,
+    pub values: Vec<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct StateLane {
+    pub label: String,
+    pub segments: Vec<StateSegment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct StateSegment {
+    pub start: f64,
+    pub end: f64,
+    pub state: StatusLevel,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct BurnRateWindow {
+    pub label: String,
+    pub burn_rate: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -473,6 +553,113 @@ impl WidgetSpec {
                     "histogram buckets must be finite and non-negative",
                 )?;
             }
+            WidgetKind::Heatmap {
+                title,
+                rows,
+                columns,
+                values,
+                unit,
+            } => {
+                bounded_label(title, "heatmap title")?;
+                optional_label(unit, "heatmap unit")?;
+                validate_labels(rows, "heatmap row", 32)?;
+                validate_labels(columns, "heatmap column", 64)?;
+                check(values.len() == rows.len(), "heatmap values must match rows")?;
+                check(
+                    values.iter().all(|row| {
+                        row.len() == columns.len() && row.iter().all(|value| value.is_finite())
+                    }),
+                    "heatmap rows must match columns and contain finite values",
+                )?;
+            }
+            WidgetKind::RankedBar { title, bars, unit } => {
+                bounded_label(title, "ranked bar title")?;
+                optional_label(unit, "ranked bar unit")?;
+                check(
+                    !bars.is_empty() && bars.len() <= 64,
+                    "ranked bar requires 1-64 bars",
+                )?;
+                for bar in bars {
+                    bounded_label(&bar.label, "ranked bar label")?;
+                    check(
+                        bar.value.is_finite() && bar.value >= 0.0,
+                        "ranked bar values must be finite and non-negative",
+                    )?;
+                }
+            }
+            WidgetKind::StackedBar {
+                title,
+                series,
+                bars,
+                unit,
+            } => {
+                bounded_label(title, "stacked bar title")?;
+                optional_label(unit, "stacked bar unit")?;
+                validate_labels(series, "stacked bar series", 12)?;
+                check(
+                    !bars.is_empty() && bars.len() <= 32,
+                    "stacked bar requires 1-32 bars",
+                )?;
+                for bar in bars {
+                    bounded_label(&bar.label, "stacked bar label")?;
+                    check(
+                        bar.values.len() == series.len()
+                            && bar
+                                .values
+                                .iter()
+                                .all(|value| value.is_finite() && *value >= 0.0),
+                        "stacked bar values must match series and be finite and non-negative",
+                    )?;
+                }
+            }
+            WidgetKind::StateTimeline { title, lanes } => {
+                bounded_label(title, "state timeline title")?;
+                check(
+                    !lanes.is_empty() && lanes.len() <= 32,
+                    "state timeline requires 1-32 lanes",
+                )?;
+                for lane in lanes {
+                    bounded_label(&lane.label, "state timeline lane")?;
+                    check(
+                        !lane.segments.is_empty() && lane.segments.len() <= 256,
+                        "state timeline lane requires 1-256 segments",
+                    )?;
+                    let mut previous_end = f64::NEG_INFINITY;
+                    for segment in &lane.segments {
+                        check(
+                            segment.start.is_finite()
+                                && segment.end.is_finite()
+                                && segment.start < segment.end
+                                && segment.start >= previous_end,
+                            "state timeline segments must be finite, ordered, and non-overlapping",
+                        )?;
+                        optional_label(&segment.label, "state segment label")?;
+                        previous_end = segment.end;
+                    }
+                }
+            }
+            WidgetKind::SloBurnRate {
+                title,
+                objective,
+                windows,
+            } => {
+                bounded_label(title, "SLO burn-rate title")?;
+                check(
+                    objective.is_finite() && *objective > 0.0 && *objective <= 100.0,
+                    "SLO objective must be within 0-100 percent",
+                )?;
+                check(
+                    !windows.is_empty() && windows.len() <= 16,
+                    "SLO burn-rate requires 1-16 windows",
+                )?;
+                for window in windows {
+                    bounded_label(&window.label, "SLO burn-rate window")?;
+                    check(
+                        window.burn_rate.is_finite() && window.burn_rate >= 0.0,
+                        "SLO burn rate must be finite and non-negative",
+                    )?;
+                }
+            }
             WidgetKind::Table {
                 title,
                 columns,
@@ -620,6 +807,17 @@ fn optional_bounded_text(value: &Option<String>, name: &str, max: usize) -> Resu
     } else {
         Ok(())
     }
+}
+
+fn validate_labels(values: &[String], name: &str, max: usize) -> Result<()> {
+    check(
+        !values.is_empty() && values.len() <= max,
+        &format!("{name} requires 1-{max} values"),
+    )?;
+    for value in values {
+        bounded_label(value, name)?;
+    }
+    Ok(())
 }
 
 fn validate_f32_series(values: &[f32], name: &str) -> Result<()> {
@@ -778,6 +976,34 @@ mod tests {
             "data": { "detail": detail }
         });
         assert!(WidgetSpec::from_json(&serde_json::to_vec(&json).unwrap()).is_err());
+    }
+
+    #[test]
+    fn operational_chart_families_validate() {
+        for json in [
+            r#"{"id":"heat","kind":"heatmap","title":"Latency","rows":["api"],"columns":["p50","p99"],"values":[[12,48]],"unit":"ms"}"#,
+            r#"{"id":"rank","kind":"ranked_bar","title":"Tokens","bars":[{"label":"agent-a","value":42}]}"#,
+            r#"{"id":"stack","kind":"stacked_bar","title":"Outcomes","series":["ok","error"],"bars":[{"label":"run","values":[9,1]}]}"#,
+            r#"{"id":"states","kind":"state_timeline","title":"Health","lanes":[{"label":"api","segments":[{"start":0,"end":10,"state":"good"}]}]}"#,
+            r#"{"id":"burn","kind":"slo_burn_rate","title":"Budget","objective":99.9,"windows":[{"label":"5m","burn_rate":0.7}]}"#,
+        ] {
+            WidgetSpec::from_json(json.as_bytes())
+                .unwrap_or_else(|error| panic!("{json}: {error}"));
+        }
+    }
+
+    #[test]
+    fn malformed_operational_charts_fail_loudly() {
+        for json in [
+            r#"{"id":"heat","kind":"heatmap","title":"Latency","rows":["api"],"columns":["p50"],"values":[[1,2]]}"#,
+            r#"{"id":"stack","kind":"stacked_bar","title":"Outcomes","series":["ok"],"bars":[{"label":"run","values":[1,2]}]}"#,
+            r#"{"id":"states","kind":"state_timeline","title":"Health","lanes":[{"label":"api","segments":[{"start":4,"end":2,"state":"critical"}]}]}"#,
+        ] {
+            assert!(
+                WidgetSpec::from_json(json.as_bytes()).is_err(),
+                "accepted {json}"
+            );
+        }
     }
 }
 

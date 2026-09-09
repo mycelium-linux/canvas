@@ -6,7 +6,8 @@
 //! all render through one library.
 
 use crate::{
-    ChartType, MeterStyle, StatusLevel, StatusState, WidgetDataState, WidgetKind, WidgetSpec,
+    BurnRateWindow, ChartType, MeterStyle, StateLane, StatusLevel, StatusState, WidgetDataState,
+    WidgetKind, WidgetSpec,
 };
 use canvas_core::{ThemePalette, VisualTheme};
 use iced::mouse;
@@ -319,6 +320,150 @@ pub fn element<'a, Message: 'a>(
             .into(),
             visual,
         ),
+        WidgetKind::Heatmap {
+            title,
+            rows,
+            columns,
+            values,
+            unit,
+        } => panel(
+            spec,
+            column![
+                row![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    space::horizontal(),
+                    text(unit.clone().unwrap_or_default())
+                        .size(metrics.small)
+                        .color(color(palette.text_muted)),
+                ],
+                Canvas::new(HeatmapProgram {
+                    rows: rows.clone(),
+                    columns: columns.clone(),
+                    values: values.clone(),
+                    low: color(palette.surface_muted),
+                    high: color(palette.primary),
+                    label: color(palette.text_muted),
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .spacing(metrics.space_2)
+            .into(),
+            visual,
+        ),
+        WidgetKind::RankedBar { title, bars, unit } => panel(
+            spec,
+            column![
+                row![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    space::horizontal(),
+                    text(unit.clone().unwrap_or_default())
+                        .size(metrics.small)
+                        .color(color(palette.text_muted)),
+                ],
+                Canvas::new(RankedBarProgram {
+                    bars: bars
+                        .iter()
+                        .map(|bar| (bar.label.clone(), bar.value as f32, bar.state))
+                        .collect(),
+                    palette: series_colors(palette),
+                    label: color(palette.text_muted),
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .spacing(metrics.space_2)
+            .into(),
+            visual,
+        ),
+        WidgetKind::StackedBar {
+            title,
+            series,
+            bars,
+            unit,
+        } => panel(
+            spec,
+            column![
+                row![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    space::horizontal(),
+                    text(unit.clone().unwrap_or_default())
+                        .size(metrics.small)
+                        .color(color(palette.text_muted)),
+                ],
+                row(series
+                    .iter()
+                    .enumerate()
+                    .map(|(index, label)| row![
+                        status_dot(series_colors(palette)[index % 5], 7.0),
+                        text(label)
+                            .size(metrics.small)
+                            .color(color(palette.text_muted)),
+                    ]
+                    .spacing(metrics.space_1)
+                    .into())
+                    .collect::<Vec<Element<'_, Message>>>())
+                .spacing(metrics.space_3),
+                Canvas::new(StackedBarProgram {
+                    bars: bars
+                        .iter()
+                        .map(|bar| (bar.label.clone(), bar.values.clone()))
+                        .collect(),
+                    colors: series_colors(palette),
+                    label: color(palette.text_muted),
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .spacing(metrics.space_2)
+            .into(),
+            visual,
+        ),
+        WidgetKind::StateTimeline { title, lanes } => panel(
+            spec,
+            column![
+                text(title).size(metrics.body).color(color(palette.text)),
+                Canvas::new(StateTimelineProgram {
+                    lanes: lanes.clone(),
+                    palette: *palette,
+                    label: color(palette.text_muted),
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .spacing(metrics.space_2)
+            .into(),
+            visual,
+        ),
+        WidgetKind::SloBurnRate {
+            title,
+            objective,
+            windows,
+        } => panel(
+            spec,
+            column![
+                row![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    space::horizontal(),
+                    text(format!("{objective:.3}% objective"))
+                        .size(metrics.small)
+                        .color(color(palette.text_muted)),
+                ],
+                Canvas::new(BurnRateProgram {
+                    windows: windows.clone(),
+                    good: color(palette.success),
+                    warning: color(palette.warning),
+                    danger: color(palette.danger),
+                    track: color(palette.surface_muted),
+                    label: color(palette.text_muted),
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .spacing(metrics.space_2)
+            .into(),
+            visual,
+        ),
         WidgetKind::Table {
             title,
             columns,
@@ -615,6 +760,293 @@ fn format_metric(value: f64) -> String {
     } else {
         format!("{value:.2}")
     }
+}
+
+struct HeatmapProgram {
+    rows: Vec<String>,
+    columns: Vec<String>,
+    values: Vec<Vec<f64>>,
+    low: Color,
+    high: Color,
+    label: Color,
+}
+
+impl<Message> canvas::Program<Message> for HeatmapProgram {
+    type State = ();
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let label_width = (bounds.width * 0.18).clamp(42.0, 110.0);
+        let top = 18.0;
+        let cell_w = ((bounds.width - label_width) / self.columns.len() as f32).max(1.0);
+        let cell_h = ((bounds.height - top) / self.rows.len() as f32).max(1.0);
+        let (min, max) = self
+            .values
+            .iter()
+            .flatten()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), value| {
+                (lo.min(*value), hi.max(*value))
+            });
+        for (column, name) in self.columns.iter().enumerate() {
+            frame.fill_text(canvas::Text {
+                content: name.clone(),
+                position: Point::new(label_width + column as f32 * cell_w + 3.0, 10.0),
+                color: self.label,
+                size: iced::Pixels(9.0),
+                ..Default::default()
+            });
+        }
+        for (row, (name, values)) in self.rows.iter().zip(&self.values).enumerate() {
+            let y = top + row as f32 * cell_h;
+            frame.fill_text(canvas::Text {
+                content: name.clone(),
+                position: Point::new(0.0, y + cell_h * 0.65),
+                color: self.label,
+                size: iced::Pixels(10.0),
+                ..Default::default()
+            });
+            for (column, value) in values.iter().enumerate() {
+                let t = ((*value - min) / (max - min).max(f64::EPSILON)) as f32;
+                let fill = lerp_color(self.low, self.high, t);
+                frame.fill(
+                    &Path::rectangle(
+                        Point::new(label_width + column as f32 * cell_w + 1.0, y + 1.0),
+                        Size::new((cell_w - 2.0).max(1.0), (cell_h - 2.0).max(1.0)),
+                    ),
+                    fill,
+                );
+            }
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
+struct RankedBarProgram {
+    bars: Vec<(String, f32, Option<StatusLevel>)>,
+    palette: Vec<Color>,
+    label: Color,
+}
+
+impl<Message> canvas::Program<Message> for RankedBarProgram {
+    type State = ();
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let mut bars = self.bars.clone();
+        bars.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let max = bars
+            .iter()
+            .map(|bar| bar.1)
+            .fold(0.0, f32::max)
+            .max(f32::EPSILON);
+        let row_h = bounds.height / bars.len() as f32;
+        let label_w = (bounds.width * 0.24).clamp(52.0, 140.0);
+        for (index, (name, value, _)) in bars.iter().enumerate() {
+            let y = index as f32 * row_h;
+            frame.fill_text(canvas::Text {
+                content: name.clone(),
+                position: Point::new(0.0, y + row_h * 0.65),
+                color: self.label,
+                size: iced::Pixels(10.0),
+                ..Default::default()
+            });
+            frame.fill(
+                &Path::rectangle(
+                    Point::new(label_w, y + row_h * 0.2),
+                    Size::new((bounds.width - label_w) * *value / max, row_h * 0.55),
+                ),
+                self.palette[index % self.palette.len()],
+            );
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
+struct StackedBarProgram {
+    bars: Vec<(String, Vec<f64>)>,
+    colors: Vec<Color>,
+    label: Color,
+}
+impl<Message> canvas::Program<Message> for StackedBarProgram {
+    type State = ();
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let max = self
+            .bars
+            .iter()
+            .map(|(_, values)| values.iter().sum::<f64>())
+            .fold(0.0, f64::max)
+            .max(f64::EPSILON);
+        let row_h = bounds.height / self.bars.len() as f32;
+        let label_w = (bounds.width * 0.22).clamp(48.0, 130.0);
+        for (row, (name, values)) in self.bars.iter().enumerate() {
+            let y = row as f32 * row_h;
+            frame.fill_text(canvas::Text {
+                content: name.clone(),
+                position: Point::new(0.0, y + row_h * 0.65),
+                color: self.label,
+                size: iced::Pixels(10.0),
+                ..Default::default()
+            });
+            let mut x = label_w;
+            for (index, value) in values.iter().enumerate() {
+                let width = (bounds.width - label_w) * (*value / max) as f32;
+                frame.fill(
+                    &Path::rectangle(
+                        Point::new(x, y + row_h * 0.2),
+                        Size::new(width, row_h * 0.55),
+                    ),
+                    self.colors[index % self.colors.len()],
+                );
+                x += width;
+            }
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
+struct StateTimelineProgram {
+    lanes: Vec<StateLane>,
+    palette: ThemePalette,
+    label: Color,
+}
+impl<Message> canvas::Program<Message> for StateTimelineProgram {
+    type State = ();
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let min = self
+            .lanes
+            .iter()
+            .flat_map(|lane| &lane.segments)
+            .map(|segment| segment.start)
+            .fold(f64::INFINITY, f64::min);
+        let max = self
+            .lanes
+            .iter()
+            .flat_map(|lane| &lane.segments)
+            .map(|segment| segment.end)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let span = (max - min).max(f64::EPSILON);
+        let label_w = (bounds.width * 0.2).clamp(48.0, 130.0);
+        let row_h = bounds.height / self.lanes.len() as f32;
+        for (row, lane) in self.lanes.iter().enumerate() {
+            let y = row as f32 * row_h;
+            frame.fill_text(canvas::Text {
+                content: lane.label.clone(),
+                position: Point::new(0.0, y + row_h * 0.65),
+                color: self.label,
+                size: iced::Pixels(10.0),
+                ..Default::default()
+            });
+            for segment in &lane.segments {
+                let x = label_w + ((segment.start - min) / span) as f32 * (bounds.width - label_w);
+                let width =
+                    ((segment.end - segment.start) / span) as f32 * (bounds.width - label_w);
+                frame.fill(
+                    &Path::rectangle(
+                        Point::new(x, y + row_h * 0.18),
+                        Size::new(width.max(1.0), row_h * 0.62),
+                    ),
+                    status_color(segment.state, &self.palette),
+                );
+            }
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
+struct BurnRateProgram {
+    windows: Vec<BurnRateWindow>,
+    good: Color,
+    warning: Color,
+    danger: Color,
+    track: Color,
+    label: Color,
+}
+impl<Message> canvas::Program<Message> for BurnRateProgram {
+    type State = ();
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let max = self
+            .windows
+            .iter()
+            .map(|window| window.burn_rate)
+            .fold(1.0, f64::max);
+        let row_h = bounds.height / self.windows.len() as f32;
+        let label_w = (bounds.width * 0.2).clamp(44.0, 110.0);
+        for (row, window) in self.windows.iter().enumerate() {
+            let y = row as f32 * row_h;
+            frame.fill_text(canvas::Text {
+                content: format!("{}  {:.2}×", window.label, window.burn_rate),
+                position: Point::new(0.0, y + row_h * 0.65),
+                color: self.label,
+                size: iced::Pixels(10.0),
+                ..Default::default()
+            });
+            let rect = |width| {
+                Path::rectangle(
+                    Point::new(label_w, y + row_h * 0.25),
+                    Size::new(width, row_h * 0.5),
+                )
+            };
+            frame.fill(&rect(bounds.width - label_w), self.track);
+            let fill = if window.burn_rate <= 1.0 {
+                self.good
+            } else if window.burn_rate <= 2.0 {
+                self.warning
+            } else {
+                self.danger
+            };
+            frame.fill(
+                &rect((bounds.width - label_w) * (window.burn_rate / max) as f32),
+                fill,
+            );
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
+fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    Color::from_rgba(
+        a.r + (b.r - a.r) * t,
+        a.g + (b.g - a.g) * t,
+        a.b + (b.b - a.b) * t,
+        a.a + (b.a - a.a) * t,
+    )
 }
 
 struct SparklineProgram {
