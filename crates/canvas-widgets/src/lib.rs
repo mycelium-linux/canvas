@@ -248,7 +248,16 @@ pub enum WidgetKind {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum WidgetMutation {
-    Quant { mutation: quant::QuantMutation },
+    Quant {
+        mutation: quant::QuantMutation,
+    },
+    /// Replace only a widget's bounded, typed data payload. Layout, identity,
+    /// theme and chrome remain owned by the saved Canvas view.
+    Snapshot {
+        widget: WidgetKind,
+        #[serde(default)]
+        data: WidgetData,
+    },
 }
 
 impl WidgetSpec {
@@ -257,10 +266,84 @@ impl WidgetSpec {
             (WidgetKind::Quant { widget }, WidgetMutation::Quant { mutation }) => {
                 widget.apply(mutation)?;
             }
+            (current, WidgetMutation::Snapshot { widget, data })
+                if same_widget_kind(current, &widget) =>
+            {
+                *current = widget;
+                self.data = data;
+            }
             _ => return err("widget mutation does not match the target widget kind"),
         }
         self.validate()
     }
+}
+
+#[cfg(test)]
+mod mutation_tests {
+    use super::*;
+
+    fn stat() -> WidgetSpec {
+        WidgetSpec {
+            schema_version: WIDGET_SCHEMA_VERSION,
+            id: "health".into(),
+            kind: WidgetKind::Stat {
+                label: "Health".into(),
+                value: 0.0,
+                unit: None,
+                change: None,
+                state: None,
+                history: Vec::new(),
+            },
+            theme: Some("project".into()),
+            refresh_ms: Some(1_000),
+            chrome: WidgetChrome::DragOnly,
+            data: WidgetData::default(),
+        }
+    }
+
+    #[test]
+    fn snapshot_replaces_only_matching_widget_data() {
+        let mut spec = stat();
+        spec.apply_mutation(WidgetMutation::Snapshot {
+            widget: WidgetKind::Stat {
+                label: "Health".into(),
+                value: 1.0,
+                unit: None,
+                change: None,
+                state: Some(StatusLevel::Good),
+                history: vec![0.0, 1.0],
+            },
+            data: WidgetData {
+                state: WidgetDataState::Ready,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        assert_eq!(spec.id, "health");
+        assert_eq!(spec.theme.as_deref(), Some("project"));
+        assert_eq!(spec.data.state, WidgetDataState::Ready);
+    }
+
+    #[test]
+    fn snapshot_cannot_change_widget_family() {
+        let mut spec = stat();
+        let before = spec.clone();
+        assert!(
+            spec.apply_mutation(WidgetMutation::Snapshot {
+                widget: WidgetKind::Gauge {
+                    value: 50.0,
+                    label: None,
+                },
+                data: WidgetData::default(),
+            })
+            .is_err()
+        );
+        assert_eq!(spec, before);
+    }
+}
+
+fn same_widget_kind(left: &WidgetKind, right: &WidgetKind) -> bool {
+    std::mem::discriminant(left) == std::mem::discriminant(right)
 }
 
 /// A declared input value carried by a [`WidgetKind::Module`] spec.

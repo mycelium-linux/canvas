@@ -4,13 +4,27 @@
 //! catalog only maps a human-facing project/view name to that existing format.
 
 use crate::{
-    Error, Layout, NormalizedRect, Placement, Result, Surface, SurfaceContent, WorkspaceDocument,
-    view::SharedViewDocument,
+    DataBinding, DataSource, DeliveryPolicy, Error, InputPort, InputTarget, Layout, NormalizedRect,
+    Placement, Result, Surface, SurfaceContent, WorkspaceDocument, view::SharedViewDocument,
 };
+use std::path::{Path, PathBuf};
 
 pub const NAMES: &[&str] = &["bifrost/runtime", "elmers/now"];
 
 pub fn load(name: &str) -> Result<SharedViewDocument> {
+    let relative = view_path(name)?;
+    if let Some(bytes) = crate::runtime_config::read(&relative, 256 * 1024)? {
+        let document: SharedViewDocument = serde_json::from_slice(&bytes)
+            .map_err(|error| Error(format!("Invalid runtime operational view {name}: {error}")))?;
+        document.validate()?;
+        if document.id != name.replace('/', "-") {
+            return Err(Error(format!(
+                "Runtime operational view {name} has mismatched id {}",
+                document.id
+            )));
+        }
+        return Ok(document);
+    }
     let source = match name {
         "bifrost/runtime" => include_str!("../../../config/views/bifrost-runtime.json"),
         "elmers/now" => include_str!("../../../config/views/elmers-now.json"),
@@ -20,6 +34,21 @@ pub fn load(name: &str) -> Result<SharedViewDocument> {
         .map_err(|error| Error(format!("Invalid built-in operational view {name}: {error}")))?;
     document.validate()?;
     Ok(document)
+}
+
+fn view_path(name: &str) -> Result<PathBuf> {
+    if name.is_empty()
+        || name.len() > 128
+        || !name.split('/').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
+    {
+        return Err(Error(format!("Invalid operational view name: {name}")));
+    }
+    Ok(Path::new("views").join(name).with_extension("json"))
 }
 
 /// Materialize a view as ordinary movable widget surfaces. Existing surfaces
@@ -33,11 +62,18 @@ pub fn materialize(name: &str, document: &WorkspaceDocument) -> Result<Workspace
     for (layer, (widget_id, placed)) in view.widgets.into_iter().enumerate() {
         let surface_id = format!("view-{}-{widget_id}", view.id);
         first.get_or_insert_with(|| surface_id.clone());
+        let source = widget_source(&placed.spec)?;
+        let inputs = source.as_ref().map_or_else(Vec::new, |_| {
+            vec![InputPort {
+                id: "snapshot".into(),
+                contract: "canvas.widget.snapshot.v1".into(),
+            }]
+        });
         let surface = Surface {
             id: surface_id.clone(),
             title: widget_title(&placed.spec),
             content: SurfaceContent::Widget { spec: placed.spec },
-            inputs: Vec::new(),
+            inputs,
         };
         if let Some(existing) = next
             .surfaces
@@ -49,7 +85,7 @@ pub fn materialize(name: &str, document: &WorkspaceDocument) -> Result<Workspace
             next.surfaces.push(surface);
         }
         placements.push(Placement {
-            surface_id,
+            surface_id: surface_id.clone(),
             bounds: NormalizedRect {
                 x: placed.rect.x,
                 y: placed.rect.y,
@@ -58,6 +94,31 @@ pub fn materialize(name: &str, document: &WorkspaceDocument) -> Result<Workspace
             },
             layer: layer as i32,
         });
+        if let Some((owner, stream)) = source {
+            let binding = DataBinding {
+                id: format!("{surface_id}-snapshot"),
+                source: DataSource {
+                    owner,
+                    stream,
+                    contract: "canvas.widget.snapshot.v1".into(),
+                },
+                target: InputTarget {
+                    surface_id: surface_id.clone(),
+                    input_id: "snapshot".into(),
+                },
+                adapter: Some("widget-snapshot-v1".into()),
+                delivery: DeliveryPolicy::Latest,
+            };
+            if let Some(existing) = next
+                .bindings
+                .iter_mut()
+                .find(|candidate| candidate.id == binding.id)
+            {
+                *existing = binding;
+            } else {
+                next.bindings.push(binding);
+            }
+        }
     }
     next.layout = Layout::Canvas { placements };
     next.focused_surface_id = first;
@@ -69,6 +130,34 @@ pub fn materialize(name: &str, document: &WorkspaceDocument) -> Result<Workspace
     }
     next.revision = document.revision.saturating_add(1);
     Ok(next)
+}
+
+fn widget_source(spec: &canvas_widgets::WidgetSpec) -> Result<Option<(String, String)>> {
+    let Some(source) = spec.data.source.as_deref() else {
+        return Ok(None);
+    };
+    let Some((transport, identity)) = source.split_once(':') else {
+        return Err(Error(format!(
+            "Invalid operational widget source: {source}"
+        )));
+    };
+    if transport != "prometheus" && transport != "sse" {
+        return Err(Error(format!(
+            "Unsupported operational widget transport: {transport}"
+        )));
+    }
+    let Some((owner, stream)) = identity.split_once('/') else {
+        return Err(Error(format!(
+            "Invalid operational widget source: {source}"
+        )));
+    };
+    let stream = format!("{transport}-{stream}");
+    if owner.is_empty() || stream.is_empty() {
+        return Err(Error(format!(
+            "Invalid operational widget source: {source}"
+        )));
+    }
+    Ok(Some((owner.into(), stream)))
 }
 
 fn widget_title(spec: &canvas_widgets::WidgetSpec) -> String {
@@ -131,6 +220,17 @@ mod tests {
         };
         let first = materialize("bifrost/runtime", &base).unwrap();
         first.validate(&catalog).unwrap();
+        assert_eq!(first.bindings.len(), 8);
+        assert!(
+            first
+                .surfaces
+                .iter()
+                .all(|surface| surface.inputs.len() == 1)
+        );
+        assert!(first.bindings.iter().all(|binding| {
+            binding.source.contract == "canvas.widget.snapshot.v1"
+                && binding.adapter.as_deref() == Some("widget-snapshot-v1")
+        }));
         let second = materialize("bifrost/runtime", &first).unwrap();
         second.validate(&catalog).unwrap();
         assert_eq!(first, second);

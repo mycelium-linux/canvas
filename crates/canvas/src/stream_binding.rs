@@ -193,8 +193,22 @@ pub fn apply_named_adapter_batch(
     events: &[&StreamEnvelope],
     target: &mut WidgetSpec,
 ) -> Result<()> {
+    if adapter.is_empty()
+        || !adapter
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(Error(format!("invalid stream adapter: {adapter}")));
+    }
+    let relative = PathBuf::from("binders").join(format!("{adapter}.lua"));
+    if let Some(bytes) = crate::runtime_config::read(&relative, MAX_ADAPTER_BYTES as u64)? {
+        let source = std::str::from_utf8(&bytes)
+            .map_err(|error| Error(format!("Canvas adapter is not UTF-8: {error}")))?;
+        return apply_lua_adapter_batch(source, events, target);
+    }
     let source = match adapter {
         "market-ohlcv-v1" => include_str!("../../../config/binders/market-ohlcv-v1.lua"),
+        "widget-snapshot-v1" => include_str!("../../../config/binders/widget-snapshot-v1.lua"),
         _ => return Err(Error(format!("unknown stream adapter: {adapter}"))),
     };
     apply_lua_adapter_batch(source, events, target)
@@ -361,5 +375,62 @@ mod tests {
         let stats = inbox.stats();
         assert_eq!(stats.queue_depth, MAX_PENDING_EVENTS);
         assert_eq!(stats.dropped, 20);
+    }
+
+    #[test]
+    fn generic_snapshot_adapter_updates_data_but_preserves_surface_spec() {
+        let mut target = WidgetSpec {
+            schema_version: 1,
+            id: "health".into(),
+            kind: WidgetKind::Stat {
+                label: "Backend health".into(),
+                value: 0.0,
+                unit: None,
+                change: None,
+                state: None,
+                history: Vec::new(),
+            },
+            theme: Some("project".into()),
+            refresh_ms: Some(5_000),
+            chrome: WidgetChrome::DragOnly,
+            data: canvas_widgets::WidgetData {
+                state: canvas_widgets::WidgetDataState::Loading,
+                source: Some("prometheus:bifrost/health".into()),
+                ..Default::default()
+            },
+        };
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "bifrost".into(),
+            stream: "prometheus-health".into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "widget": {
+                    "kind": "stat",
+                    "label": "Backend health",
+                    "value": 1.0,
+                    "state": "good"
+                },
+                "data": {
+                    "state": "ready",
+                    "source": "prometheus:bifrost/health",
+                    "observed_at": "2026-09-09T00:00:00Z",
+                    "window": "now"
+                }
+            }),
+        };
+
+        apply_named_adapter("widget-snapshot-v1", &event, &mut target).unwrap();
+        assert_eq!(target.id, "health");
+        assert_eq!(target.theme.as_deref(), Some("project"));
+        assert_eq!(target.refresh_ms, Some(5_000));
+        assert_eq!(target.data.state, canvas_widgets::WidgetDataState::Ready);
+        let WidgetKind::Stat { value, state, .. } = target.kind else {
+            panic!("stat")
+        };
+        assert_eq!(value, 1.0);
+        assert_eq!(state, Some(canvas_widgets::StatusLevel::Good));
     }
 }

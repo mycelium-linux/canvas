@@ -324,15 +324,15 @@ mod tests {
     fn vertical_movement_never_strands_the_selection() {
         // The last row is short, so an unguarded +COLUMNS would index past the
         // end and a naive clamp would make Down a dead end.
-        for start in 0..SHADERS.len() {
+        for shader in SHADERS {
             let mut picker = BackgroundPicker::opened_from(&Background::Shader {
-                shader_id: SHADERS[start].id,
+                shader_id: shader.id,
                 speed: 0.5,
             });
             picker.handle(&named(iced::keyboard::key::Named::ArrowDown));
             let after_down = picker.selected();
             picker.handle(&named(iced::keyboard::key::Named::ArrowUp));
-            assert_eq!(picker.selected(), SHADERS[start].id, "down then up returns");
+            assert_eq!(picker.selected(), shader.id, "down then up returns");
             assert!(BackgroundShader::ALL.contains(&after_down));
         }
     }

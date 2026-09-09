@@ -26,6 +26,7 @@ pub mod mcp;
 pub mod media;
 pub mod operational_views;
 pub mod reconcile;
+pub mod runtime_config;
 pub mod screensaver;
 #[cfg(feature = "lua-scenes")]
 pub mod stream_binding;

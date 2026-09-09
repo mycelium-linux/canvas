@@ -14,6 +14,18 @@ class SetupCanvasMcpTest(unittest.TestCase):
                 ["/usr/bin/open", "-n", "-a", str(app)],
             )
             self.assertFalse(desired["KeepAlive"])
+            self.assertEqual(
+                desired["EnvironmentVariables"]["CANVAS_CONFIG_DIR"],
+                str(home / "Library/Application Support/Dock/canvas"),
+            )
+
+    def test_runtime_config_installs_binders_and_nested_named_views(self):
+        with tempfile.TemporaryDirectory() as directory:
+            support = pathlib.Path(directory) / "canvas"
+            MODULE.install_runtime_config(support)
+            self.assertTrue((support / "binders/widget-snapshot-v1.lua").is_file())
+            self.assertTrue((support / "views/bifrost/runtime.json").is_file())
+            self.assertTrue((support / "views/elmers/now.json").is_file())
 
     def test_registration_preserves_others_and_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
