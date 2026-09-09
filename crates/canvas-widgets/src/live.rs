@@ -147,30 +147,40 @@ pub fn element<'a, Message: 'a>(
         // crate, which has no Lua runtime of its own. Reaching here is a wiring
         // bug, and `element` cannot return an error — so say so on screen rather
         // than render an innocent blank that looks like a working empty widget.
-        WidgetKind::Module { module, .. } => {
+        WidgetKind::Module { module, .. } => panel(
+            spec,
             container(text(format!("unresolved module: {module}")).color(color(palette.text)))
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .center(Length::Fill)
-                .into()
-        }
-        WidgetKind::Text { text: body } => container(text(body).color(color(palette.text)))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center(Length::Fill)
-            .into(),
+                .into(),
+            visual,
+        ),
+        WidgetKind::Text { text: body } => panel(
+            spec,
+            container(text(body).color(color(palette.text)))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center(Length::Fill)
+                .into(),
+            visual,
+        ),
         WidgetKind::Clock { format } => {
             let now = chrono_now();
             let rendered = strftime(&now, format);
-            container(
-                text(rendered)
-                    .size(metrics.display * 2.25)
-                    .color(color(palette.text)),
+            panel(
+                spec,
+                container(
+                    text(rendered)
+                        .size(metrics.display * 2.25)
+                        .color(color(palette.text)),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center(Length::Fill)
+                .into(),
+                visual,
             )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center(Length::Fill)
-            .into()
         }
         WidgetKind::Ticker { symbols } => {
             let quotes = symbols
@@ -364,7 +374,13 @@ pub fn element<'a, Message: 'a>(
                 Canvas::new(RankedBarProgram {
                     bars: bars
                         .iter()
-                        .map(|bar| (bar.label.clone(), bar.value as f32, bar.state))
+                        .map(|bar| {
+                            (
+                                bar.label.clone(),
+                                bar.value as f32,
+                                bar.state.map(|level| status_color(level, palette)),
+                            )
+                        })
                         .collect(),
                     palette: series_colors(palette),
                     label: color(palette.text_muted),
@@ -616,15 +632,26 @@ pub(crate) fn panel<'a, Message: 'a>(
     let metrics = visual.metrics;
     let panel_opacity = visual.panel_opacity;
     let muted_opacity = visual.muted_opacity;
-    let shadow_opacity = visual.shadow_opacity;
-    let shadow_offset_y = visual.shadow_offset_y;
-    let shadow_blur = visual.shadow_blur;
     let content: Element<'a, Message> = match spec.data.state {
         WidgetDataState::Loading
         | WidgetDataState::NoData
         | WidgetDataState::Disconnected
         | WidgetDataState::Error => data_state_content(spec, visual),
-        WidgetDataState::Ready | WidgetDataState::Stale | WidgetDataState::Partial => body,
+        // Stale keeps its body, because a stale number is still information,
+        // but must not read as current. The footer already names the state; this
+        // carries it into the value, which is the part anyone actually looks at.
+        WidgetDataState::Stale | WidgetDataState::Partial => {
+            // Resolved before the closure: capturing `visual` would tie the
+            // style to the theme's lifetime, and Color is Copy.
+            let dimmed = with_alpha(color(visual.palette.text), muted_opacity);
+            container(body)
+                .style(move |_| container::Style {
+                    text_color: Some(dimmed),
+                    ..Default::default()
+                })
+                .into()
+        }
+        WidgetDataState::Ready => body,
     };
     let mut layout = column![].spacing(metrics.space_2);
     // The badge sits above the body and is drawn in every state, including
@@ -648,11 +675,9 @@ pub(crate) fn panel<'a, Message: 'a>(
                 width: 1.0,
                 radius: metrics.radius_lg.into(),
             },
-            shadow: iced::Shadow {
-                color: Color::from_rgba(0.0, 0.0, 0.0, shadow_opacity),
-                offset: iced::Vector::new(0.0, shadow_offset_y),
-                blur_radius: shadow_blur,
-            },
+            // No shadow. The host draws a plane with its own shadow behind every
+            // widget surface, and a second concentric one at a near-identical
+            // radius is the single clearest signal that this is unfinished.
             ..Default::default()
         })
         .into()
@@ -906,7 +931,9 @@ impl<Message> canvas::Program<Message> for HeatmapProgram {
 }
 
 struct RankedBarProgram {
-    bars: Vec<(String, f32, Option<StatusLevel>)>,
+    /// Colour resolved at construction: the draw pass has the series ramp
+    /// but not the palette, and a declared status must win over rank position.
+    bars: Vec<(String, f32, Option<Color>)>,
     palette: Vec<Color>,
     label: Color,
 }
@@ -931,7 +958,7 @@ impl<Message> canvas::Program<Message> for RankedBarProgram {
             .max(f32::EPSILON);
         let row_h = bounds.height / bars.len() as f32;
         let label_w = (bounds.width * 0.24).clamp(52.0, 140.0);
-        for (index, (name, value, _)) in bars.iter().enumerate() {
+        for (index, (name, value, state)) in bars.iter().enumerate() {
             let y = index as f32 * row_h;
             frame.fill_text(canvas::Text {
                 content: name.clone(),
@@ -945,7 +972,10 @@ impl<Message> canvas::Program<Message> for RankedBarProgram {
                     Point::new(label_w, y + row_h * 0.2),
                     Size::new((bounds.width - label_w) * *value / max, row_h * 0.55),
                 ),
-                self.palette[index % self.palette.len()],
+                // A bar that declares a status is coloured by it. Ranking is
+                // already conveyed by position, so spending colour on rank too
+                // discards meaning the payload went to the trouble of carrying.
+                state.unwrap_or(self.palette[index % self.palette.len()]),
             );
         }
         vec![frame.into_geometry()]
