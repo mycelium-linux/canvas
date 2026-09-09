@@ -399,6 +399,7 @@ name = "canvas-core"
 version = "0.1.0"
 dependencies = [
  "coherence-tokens",
+ "schemars",
  "serde",
  "serde_json",
  "toml",

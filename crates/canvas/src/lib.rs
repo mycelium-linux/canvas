@@ -30,6 +30,7 @@ pub mod runtime_config;
 pub mod screensaver;
 #[cfg(feature = "lua-scenes")]
 pub mod stream_binding;
+pub mod theme_picker;
 pub mod view;
 pub mod workspace_store;
 
@@ -126,11 +127,15 @@ pub enum SurfaceTitleMode {
     Always,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum ThemeRef {
     Project,
+    /// A workspace-local selection from the bounded native theme catalog.
+    Selection {
+        theme: ThemeSelection,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -647,6 +652,7 @@ impl WorkspaceDocument {
                 .project(&self.project_id)
                 .map_err(|error| Error(error.to_string()))?
                 .theme),
+            ThemeRef::Selection { theme } => Ok(theme),
         }
     }
 
@@ -1303,6 +1309,22 @@ mod tests {
         .unwrap()
         .replace("\"revision\":2", "\"revision\":2,\"surprise\":true");
         assert!(serde_json::from_str::<WorkspacePatch>(&json).is_err());
+    }
+
+    #[test]
+    fn workspace_can_override_the_project_theme_without_changing_the_catalog() {
+        let catalog = catalog();
+        let mut document = document();
+        let selected =
+            ThemeSelection::coherence(canvas_core::ThemeMode::Light, canvas_core::Accent::Success);
+        document.theme = ThemeRef::Selection { theme: selected };
+        let json = serde_json::to_string(&document).unwrap();
+        let restored = WorkspaceDocument::parse(&json, &catalog).unwrap();
+        assert_eq!(restored.resolved_theme(&catalog).unwrap(), selected);
+        assert_eq!(
+            catalog.project("dock").unwrap().theme,
+            ThemeSelection::coherence(canvas_core::ThemeMode::Dark, canvas_core::Accent::Info)
+        );
     }
 
     #[test]

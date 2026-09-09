@@ -12,6 +12,7 @@ license = "LicenseRef-Proprietary"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+schemars = "1"
 canvas-core = { path = "crates/canvas-core" }
 canvas = { path = "crates/canvas" }
 coherence-tokens = { path = "vendor/coherence-tokens" }

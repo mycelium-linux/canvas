@@ -279,6 +279,7 @@ struct App {
     jarvis_hotkey: Option<GlobalHotkey>,
     shortcuts_visible: bool,
     background_picker: Option<::canvas::background_picker::BackgroundPicker>,
+    theme_picker: Option<::canvas::theme_picker::ThemePicker>,
     jarvis_visible: bool,
     hud_visible: bool,
     scale_factor: f64,
@@ -434,6 +435,7 @@ impl App {
             jarvis_hotkey,
             shortcuts_visible: false,
             background_picker: None,
+            theme_picker: None,
             jarvis_visible: true,
             hud_visible: true,
             scale_factor: 1.0,
@@ -543,7 +545,12 @@ impl App {
     /// The palette the view should render: the live palette, or an
     /// interpolation toward it while a transition is in flight.
     fn presented_palette(&self) -> canvas_core::ThemePalette {
-        let target = self.project_palette();
+        let target = self
+            .theme_picker
+            .as_ref()
+            .map(::canvas::theme_picker::ThemePicker::selection)
+            .map(canvas_core::ThemeSelection::palette)
+            .unwrap_or_else(|| self.project_palette());
         self.transition
             .as_ref()
             .map(|t| t.palette(target))
@@ -743,8 +750,34 @@ impl App {
                         Action::Ignored => {}
                     }
                 }
+                if let Some(picker) = self.theme_picker.as_mut() {
+                    use ::canvas::theme_picker::Action;
+                    match picker.handle(&kbd_event) {
+                        Action::Consumed => {
+                            self.transition = None;
+                            self.bump();
+                            return Task::none();
+                        }
+                        Action::Apply => {
+                            let theme = picker.selection();
+                            self.theme_picker = None;
+                            return self.apply_picked_theme(theme);
+                        }
+                        Action::Cancel => {
+                            self.theme_picker = None;
+                            self.transition = None;
+                            self.status = "Kept the current theme.".into();
+                            self.bump();
+                            return Task::none();
+                        }
+                        Action::Ignored => {}
+                    }
+                }
                 if background_picker_requested(&kbd_event) {
                     return self.toggle_background_picker();
+                }
+                if theme_picker_requested(&kbd_event) {
+                    return self.toggle_theme_picker();
                 }
                 if diagnostics_toggle_requested(&kbd_event) {
                     self.hud_visible = !self.hud_visible;
@@ -1294,6 +1327,7 @@ impl App {
     }
 
     fn toggle_background_picker(&mut self) -> Task<Message> {
+        self.theme_picker = None;
         self.background_picker = match self.background_picker {
             Some(_) => None,
             None => Some(::canvas::background_picker::BackgroundPicker::opened_from(
@@ -1316,6 +1350,67 @@ impl App {
         } else {
             Task::none()
         }
+    }
+
+    fn toggle_theme_picker(&mut self) -> Task<Message> {
+        self.background_picker = None;
+        self.theme_picker = match self.theme_picker {
+            Some(_) => None,
+            None => Some(::canvas::theme_picker::ThemePicker::opened_from(
+                self.document
+                    .resolved_theme(&self.catalog)
+                    .expect("validated Canvas document theme"),
+            )),
+        };
+        let open = self.theme_picker.is_some();
+        self.transition = None;
+        self.status = if open {
+            "Choose a theme: ←→↑↓, Enter to apply.".into()
+        } else {
+            "Kept the current theme.".into()
+        };
+        self.bump();
+        self.emit_event(format!(
+            "theme_picker {}",
+            if open { "shown" } else { "hidden" }
+        ));
+        if open && !self.canvas_visible {
+            self.set_canvas_visible(true)
+        } else {
+            Task::none()
+        }
+    }
+
+    fn apply_picked_theme(&mut self, theme: canvas_core::ThemeSelection) -> Task<Message> {
+        let previous = self.document.theme;
+        self.document.theme = ThemeRef::Selection { theme };
+        if let Err(error) = self.document.validate(&self.catalog) {
+            self.document.theme = previous;
+            self.status = format!("Could not apply that theme: {error}");
+            self.bump();
+            return Task::none();
+        }
+        if self.active_project_workspace.as_deref() == Some(self.document.project_id.as_str()) {
+            let mut next = self.workspaces.clone();
+            next.upsert(self.document.clone());
+            if let Err(error) =
+                workspace_store::save(&self.workspace_store_path, &next, &self.catalog)
+            {
+                self.document.theme = previous;
+                self.status = format!("Could not save that theme: {error}");
+                self.bump();
+                return Task::none();
+            }
+            self.workspaces = next;
+        }
+        let selected = theme.to_project_theme();
+        self.status = selected.map_or_else(
+            || "Theme set to imported palette.".into(),
+            |theme| format!("Theme set to {:?} {:?}.", theme.mode, theme.accent),
+        );
+        self.emit_event("theme_applied");
+        self.bump();
+        Task::none()
     }
 
     /// Commit a chosen background to the workspace the human is standing in.
@@ -3974,6 +4069,9 @@ impl App {
             // the minimized dock so the desktop's own furniture stays reachable.
             layers.push(picker.view(self.screensaver_elapsed, &self.presented_palette()));
         }
+        if let Some(picker) = self.theme_picker.as_ref() {
+            layers.push(picker.view());
+        }
         if let Some(dock) = self.minimized_dock() {
             layers.push(dock);
         }
@@ -4357,7 +4455,9 @@ fn shortcut_help<'a>(
          Ctrl-← / Ctrl-→        Saved views (reserved)\n\
          \n\
          Canvas\n\
+         F2                     Choose background\n\
          F3                     Toggle diagnostics\n\
+         F4                     Choose theme / palette\n\
          Ctrl-1 / 2 / 3         Toggle left / center / right display\n\
          Ctrl-0                 Show Canvas on every display\n\
          {CANVAS_TOGGLE_KEYS:<22} Toggle Canvas\n\
@@ -4516,6 +4616,19 @@ fn diagnostics_toggle_requested(event: &iced::keyboard::Event) -> bool {
         event,
         Event::KeyPressed {
             key: Key::Named(Named::F3),
+            modifiers,
+            repeat: false,
+            ..
+        } if modifiers.is_empty()
+    )
+}
+
+fn theme_picker_requested(event: &iced::keyboard::Event) -> bool {
+    use iced::keyboard::{Event, Key, key::Named};
+    matches!(
+        event,
+        Event::KeyPressed {
+            key: Key::Named(Named::F4),
             modifiers,
             repeat: false,
             ..
@@ -7365,6 +7478,40 @@ mod tests {
         assert_eq!(app.document.revision, revision);
         drop(app.update(Message::TerminalInput(f3())));
         assert!(app.hud_visible);
+    }
+
+    #[test]
+    fn f4_previews_applies_and_cancels_workspace_themes() {
+        use iced::keyboard::{Event, Key, Location, Modifiers, key};
+        let pressed = |named| Event::KeyPressed {
+            key: Key::Named(named),
+            modified_key: Key::Named(named),
+            physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+            location: Location::Standard,
+            modifiers: Modifiers::empty(),
+            text: None,
+            repeat: false,
+        };
+        let mut app = test_app();
+        let original = app.project_palette();
+
+        let f4 = pressed(key::Named::F4);
+        assert!(theme_picker_requested(&f4));
+        drop(app.update(Message::TerminalInput(f4)));
+        assert!(app.theme_picker.is_some());
+        drop(app.update(Message::TerminalInput(pressed(key::Named::ArrowRight))));
+        assert_ne!(app.presented_palette(), original);
+        drop(app.update(Message::TerminalInput(pressed(key::Named::Escape))));
+        assert!(app.theme_picker.is_none());
+        assert_eq!(app.project_palette(), original);
+
+        drop(app.update(Message::TerminalInput(pressed(key::Named::F4))));
+        drop(app.update(Message::TerminalInput(pressed(key::Named::ArrowRight))));
+        let preview = app.presented_palette();
+        drop(app.update(Message::TerminalInput(pressed(key::Named::Enter))));
+        assert!(app.theme_picker.is_none());
+        assert_eq!(app.project_palette(), preview);
+        assert!(matches!(app.document.theme, ThemeRef::Selection { .. }));
     }
 
     #[test]

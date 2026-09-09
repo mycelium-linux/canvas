@@ -79,13 +79,13 @@ pub enum ResourceKind {
     TerminalSession,
     AgentSession,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeMode {
     Light,
     Dark,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Accent {
     Brand,
@@ -113,7 +113,7 @@ impl ThemeSelection {
 
 /// A project's theme source: a Coherence mode, or an imported palette in the
 /// canonical role set. This is the only theme boundary Canvas surfaces read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ThemeSelection {
     /// Derived from upstream Coherence tokens for a mode and accent.
@@ -122,34 +122,47 @@ pub enum ThemeSelection {
     Palette { palette: ThemePalette },
 }
 /// Canonical role set for every Canvas surface. Roles serialize as `#rrggbb`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ThemePalette {
     #[serde(with = "theme_hex")]
+    #[schemars(with = "String")]
     pub background: [u8; 3],
     #[serde(with = "theme_hex")]
+    #[schemars(with = "String")]
     pub background_strong: [u8; 3],
     #[serde(with = "theme_hex")]
+    #[schemars(with = "String")]
     pub surface: [u8; 3],
     #[serde(with = "theme_hex")]
+    #[schemars(with = "String")]
     pub surface_muted: [u8; 3],
     #[serde(with = "theme_hex")]
+    #[schemars(with = "String")]
     pub text: [u8; 3],
     #[serde(with = "theme_hex")]
+    #[schemars(with = "String")]
     pub text_muted: [u8; 3],
     #[serde(with = "theme_hex")]
+    #[schemars(with = "String")]
     pub primary: [u8; 3],
     #[serde(with = "theme_hex")]
+    #[schemars(with = "String")]
     pub success: [u8; 3],
     #[serde(with = "theme_hex")]
+    #[schemars(with = "String")]
     pub warning: [u8; 3],
     #[serde(with = "theme_hex")]
+    #[schemars(with = "String")]
     pub danger: [u8; 3],
     #[serde(with = "theme_hex")]
+    #[schemars(with = "String")]
     pub info: [u8; 3],
     #[serde(with = "theme_hex")]
+    #[schemars(with = "String")]
     pub border: [u8; 3],
     #[serde(with = "theme_hex")]
+    #[schemars(with = "String")]
     pub border_strong: [u8; 3],
 }
 /// `#rrggbb` hex codec for canonical palette roles.
