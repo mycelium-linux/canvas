@@ -174,10 +174,13 @@ pub enum BackgroundShader {
     Spirales,
     FloatingRectangles,
     SmokeRings,
+    Flame,
+    Meme,
+    StarNest,
 }
 
 impl BackgroundShader {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 10] = [
         Self::Tidepool,
         Self::AuroraDrift,
         Self::DuskEmber,
@@ -185,6 +188,9 @@ impl BackgroundShader {
         Self::Spirales,
         Self::FloatingRectangles,
         Self::SmokeRings,
+        Self::Flame,
+        Self::Meme,
+        Self::StarNest,
     ];
 }
 
@@ -217,8 +223,22 @@ pub struct Surface {
     pub inputs: Vec<InputPort>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+/// Surface kinds this build understands, plus everything it does not.
+///
+/// A closed enum here used to mean that one unrecognized `kind` anywhere in a
+/// workspace made the entire store unloadable — Canvas panicked on startup
+/// against a store written by a newer build, and the workspace adapter could not
+/// parse *any* control reply because it had never heard of `widget`. Neither
+/// failure was confined to the surface that caused it.
+///
+/// A kind is a version boundary, not a typo. Unknown ones are retained verbatim
+/// in [`SurfaceContent::Unsupported`] and drawn as a placeholder, so an older
+/// binary degrades one tile instead of refusing to run — and writes the original
+/// back untouched rather than destroying a widget it could not draw.
+///
+/// Malformed *known* kinds still fail loudly; that is a mistake, not a version.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum SurfaceContent {
     ProjectResource { resource_id: String },
@@ -228,6 +248,115 @@ pub enum SurfaceContent {
     Scene { scene: Scene },
     Terminal { resource_id: String },
     Stream { url: String },
+    /// Content from a newer Canvas, kept exactly as written.
+    #[serde(untagged)]
+    Unsupported(serde_json::Value),
+}
+
+/// The `kind` tags this build can render. Anything else is a newer Canvas.
+const KNOWN_SURFACE_KINDS: [&str; 7] = [
+    "project_resource",
+    "asset",
+    "chart",
+    "widget",
+    "scene",
+    "terminal",
+    "stream",
+];
+
+impl SurfaceContent {
+    /// The wire tag, including for content this build cannot render.
+    pub fn kind_tag(&self) -> &str {
+        match self {
+            Self::ProjectResource { .. } => "project_resource",
+            Self::Asset { .. } => "asset",
+            Self::Chart { .. } => "chart",
+            Self::Widget { .. } => "widget",
+            Self::Scene { .. } => "scene",
+            Self::Terminal { .. } => "terminal",
+            Self::Stream { .. } => "stream",
+            Self::Unsupported(raw) => raw
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown"),
+        }
+    }
+
+    /// What a placeholder should say, or `None` when this build can draw it.
+    pub fn unsupported_reason(&self) -> Option<String> {
+        match self {
+            Self::Unsupported(_) => Some(format!(
+                "unsupported surface \u{201c}{}\u{201d} — this Canvas is older than this workspace",
+                self.kind_tag()
+            )),
+            // A widget kind this build does not know fails `Widget`'s own parse
+            // and arrives here as `Unsupported`, so there is nothing extra to
+            // detect: the same placeholder covers both depths.
+            _ => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SurfaceContent {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        use serde::de::Error;
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        let tag = raw
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| D::Error::custom("Canvas surface content needs a kind"))?;
+        if !KNOWN_SURFACE_KINDS.contains(&tag) {
+            return Ok(Self::Unsupported(raw));
+        }
+        // The version boundary exists at two depths: `widget` is a kind this
+        // build owns, but the widget *inside* it may not be. Without this a
+        // newer widget kind is indistinguishable from a malformed known one and
+        // takes the whole document down — which is how `slo_burn_rate` stopped
+        // Canvas from starting.
+        if tag == "widget"
+            && raw
+                .get("spec")
+                .and_then(|spec| spec.get("kind"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|kind| !canvas_widgets::is_known_widget_kind(kind))
+        {
+            return Ok(Self::Unsupported(raw));
+        }
+        // A tag this build owns must parse. Degrading here would turn a typo in
+        // a field name into a silently blank tile.
+        Known::deserialize(&raw)
+            .map(Known::into_content)
+            .map_err(D::Error::custom)
+    }
+}
+
+/// The derived shape, so the variant list is not written twice.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum Known {
+    ProjectResource { resource_id: String },
+    Asset { asset: AssetRef },
+    Chart { chart: chart::ChartDocument },
+    Widget { spec: canvas_widgets::WidgetSpec },
+    Scene { scene: Scene },
+    Terminal { resource_id: String },
+    Stream { url: String },
+}
+
+impl Known {
+    fn into_content(self) -> SurfaceContent {
+        match self {
+            Self::ProjectResource { resource_id } => SurfaceContent::ProjectResource { resource_id },
+            Self::Asset { asset } => SurfaceContent::Asset { asset },
+            Self::Chart { chart } => SurfaceContent::Chart { chart },
+            Self::Widget { spec } => SurfaceContent::Widget { spec },
+            Self::Scene { scene } => SurfaceContent::Scene { scene },
+            Self::Terminal { resource_id } => SurfaceContent::Terminal { resource_id },
+            Self::Stream { url } => SurfaceContent::Stream { url },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -734,6 +863,16 @@ impl WorkspaceDocument {
                 SurfaceContent::Stream { url } => {
                     check(!url.is_empty(), "Stream URL must not be empty")?;
                 }
+                // Retained verbatim from a newer Canvas. There is nothing this
+                // build can check about it, and refusing the whole document is
+                // exactly the failure this variant exists to prevent — but it
+                // must still be a JSON object so it round-trips as one.
+                SurfaceContent::Unsupported(raw) => {
+                    check(
+                        raw.is_object(),
+                        format!("Unsupported surface content must be an object: {}", surface.id),
+                    )?;
+                }
             }
         }
 
@@ -949,6 +1088,90 @@ impl NormalizedRect {
                 && self.y < 1.0,
             "Canvas bounds must be a positive, reachable rectangle in normalized workspace space",
         )
+    }
+}
+
+#[cfg(test)]
+mod forward_compatibility_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_surface_kind_from_a_newer_canvas_degrades_instead_of_failing() {
+        // The `widget` kind did exactly this to the workspace adapter: one
+        // unknown tag made every control reply unparseable, not just this one.
+        let raw = json!({"kind": "hologram", "spec": {"depth": 3}});
+        let content: SurfaceContent = serde_json::from_value(raw.clone()).expect("degrades");
+        assert!(matches!(content, SurfaceContent::Unsupported(_)));
+        assert_eq!(content.kind_tag(), "hologram");
+        assert!(content.unsupported_reason().is_some_and(|r| r.contains("hologram")));
+    }
+
+    #[test]
+    fn an_unknown_widget_kind_degrades_at_the_surface_rather_than_panicking() {
+        // A kind like `slo_burn_rate` was — before this build gained it — enough
+        // to stop Canvas booting at all. One tile is the blast radius now.
+        let raw = json!({"kind": "widget", "spec": {
+            "schema_version": 1, "id": "future", "kind": "flux_capacitor", "jigawatts": 1.21
+        }});
+        let content: SurfaceContent = serde_json::from_value(raw).expect("degrades");
+        assert!(matches!(content, SurfaceContent::Unsupported(_)));
+    }
+
+    #[test]
+    fn unsupported_content_is_written_back_exactly_as_it_arrived() {
+        // Without this an older Canvas would load a newer workspace, draw a
+        // placeholder, save, and destroy the widget it merely could not render.
+        let raw = json!({"kind": "hologram", "spec": {"depth": 3, "nested": [1, 2]}});
+        let content: SurfaceContent = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&content).unwrap(), raw);
+    }
+
+    #[test]
+    fn a_malformed_known_kind_still_fails_loudly() {
+        // A version boundary and a typo are different things. `stream` is a kind
+        // this build owns, so a missing field is a mistake, not a newer Canvas.
+        let wrong: std::result::Result<SurfaceContent, _> =
+            serde_json::from_value(json!({"kind": "stream"}));
+        assert!(wrong.is_err(), "a known kind must not degrade into a blank tile");
+
+        let typo: std::result::Result<SurfaceContent, _> =
+            serde_json::from_value(json!({"kind": "stream", "ur1": "x"}));
+        assert!(typo.is_err(), "an unknown field in a known kind is still an error");
+    }
+
+    #[test]
+    fn a_known_widget_kind_with_a_bad_field_is_an_error_not_a_placeholder() {
+        // Proven the hard way: `slo_burn_rate` exists in this build, so a wrong
+        // field inside it is a mistake and must not be swallowed as "newer".
+        let raw = json!({"kind": "widget", "spec": {
+            "schema_version": 1, "id": "burn", "kind": "slo_burn_rate", "budget": 0.5
+        }});
+        let parsed: std::result::Result<SurfaceContent, _> = serde_json::from_value(raw);
+        assert!(parsed.is_err(), "a known widget kind must fail loudly on a bad field");
+    }
+
+    #[test]
+    fn content_without_a_kind_is_refused() {
+        let none: std::result::Result<SurfaceContent, _> =
+            serde_json::from_value(json!({"spec": {}}));
+        assert!(none.is_err());
+    }
+
+    #[test]
+    fn every_known_kind_round_trips_through_the_custom_deserializer() {
+        // The hand-written deserializer must not quietly drop a variant the
+        // derived one used to handle.
+        for value in [
+            json!({"kind": "project_resource", "resource_id": "code"}),
+            json!({"kind": "terminal", "resource_id": "shell"}),
+            json!({"kind": "stream", "url": "https://example.test/s"}),
+        ] {
+            let content: SurfaceContent =
+                serde_json::from_value(value.clone()).expect("known kind parses");
+            assert!(content.unsupported_reason().is_none(), "{value}");
+            assert_eq!(serde_json::to_value(&content).unwrap(), value);
+        }
     }
 }
 

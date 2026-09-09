@@ -3493,6 +3493,24 @@ impl App {
                     ContentKind::Widget,
                     ContentSource::Widget { spec: spec.clone() },
                 ),
+                // Content this build cannot draw still gets a tile. Rendering it
+                // as markdown reuses a renderer that already exists rather than
+                // adding a path solely to say "no": the surface keeps its place
+                // in the layout, and a person reading it learns which kind is
+                // missing and that the fix is a newer Canvas — rather than
+                // finding an empty rectangle and guessing.
+                SurfaceContent::Unsupported(_) => {
+                    let Some(reason) = surface.content.unsupported_reason() else {
+                        continue;
+                    };
+                    (
+                        ContentKind::Markdown,
+                        ContentSource::Markdown {
+                            path: PathBuf::new(),
+                            items: markdown::parse(&reason).collect(),
+                        },
+                    )
+                }
                 _ => continue,
             };
             let snapshot = SurfaceSnapshot {

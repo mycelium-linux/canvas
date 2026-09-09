@@ -300,6 +300,243 @@ pub struct ShaderPiece {
     pub license: &'static str,
 }
 
+// "3D Fire" — fragcoord.xyz/s/cx081tgx
+// License: as published at the source; confirm before redistribution.
+const FLAME: &str = r#"
+@fragment
+fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let frag = local(pos);
+    // ShaderToy's fragCoord starts bottom-left and WGSL's position starts
+    // top-left, so without the flip the flame burns downward.
+    let I = vec2<f32>(frag.x, u.res.y - frag.y);
+    // Slowed from the original: at 1x this reads as a strobe rather than fire.
+    // The workspace speed still scales on top of this.
+    let T = u.time * 0.35;
+
+    var O = vec4<f32>(0.0);
+    var z = 0.0;
+    var i = 0.0;
+    let ray = normalize(vec3<f32>(I + I, 0.0) - vec3<f32>(u.res.x, u.res.y, u.res.y));
+
+    loop {
+        if i >= 90.0 { break; }
+        i += 1.0;
+
+        var p = z * ray;
+        p.z += 9.0;
+        let t = p;
+        let a = (p.y - length(p.xz)) * 0.5;
+
+        // mat2(cos(a + vec4(0,5,8,0))) — columns, as GLSL builds them.
+        let c = cos(a + vec4<f32>(0.0, 5.0, 8.0, 0.0));
+        let rotated = p.xz * mat2x2<f32>(c.x, c.y, c.z, c.w);
+        p = vec3<f32>(rotated.x, p.y, rotated.y);
+
+        var d = 2.0;
+        loop {
+            if d >= 4.0 { break; }
+            d /= 0.9;
+            p += sin(p.yzx * d - vec3<f32>(T, 0.0, 0.0) * 6.0) / d;
+        }
+
+        d = min(length(p.xz), 8.0 - abs(p.y)) / 15.0 / (2.0 + cos(a - T));
+        z += d;
+        // The denominator reaches zero where the ray crosses the axis; the
+        // original relies on float infinity there, which `tanh` would fold back
+        // to 1.0 but NaN would not.
+        let denom = length(t.xz + (p.xz * 0.5 + vec2<f32>(3.0)) * sin(T - a));
+        O += vec4<f32>(7.0, 5.0, z, 0.0) * d / max(denom, 1e-4);
+    }
+
+    O = tanh(O * O / 1e3);
+    return vec4<f32>(O.rgb, 1.0);
+}
+"#;
+
+// "Meme" — raymarched window lattice, after glslsandbox.com/e#26840.0 for the
+// value noise. License: as published at the source; confirm before use.
+const MEME: &str = r#"
+fn m_hash(p: vec2<f32>) -> f32 {
+    let h = dot(p, vec2<f32>(127.1, 311.7));
+    return fract(sin(h) * 458.325421) * 2.0 - 1.0;
+}
+
+fn m_noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    var f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(
+        mix(m_hash(i + vec2<f32>(0.0, 0.0)), m_hash(i + vec2<f32>(1.0, 0.0)), f.x),
+        mix(m_hash(i + vec2<f32>(0.0, 1.0)), m_hash(i + vec2<f32>(1.0, 1.0)), f.x),
+        f.y);
+}
+
+fn m_rot(p: vec2<f32>, a: f32) -> vec2<f32> {
+    return vec2<f32>(p.x * cos(a) - p.y * sin(a), p.x * sin(a) + p.y * cos(a));
+}
+
+fn m_nac(p: vec3<f32>, f: vec2<f32>, o: vec3<f32>) -> f32 {
+    let q = p + o;
+    return length(max(abs(q.xy) - f, vec2<f32>(0.0))) - 0.0001;
+}
+
+fn m_recta(p: vec3<f32>, f: vec3<f32>, o: vec3<f32>) -> f32 {
+    let q = p + o;
+    return length(max(abs(q) - f, vec3<f32>(0.0))) - 0.0001;
+}
+
+fn m_map1(p: vec3<f32>, scale: f32) -> f32 {
+    let g = 0.5;
+    let f = 0.5 * scale;
+    var t = m_nac(p, vec2<f32>(f, f), vec3<f32>(g, g, 0.0));
+    t = min(t, m_nac(p, vec2<f32>(f, f), vec3<f32>(g, -g, 0.0)));
+    t = min(t, m_nac(p, vec2<f32>(f, f), vec3<f32>(-g, g, 0.0)));
+    t = min(t, m_nac(p, vec2<f32>(f, f), vec3<f32>(-g, -g, 0.0)));
+    return t;
+}
+
+fn m_map2(p: vec3<f32>) -> f32 {
+    return max(m_map1(p, 0.9), m_recta(p, vec3<f32>(1.0, 1.0, 0.02), vec3<f32>(0.0)));
+}
+
+fn m_gennoise(p0: vec2<f32>, time: f32) -> f32 {
+    var p = p0;
+    var d = 0.5;
+    let h = mat2x2<f32>(1.6, 1.2, -1.2, 1.6);
+    var color = 0.0;
+    for (var i = 0; i < 2; i += 1) {
+        color += d * m_noise(p * 5.0 + time);
+        p = p * h;
+        d /= 2.0;
+    }
+    return color;
+}
+
+@fragment
+fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let frag = local(pos);
+    let fragcoord = vec2<f32>(frag.x, u.res.y - frag.y);
+    // Slowed from the original; the workspace speed scales on top.
+    let time = u.time * 0.4;
+
+    let wbcol = vec3<f32>(0.5, 0.7, 1.7);
+    let wbcol2 = vec3<f32>(0.15, 0.8, 1.7);
+    var acc = vec4<f32>(0.0);
+
+    for (var count = 0; count < 2; count += 1) {
+        var uv = (-1.0 + 2.0 * (fragcoord / u.res)) * 1.4;
+        uv.x += m_hash(uv.xy + time + f32(count)) / 512.0;
+        uv.y += m_hash(uv.yx + time + f32(count)) / 512.0;
+
+        var dir = normalize(vec3<f32>(uv * vec2<f32>(u.res.x / u.res.y, 1.0), 1.0 + sin(time) * 0.01));
+        let xz = m_rot(dir.xz, radians(70.0));
+        dir = vec3<f32>(xz.x, dir.y, xz.y);
+        let xy = m_rot(dir.xy, radians(90.0));
+        dir = vec3<f32>(xy.x, xy.y, dir.z);
+
+        let origin = vec3<f32>(-0.1 + sin(time * 0.3) * 0.1, 2.0 + cos(time * 0.4) * 0.1, -3.5);
+        var col = vec3<f32>(0.0);
+        var t = 0.0;
+        let m = 1.002;
+        var bsh = 0.01;
+        var dens = 0.0;
+
+        for (var i = 0; i < 600; i += 1) {
+            if m_map1(origin + dir * t, 0.6) < 0.2 {
+                col += wbcol * 0.005 * dens;
+            }
+            t += bsh * m;
+            bsh *= m;
+            dens += 0.025;
+        }
+
+        t = 0.0;
+        var y = 0.0;
+        for (var i = 0; i < 25; i += 1) {
+            let temp = m_map2(origin + dir * t);
+            if temp < 0.025 {
+                col += wbcol2 * 0.5;
+            }
+            t += temp;
+            y += 1.0;
+        }
+
+        col += ((2.0 + uv.x) * wbcol2) + (y / (25.0 * 50.0));
+        col += m_gennoise(dir.xz, time) * 0.5;
+        col *= 1.0 - uv.y * 0.5;
+        col *= vec3<f32>(0.05);
+        col = pow(max(col, vec3<f32>(0.0)), vec3<f32>(0.717));
+        acc += vec4<f32>(col, 1.0 / max(t, 1e-4));
+    }
+
+    acc /= 2.0;
+    return vec4<f32>(acc.rgb, 1.0);
+}
+"#;
+
+// "Star Nest" by Pablo Roman Andrioli. License: MIT.
+const STAR_NEST: &str = r#"
+@fragment
+fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let frag = local(pos);
+    let fragcoord = vec2<f32>(frag.x, u.res.y - frag.y);
+
+    var uv = fragcoord / u.res - 0.5;
+    uv.y *= u.res.y / u.res.x;
+    var dir = vec3<f32>(uv * 0.800, 1.0);
+    let time = u.time * 0.010 + 0.25;
+
+    // ShaderToy reports iMouse as zero until the pointer is used, so these are
+    // the angles the shader shows on load — the view everyone knows it by.
+    let a1 = 0.5;
+    let a2 = 0.8;
+    let rot1 = mat2x2<f32>(cos(a1), sin(a1), -sin(a1), cos(a1));
+    let rot2 = mat2x2<f32>(cos(a2), sin(a2), -sin(a2), cos(a2));
+
+    let dxz = dir.xz * rot1;
+    dir = vec3<f32>(dxz.x, dir.y, dxz.y);
+    let dxy = dir.xy * rot2;
+    dir = vec3<f32>(dxy.x, dxy.y, dir.z);
+
+    var ray_origin = vec3<f32>(1.0, 0.5, 0.5) + vec3<f32>(time * 2.0, time, -2.0);
+    let fxz = ray_origin.xz * rot1;
+    ray_origin = vec3<f32>(fxz.x, ray_origin.y, fxz.y);
+    let fxy = ray_origin.xy * rot2;
+    ray_origin = vec3<f32>(fxy.x, fxy.y, ray_origin.z);
+
+    var s = 0.1;
+    var fade = 1.0;
+    var v = vec3<f32>(0.0);
+
+    for (var r = 0; r < 20; r += 1) {
+        var p = ray_origin + s * dir * 0.5;
+        // GLSL `mod` floors; WGSL `%` truncates, which differs for negative
+        // coordinates — and this fold is fed negatives constantly.
+        let period = vec3<f32>(0.850 * 2.0);
+        p = abs(vec3<f32>(0.850) - (p - floor(p / period) * period));
+
+        var pa = 0.0;
+        var a = 0.0;
+        for (var i = 0; i < 17; i += 1) {
+            p = abs(p) / max(dot(p, p), 1e-6) - 0.53;
+            a += abs(length(p) - pa);
+            pa = length(p);
+        }
+
+        let dm = max(0.0, 0.300 - a * a * 0.001);
+        a = a * a * a;
+        if r > 6 { fade *= 1.0 - dm; }
+        v += vec3<f32>(fade);
+        v += vec3<f32>(s, s * s, s * s * s * s) * a * 0.0015 * fade;
+        fade *= 0.730;
+        s += 0.1;
+    }
+
+    v = mix(vec3<f32>(length(v)), v, 0.850);
+    return vec4<f32>(v * 0.01, 1.0);
+}
+"#;
+
 pub const SHADERS: &[ShaderPiece] = &[
     ShaderPiece {
         id: BackgroundShader::Tidepool,
@@ -349,6 +586,27 @@ pub const SHADERS: &[ShaderPiece] = &[
         wgsl: SMOKE_RINGS,
         credit: "Sebastien Berube & Noztol (ShaderToy)",
         license: "CC-BY-4.0",
+    },
+    ShaderPiece {
+        id: BackgroundShader::Flame,
+        name: "Flame",
+        wgsl: FLAME,
+        credit: "fragcoord.xyz/s/cx081tgx",
+        license: "see source",
+    },
+    ShaderPiece {
+        id: BackgroundShader::Meme,
+        name: "Meme",
+        wgsl: MEME,
+        credit: "glslsandbox.com/e#26840.0 (noise)",
+        license: "see source",
+    },
+    ShaderPiece {
+        id: BackgroundShader::StarNest,
+        name: "Star Nest",
+        wgsl: STAR_NEST,
+        credit: "Pablo Roman Andrioli",
+        license: "MIT",
     },
 ];
 

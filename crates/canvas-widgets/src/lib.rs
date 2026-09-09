@@ -101,6 +101,43 @@ fn default_schema_version() -> u32 {
     WIDGET_SCHEMA_VERSION
 }
 
+/// Widget `kind` tags this build can render.
+///
+/// A caller needs to tell "a widget from a newer Canvas" apart from "a typo in a
+/// widget this build owns": the first should degrade to a placeholder, the
+/// second must fail loudly. Serde's derived enum knows the difference internally
+/// but only reports it as an error string, so the list is named here.
+///
+/// Adding a variant to [`WidgetKind`] means adding its tag here;
+/// `every_known_widget_kind_is_listed` fails if they drift apart.
+pub const KNOWN_WIDGET_KINDS: [&str; 20] = [
+    "quant",
+    "stat",
+    "time_series",
+    "clock",
+    "ticker",
+    "gauge",
+    "meter",
+    "histogram",
+    "heatmap",
+    "ranked_bar",
+    "stacked_bar",
+    "state_timeline",
+    "slo_burn_rate",
+    "table",
+    "event_log",
+    "node_summary",
+    "chart",
+    "status",
+    "text",
+    "module",
+];
+
+/// Whether this build can render `tag`, or it belongs to a newer Canvas.
+pub fn is_known_widget_kind(tag: &str) -> bool {
+    KNOWN_WIDGET_KINDS.contains(&tag)
+}
+
 /// The widget primitive set. Each variant carries exactly the params its
 /// renderer needs; `deny_unknown_fields` keeps specs honest.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -915,6 +952,31 @@ pub mod live;
 
 /// Static PNG rendering through external tools (matplotlib / plotters helper).
 pub mod render;
+
+#[cfg(test)]
+mod known_kind_tests {
+    use super::*;
+
+    #[test]
+    fn every_known_widget_kind_is_listed() {
+        // The list and the enum drift the moment someone adds a variant and not
+        // a tag — and the symptom would be a real widget quietly degrading to a
+        // placeholder, which looks like a rendering bug rather than a stale list.
+        for tag in KNOWN_WIDGET_KINDS {
+            let spec = serde_json::json!({"kind": tag});
+            // A bare tag may parse (kinds whose fields all default, like
+            // `clock`) or fail for a missing field. Either proves the variant
+            // exists; only "unknown variant" proves it does not.
+            if let Err(error) = serde_json::from_value::<WidgetKind>(spec) {
+                assert!(
+                    !error.to_string().contains("unknown variant"),
+                    "{tag} is listed but is not a WidgetKind variant"
+                );
+            }
+        }
+        assert!(!is_known_widget_kind("flux_capacitor"));
+    }
+}
 
 #[cfg(test)]
 mod tests {
