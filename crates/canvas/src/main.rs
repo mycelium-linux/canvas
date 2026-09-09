@@ -2399,15 +2399,20 @@ impl App {
                                 .collect::<Vec<_>>(),
                             _ => unreachable!("operational views always materialize as a canvas"),
                         };
-                        self.start_transition();
-                        self.document = document;
-                        for surface_id in &surface_ids {
-                            self.decoded.remove(surface_id);
+                        let changed = document != self.document;
+                        if changed {
+                            self.start_transition();
+                            self.document = document;
+                            for surface_id in &surface_ids {
+                                self.decoded.remove(surface_id);
+                            }
+                            self.ensure_scene_decoded();
+                            self.bump();
                         }
-                        self.ensure_scene_decoded();
-                        self.bump();
                         self.status = format!("Opened operational view {view_id}.");
-                        self.emit_event(format!("operational_view_opened {view_id}"));
+                        if changed {
+                            self.emit_event(format!("operational_view_opened {view_id}"));
+                        }
                         self.answer(
                             pending,
                             Outcome::Ok {

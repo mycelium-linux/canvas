@@ -61,7 +61,13 @@ pub fn materialize(name: &str, document: &WorkspaceDocument) -> Result<Workspace
     }
     next.layout = Layout::Canvas { placements };
     next.focused_surface_id = first;
-    next.revision = next.revision.saturating_add(1);
+    if next.surfaces == document.surfaces
+        && next.layout == document.layout
+        && next.focused_surface_id == document.focused_surface_id
+    {
+        return Ok(document.clone());
+    }
+    next.revision = document.revision.saturating_add(1);
     Ok(next)
 }
 
@@ -127,8 +133,6 @@ mod tests {
         first.validate(&catalog).unwrap();
         let second = materialize("bifrost/runtime", &first).unwrap();
         second.validate(&catalog).unwrap();
-        assert_eq!(first.surfaces.len(), second.surfaces.len());
-        assert_eq!(first.layout, second.layout);
-        assert_eq!(second.revision, first.revision + 1);
+        assert_eq!(first, second);
     }
 }
