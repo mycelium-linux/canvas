@@ -1474,7 +1474,11 @@ fn draw_series_line(
     let (Some(first), Some(last)) = (points.first(), points.last()) else {
         return;
     };
+    // A single sample is data, not an empty plot. There is no area or line to
+    // draw through one point, but the head marks where the series actually is —
+    // returning early here rendered a fully drawn, entirely blank chart.
     if points.len() < 2 {
+        frame.fill(&Path::circle(*first, HEAD_RADIUS), stroke);
         return;
     }
     let crest = points.iter().map(|point| point.y).fold(baseline, f32::min);
@@ -2035,6 +2039,23 @@ mod tests {
             assert!(held_off(point.x, bounds.width), "{point:?} clips the side");
             assert!(held_off(point.y, bounds.height), "{point:?} clips the edge");
         }
+    }
+
+    #[test]
+    fn a_single_sample_projects_into_the_plot_rather_than_nowhere() {
+        // One sample gives min == max, so a naive range divides by zero and the
+        // point lands at NaN — which draws nothing and reads as a broken source.
+        // draw_series_line also has to draw its head for this case, since there
+        // is no line or area through a single point.
+        let area = plot_area(Size::new(200.0, 100.0));
+        let series = vec![(0.0, 7.0)];
+        let range = PlotRange::over(&series);
+        let point = range.project(series[0], area);
+        assert!(point.x.is_finite() && point.y.is_finite(), "got {point:?}");
+        assert!(
+            point.y >= area.y && point.y <= area.y + area.height,
+            "outside the plot: {point:?}"
+        );
     }
 
     #[test]
