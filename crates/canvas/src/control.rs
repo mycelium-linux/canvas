@@ -1,7 +1,7 @@
 //! Bounded control protocol for a long-lived Canvas runtime.
 
 use crate::{
-    Background, NormalizedRect, ThemeRef, WorkspaceDocument, WorkspacePatch,
+    Background, BackgroundShader, NormalizedRect, ThemeRef, WorkspaceDocument, WorkspacePatch,
     display::{DisplayInfo, DisplayRegion, DisplayTarget},
     view::{SharedViewDocument, SharedViewPatch},
 };
@@ -25,6 +25,15 @@ pub const MAX_PRESENCE_FACES: usize = 8;
 pub const MAX_PROJECT_WORKSPACES: usize = 512;
 pub const DEFAULT_SCREENSAVER_FPS: u16 = 30;
 pub const MAX_SCREENSAVER_FPS: u16 = 60;
+/// Ceiling on a document background shader's animation speed, read off the
+/// picker's own ladder so the protocol cannot express a speed no human could
+/// choose at the keyboard.
+pub const MAX_BACKGROUND_SHADER_SPEED: f32 =
+    crate::background_picker::SPEEDS[crate::background_picker::SPEEDS.len() - 1];
+/// Speed a background shader runs at when the caller does not name one: its own
+/// tempo, unscaled. Zero is a legal speed but freezes the shader, which reads as
+/// a broken command rather than a still background when nobody asked for it.
+pub const DEFAULT_BACKGROUND_SHADER_SPEED: f32 = 1.0;
 pub const MAX_SURFACE_PLACEMENT_MARGIN: u16 = 256;
 const MAX_INDICATOR_TITLE_BYTES: usize = 128;
 const MAX_INDICATOR_CAPTION_BYTES: usize = 512;
@@ -146,6 +155,22 @@ pub enum Command {
     ScreensaverShader {
         index: usize,
     },
+    /// Set the *document* background shader of a named project's workspace.
+    ///
+    /// [`Command::ScreensaverShader`] names a neighbouring but different
+    /// surface: the privacy screensaver, which is only drawn while the
+    /// screensaver is enabled. What a human sees on an ordinary desk is
+    /// `Background::Shader` on the presented document, and until this command
+    /// existed the F2 picker was the only thing in Canvas that could set it —
+    /// so an agent asking for a shader got three `ok` replies and an unchanged
+    /// desk. The project is named rather than implied so that landing the
+    /// change on a workspace nobody is looking at is reported, not silent.
+    SetBackgroundShader {
+        project_id: String,
+        shader_id: BackgroundShader,
+        #[serde(default = "default_background_shader_speed")]
+        speed: f32,
+    },
     OpenDataViz {
         surface_id: String,
         file: PathBuf,
@@ -247,6 +272,10 @@ impl ScreensaverSettings {
 
 const fn default_screensaver_fps() -> u16 {
     DEFAULT_SCREENSAVER_FPS
+}
+
+const fn default_background_shader_speed() -> f32 {
+    DEFAULT_BACKGROUND_SHADER_SPEED
 }
 
 const fn default_surface_margin() -> u16 {
@@ -634,7 +663,47 @@ pub enum Receipt {
     ScreensaverShaderSet {
         index: usize,
         name: String,
+        /// Optional so a reply from an older runtime still parses; every
+        /// current runtime fills it in.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        visible: Option<VisibleBackground>,
     },
+    BackgroundShaderSet {
+        visible: VisibleBackground,
+    },
+}
+
+/// What a person is actually looking at once a mutation has landed.
+///
+/// A receipt that echoes the field it wrote cannot tell "done" from "done
+/// somewhere nobody is looking". `OK rev=2189 shader=7 (Flame)` came back three
+/// times for a screensaver index while the desk went on drawing another
+/// project's document background, and every reply was truthful about the write
+/// and useless about the result. Naming the project the change landed on, the
+/// project on screen, and the shader being drawn makes that gap visible in the
+/// first reply instead of the third.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VisibleBackground {
+    /// The project whose workspace the mutation was written to.
+    pub project_id: String,
+    /// The project Canvas is presenting. Equal to `project_id` when the change
+    /// is on screen, and different when it is not — which is the whole point.
+    pub active_project_id: String,
+    /// The presented project's document background.
+    pub background: Background,
+    /// Whether the privacy screensaver is covering that background.
+    pub screensaver_enabled: bool,
+    /// The shader the desk is drawing right now, if any: the screensaver's
+    /// while it is enabled, otherwise the presented document's.
+    pub drawn_shader: Option<BackgroundShader>,
+}
+
+impl VisibleBackground {
+    /// Whether the mutation landed on the workspace that is on screen.
+    pub fn on_screen(&self) -> bool {
+        self.project_id == self.active_project_id
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -929,6 +998,18 @@ impl ControlRequest {
                     return Err("invalid project workspace id".into());
                 }
             }
+            Command::SetBackgroundShader {
+                project_id, speed, ..
+            } => {
+                if !identifier(project_id) {
+                    return Err("invalid project id".into());
+                }
+                if !speed.is_finite() || *speed < 0.0 || *speed > MAX_BACKGROUND_SHADER_SPEED {
+                    return Err(format!(
+                        "background shader speed must be between 0 and {MAX_BACKGROUND_SHADER_SPEED}"
+                    ));
+                }
+            }
             Command::OpenOperationalView { view_id } => {
                 crate::operational_views::load(view_id).map_err(|error| error.to_string())?;
             }
@@ -1130,6 +1211,21 @@ pub mod text {
             .map_err(|_| format!("not a byte value (0-255): {token}"))
     }
 
+    /// A shader named the way the wire names it (`aurora-drift`), or the
+    /// renderer index `screensaver_shader` already takes. Both resolutions come
+    /// from the shader table and serde rather than a name list here, so adding
+    /// a shader does not need a second edit in the protocol.
+    fn background_shader_from_token(token: &str) -> Result<BackgroundShader, String> {
+        if let Ok(index) = token.parse::<usize>() {
+            return crate::screensaver::SHADERS
+                .get(index)
+                .map(|shader| shader.id)
+                .ok_or_else(|| format!("background shader index {index} is out of range"));
+        }
+        serde_json::from_value(serde_json::Value::String(token.to_owned()))
+            .map_err(|_| format!("unknown background shader: {token}"))
+    }
+
     fn state_from_name(token: &str) -> Result<IndicatorState, String> {
         match token {
             "ready" => Ok(IndicatorState::Ready),
@@ -1169,6 +1265,27 @@ pub mod text {
                     .parse::<usize>()
                     .map_err(|_| "invalid shader index".into())
                     .map(|index| Command::ScreensaverShader { index })
+            }
+            "bg-shader" | "set_background_shader" => {
+                req(
+                    tokens,
+                    3,
+                    "bg-shader <project_id> <shader-name|index> [speed]",
+                )?;
+                if !identifier(&tokens[1]) {
+                    return Err("invalid project id".into());
+                }
+                let speed = match tokens.get(3) {
+                    Some(token) => token
+                        .parse::<f32>()
+                        .map_err(|_| format!("not a speed: {token}"))?,
+                    None => DEFAULT_BACKGROUND_SHADER_SPEED,
+                };
+                Ok(Command::SetBackgroundShader {
+                    project_id: tokens[1].clone(),
+                    shader_id: background_shader_from_token(&tokens[2])?,
+                    speed,
+                })
             }
             "open_dataviz" | "dataviz" | "chart" => {
                 req(tokens, 4, "open_dataviz <chart_type> <surface_id> <file>")?;
@@ -1370,6 +1487,44 @@ pub mod text {
         Ok(request)
     }
 
+    /// The result a person can see, not the field that was written.
+    ///
+    /// The `NOT on screen` half is the whole reason this exists: a reply that
+    /// said only what it had written let three identical `ok`s describe a desk
+    /// that never changed.
+    fn format_visible_background(visible: &VisibleBackground) -> String {
+        let landed = if visible.on_screen() {
+            format!("project={} (on screen)", visible.project_id)
+        } else {
+            format!(
+                "project={} NOT on screen, showing={}",
+                visible.project_id, visible.active_project_id
+            )
+        };
+        let drawn = match &visible.drawn_shader {
+            Some(shader) => format!("{shader:?}"),
+            None => "none".into(),
+        };
+        format!(
+            "{landed} background={} drawing={drawn} screensaver={}",
+            background_kind(&visible.background),
+            visible.screensaver_enabled
+        )
+    }
+
+    /// The background's own wire tag, so this label cannot drift from the enum.
+    fn background_kind(background: &Background) -> String {
+        serde_json::to_value(background)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "unknown".into())
+    }
+
     fn format_error_code(code: &ErrorCode) -> &'static str {
         match code {
             ErrorCode::InvalidRequest => "invalid_request",
@@ -1495,8 +1650,19 @@ pub mod text {
                     } => format!(
                         "workspaces={total} created={created} updated={updated} preserved={preserved}"
                     ),
-                    Receipt::ScreensaverShaderSet { index, name } => {
-                        format!("shader={index} ({name})")
+                    Receipt::ScreensaverShaderSet {
+                        index,
+                        name,
+                        visible,
+                    } => match visible {
+                        Some(visible) => format!(
+                            "screensaver shader={index} ({name}) {}",
+                            format_visible_background(visible)
+                        ),
+                        None => format!("shader={index} ({name})"),
+                    },
+                    Receipt::BackgroundShaderSet { visible } => {
+                        format!("background {}", format_visible_background(visible))
                     }
                 };
                 format!("OK rev={} {}", reply.revision, detail)
@@ -2031,6 +2197,133 @@ mod tests {
         let encoded = serde_json::to_vec(&request).unwrap();
         let decoded: ControlRequest = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn background_shader_command_names_a_project_and_bounded_speed() {
+        use crate::control::text::*;
+
+        let request = parse_line("bg-shader dock aurora-drift 0.5").unwrap();
+        assert_eq!(
+            request.command,
+            Command::SetBackgroundShader {
+                project_id: "dock".into(),
+                shader_id: BackgroundShader::AuroraDrift,
+                speed: 0.5,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&request).unwrap()["command"]["command"],
+            "set_background_shader"
+        );
+
+        // An index means the same shader the renderer table means, so the
+        // number an operator already has from `shader <n>` keeps working.
+        let by_index = parse_line("bg-shader dock 0").unwrap();
+        assert_eq!(
+            by_index.command,
+            Command::SetBackgroundShader {
+                project_id: "dock".into(),
+                shader_id: crate::screensaver::SHADERS[0].id,
+                speed: DEFAULT_BACKGROUND_SHADER_SPEED,
+            }
+        );
+        const { assert!(DEFAULT_BACKGROUND_SHADER_SPEED > 0.0) };
+
+        assert!(parse_line("bg-shader dock no-such-shader").is_err());
+        assert!(parse_line("bg-shader Dock tidepool").is_err());
+        assert!(parse_line("bg-shader dock").is_err());
+        assert!(
+            parse_line(&format!(
+                "bg-shader dock tidepool {}",
+                MAX_BACKGROUND_SHADER_SPEED + 1.0
+            ))
+            .is_err()
+        );
+
+        // The screensaver command it is easily mistaken for still parses to the
+        // command it always did.
+        assert_eq!(
+            parse_line("shader 7").unwrap().command,
+            Command::ScreensaverShader { index: 7 }
+        );
+    }
+
+    #[test]
+    fn mutation_receipts_name_the_project_the_change_landed_on() {
+        use crate::control::text::*;
+
+        let off_screen = VisibleBackground {
+            project_id: "studio".into(),
+            active_project_id: "dock".into(),
+            background: Background::Shader {
+                shader_id: BackgroundShader::Tidepool,
+                speed: 1.0,
+            },
+            screensaver_enabled: false,
+            drawn_shader: Some(BackgroundShader::Tidepool),
+        };
+        assert!(!off_screen.on_screen());
+        let reply = ControlReply {
+            schema_version: CONTROL_VERSION,
+            request_id: "bg-1".into(),
+            revision: 2189,
+            outcome: Outcome::Ok {
+                receipt: Receipt::BackgroundShaderSet {
+                    visible: off_screen.clone(),
+                },
+            },
+        };
+        let formatted = format_reply(&reply);
+        assert!(formatted.contains("project=studio"), "{formatted}");
+        assert!(formatted.contains("showing=dock"), "{formatted}");
+        assert!(formatted.contains("NOT on screen"), "{formatted}");
+
+        // The receipt that said only `shader=7` now says where that landed.
+        let screensaver = ControlReply {
+            outcome: Outcome::Ok {
+                receipt: Receipt::ScreensaverShaderSet {
+                    index: 7,
+                    name: "Flame".into(),
+                    visible: Some(VisibleBackground {
+                        project_id: "dock".into(),
+                        ..off_screen
+                    }),
+                },
+            },
+            ..reply
+        };
+        let formatted = format_reply(&screensaver);
+        assert!(formatted.contains("shader=7 (Flame)"), "{formatted}");
+        assert!(formatted.contains("project=dock"), "{formatted}");
+        assert!(formatted.contains("screensaver=false"), "{formatted}");
+    }
+
+    #[test]
+    fn receipts_stay_readable_without_the_visible_state_field() {
+        // An older runtime's reply carries no `visible`; a client built from
+        // this protocol must still parse and print it.
+        let legacy = serde_json::json!({
+            "kind": "screensaver_shader_set",
+            "index": 3,
+            "name": "Tidepool",
+        });
+        let receipt: Receipt = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            receipt,
+            Receipt::ScreensaverShaderSet {
+                index: 3,
+                name: "Tidepool".into(),
+                visible: None,
+            }
+        );
+        let reply = ControlReply {
+            schema_version: CONTROL_VERSION,
+            request_id: "legacy".into(),
+            revision: 1,
+            outcome: Outcome::Ok { receipt },
+        };
+        assert_eq!(text::format_reply(&reply), "OK rev=1 shader=3 (Tidepool)");
     }
 
     #[test]

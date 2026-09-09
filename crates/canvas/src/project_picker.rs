@@ -14,19 +14,10 @@ pub enum Action {
     Cancel,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProjectPicker {
     query: String,
     selected: usize,
-}
-
-impl Default for ProjectPicker {
-    fn default() -> Self {
-        Self {
-            query: String::new(),
-            selected: 0,
-        }
-    }
 }
 
 impl ProjectPicker {
@@ -40,15 +31,19 @@ impl ProjectPicker {
             .map(|project| project.id.clone())
     }
 
+    /// Best matches first, capped at `MAX_RESULTS`. The sort is stable and has
+    /// no tie-break, so equally good matches keep catalog order: that order is
+    /// authored in `config/projects.json`, and its first entry is the project
+    /// the rest of Canvas treats as the default. Ranking by id instead would
+    /// bury the default behind whatever sorts alphabetically first, and would
+    /// look arbitrary next to the names the rows actually show.
     fn matches<'a>(&self, catalog: &'a Catalog) -> Vec<&'a Project> {
         let mut matches = catalog
             .projects
             .iter()
             .filter_map(|project| fuzzy_score(&self.query, project).map(|score| (score, project)))
             .collect::<Vec<_>>();
-        matches.sort_by(|(a_score, a), (b_score, b)| {
-            a_score.cmp(b_score).then_with(|| a.id.cmp(&b.id))
-        });
+        matches.sort_by_key(|(score, _)| *score);
         matches
             .into_iter()
             .take(MAX_RESULTS)
@@ -243,6 +238,30 @@ mod tests {
         ]}"#).unwrap()
     }
 
+    fn catalog_of(ids: &[&str]) -> Catalog {
+        let projects = ids
+            .iter()
+            .map(|id| {
+                format!(
+                    r#"{{"id":"{id}","name":"{id}","theme":{{"source":"coherence","mode":"dark","accent":"brand"}},"resources":[]}}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        serde_json::from_str(&format!(
+            r#"{{"schema_version":1,"projects":[{projects}]}}"#
+        ))
+        .unwrap()
+    }
+
+    fn listed(picker: &ProjectPicker, catalog: &Catalog) -> Vec<String> {
+        picker
+            .matches(catalog)
+            .iter()
+            .map(|project| project.id.clone())
+            .collect()
+    }
+
     fn key(key: Key, text: Option<&'static str>) -> Event {
         Event::KeyPressed {
             key: key.clone(),
@@ -285,5 +304,74 @@ mod tests {
             picker.handle(&key(Key::Named(key::Named::Escape), None), &catalog),
             Action::Cancel
         );
+    }
+
+    #[test]
+    fn an_empty_query_lists_the_catalog_in_its_own_order() {
+        let catalog = catalog();
+        let picker = ProjectPicker::default();
+        let ids = catalog
+            .projects
+            .iter()
+            .map(|project| project.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(listed(&picker, &catalog), ids);
+        // Opening the picker must preselect the project Canvas defaults to.
+        assert_eq!(picker.selected_project(&catalog).as_deref(), Some("dock"));
+    }
+
+    #[test]
+    fn ranking_is_independent_of_catalog_order() {
+        let mut picker = ProjectPicker::default();
+        picker.query.push_str("notes");
+        // A prefix match outranks a mere substring match from either position.
+        for order in [["studio-notes", "notes"], ["notes", "studio-notes"]] {
+            let catalog = catalog_of(&order);
+            assert_eq!(listed(&picker, &catalog), ["notes", "studio-notes"]);
+        }
+    }
+
+    #[test]
+    fn arrow_keys_wrap_within_the_result_set() {
+        let catalog = catalog();
+        let mut picker = ProjectPicker::default();
+        let count = picker.matches(&catalog).len();
+        let first = picker.selected_project(&catalog);
+        for _ in 0..count {
+            picker.handle(&key(Key::Named(key::Named::ArrowDown), None), &catalog);
+            assert!(picker.selected_project(&catalog).is_some());
+        }
+        assert_eq!(picker.selected_project(&catalog), first);
+        picker.handle(&key(Key::Named(key::Named::ArrowUp), None), &catalog);
+        assert_ne!(picker.selected_project(&catalog), first);
+        picker.handle(&key(Key::Named(key::Named::ArrowDown), None), &catalog);
+        assert_eq!(picker.selected_project(&catalog), first);
+    }
+
+    #[test]
+    fn narrowing_the_query_keeps_the_selection_in_range() {
+        let catalog = catalog();
+        let mut picker = ProjectPicker::default();
+        while picker.selected + 1 < picker.matches(&catalog).len() {
+            picker.handle(&key(Key::Named(key::Named::ArrowDown), None), &catalog);
+        }
+        picker.handle(&key(Key::Character("s".into()), Some("s")), &catalog);
+        assert!(picker.selected < picker.matches(&catalog).len());
+        assert_eq!(picker.selected_project(&catalog).as_deref(), Some("studio"));
+    }
+
+    #[test]
+    fn results_are_ranked_before_they_are_capped() {
+        let mut ids = (0..MAX_RESULTS + 2)
+            .map(|index| format!("z-ab-{index}"))
+            .collect::<Vec<_>>();
+        ids.push("abz".into());
+        let catalog = catalog_of(&ids.iter().map(String::as_str).collect::<Vec<_>>());
+        let mut picker = ProjectPicker::default();
+        picker.query.push_str("ab");
+        let matches = listed(&picker, &catalog);
+        assert_eq!(matches.len(), MAX_RESULTS);
+        // The cap must not drop the best match just because it is listed last.
+        assert_eq!(matches[0], "abz");
     }
 }

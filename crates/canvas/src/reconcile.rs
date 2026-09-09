@@ -85,9 +85,19 @@ pub struct Reconciliation {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum ReconcileAction {
-    NoChange { document_revision: u64 },
-    ApplyPatch { patch: WorkspacePatch },
-    ApplyDocument { document: WorkspaceDocument },
+    NoChange {
+        document_revision: u64,
+    },
+    ApplyPatch {
+        patch: WorkspacePatch,
+    },
+    /// Boxed because every plan is returned by value: inline, this one variant
+    /// would size the whole enum, so a `no_change` plan would still cost a
+    /// workspace-sized move. `Box` is transparent to serde and schemars, so the
+    /// `apply_document` wire shape and schema are unchanged.
+    ApplyDocument {
+        document: Box<WorkspaceDocument>,
+    },
 }
 
 pub fn reconcile(
@@ -208,7 +218,9 @@ fn replace_project(
     }
     Ok(Reconciliation {
         changes,
-        action: ReconcileAction::ApplyDocument { document },
+        action: ReconcileAction::ApplyDocument {
+            document: Box::new(document),
+        },
     })
 }
 
@@ -645,10 +657,27 @@ mod tests {
         assert_eq!(applied.focused_surface_id.as_deref(), Some("invoice"));
     }
 
+    /// Exact recall of a different project, the one intent that replaces the
+    /// whole document instead of patching it.
+    fn recall_ohm() -> DesiredWorkspaceState {
+        DesiredWorkspaceState {
+            project_id: "ohm".into(),
+            mode: ReconcileMode::Exact,
+            surfaces: vec![resource_surface("board", "board")],
+            layout: Some(Layout::Surface {
+                surface_id: "board".into(),
+            }),
+            focus: DesiredFocus::Surface {
+                surface_id: "board".into(),
+            },
+            ..desired()
+        }
+    }
+
     #[test]
     fn project_recall_requires_exact_state_and_returns_a_document() {
-        let mut preserving = desired();
-        preserving.project_id = "ohm".into();
+        let mut preserving = recall_ohm();
+        preserving.mode = ReconcileMode::Preserve;
         assert!(
             reconcile(&current(), &preserving, &catalog())
                 .unwrap_err()
@@ -656,21 +685,33 @@ mod tests {
                 .contains("requires exact")
         );
 
-        preserving.mode = ReconcileMode::Exact;
-        preserving.surfaces = vec![resource_surface("board", "board")];
-        preserving.layout = Some(Layout::Surface {
-            surface_id: "board".into(),
-        });
-        preserving.focus = DesiredFocus::Surface {
-            surface_id: "board".into(),
-        };
-        let plan = reconcile(&current(), &preserving, &catalog()).unwrap();
+        let plan = reconcile(&current(), &recall_ohm(), &catalog()).unwrap();
         let ReconcileAction::ApplyDocument { document } = plan.action else {
             panic!("expected a document replacement");
         };
         assert_eq!(document.project_id, "ohm");
         assert_eq!(document.revision, 8);
         document.validate(&catalog()).unwrap();
+    }
+
+    #[test]
+    fn every_plan_is_cheaper_to_return_than_the_document_it_replaces() {
+        // `Reconciliation` is returned by value from every planning call, so the
+        // replacement document stays behind an indirection.
+        assert!(size_of::<ReconcileAction>() < size_of::<WorkspaceDocument>());
+        assert!(size_of::<Reconciliation>() < size_of::<WorkspaceDocument>());
+    }
+
+    #[test]
+    fn a_document_replacement_keeps_its_flat_tagged_wire_shape() {
+        let plan = reconcile(&current(), &recall_ohm(), &catalog()).unwrap();
+        let encoded = serde_json::to_value(&plan.action).unwrap();
+        assert_eq!(encoded["action"], "apply_document");
+        assert_eq!(encoded["document"]["project_id"], "ohm");
+        assert_eq!(
+            serde_json::from_value::<ReconcileAction>(encoded).unwrap(),
+            plan.action
+        );
     }
 
     #[test]

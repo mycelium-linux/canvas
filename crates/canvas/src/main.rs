@@ -6,7 +6,7 @@ use ::canvas::control::{
     ErrorCode, MAX_ACTIVE_INDICATORS, MAX_CONTROL_MESSAGE, MeshSnapshot, MountedViewSnapshot,
     Navigation, Outcome, OverlaySettings, OverlayTarget, PresencePreview, PresenceSnapshot,
     ProjectWorkspaceSnapshot, Receipt, RuntimeSnapshot, ScreensaverSettings, ScreensaverSnapshot,
-    StatusIndicator, SurfaceSnapshot,
+    StatusIndicator, SurfaceSnapshot, VisibleBackground,
 };
 use ::canvas::display::{
     DisplayInfo, DisplayRegion, DisplayTarget, DisplayTopology, ResolvedDisplayTarget,
@@ -32,7 +32,9 @@ use ::canvas::{
 };
 use base64::Engine as _;
 use canvas_core::global_hotkey::{GlobalHotkey, HotkeySpec};
-use canvas_core::{Catalog, ThemePalette, VisualTheme, desktop::WallpaperRequest, layout::Rect};
+use canvas_core::{
+    Catalog, ThemeMetrics, ThemePalette, VisualTheme, desktop::WallpaperRequest, layout::Rect,
+};
 use iced::mouse;
 use iced::widget::canvas::{Canvas, Geometry};
 use iced::widget::{
@@ -1661,18 +1663,22 @@ impl App {
         Task::none()
     }
 
-    /// Commit a chosen background to the workspace the human is standing in.
+    /// Commit a background to the workspace the human is standing in.
     ///
     /// Persisted immediately rather than on switch: the point of choosing is
     /// that it survives, and a background that quietly reverted on the next
     /// restart would look like the picker had not worked at all.
-    fn apply_picked_background(&mut self, background: Background) -> Task<Message> {
-        let previous = std::mem::replace(&mut self.document.background, background.clone());
+    ///
+    /// Shared with the control protocol so `bg-shader` and F2 land the same
+    /// change the same way; the picker reports failures in the status line and
+    /// the socket reports them as an error outcome.
+    fn commit_background(&mut self, background: Background) -> Result<(), Failure> {
+        let previous = std::mem::replace(&mut self.document.background, background);
         if let Err(error) = self.document.validate(&self.catalog) {
             self.document.background = previous;
-            self.status = format!("Could not apply that background: {error}");
-            self.bump();
-            return Task::none();
+            return Err(Failure::invalid(format!(
+                "Could not apply that background: {error}"
+            )));
         }
         self.screensaver_index =
             screensaver::workspace_index(&self.document.id, &self.document.background);
@@ -1688,9 +1694,9 @@ impl App {
                 workspace_store::save(&self.workspace_store_path, &next, &self.catalog)
             {
                 self.document.background = previous;
-                self.status = format!("Could not save that background: {error}");
-                self.bump();
-                return Task::none();
+                return Err(Failure::resource(format!(
+                    "Could not save that background: {error}"
+                )));
             }
             self.workspaces = next;
         }
@@ -1700,7 +1706,77 @@ impl App {
         );
         self.emit_event("background_applied");
         self.bump();
+        Ok(())
+    }
+
+    fn apply_picked_background(&mut self, background: Background) -> Task<Message> {
+        if let Err(failure) = self.commit_background(background) {
+            self.status = failure.message;
+            self.bump();
+        }
         Task::none()
+    }
+
+    /// Write a background onto a stored workspace that is not on screen.
+    ///
+    /// The document is not the live one, so nothing here touches the shader
+    /// clock: the change is real and persisted, and becomes visible when that
+    /// project is switched to.
+    fn commit_stored_background(
+        &mut self,
+        project_id: &str,
+        background: Background,
+    ) -> Result<(), Failure> {
+        let mut document = self
+            .workspaces
+            .get(project_id)
+            .cloned()
+            .ok_or_else(|| Failure {
+                code: ErrorCode::NotFound,
+                message: format!("workspace '{project_id}' not found"),
+            })?;
+        document.background = background;
+        document.revision = document.revision.saturating_add(1);
+        document.validate(&self.catalog).map_err(|error| {
+            Failure::invalid(format!("Could not apply that background: {error}"))
+        })?;
+        let mut next = self.workspaces.clone();
+        next.upsert(document);
+        workspace_store::save(&self.workspace_store_path, &next, &self.catalog).map_err(
+            |error| Failure::resource(format!("Could not save that background: {error}")),
+        )?;
+        self.workspaces = next;
+        self.status = format!("Background set on project workspace '{project_id}'.");
+        self.emit_event("background_applied");
+        self.bump();
+        Ok(())
+    }
+
+    /// What a person is looking at, told from the point of view of a change
+    /// that has just landed on `project_id`.
+    ///
+    /// The presented document is the authority, not the field the mutation
+    /// wrote: those are the same thing only when the change landed on the
+    /// project that is on screen, and a receipt that cannot tell the two apart
+    /// is how three `ok` replies described a desk that never changed.
+    fn visible_background(&self, project_id: &str) -> VisibleBackground {
+        let drawn_shader = if self.screensaver_settings.enabled {
+            screensaver::SHADERS
+                .get(self.screensaver_index)
+                .map(|shader| shader.id)
+        } else {
+            match &self.document.background {
+                Background::Shader { shader_id, .. } => Some(*shader_id),
+                _ => None,
+            }
+        };
+        VisibleBackground {
+            project_id: project_id.to_owned(),
+            active_project_id: self.document.project_id.clone(),
+            background: self.document.background.clone(),
+            screensaver_enabled: self.screensaver_settings.enabled,
+            drawn_shader,
+        }
     }
 
     fn toggle_shortcut_help(&mut self) -> Task<Message> {
@@ -2917,15 +2993,44 @@ impl App {
                 self.screensaver_last_frame = Some(Instant::now());
                 self.bump();
                 self.status = format!("Using screensaver shader {}.", shader.name);
+                let visible = self.visible_background(&self.document.project_id);
                 self.answer(
                     pending,
                     Outcome::Ok {
                         receipt: Receipt::ScreensaverShaderSet {
                             index,
                             name: shader.name.to_string(),
+                            visible: Some(visible),
                         },
                     },
                 );
+                Task::none()
+            }
+            Command::SetBackgroundShader {
+                project_id,
+                shader_id,
+                speed,
+            } => {
+                let background = Background::Shader { shader_id, speed };
+                let committed = if project_id == self.document.project_id {
+                    // The same call F2 makes, so the protocol can say exactly
+                    // what a human at the keyboard can say and nothing else.
+                    self.commit_background(background)
+                } else {
+                    self.commit_stored_background(&project_id, background)
+                };
+                match committed {
+                    Ok(()) => {
+                        let visible = self.visible_background(&project_id);
+                        self.answer(
+                            pending,
+                            Outcome::Ok {
+                                receipt: Receipt::BackgroundShaderSet { visible },
+                            },
+                        );
+                    }
+                    Err(failure) => self.fail(pending, failure),
+                }
                 Task::none()
             }
         }
@@ -3802,18 +3907,18 @@ impl App {
                     .into()
             }
             ContentSource::DataViz { chart } => {
-                let palette = self.presented_palette();
+                let visual = self.presented_visual_theme();
+                let palette = visual.palette;
                 Canvas::new(ChartProgram {
                     chart: chart.clone(),
                     axis_color: color(palette.text),
                     muted_color: color(palette.text_muted),
                     surface_color: color(palette.surface),
-                    series_colors: vec![
-                        color(palette.primary),
-                        color(palette.success),
-                        color(palette.danger),
-                        color(palette.warning),
-                    ],
+                    // Categorical identity, not status: a ramp of
+                    // `[primary, success, danger, warning]` made series three
+                    // and four claim "failed" and "degraded" by list position.
+                    series_colors: canvas_widgets::live::series_colors(&palette),
+                    metrics: visual.metrics,
                 })
                 .width(width)
                 .height(height)
@@ -4146,6 +4251,15 @@ impl App {
                     stops,
                 } => gradient(*angle_degrees, stops).into(),
                 Background::Image { .. } | Background::Shader { .. } => Color::TRANSPARENT.into(),
+                // A background written by a newer Canvas. It is retained
+                // verbatim, but this build cannot draw it, so fall back to the
+                // theme ground rather than leaving the desktop black.
+                Background::Unsupported(_) => iced::Gradient::Linear(
+                    iced::gradient::Linear::new(core::f32::consts::PI / 2.0)
+                        .add_stop(0.0, color(palette.background))
+                        .add_stop(1.0, color(palette.background_strong)),
+                )
+                .into(),
             }
         };
         let surface_color = color(palette.surface);
@@ -4317,11 +4431,19 @@ impl App {
                 ),
         };
 
+        // One field across the desk rather than one copy per display: this
+        // window shows the slice of the shader that starts where it sits.
+        let desk = screensaver::Field::Desk {
+            origin: [viewport_x as f32, viewport_y as f32],
+            extent: [self.frame.width as f32, self.frame.height as f32],
+        };
+
         let mut layers: Vec<Element<'_, Message>> = Vec::new();
         if self.screensaver_settings.enabled {
-            layers.push(screensaver::view(
+            layers.push(screensaver::view_in(
                 self.screensaver_index,
                 self.screensaver_elapsed,
+                desk,
             ));
         } else {
             match &self.document.background {
@@ -4336,11 +4458,15 @@ impl App {
                         );
                     }
                 }
-                Background::Shader { shader_id, .. } => layers.push(screensaver::view(
+                Background::Shader { shader_id, .. } => layers.push(screensaver::view_in(
                     screensaver::index_for(*shader_id),
                     self.screensaver_elapsed,
+                    desk,
                 )),
                 Background::Theme | Background::Solid { .. } | Background::Gradient { .. } => {}
+                // Nothing to layer: the ground above already fell back to the
+                // theme gradient for a background this build cannot draw.
+                Background::Unsupported(_) => {}
             }
         }
         layers.push(content);
@@ -5219,6 +5345,9 @@ struct ChartProgram {
     muted_color: Color,
     surface_color: Color,
     series_colors: Vec<Color>,
+    /// The chart draws its own labels, so it has to be handed the type scale
+    /// rather than inheriting one from a widget it does not use.
+    metrics: ThemeMetrics,
 }
 
 impl<Message> canvas::Program<Message> for ChartProgram {
@@ -5238,7 +5367,7 @@ impl<Message> canvas::Program<Message> for ChartProgram {
                 &mut frame,
                 "No chart data",
                 Point::new(20.0, 24.0),
-                16.0,
+                self.metrics.body,
                 self.muted_color,
                 iced::alignment::Horizontal::Left,
             );
@@ -5249,7 +5378,7 @@ impl<Message> canvas::Program<Message> for ChartProgram {
             &mut frame,
             &self.chart.title,
             Point::new(18.0, 12.0),
-            16.0,
+            self.metrics.body,
             self.axis_color,
             iced::alignment::Horizontal::Left,
         );
@@ -5267,7 +5396,7 @@ impl<Message> canvas::Program<Message> for ChartProgram {
                 &mut frame,
                 &item.label,
                 Point::new(item.x + 13.0, item.y),
-                11.0,
+                self.metrics.micro,
                 self.muted_color,
                 iced::alignment::Horizontal::Left,
             );
@@ -5302,7 +5431,7 @@ impl<Message> canvas::Program<Message> for ChartProgram {
                 &mut frame,
                 &format_chart_value(*tick),
                 Point::new(left - 7.0, y),
-                10.0,
+                self.metrics.micro,
                 self.muted_color,
                 iced::alignment::Horizontal::Right,
             );
@@ -5317,7 +5446,7 @@ impl<Message> canvas::Program<Message> for ChartProgram {
                 &mut frame,
                 &format_chart_value(*tick),
                 Point::new(x, bottom + 7.0),
-                10.0,
+                self.metrics.micro,
                 self.muted_color,
                 iced::alignment::Horizontal::Center,
             );
@@ -5328,7 +5457,7 @@ impl<Message> canvas::Program<Message> for ChartProgram {
             &mut frame,
             &y_label,
             Point::new(12.0, top - 20.0),
-            11.0,
+            self.metrics.micro,
             self.muted_color,
             iced::alignment::Horizontal::Left,
         );
@@ -5337,7 +5466,7 @@ impl<Message> canvas::Program<Message> for ChartProgram {
             &mut frame,
             &x_label,
             Point::new((left + right) / 2.0, bounds.height - 15.0),
-            11.0,
+            self.metrics.micro,
             self.muted_color,
             iced::alignment::Horizontal::Center,
         );
@@ -5354,24 +5483,18 @@ impl<Message> canvas::Program<Message> for ChartProgram {
             let series_color = self.series_colors[series_index % self.series_colors.len()];
             match self.chart.kind {
                 ChartKind::Line => {
-                    let stroke = canvas::Stroke::default()
-                        .with_width(2.0)
-                        .with_color(series_color);
-                    for pair in series.points.windows(2) {
-                        frame.stroke(
-                            &canvas::Path::line(
-                                Point::new(sx(pair[0].x), sy(pair[0].y)),
-                                Point::new(sx(pair[1].x), sy(pair[1].y)),
-                            ),
-                            stroke,
-                        );
-                    }
-                    for point in &series.points {
-                        frame.fill(
-                            &canvas::Path::circle(Point::new(sx(point.x), sy(point.y)), 2.7),
-                            series_color,
-                        );
-                    }
+                    let points: Vec<Point> = series
+                        .points
+                        .iter()
+                        .map(|point| Point::new(sx(point.x), sy(point.y)))
+                        .collect();
+                    draw_chart_series_line(
+                        &mut frame,
+                        &points,
+                        bottom,
+                        series_color,
+                        CHART_AREA_ALPHA / self.chart.series.len().max(1) as f32,
+                    );
                 }
                 ChartKind::Scatter => {
                     for point in &series.points {
@@ -5442,7 +5565,7 @@ impl<Message> canvas::Program<Message> for ChartProgram {
                 &mut frame,
                 &value,
                 Point::new(tooltip_x + 9.0, tooltip_y + 5.0),
-                10.0,
+                self.metrics.micro,
                 self.axis_color,
                 iced::alignment::Horizontal::Left,
             );
@@ -5578,6 +5701,78 @@ fn format_axis_value(value: f32, unit: Option<&str>) -> String {
             format!("{value} {unit}")
         }
     })
+}
+
+const CHART_LINE_WIDTH: f32 = 2.0;
+/// Opacity of the area under a line at the line itself, falling to nothing at
+/// the axis. Divided among overlaid series so a four-series chart does not silt
+/// up.
+const CHART_AREA_ALPHA: f32 = 0.22;
+const CHART_HEAD_RADIUS: f32 = CHART_LINE_WIDTH * 1.6;
+
+/// Draw one series: the area beneath it, the line as a single path, and a
+/// filled head on the newest point.
+///
+/// Every vertex used to be the meeting of two separately stroked `Path::line`
+/// segments, which on a 2px butt-capped stroke leaves a visible notch at each
+/// one. One path with round joins removes them, and hands the tessellator one
+/// shape instead of n.
+///
+/// This mirrors `canvas_widgets::live`'s private `draw_series_line`; the two
+/// should become one call once that crate exports it.
+fn draw_chart_series_line(
+    frame: &mut canvas::Frame,
+    points: &[Point],
+    baseline: f32,
+    stroke: Color,
+    area_alpha: f32,
+) {
+    let (Some(first), Some(last)) = (points.first(), points.last()) else {
+        return;
+    };
+    if points.len() < 2 {
+        return;
+    }
+    let crest = points.iter().map(|point| point.y).fold(baseline, f32::min);
+    let area = canvas::Path::new(|path| {
+        path.move_to(Point::new(first.x, baseline));
+        for point in points {
+            path.line_to(*point);
+        }
+        path.line_to(Point::new(last.x, baseline));
+        path.close();
+    });
+    frame.fill(
+        &area,
+        canvas::gradient::Linear::new(Point::new(first.x, crest), Point::new(first.x, baseline))
+            .add_stop(
+                0.0,
+                Color {
+                    a: area_alpha,
+                    ..stroke
+                },
+            )
+            .add_stop(1.0, Color { a: 0.0, ..stroke }),
+    );
+    let line = canvas::Path::new(|path| {
+        path.move_to(*first);
+        for point in &points[1..] {
+            path.line_to(*point);
+        }
+    });
+    frame.stroke(
+        &line,
+        canvas::Stroke {
+            style: canvas::Style::Solid(stroke),
+            width: CHART_LINE_WIDTH,
+            line_cap: canvas::LineCap::Round,
+            line_join: canvas::LineJoin::Round,
+            ..Default::default()
+        },
+    );
+    // The newest point is what a live series is read for; without it the eye
+    // has to work out which end of the line is now.
+    frame.fill(&canvas::Path::circle(*last, CHART_HEAD_RADIUS), stroke);
 }
 
 fn chart_text(
@@ -6982,6 +7177,140 @@ mod tests {
             reply.outcome,
             Outcome::Error {
                 code: ErrorCode::InvalidRequest,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn screensaver_shader_receipt_reports_what_is_actually_drawn() {
+        let mut app = test_app();
+        let reply = execute(
+            &mut app,
+            "shader-receipt",
+            Command::ScreensaverShader { index: 0 },
+        );
+        let Outcome::Ok {
+            receipt: Receipt::ScreensaverShaderSet { visible, .. },
+        } = reply.outcome
+        else {
+            panic!("expected a screensaver shader receipt");
+        };
+        let visible = visible.expect("a mutation receipt must report visible state");
+        assert_eq!(visible.project_id, app.document.project_id);
+        assert_eq!(visible.active_project_id, app.document.project_id);
+        assert_eq!(
+            visible.screensaver_enabled,
+            app.screensaver_settings.enabled
+        );
+        assert_eq!(visible.background, app.document.background);
+        // The screensaver is off, so its shader index is not what the desk is
+        // drawing — which is exactly what three identical `ok` replies failed
+        // to say.
+        assert_eq!(
+            visible.drawn_shader.is_some(),
+            matches!(app.document.background, Background::Shader { .. })
+        );
+    }
+
+    #[test]
+    fn background_shader_command_sets_what_the_presented_document_draws() {
+        let mut app = test_app();
+        let project = app.document.project_id.clone();
+        let reply = execute(
+            &mut app,
+            "bg-shader-active",
+            Command::SetBackgroundShader {
+                project_id: project.clone(),
+                shader_id: BackgroundShader::SmokeRings,
+                speed: 0.5,
+            },
+        );
+        let Outcome::Ok {
+            receipt: Receipt::BackgroundShaderSet { visible },
+        } = reply.outcome
+        else {
+            panic!("expected a background shader receipt");
+        };
+        assert_eq!(
+            app.document.background,
+            Background::Shader {
+                shader_id: BackgroundShader::SmokeRings,
+                speed: 0.5,
+            }
+        );
+        assert!(visible.on_screen());
+        assert_eq!(visible.project_id, project);
+        assert_eq!(visible.background, app.document.background);
+        assert_eq!(visible.drawn_shader, Some(BackgroundShader::SmokeRings));
+        // The renderer follows the document rather than being aimed separately.
+        assert_eq!(
+            app.screensaver_index,
+            screensaver::index_for(BackgroundShader::SmokeRings)
+        );
+    }
+
+    #[test]
+    fn background_shader_receipt_names_a_project_that_is_not_on_screen() {
+        let mut app = test_app();
+        let active = app.document.project_id.clone();
+        app.workspaces.upsert(WorkspaceDocument {
+            schema_version: SCHEMA_VERSION,
+            id: "studio-workspace".into(),
+            project_id: "studio".into(),
+            revision: 1,
+            theme: ThemeRef::Project,
+            background: Background::default(),
+            chrome: SurfaceChrome::default(),
+            surfaces: Vec::new(),
+            layout: Layout::Empty,
+            bindings: Vec::new(),
+            focused_surface_id: None,
+        });
+        let unchanged = app.document.background.clone();
+
+        let reply = execute(
+            &mut app,
+            "bg-shader-elsewhere",
+            Command::SetBackgroundShader {
+                project_id: "studio".into(),
+                shader_id: BackgroundShader::Tidepool,
+                speed: 1.0,
+            },
+        );
+        let Outcome::Ok {
+            receipt: Receipt::BackgroundShaderSet { visible },
+        } = reply.outcome
+        else {
+            panic!("expected a background shader receipt");
+        };
+        // The reply that would have caught the failure on the first command
+        // rather than the third: it names a project nobody was looking at.
+        assert_eq!(visible.project_id, "studio");
+        assert_eq!(visible.active_project_id, active);
+        assert!(!visible.on_screen());
+        assert_eq!(app.document.background, unchanged);
+        assert_eq!(
+            app.workspaces.get("studio").unwrap().background,
+            Background::Shader {
+                shader_id: BackgroundShader::Tidepool,
+                speed: 1.0,
+            }
+        );
+
+        let missing = execute(
+            &mut app,
+            "bg-shader-missing",
+            Command::SetBackgroundShader {
+                project_id: "nowhere".into(),
+                shader_id: BackgroundShader::Tidepool,
+                speed: 1.0,
+            },
+        );
+        assert!(matches!(
+            missing.outcome,
+            Outcome::Error {
+                code: ErrorCode::NotFound,
                 ..
             }
         ));

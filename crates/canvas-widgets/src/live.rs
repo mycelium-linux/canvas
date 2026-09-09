@@ -61,7 +61,7 @@ pub fn element<'a, Message: 'a>(
             let accent = state.map_or(color(palette.primary), |state| status_color(state, palette));
             let mut value_line = row![
                 text(format_metric(*value))
-                    .size(metrics.display * 1.5)
+                    .size(metrics.hero)
                     .color(color(palette.text)),
                 text(unit.clone().unwrap_or_default())
                     .size(metrics.small)
@@ -79,6 +79,8 @@ pub fn element<'a, Message: 'a>(
                         },
                     ));
             }
+            // Label above the value, as the gauge also does: the label names the
+            // metric, and a name reads as a caption rather than a footnote.
             let body = column![
                 text(label)
                     .size(metrics.small)
@@ -170,15 +172,11 @@ pub fn element<'a, Message: 'a>(
             let rendered = strftime(&now, format);
             panel(
                 spec,
-                container(
-                    text(rendered)
-                        .size(metrics.display * 2.25)
-                        .color(color(palette.text)),
-                )
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center(Length::Fill)
-                .into(),
+                container(text(rendered).size(metrics.hero).color(color(palette.text)))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .center(Length::Fill)
+                    .into(),
                 visual,
             )
         }
@@ -280,16 +278,15 @@ pub fn element<'a, Message: 'a>(
             panel(
                 spec,
                 iced::widget::Column::<Message>::new()
-                    .push(
-                        text(pct)
-                            .size(metrics.display * 1.7)
-                            .color(color(palette.text)),
-                    )
+                    // Same order as Stat — label, value, then the track the
+                    // value fills. The two disagreeing was the tell that
+                    // neither had been placed on purpose.
                     .push(
                         text(label)
                             .size(metrics.small)
                             .color(color(palette.text_muted)),
                     )
+                    .push(text(pct).size(metrics.hero).color(color(palette.text)))
                     .push(
                         Canvas::new(GaugeProgram {
                             value: *value,
@@ -353,6 +350,7 @@ pub fn element<'a, Message: 'a>(
                     low: color(palette.surface_muted),
                     high: color(palette.primary),
                     label: color(palette.text_muted),
+                    label_size: metrics.micro,
                 })
                 .width(Length::Fill)
                 .height(Length::Fill),
@@ -384,6 +382,7 @@ pub fn element<'a, Message: 'a>(
                         .collect(),
                     palette: series_colors(palette),
                     label: color(palette.text_muted),
+                    label_size: metrics.micro,
                 })
                 .width(Length::Fill)
                 .height(Length::Fill),
@@ -397,44 +396,50 @@ pub fn element<'a, Message: 'a>(
             series,
             bars,
             unit,
-        } => panel(
-            spec,
-            column![
-                row![
-                    text(title).size(metrics.body).color(color(palette.text)),
-                    space::horizontal(),
-                    text(unit.clone().unwrap_or_default())
-                        .size(metrics.small)
-                        .color(color(palette.text_muted)),
-                ],
-                row(series
-                    .iter()
-                    .enumerate()
-                    .map(|(index, label)| row![
-                        status_dot(series_colors(palette)[index % 5], 7.0),
-                        text(label)
+        } => {
+            // One ramp for the whole widget: the legend and the bars have to
+            // agree, and rebuilding it per legend item is a Vec per series.
+            let colors = series_colors(palette);
+            panel(
+                spec,
+                column![
+                    row![
+                        text(title).size(metrics.body).color(color(palette.text)),
+                        space::horizontal(),
+                        text(unit.clone().unwrap_or_default())
                             .size(metrics.small)
                             .color(color(palette.text_muted)),
-                    ]
-                    .spacing(metrics.space_1)
-                    .into())
-                    .collect::<Vec<Element<'_, Message>>>())
-                .spacing(metrics.space_3),
-                Canvas::new(StackedBarProgram {
-                    bars: bars
+                    ],
+                    row(series
                         .iter()
-                        .map(|bar| (bar.label.clone(), bar.values.clone()))
-                        .collect(),
-                    colors: series_colors(palette),
-                    label: color(palette.text_muted),
-                })
-                .width(Length::Fill)
-                .height(Length::Fill),
-            ]
-            .spacing(metrics.space_2)
-            .into(),
-            visual,
-        ),
+                        .enumerate()
+                        .map(|(index, label)| row![
+                            status_dot(colors[index % colors.len()], 7.0),
+                            text(label)
+                                .size(metrics.small)
+                                .color(color(palette.text_muted)),
+                        ]
+                        .spacing(metrics.space_1)
+                        .into())
+                        .collect::<Vec<Element<'_, Message>>>())
+                    .spacing(metrics.space_3),
+                    Canvas::new(StackedBarProgram {
+                        bars: bars
+                            .iter()
+                            .map(|bar| (bar.label.clone(), bar.values.clone()))
+                            .collect(),
+                        colors,
+                        label: color(palette.text_muted),
+                        label_size: metrics.micro,
+                    })
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+                ]
+                .spacing(metrics.space_2)
+                .into(),
+                visual,
+            )
+        }
         WidgetKind::StateTimeline { title, lanes } => panel(
             spec,
             column![
@@ -443,6 +448,7 @@ pub fn element<'a, Message: 'a>(
                     lanes: lanes.clone(),
                     palette: *palette,
                     label: color(palette.text_muted),
+                    label_size: metrics.micro,
                 })
                 .width(Length::Fill)
                 .height(Length::Fill),
@@ -472,6 +478,7 @@ pub fn element<'a, Message: 'a>(
                     danger: color(palette.danger),
                     track: color(palette.surface_muted),
                     label: color(palette.text_muted),
+                    label_size: metrics.micro,
                 })
                 .width(Length::Fill)
                 .height(Length::Fill),
@@ -840,14 +847,227 @@ fn status_color(level: StatusLevel, palette: &ThemePalette) -> Color {
     })
 }
 
-fn series_colors(palette: &ThemePalette) -> Vec<Color> {
-    vec![
-        color(palette.primary),
-        color(palette.success),
-        color(palette.info),
-        color(palette.warning),
-        color(palette.danger),
+/// Distinct colours a series is identified by, derived from the theme.
+///
+/// Categorical colour and status colour are two languages, and this used to
+/// speak one where it meant the other: the ramp *was* `[primary, success, info,
+/// warning, danger]`, so `ops-stacked-bar`'s `["ok", "retried", "failed"]`
+/// rendered green, cyan, amber by list position. Colour was making a claim
+/// about severity that the data never made.
+///
+/// The ramp rotates hue off `primary` in OKLCH — perceptually even steps, so
+/// neighbours separate as well at the end of the ramp as at the start — and
+/// alternates lightness, which keeps neighbours apart in greyscale and for a
+/// red-green colour-blind reader. The hue windows the status roles occupy are
+/// excluded from the walk rather than merely stepped over, so no palette,
+/// imported ones included, can produce a series that reads as a state.
+pub fn series_colors(palette: &ThemePalette) -> Vec<Color> {
+    let base = to_oklch(color(palette.primary));
+    let open = categorical_arcs(&[
+        to_oklch(color(palette.success)).h,
+        to_oklch(color(palette.warning)).h,
+        to_oklch(color(palette.danger)).h,
+        to_oklch(color(palette.info)).h,
+    ]);
+    let span = arc_span(&open);
+    let start = arc_offset(&open, base.h);
+    let chroma = base.c.clamp(SERIES_CHROMA_MIN, SERIES_CHROMA_MAX);
+    // Lightness comes from the theme's own primary, so a light theme's ramp
+    // lands dark enough to read on white and a dark theme's light enough to
+    // read on black, without either being written down anywhere.
+    (0..SERIES_COLORS)
+        .map(|index| {
+            let lift = if index % 2 == 0 {
+                1.0
+            } else {
+                1.0 + SERIES_LIGHTNESS_STEP
+            };
+            from_oklch(Oklch {
+                l: (base.l * lift).clamp(SERIES_LIGHTNESS_MIN, SERIES_LIGHTNESS_MAX),
+                c: chroma,
+                h: arc_hue(&open, start + span * index as f32 / SERIES_COLORS as f32),
+            })
+        })
+        .collect()
+}
+
+/// How many identities the ramp carries before it repeats. Beyond this a chart
+/// has more series than a person can hold in one glance anyway, and the honest
+/// answer is fewer series, not more colours.
+const SERIES_COLORS: usize = 6;
+/// Degrees of hue held clear either side of a status hue.
+const STATUS_HUE_GUARD: f32 = 25.0;
+/// The floor keeps a desaturated brand from yielding six greys; the ceiling
+/// keeps a rotated hue inside sRGB, where an over-saturated one would clip and
+/// collapse onto its neighbour.
+const SERIES_CHROMA_MIN: f32 = 0.08;
+const SERIES_CHROMA_MAX: f32 = 0.15;
+/// Fraction of the base lightness that alternating entries are lifted by.
+const SERIES_LIGHTNESS_STEP: f32 = 0.12;
+const SERIES_LIGHTNESS_MIN: f32 = 0.30;
+const SERIES_LIGHTNESS_MAX: f32 = 0.92;
+
+/// The hue arcs a categorical colour may occupy: the circle, less a guard
+/// window around each status hue, with overlapping windows merged.
+fn categorical_arcs(status_hues: &[f32]) -> Vec<(f32, f32)> {
+    let mut blocked: Vec<(f32, f32)> = Vec::new();
+    for hue in status_hues {
+        let start = (hue - STATUS_HUE_GUARD).rem_euclid(360.0);
+        let end = start + STATUS_HUE_GUARD * 2.0;
+        // A window straddling 0° is two windows in a sorted list.
+        if end > 360.0 {
+            blocked.push((start, 360.0));
+            blocked.push((0.0, end - 360.0));
+        } else {
+            blocked.push((start, end));
+        }
+    }
+    blocked.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut merged: Vec<(f32, f32)> = Vec::new();
+    for (start, end) in blocked {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    let mut open = Vec::new();
+    let mut cursor = 0.0f32;
+    for (start, end) in merged {
+        if start > cursor {
+            open.push((cursor, start));
+        }
+        cursor = cursor.max(end);
+    }
+    if cursor < 360.0 {
+        open.push((cursor, 360.0));
+    }
+    open
+}
+
+fn arc_span(arcs: &[(f32, f32)]) -> f32 {
+    arcs.iter().map(|(start, end)| end - start).sum()
+}
+
+/// The hue `distance` degrees along the open arcs, wrapping at the end.
+fn arc_hue(arcs: &[(f32, f32)], distance: f32) -> f32 {
+    let span = arc_span(arcs);
+    if span <= f32::EPSILON {
+        return distance.rem_euclid(360.0);
+    }
+    let mut remaining = distance.rem_euclid(span);
+    for (start, end) in arcs {
+        if remaining < end - start {
+            return start + remaining;
+        }
+        remaining -= end - start;
+    }
+    arcs[0].0
+}
+
+/// Where `hue` sits along the open arcs. A hue inside a guarded window resolves
+/// to the start of the next open arc, which is what keeps the guarantee true
+/// even for a palette whose primary is itself a status colour.
+fn arc_offset(arcs: &[(f32, f32)], hue: f32) -> f32 {
+    let mut travelled = 0.0;
+    for (start, end) in arcs {
+        if hue < *end {
+            return travelled + (hue - start).max(0.0);
+        }
+        travelled += end - start;
+    }
+    0.0
+}
+
+/// Oklab in cylindrical form: perceptual lightness, chroma, and hue in degrees.
+/// Rotating hue here keeps apparent brightness roughly fixed, which sRGB hue
+/// rotation does not — the reason the ramp is not built in RGB.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Oklch {
+    l: f32,
+    c: f32,
+    h: f32,
+}
+
+// Matrices are Björn Ottosson's published sRGB ↔ Oklab pair.
+fn to_oklch(value: Color) -> Oklch {
+    let r = srgb_decode(value.r);
+    let g = srgb_decode(value.g);
+    let b = srgb_decode(value.b);
+    let long = (0.412_221_47 * r + 0.536_332_54 * g + 0.051_445_995 * b).cbrt();
+    let medium = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
+    let short = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
+    let lightness = 0.210_454_26 * long + 0.793_617_8 * medium - 0.004_072_047 * short;
+    let green_red = 1.977_998_5 * long - 2.428_592_2 * medium + 0.450_593_7 * short;
+    let blue_yellow = 0.025_904_037 * long + 0.782_771_77 * medium - 0.808_675_77 * short;
+    Oklch {
+        l: lightness,
+        c: green_red.hypot(blue_yellow),
+        h: blue_yellow.atan2(green_red).to_degrees().rem_euclid(360.0),
+    }
+}
+
+/// The nearest displayable colour at this lightness and hue.
+///
+/// Chroma is reduced until the conversion lands inside sRGB, rather than the
+/// channels being clipped where they leave it: clipping moves the hue — by 14°
+/// on a light saturated blue, straight into the window the status guard keeps
+/// clear — while dropping chroma keeps the hue the ramp chose.
+fn from_oklch(value: Oklch) -> Color {
+    let mut chroma = value.c;
+    if !in_srgb_gamut(oklch_to_linear(value)) {
+        // Grey is always displayable, so the low end is a known-good bound and
+        // eight halvings land within a percent of the gamut edge.
+        let (mut lo, mut hi) = (0.0, value.c);
+        for _ in 0..8 {
+            let mid = (lo + hi) / 2.0;
+            if in_srgb_gamut(oklch_to_linear(Oklch { c: mid, ..value })) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        chroma = lo;
+    }
+    let [r, g, b] = oklch_to_linear(Oklch { c: chroma, ..value });
+    Color::from_rgb(srgb_encode(r), srgb_encode(g), srgb_encode(b))
+}
+
+fn oklch_to_linear(value: Oklch) -> [f32; 3] {
+    let (sin, cos) = value.h.to_radians().sin_cos();
+    let (green_red, blue_yellow) = (value.c * cos, value.c * sin);
+    let long = (value.l + 0.396_337_78 * green_red + 0.215_803_76 * blue_yellow).powi(3);
+    let medium = (value.l - 0.105_561_346 * green_red - 0.063_854_17 * blue_yellow).powi(3);
+    let short = (value.l - 0.089_484_18 * green_red - 1.291_485_5 * blue_yellow).powi(3);
+    [
+        4.076_741_7 * long - 3.307_711_6 * medium + 0.230_969_94 * short,
+        -1.268_438 * long + 2.609_757_4 * medium - 0.341_319_38 * short,
+        -0.004_196_086 * long - 0.703_418_6 * medium + 1.707_614_7 * short,
     ]
+}
+
+fn in_srgb_gamut(linear: [f32; 3]) -> bool {
+    linear
+        .iter()
+        .all(|channel| (-1e-4..=1.0 + 1e-4).contains(channel))
+}
+
+fn srgb_decode(channel: f32) -> f32 {
+    if channel <= 0.040_45 {
+        channel / 12.92
+    } else {
+        ((channel + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// The clamp is a backstop for the fraction of a percent the gamut search in
+/// [`from_oklch`] leaves on the table, not the gamut policy itself.
+fn srgb_encode(channel: f32) -> f32 {
+    let channel = channel.clamp(0.0, 1.0);
+    if channel <= 0.003_130_8 {
+        channel * 12.92
+    } else {
+        1.055 * channel.powf(1.0 / 2.4) - 0.055
+    }
 }
 
 fn format_metric(value: f64) -> String {
@@ -872,6 +1092,9 @@ struct HeatmapProgram {
     low: Color,
     high: Color,
     label: Color,
+    /// Resolved from the theme at construction, like the colours above: a
+    /// canvas draws its own text and has no access to the type scale.
+    label_size: f32,
 }
 
 impl<Message> canvas::Program<Message> for HeatmapProgram {
@@ -901,7 +1124,7 @@ impl<Message> canvas::Program<Message> for HeatmapProgram {
                 content: name.clone(),
                 position: Point::new(label_width + column as f32 * cell_w + 3.0, 10.0),
                 color: self.label,
-                size: iced::Pixels(9.0),
+                size: iced::Pixels(self.label_size),
                 ..Default::default()
             });
         }
@@ -911,7 +1134,7 @@ impl<Message> canvas::Program<Message> for HeatmapProgram {
                 content: name.clone(),
                 position: Point::new(0.0, y + cell_h * 0.65),
                 color: self.label,
-                size: iced::Pixels(10.0),
+                size: iced::Pixels(self.label_size),
                 ..Default::default()
             });
             for (column, value) in values.iter().enumerate() {
@@ -936,6 +1159,7 @@ struct RankedBarProgram {
     bars: Vec<(String, f32, Option<Color>)>,
     palette: Vec<Color>,
     label: Color,
+    label_size: f32,
 }
 
 impl<Message> canvas::Program<Message> for RankedBarProgram {
@@ -964,7 +1188,7 @@ impl<Message> canvas::Program<Message> for RankedBarProgram {
                 content: name.clone(),
                 position: Point::new(0.0, y + row_h * 0.65),
                 color: self.label,
-                size: iced::Pixels(10.0),
+                size: iced::Pixels(self.label_size),
                 ..Default::default()
             });
             frame.fill(
@@ -986,6 +1210,7 @@ struct StackedBarProgram {
     bars: Vec<(String, Vec<f64>)>,
     colors: Vec<Color>,
     label: Color,
+    label_size: f32,
 }
 impl<Message> canvas::Program<Message> for StackedBarProgram {
     type State = ();
@@ -1012,7 +1237,7 @@ impl<Message> canvas::Program<Message> for StackedBarProgram {
                 content: name.clone(),
                 position: Point::new(0.0, y + row_h * 0.65),
                 color: self.label,
-                size: iced::Pixels(10.0),
+                size: iced::Pixels(self.label_size),
                 ..Default::default()
             });
             let mut x = label_w;
@@ -1036,6 +1261,7 @@ struct StateTimelineProgram {
     lanes: Vec<StateLane>,
     palette: ThemePalette,
     label: Color,
+    label_size: f32,
 }
 impl<Message> canvas::Program<Message> for StateTimelineProgram {
     type State = ();
@@ -1069,7 +1295,7 @@ impl<Message> canvas::Program<Message> for StateTimelineProgram {
                 content: lane.label.clone(),
                 position: Point::new(0.0, y + row_h * 0.65),
                 color: self.label,
-                size: iced::Pixels(10.0),
+                size: iced::Pixels(self.label_size),
                 ..Default::default()
             });
             for segment in &lane.segments {
@@ -1096,6 +1322,7 @@ struct BurnRateProgram {
     danger: Color,
     track: Color,
     label: Color,
+    label_size: f32,
 }
 impl<Message> canvas::Program<Message> for BurnRateProgram {
     type State = ();
@@ -1121,7 +1348,7 @@ impl<Message> canvas::Program<Message> for BurnRateProgram {
                 content: format!("{}  {:.2}×", window.label, window.burn_rate),
                 position: Point::new(0.0, y + row_h * 0.65),
                 color: self.label,
-                size: iced::Pixels(10.0),
+                size: iced::Pixels(self.label_size),
                 ..Default::default()
             });
             let rect = |width| {
@@ -1157,6 +1384,135 @@ fn lerp_color(a: Color, b: Color, t: f32) -> Color {
     )
 }
 
+/// The value window a plot maps onto its bounds, so a mapping is stated once
+/// and shared: a sparkline and a time series that scale differently are two
+/// instruments, not one library.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PlotRange {
+    min_x: f32,
+    max_x: f32,
+    min_y: f32,
+    max_y: f32,
+}
+
+impl PlotRange {
+    fn over<'a>(points: impl IntoIterator<Item = &'a (f32, f32)>) -> Self {
+        points.into_iter().fold(
+            Self {
+                min_x: f32::INFINITY,
+                max_x: f32::NEG_INFINITY,
+                min_y: f32::INFINITY,
+                max_y: f32::NEG_INFINITY,
+            },
+            |range, (x, y)| Self {
+                min_x: range.min_x.min(*x),
+                max_x: range.max_x.max(*x),
+                min_y: range.min_y.min(*y),
+                max_y: range.max_y.max(*y),
+            },
+        )
+    }
+
+    /// Screen position of one value inside `area`, y inverted. A series with no
+    /// spread is centred rather than pinned to the floor: a flat line along the
+    /// bottom edge reads as "no data" when it means "steady".
+    fn project(&self, (x, y): (f32, f32), area: Rectangle) -> Point {
+        let span_x = self.max_x - self.min_x;
+        let span_y = self.max_y - self.min_y;
+        let across = if span_x > f32::EPSILON {
+            (x - self.min_x) / span_x
+        } else {
+            0.5
+        };
+        let up = if span_y > f32::EPSILON {
+            (y - self.min_y) / span_y
+        } else {
+            0.5
+        };
+        Point::new(
+            area.x + across * area.width,
+            area.y + area.height - up * area.height,
+        )
+    }
+}
+
+/// The drawable rectangle for a line, held off the canvas edge by the head
+/// dot's radius so the dot and the round caps are not sliced in half by it.
+fn plot_area(bounds: Size) -> Rectangle {
+    Rectangle {
+        x: HEAD_RADIUS,
+        y: HEAD_RADIUS,
+        width: (bounds.width - HEAD_RADIUS * 2.0).max(1.0),
+        height: (bounds.height - HEAD_RADIUS * 2.0).max(1.0),
+    }
+}
+
+/// Stroke width shared by every plotted line, so a sparkline and a time series
+/// read as one instrument.
+const LINE_WIDTH: f32 = 2.0;
+/// Opacity of the area under a line, at the line itself, falling to nothing at
+/// the baseline. Divided among overlaid series so a four-series chart does not
+/// silt up.
+const AREA_ALPHA: f32 = 0.22;
+/// Radius of the dot marking the newest point.
+const HEAD_RADIUS: f32 = LINE_WIDTH * 1.6;
+
+/// Draw one series: the area beneath it, the line as a single path, and a
+/// filled head on the newest point.
+///
+/// Every vertex used to be the meeting of two separately stroked `Path::line`
+/// segments, which on a 2px butt-capped stroke leaves a visible notch at each
+/// one. One path with round joins removes them, and hands the tessellator one
+/// shape instead of n.
+fn draw_series_line(
+    frame: &mut canvas::Frame,
+    points: &[Point],
+    baseline: f32,
+    stroke: Color,
+    area_alpha: f32,
+) {
+    let (Some(first), Some(last)) = (points.first(), points.last()) else {
+        return;
+    };
+    if points.len() < 2 {
+        return;
+    }
+    let crest = points.iter().map(|point| point.y).fold(baseline, f32::min);
+    let area = Path::new(|path| {
+        path.move_to(Point::new(first.x, baseline));
+        for point in points {
+            path.line_to(*point);
+        }
+        path.line_to(Point::new(last.x, baseline));
+        path.close();
+    });
+    frame.fill(
+        &area,
+        canvas::gradient::Linear::new(Point::new(first.x, crest), Point::new(first.x, baseline))
+            .add_stop(0.0, with_alpha(stroke, area_alpha))
+            .add_stop(1.0, with_alpha(stroke, 0.0)),
+    );
+    let line = Path::new(|path| {
+        path.move_to(*first);
+        for point in &points[1..] {
+            path.line_to(*point);
+        }
+    });
+    frame.stroke(
+        &line,
+        canvas::Stroke {
+            style: canvas::Style::Solid(stroke),
+            width: LINE_WIDTH,
+            line_cap: canvas::LineCap::Round,
+            line_join: canvas::LineJoin::Round,
+            ..Default::default()
+        },
+    );
+    // The newest point is what a live series is read for; without it the eye
+    // has to work out which end of the line is now.
+    frame.fill(&Path::circle(*last, HEAD_RADIUS), stroke);
+}
+
 struct SparklineProgram {
     values: Vec<f32>,
     color: Color,
@@ -1176,29 +1532,19 @@ impl<Message> canvas::Program<Message> for SparklineProgram {
             return Vec::new();
         }
         let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let min = self.values.iter().copied().fold(f32::INFINITY, f32::min);
-        let max = self
+        let series: Vec<(f32, f32)> = self
             .values
             .iter()
-            .copied()
-            .fold(f32::NEG_INFINITY, f32::max);
-        let point = |index: usize, value: f32| {
-            Point::new(
-                index as f32 / (self.values.len() - 1) as f32 * bounds.width,
-                bounds.height - (value - min) / (max - min).max(1e-6) * bounds.height,
-            )
-        };
-        for index in 1..self.values.len() {
-            frame.stroke(
-                &Path::line(
-                    point(index - 1, self.values[index - 1]),
-                    point(index, self.values[index]),
-                ),
-                canvas::Stroke::default()
-                    .with_width(2.0)
-                    .with_color(self.color),
-            );
-        }
+            .enumerate()
+            .map(|(index, value)| (index as f32, *value))
+            .collect();
+        let range = PlotRange::over(&series);
+        let area = plot_area(bounds.size());
+        let points: Vec<Point> = series
+            .iter()
+            .map(|value| range.project(*value, area))
+            .collect();
+        draw_series_line(&mut frame, &points, bounds.height, self.color, AREA_ALPHA);
         vec![frame.into_geometry()]
     }
 }
@@ -1301,15 +1647,14 @@ impl<Message> canvas::Program<Message> for TimeSeriesProgram {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let points = self.series.iter().flatten().copied().collect::<Vec<_>>();
-        if points.len() < 2 {
+        if self.series.iter().flatten().count() < 2 {
             return Vec::new();
         }
         let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let min_x = points.iter().map(|p| p.0).fold(f32::INFINITY, f32::min);
-        let max_x = points.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max);
-        let min_y = points.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
-        let max_y = points.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
+        // One range over every series: two series on their own scales share an
+        // axis that means nothing.
+        let range = PlotRange::over(self.series.iter().flatten());
+        let area = plot_area(bounds.size());
         for row in 0..=4 {
             let y = bounds.height * row as f32 / 4.0;
             frame.stroke(
@@ -1319,21 +1664,21 @@ impl<Message> canvas::Program<Message> for TimeSeriesProgram {
                     .with_color(self.grid),
             );
         }
-        let map = |(x, y): (f32, f32)| {
-            Point::new(
-                (x - min_x) / (max_x - min_x).max(1e-6) * bounds.width,
-                bounds.height - (y - min_y) / (max_y - min_y).max(1e-6) * bounds.height,
-            )
-        };
+        // The fills stack, so each is worth a share of the budget rather than
+        // all of it.
+        let area_alpha = AREA_ALPHA / self.series.len().max(1) as f32;
         for (index, series) in self.series.iter().enumerate() {
-            for pair in series.windows(2) {
-                frame.stroke(
-                    &Path::line(map(pair[0]), map(pair[1])),
-                    canvas::Stroke::default()
-                        .with_width(2.0)
-                        .with_color(self.colors[index % self.colors.len()]),
-                );
-            }
+            let points: Vec<Point> = series
+                .iter()
+                .map(|value| range.project(*value, area))
+                .collect();
+            draw_series_line(
+                &mut frame,
+                &points,
+                bounds.height,
+                self.colors[index % self.colors.len()],
+                area_alpha,
+            );
         }
         vec![frame.into_geometry()]
     }
@@ -1482,25 +1827,22 @@ impl<Message> canvas::Program<Message> for ChartProgram {
                     );
                 }
             }
+            // The same line the widgets draw, for the same reasons: one path,
+            // round joins, an area that falls to the axis, a head on the newest
+            // point. A marker on every point competes with the shape.
             ChartType::Line => {
-                let line_stroke = canvas::Stroke::default()
-                    .with_width(2.0)
-                    .with_color(self.line_color);
-                for window in self.data.windows(2) {
-                    frame.stroke(
-                        &Path::line(
-                            Point::new(sx(window[0].0), sy(window[0].1)),
-                            Point::new(sx(window[1].0), sy(window[1].1)),
-                        ),
-                        line_stroke,
-                    );
-                }
-                for (x, y) in &self.data {
-                    frame.fill(
-                        &Path::circle(Point::new(sx(*x), sy(*y)), 2.5),
-                        self.line_color,
-                    );
-                }
+                let points: Vec<Point> = self
+                    .data
+                    .iter()
+                    .map(|(x, y)| Point::new(sx(*x), sy(*y)))
+                    .collect();
+                draw_series_line(
+                    &mut frame,
+                    &points,
+                    bounds.height - margin,
+                    self.line_color,
+                    AREA_ALPHA,
+                );
             }
             ChartType::Scatter => {
                 for (x, y) in &self.data {
@@ -1550,5 +1892,161 @@ mod tests {
             overflow_label(12, 7, "events").as_deref(),
             Some("+5 more events")
         );
+    }
+
+    fn palettes() -> Vec<(&'static str, ThemePalette)> {
+        use canvas_core::{Accent, ThemeMode, ThemeSelection};
+        let dark = ThemeSelection::coherence(ThemeMode::Dark, Accent::Brand).palette();
+        let light = ThemeSelection::coherence(ThemeMode::Light, Accent::Brand).palette();
+        // A palette whose primary *is* a status colour is the case the guard
+        // exists for: an imported palette owes us nothing.
+        let mut collided = light;
+        collided.primary = collided.danger;
+        vec![
+            ("dark", dark),
+            ("light", light),
+            ("primary-collides-with-danger", collided),
+        ]
+    }
+
+    /// Shortest angular distance between two hues, in degrees.
+    fn hue_gap(a: f32, b: f32) -> f32 {
+        ((a - b + 180.0).rem_euclid(360.0) - 180.0).abs()
+    }
+
+    #[test]
+    fn a_series_colour_is_never_a_status_colour() {
+        // The defect this ramp replaces: `ops-stacked-bar` declares
+        // ["ok", "retried", "failed"] and the third series rendered in the
+        // palette's `info` cyan purely because it was third. Colour has to stop
+        // making claims about severity that the data did not make.
+        for (name, palette) in palettes() {
+            let status = [
+                ("success", to_oklch(color(palette.success)).h),
+                ("warning", to_oklch(color(palette.warning)).h),
+                ("danger", to_oklch(color(palette.danger)).h),
+                ("info", to_oklch(color(palette.info)).h),
+            ];
+            for (index, series) in series_colors(&palette).into_iter().enumerate() {
+                let hue = to_oklch(series).h;
+                for (role, status_hue) in status {
+                    // A degree of slack for the trip out through 8-bit sRGB and
+                    // back; the placement itself is exact.
+                    assert!(
+                        hue_gap(hue, status_hue) >= STATUS_HUE_GUARD - 1.0,
+                        "{name} series {index} at {hue:.1}° reads as {role}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn series_colours_stay_apart_from_each_other() {
+        // Distance in Oklab, where a fixed step means the same perceived
+        // difference anywhere in the space — the property a ramp built by
+        // rotating RGB hue does not have.
+        let separation = |a: Oklch, b: Oklch| {
+            let point = |c: Oklch| {
+                let (sin, cos) = c.h.to_radians().sin_cos();
+                (c.l, c.c * cos, c.c * sin)
+            };
+            let (l1, a1, b1) = point(a);
+            let (l2, a2, b2) = point(b);
+            ((l1 - l2).powi(2) + (a1 - a2).powi(2) + (b1 - b2).powi(2)).sqrt()
+        };
+        for (name, palette) in palettes() {
+            let colors = series_colors(&palette);
+            assert!(
+                colors.len() >= 3,
+                "{name} cannot even give three series their own colour"
+            );
+            for (i, first) in colors.iter().enumerate() {
+                for second in &colors[i + 1..] {
+                    let apart = separation(to_oklch(*first), to_oklch(*second));
+                    assert!(apart > 0.05, "{name} has two series {apart:.3} apart");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_ramp_follows_the_theme_rather_than_being_a_fixed_list() {
+        // Light and dark differ in lightness in the direction the background
+        // demands; a hard-coded ramp would be identical in both.
+        let lightness = |palette: &ThemePalette| {
+            let colors = series_colors(palette);
+            colors.iter().map(|c| to_oklch(*c).l).sum::<f32>() / colors.len() as f32
+        };
+        use canvas_core::{Accent, ThemeMode, ThemeSelection};
+        let dark = ThemeSelection::coherence(ThemeMode::Dark, Accent::Brand).palette();
+        let light = ThemeSelection::coherence(ThemeMode::Light, Accent::Brand).palette();
+        assert!(lightness(&dark) > lightness(&light));
+        // And the first entry still carries the brand: identity starts where
+        // the theme's primary already points.
+        let brand = to_oklch(color(light.primary)).h;
+        assert!(hue_gap(to_oklch(series_colors(&light)[0]).h, brand) < 1.0);
+    }
+
+    #[test]
+    fn oklch_survives_a_round_trip_through_srgb() {
+        for rgb in [[36, 73, 216], [255, 255, 255], [0, 0, 0], [177, 43, 64]] {
+            let original = color(rgb);
+            let round_tripped = from_oklch(to_oklch(original));
+            for (a, b) in [
+                (original.r, round_tripped.r),
+                (original.g, round_tripped.g),
+                (original.b, round_tripped.b),
+            ] {
+                assert!(
+                    (a - b).abs() < 0.01,
+                    "{rgb:?} round-tripped to {b} from {a}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_plot_fills_its_area_and_keeps_the_head_inside_it() {
+        let bounds = Size::new(200.0, 100.0);
+        let area = plot_area(bounds);
+        let series: Vec<(f32, f32)> = vec![(0.0, 5.0), (1.0, 20.0), (2.0, 10.0)];
+        let range = PlotRange::over(&series);
+        let points: Vec<Point> = series
+            .iter()
+            .map(|value| range.project(*value, area))
+            .collect();
+        // The extremes reach the edges of the drawable area, or the series is
+        // being drawn smaller than the room it was given.
+        let reaches = |value: f32, edge: f32| (value - edge).abs() < 0.01;
+        assert!(reaches(points[0].x, area.x));
+        assert!(reaches(points[2].x, area.x + area.width));
+        assert!(reaches(points[1].y, area.y), "the peak reaches the top");
+        assert!(
+            reaches(points[0].y, area.y + area.height),
+            "the trough reaches the bottom"
+        );
+        // The head dot and the round caps have to survive the canvas edge, so
+        // no point may sit closer to it than the dot's radius.
+        let held_off = |value: f32, edge: f32| {
+            value >= HEAD_RADIUS - 0.01 && value <= edge - HEAD_RADIUS + 0.01
+        };
+        for point in &points {
+            assert!(held_off(point.x, bounds.width), "{point:?} clips the side");
+            assert!(held_off(point.y, bounds.height), "{point:?} clips the edge");
+        }
+    }
+
+    #[test]
+    fn a_flat_series_is_drawn_through_the_middle() {
+        // Pinned to the floor, a steady value is indistinguishable from an
+        // empty widget — the one reading it must never carry.
+        let area = plot_area(Size::new(200.0, 100.0));
+        let series = vec![(0.0, 7.0), (1.0, 7.0), (2.0, 7.0)];
+        let range = PlotRange::over(&series);
+        for value in &series {
+            let point = range.project(*value, area);
+            assert!((point.y - (area.y + area.height / 2.0)).abs() < 0.001);
+        }
     }
 }

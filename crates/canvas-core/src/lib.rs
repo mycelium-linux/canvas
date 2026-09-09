@@ -211,11 +211,20 @@ pub struct ThemeMetrics {
     pub radius_lg: f32,
     /// Compatibility alias for the default component radius.
     pub radius: f32,
+    /// The floor of the scale, for labels a renderer draws itself and cannot
+    /// reflow — axis ticks, cell headings. Below `small`, and deliberately the
+    /// only thing that is: a widget picking its own smaller size is how eight
+    /// unreadable literals got into the library.
+    pub micro: f32,
     pub body: f32,
     pub small: f32,
     pub large: f32,
     pub title: f32,
     pub display: f32,
+    /// The one size a value is allowed to dominate at. Every hero number in the
+    /// library shares it, so a stat beside a gauge beside a clock reads as one
+    /// scale instead of three near-misses.
+    pub hero: f32,
 }
 
 /// A resolved, renderer-neutral Coherence theme. Consumers select semantic
@@ -349,11 +358,18 @@ impl ThemeMetrics {
             radius_md: t::RADIUS_MD,
             radius_lg: t::RADIUS_LG,
             radius: t::RADIUS_MD,
+            // Half a `small`→`body` step below `small`, so the floor moves with
+            // the scale instead of being a literal that outlives it.
+            micro: t::FONT_SIZE_SM - (t::FONT_SIZE_BASE - t::FONT_SIZE_SM) / 2.0,
             body: t::FONT_SIZE_BASE,
             small: t::FONT_SIZE_SM,
             large: t::FONT_SIZE_LG,
             title: t::FONT_SIZE_XL,
             display: t::FONT_SIZE_2XL,
+            // Half again the largest text token: far enough above `display` to
+            // read as the value rather than a louder heading, and one ratio in
+            // one place rather than 1.5×, 1.7× and 2.25× at three call sites.
+            hero: t::FONT_SIZE_2XL * 1.5,
         }
     }
 }
@@ -752,6 +768,41 @@ mod tests {
         assert_eq!(dark.metrics.display, coherence_tokens::dark::FONT_SIZE_2XL);
         assert_eq!(dark.metrics.radius_lg, coherence_tokens::dark::RADIUS_LG);
         assert!(dark.shadow_opacity > light.shadow_opacity);
+    }
+    #[test]
+    fn the_type_scale_is_one_ascending_run_from_micro_to_hero() {
+        let m = ThemeMetrics::shared();
+        let scale = [
+            m.micro, m.small, m.body, m.large, m.title, m.display, m.hero,
+        ];
+        for step in scale.windows(2) {
+            assert!(step[1] > step[0], "type scale is not ascending: {scale:?}");
+        }
+        // The two ends are the ones a widget is tempted to invent, so they are
+        // pinned by relationship rather than by value: a floor that stays below
+        // `small` but within reading distance of it, and a hero that outruns
+        // every heading by more than the largest step inside the scale.
+        assert!(m.micro > m.small * 0.75);
+        let widest_inner_step = scale[..scale.len() - 1]
+            .windows(2)
+            .map(|step| step[1] - step[0])
+            .fold(0.0_f32, f32::max);
+        assert!(m.hero - m.display > widest_inner_step);
+    }
+    #[test]
+    fn the_scale_follows_its_tokens_rather_than_pasted_sizes() {
+        // Every size token traces back to the upstream scale. A literal here
+        // survives a token change silently, which is how a widget ends up 5px
+        // off the scale it claims to follow.
+        use coherence_tokens::light as t;
+        let m = ThemeMetrics::shared();
+        assert_eq!(m.small, t::FONT_SIZE_SM);
+        assert_eq!(m.display, t::FONT_SIZE_2XL);
+        assert_eq!(
+            m.micro,
+            t::FONT_SIZE_SM - (t::FONT_SIZE_BASE - t::FONT_SIZE_SM) / 2.0
+        );
+        assert_eq!(m.hero, t::FONT_SIZE_2XL * 1.5);
     }
     #[test]
     fn imported_palette_resolves_the_complete_visual_contract() {

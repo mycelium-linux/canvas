@@ -42,6 +42,7 @@ pub(super) fn element<'a, Message: 'a>(
                 falling: rgb(p.danger),
                 grid: alpha(rgb(p.border), visual.grid_opacity),
                 label: rgb(p.text_muted),
+                label_size: m.micro,
                 volume: alpha(rgb(p.info), visual.muted_opacity),
                 show_volume: *show_volume,
             })
@@ -62,6 +63,9 @@ struct CandlestickProgram<'a> {
     falling: Color,
     grid: Color,
     label: Color,
+    /// Resolved from the theme at construction, like the colours above: a
+    /// canvas draws its own text and has no access to the type scale.
+    label_size: f32,
     volume: Color,
     show_volume: bool,
 }
@@ -115,7 +119,7 @@ impl<Message> canvas::Program<Message> for CandlestickProgram<'_> {
                     line_y - 6.0,
                 ),
                 color: self.label,
-                size: iced::Pixels(10.0),
+                size: iced::Pixels(self.label_size),
                 ..Default::default()
             });
         }
@@ -187,7 +191,7 @@ impl<Message> canvas::Program<Message> for CandlestickProgram<'_> {
                 last_y - 6.0,
             ),
             color: self.label,
-            size: iced::Pixels(10.0),
+            size: iced::Pixels(self.label_size),
             ..Default::default()
         });
         vec![frame.into_geometry()]

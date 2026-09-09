@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "tick_seconds": 5,
+  "sources": {
+    "elmers/activity": {
+      "kind": "event_log",
+      "topic": "events",
+      "event_types": [],
+      "label": "Recent outcomes",
+      "retain": 64,
+      "stale_after_seconds": 900
+    },
+    "elmers/attention": {
+      "kind": "table",
+      "topic": "attention",
+      "event_types": [],
+      "label": "Needs attention",
+      "columns": ["Item", "State", "Age"],
+      "retain": 32,
+      "stale_after_seconds": 900
+    },
+    "elmers/state": {
+      "kind": "state_timeline",
+      "topic": "state",
+      "event_types": [],
+      "label": "Capability state",
+      "retain": 64,
+      "window_seconds": 3600,
+      "stale_after_seconds": 900
+    }
+  }
+}

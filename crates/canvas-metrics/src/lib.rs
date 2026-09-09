@@ -211,7 +211,7 @@ pub fn widget_within(spec: &SourceSpec, result: &Value, points: usize) -> Option
         "time_series" => {
             let series: Vec<Value> = samples
                 .iter()
-                .take(points.min(8).max(1))
+                .take(points.clamp(1, 8))
                 .filter_map(|sample| {
                     let raw = sample.get("values")?.as_array()?;
                     // Canvas caps a datagram at 64KB; thin long ranges rather
@@ -244,11 +244,11 @@ pub fn widget_within(spec: &SourceSpec, result: &Value, points: usize) -> Option
         "heatmap" => {
             let rows: Vec<String> = samples
                 .iter()
-                .take(points.min(12).max(1))
+                .take(points.clamp(1, 12))
                 .filter_map(|sample| Some(label_for(spec, sample.get("metric")?)))
                 .collect();
             let first = samples.first()?.get("values")?.as_array()?;
-            let stride = first.len().div_ceil(points.min(48).max(2)).max(1);
+            let stride = first.len().div_ceil(points.clamp(2, 48)).max(1);
             let columns: Vec<String> = first
                 .iter()
                 .step_by(stride)
@@ -256,7 +256,7 @@ pub fn widget_within(spec: &SourceSpec, result: &Value, points: usize) -> Option
                 .collect();
             let values: Vec<Vec<f64>> = samples
                 .iter()
-                .take(points.min(12).max(1))
+                .take(points.clamp(1, 12))
                 .map(|sample| {
                     sample
                         .get("values")

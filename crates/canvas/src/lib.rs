@@ -139,7 +139,18 @@ pub enum ThemeRef {
     },
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// Backgrounds carry the same version boundary as [`SurfaceContent`], and for
+/// the same reason: a `shader_id` this build has never heard of once made every
+/// client unable to parse *any* control reply, so `canvas_inspect`, every MCP
+/// write and `canvasctl` all failed together against a store a newer Canvas had
+/// written. A cosmetic value took down the whole control plane.
+///
+/// The boundary sits at two depths here as well. `shader` is a kind this build
+/// owns, but the shader *inside* it may belong to a newer one; that degrades to
+/// [`Background::Unsupported`], retained verbatim and written back untouched.
+/// A malformed *known* background still fails loudly -- that is a mistake, not a
+/// version.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum Background {
@@ -161,6 +172,89 @@ pub enum Background {
         shader_id: BackgroundShader,
         speed: f32,
     },
+    /// A background from a newer Canvas, kept exactly as written.
+    #[serde(untagged)]
+    Unsupported(serde_json::Value),
+}
+
+/// The `kind` tags this build can draw. Anything else is a newer Canvas.
+const KNOWN_BACKGROUND_KINDS: [&str; 5] = ["theme", "solid", "gradient", "image", "shader"];
+
+impl<'de> Deserialize<'de> for Background {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        use serde::de::Error;
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        let tag = raw
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| D::Error::custom("Canvas background needs a kind"))?;
+        if !KNOWN_BACKGROUND_KINDS.contains(&tag) {
+            return Ok(Self::Unsupported(raw));
+        }
+        // The second depth: `shader` is ours, the shader named inside it may not
+        // be. Without this a newer shader is indistinguishable from a malformed
+        // known background and takes every control reply down with it, which is
+        // how `star-nest` blinded the control plane.
+        if tag == "shader"
+            && raw
+                .get("shader_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| !is_known_shader(id))
+        {
+            return Ok(Self::Unsupported(raw));
+        }
+        KnownBackground::deserialize(&raw)
+            .map(KnownBackground::into_background)
+            .map_err(D::Error::custom)
+    }
+}
+
+/// Asking serde rather than a second list: a hand-written name table would drift
+/// from the enum's own `rename_all` the first time a shader is added.
+fn is_known_shader(id: &str) -> bool {
+    serde_json::from_value::<BackgroundShader>(serde_json::Value::String(id.to_owned())).is_ok()
+}
+
+/// The derived shape, so the variant list is not written twice.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum KnownBackground {
+    Theme,
+    Solid {
+        color: [u8; 4],
+    },
+    Gradient {
+        angle_degrees: f32,
+        stops: Vec<GradientStop>,
+    },
+    Image {
+        asset: AssetRef,
+        fit: BackgroundFit,
+    },
+    Shader {
+        shader_id: BackgroundShader,
+        speed: f32,
+    },
+}
+
+impl KnownBackground {
+    fn into_background(self) -> Background {
+        match self {
+            Self::Theme => Background::Theme,
+            Self::Solid { color } => Background::Solid { color },
+            Self::Gradient {
+                angle_degrees,
+                stops,
+            } => Background::Gradient {
+                angle_degrees,
+                stops,
+            },
+            Self::Image { asset, fit } => Background::Image { asset, fit },
+            Self::Shader { shader_id, speed } => Background::Shader { shader_id, speed },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -660,6 +754,12 @@ impl Background {
             Self::Shader { speed, .. } => check(
                 speed.is_finite() && (0.0..=4.0).contains(speed),
                 "Canvas background shader speed must be between zero and four",
+            ),
+            // Never drawn, so there is nothing to bound. It is inert data this
+            // build retains for whichever Canvas can render it.
+            Self::Unsupported(raw) => check(
+                raw.is_object(),
+                "Unsupported Canvas background must be an object",
             ),
         }
     }
@@ -1421,13 +1521,27 @@ mod tests {
                 .to_string()
                 .contains("ordered")
         );
+        // A shader_id this build does not know is a version boundary, not an
+        // instruction: it is retained inert and never drawn, exactly as an
+        // unknown widget kind is. The property that matters is unchanged --
+        // nothing outside BackgroundShader::ALL can ever be rendered -- but it
+        // now costs one undrawn background instead of every client's ability to
+        // parse a control reply, which is what `star-nest` actually cost.
         let mut encoded = serde_json::to_value(&invalid).unwrap();
         encoded["background"] = serde_json::json!({
             "kind": "shader",
             "shader_id": "downloaded-code",
             "speed": 1.0
         });
-        assert!(serde_json::from_value::<WorkspaceDocument>(encoded).is_err());
+        let parsed = serde_json::from_value::<WorkspaceDocument>(encoded).unwrap();
+        assert!(matches!(parsed.background, Background::Unsupported(_)));
+        assert!(!parsed.background.is_animated());
+        // Retained verbatim, so an older binary writing this document back does
+        // not destroy a newer Canvas's setting.
+        assert_eq!(
+            serde_json::to_value(&parsed.background).unwrap()["shader_id"],
+            "downloaded-code"
+        );
     }
 
     #[test]

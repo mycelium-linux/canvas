@@ -1063,7 +1063,9 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
     let gap = metrics.space_2;
     // The chrome every panelled widget carries: a title line and a footer line.
     let chrome = metrics.body + metrics.small + gap * 2.0 + pad;
-    let hero = metrics.display * 1.5;
+    // The same token the renderer sets a hero value in, so a hint stays a
+    // statement about what will be drawn rather than a guess about it.
+    let hero = metrics.hero;
     let digit = 0.6;
     match kind {
         // A number and its label. Gains nothing from height, so comfortable is
@@ -1077,19 +1079,16 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
         ),
         // A dial reads as a dial only while it is roughly square.
         WidgetKind::Gauge { .. } | WidgetKind::Meter { .. } => {
-            let side = metrics.display * 1.7 + metrics.small + pad;
+            let side = hero + metrics.small + pad;
             SizeHint::new(side * 0.8, side * 0.8, side, side, 1.0)
         }
-        WidgetKind::Clock { .. } => {
-            let hero = metrics.display * 2.25;
-            SizeHint::new(
-                hero * digit * 5.0,
-                hero + pad,
-                hero * digit * 8.0,
-                hero + pad,
-                2.4,
-            )
-        }
+        WidgetKind::Clock { .. } => SizeHint::new(
+            hero * digit * 5.0,
+            hero + pad,
+            hero * digit * 8.0,
+            hero + pad,
+            2.4,
+        ),
         // Below roughly 48px of plot area a line is a smear rather than a shape,
         // and 180 is the point budget a snapshot is thinned to, so a pixel per
         // point is the width at which detail stops being thrown away.
@@ -1270,9 +1269,11 @@ mod tests {
         // someone replaced a derivation with a literal and the hint will drift
         // from what is actually rendered.
         let mut big = metrics();
-        big.display *= 2.0;
+        big.micro *= 2.0;
         big.small *= 2.0;
         big.body *= 2.0;
+        big.display *= 2.0;
+        big.hero *= 2.0;
         for kind in [
             WidgetKind::Stat {
                 label: "l".into(),
@@ -1295,6 +1296,39 @@ mod tests {
             assert!(
                 large.min_height > small.min_height,
                 "{kind:?} ignored the type scale"
+            );
+        }
+    }
+
+    #[test]
+    fn every_value_led_kind_sizes_from_the_one_hero_token() {
+        // Stat, Gauge and Clock all render their value at `metrics.hero`. If a
+        // hint still derives its own multiple of `display`, moving `hero` alone
+        // leaves it behind and the hint stops describing what is drawn — which
+        // is how 42, 47.6 and 63 pixels coexisted in one library.
+        let base = metrics();
+        let mut taller = base;
+        taller.hero *= 2.0;
+        for kind in [
+            WidgetKind::Stat {
+                label: "l".into(),
+                value: 1.0,
+                unit: None,
+                change: None,
+                state: None,
+                history: Vec::new(),
+            },
+            WidgetKind::Gauge {
+                value: 1.0,
+                label: None,
+            },
+            WidgetKind::Clock {
+                format: "%H".into(),
+            },
+        ] {
+            assert!(
+                size_hint(&kind, &taller).min_height > size_hint(&kind, &base).min_height,
+                "{kind:?} does not follow the hero token"
             );
         }
     }

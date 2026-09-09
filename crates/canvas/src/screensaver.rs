@@ -6,6 +6,7 @@
 use crate::{Background, BackgroundShader};
 use iced::widget::shader::{self, Shader};
 use iced::{Element, Length, Rectangle};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 const CALM_WORKSPACE_SHADERS: [BackgroundShader; 4] = [
@@ -20,21 +21,25 @@ struct Uniforms {
     res: vec2<f32>,
     time: f32,
     _pad: f32,
-    // Where this widget starts in the framebuffer.
+    // The framebuffer coordinate that field position zero sits at.
     //
-    // `@builtin(position)` is a framebuffer coordinate, not a widget-local one.
-    // A full-screen background can ignore that because the two coincide; a tile
-    // at x=1100 cannot, and dividing its framebuffer position by its own width
-    // put `uv` somewhere around 3.0 instead of 0..1 — flat colour for the
-    // gradient shaders, black for the rest.
+    // `@builtin(position)` is a framebuffer coordinate, not a field one, and
+    // the two coincide only for a full-screen background on the first display.
+    // A picker tile at x=1100 that divides its framebuffer position by its own
+    // width puts `uv` somewhere around 3.0 instead of 0..1 — flat colour for the
+    // gradient shaders, black for the rest. A window on the second display has
+    // the mirror problem: it starts at framebuffer 0 but half-way across the
+    // desk, so subtracting nothing there draws a second copy of the field
+    // rather than its right half. Both are the same subtraction.
     origin: vec2<f32>,
     _pad2: vec2<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
-/// Widget-local pixel coordinate. Every shader starts here rather than from
-/// `pos.xy`, so one of them cannot quietly go back to assuming it owns the
-/// whole framebuffer.
+/// Pixel coordinate inside the field, which is whatever `u.res` measures: the
+/// whole desk for a background spanning several displays, the widget itself for
+/// a preview tile. Every shader starts here rather than from `pos.xy`, so one
+/// of them cannot quietly go back to assuming it owns the whole framebuffer.
 fn local(pos: vec4<f32>) -> vec2<f32> {
     return pos.xy - u.origin;
 }
@@ -702,20 +707,62 @@ impl FrameClock {
     }
 }
 
+/// Where a background widget sits inside the field its shader draws.
+///
+/// `u.res` is the field and `local(pos)` the coordinate inside it, so this is
+/// the whole of the difference between one image stretched across the desk and
+/// one copy of it per display.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Field {
+    /// One field across the desk. The widget shows the slice that starts at
+    /// `origin` — its window's top-left in desk coordinates — out of a field
+    /// `extent` logical units across. Both are logical, so each window scales
+    /// the shared field by its own factor and a mixed-DPI desk still joins up.
+    Desk { origin: [f32; 2], extent: [f32; 2] },
+    /// The widget is its own field, drawn from its own (0, 0). Per-display
+    /// tiling asks for this deliberately, and a preview tile in the background
+    /// picker has no desk to belong to.
+    Widget,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct BackgroundProgram {
     index: usize,
     elapsed_seconds: f32,
+    field: Field,
+    slot: u64,
 }
 
+impl BackgroundProgram {
+    fn new(index: usize, elapsed: Duration, field: Field) -> Self {
+        Self {
+            index: index % SHADERS.len(),
+            elapsed_seconds: elapsed.as_secs_f32(),
+            field,
+            slot: claim_slot(),
+        }
+    }
+}
+
+/// A background drawn into `field`.
+pub fn view_in<'a, Message: 'a>(
+    index: usize,
+    elapsed: Duration,
+    field: Field,
+) -> Element<'a, Message> {
+    Shader::new(BackgroundProgram::new(index, elapsed, field))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+/// A background that is its own field.
+///
+/// Anything covering a window wants [`view_in`] with [`Field::Desk`] instead: a
+/// window that does not know where it sits on the desk draws the field from its
+/// own corner, so three displays show three copies of it rather than one image.
 pub fn view<'a, Message: 'a>(index: usize, elapsed: Duration) -> Element<'a, Message> {
-    Shader::new(BackgroundProgram {
-        index: index % SHADERS.len(),
-        elapsed_seconds: elapsed.as_secs_f32(),
-    })
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+    view_in(index, elapsed, Field::Widget)
 }
 
 impl<Message> shader::Program<Message> for BackgroundProgram {
@@ -731,6 +778,8 @@ impl<Message> shader::Program<Message> for BackgroundProgram {
         BackgroundPrimitive {
             index: self.index,
             elapsed_seconds: self.elapsed_seconds,
+            field: self.field,
+            slot: self.slot,
         }
     }
 }
@@ -743,18 +792,65 @@ impl<Message> shader::Program<Message> for BackgroundProgram {
 /// stride rather than packed.
 const UNIFORM_SLOT: u64 = 256;
 
+/// Slots in the shared uniform buffer.
+///
+/// Sized for the widest frame anyone builds: a full picker grid plus a desktop
+/// background on each of sixteen displays. Slots are claimed per widget and
+/// recycled, so the ring only has to outlast the widgets alive at once, not the
+/// session.
+const UNIFORM_SLOTS: u64 = (SHADERS.len() as u64 + 1) * 16;
+
+/// Byte offset of the `ticket`-th widget's uniforms.
+const fn slot_offset(ticket: u64) -> u64 {
+    (ticket % UNIFORM_SLOTS) * UNIFORM_SLOT
+}
+
+/// Claims a uniform slot for one widget instance.
+///
+/// Slots used to be keyed by shader index, on the assumption that a shader
+/// appears at most once on screen. `view` runs once per window, so a second
+/// display already breaks it: both primitives write the same slot, whichever
+/// window prepares last decides `res` for both, and a picker tile previewing
+/// the shader already on the desktop does the same within a single frame. A
+/// widget is the thing that owns a slot, so a widget is what claims one.
+fn claim_slot() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    slot_offset(NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
 #[derive(Debug, Clone, Copy)]
 struct BackgroundPrimitive {
     index: usize,
     elapsed_seconds: f32,
+    field: Field,
+    /// Byte offset into the shared uniform buffer, claimed by the widget this
+    /// primitive was drawn from.
+    slot: u64,
 }
 
 impl BackgroundPrimitive {
-    /// Where this shader's uniforms live. Keyed by shader rather than by widget
-    /// because each shader appears at most once on screen, which keeps the slot
-    /// stable without the primitive having to be told who it is.
-    fn slot(&self) -> u64 {
-        (self.index % SHADERS.len()) as u64 * UNIFORM_SLOT
+    /// The uniform block for one widget: the field it draws, the time, and the
+    /// framebuffer coordinate `local(pos)` subtracts to reach field coordinates.
+    fn uniforms(&self, bounds: &Rectangle, scale: f32) -> [f32; 8] {
+        let (extent, origin) = match self.field {
+            // The field is desk space, so a pixel's colour follows where it is
+            // on the desk rather than which window drew it — and the widget's
+            // own offset inside its window plays no part, because `pos` already
+            // starts there.
+            Field::Desk { origin, extent } => (extent, [-origin[0], -origin[1]]),
+            Field::Widget => ([bounds.width, bounds.height], [bounds.x, bounds.y]),
+        };
+        [
+            // A zero-extent field would divide `uv` by zero in every shader.
+            (extent[0] * scale).max(1.0),
+            (extent[1] * scale).max(1.0),
+            self.elapsed_seconds,
+            0.0,
+            origin[0] * scale,
+            origin[1] * scale,
+            0.0,
+            0.0,
+        ]
     }
 }
 
@@ -768,13 +864,15 @@ impl shader::Pipeline for BackgroundPipeline {
     fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Canvas screensaver uniforms"),
-            // One slot per shader, not one buffer total. iced keeps a single
-            // pipeline per primitive type, so every shader widget on screen
-            // shares this one — and with a single slot each `prepare` overwrote
-            // the last, leaving every tile drawing at whichever tile happened to
+            // One slot per widget, not one buffer total. iced keeps a single
+            // pipeline per primitive type — and one `Storage` for the whole
+            // process, so this buffer is shared by every background widget on
+            // every window. With a single slot each `prepare` overwrote the
+            // last, leaving every tile drawing at whichever tile happened to
             // prepare last. That is invisible with one full-screen background
-            // and immediately visible in a grid of previews.
-            size: (SHADERS.len() as u64) * UNIFORM_SLOT,
+            // and immediately visible in a grid of previews or on a second
+            // display.
+            size: UNIFORM_SLOTS * UNIFORM_SLOT,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -864,25 +962,15 @@ impl shader::Primitive for BackgroundPrimitive {
         bounds: &Rectangle,
         viewport: &shader::Viewport,
     ) {
-        let scale = viewport.scale_factor();
-        let uniforms = [
-            (bounds.width * scale).max(1.0),
-            (bounds.height * scale).max(1.0),
-            self.elapsed_seconds,
-            0.0,
-            bounds.x * scale,
-            bounds.y * scale,
-            0.0,
-            0.0,
-        ];
-        queue.write_buffer(&pipeline.uniform_buffer, self.slot(), unsafe {
+        let uniforms = self.uniforms(bounds, viewport.scale_factor());
+        queue.write_buffer(&pipeline.uniform_buffer, self.slot, unsafe {
             std::slice::from_raw_parts(uniforms.as_ptr().cast::<u8>(), 32)
         });
     }
 
     fn draw(&self, pipeline: &Self::Pipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
         render_pass.set_pipeline(&pipeline.pipelines[self.index % pipeline.pipelines.len()]);
-        render_pass.set_bind_group(0, &pipeline.bind_group, &[self.slot() as u32]);
+        render_pass.set_bind_group(0, &pipeline.bind_group, &[self.slot as u32]);
         render_pass.draw(0..3, 0..1);
         true
     }
@@ -891,6 +979,132 @@ impl shader::Primitive for BackgroundPrimitive {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    fn primitive(field: Field) -> BackgroundPrimitive {
+        let program = BackgroundProgram::new(0, Duration::from_secs(1), field);
+        BackgroundPrimitive {
+            index: program.index,
+            elapsed_seconds: program.elapsed_seconds,
+            field: program.field,
+            slot: program.slot,
+        }
+    }
+
+    fn rect(x: f32, y: f32, width: f32, height: f32) -> Rectangle {
+        Rectangle {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// What `local(pos) / u.res` computes in every shader, on the CPU.
+    fn uv(uniforms: &[f32; 8], pos: [f32; 2]) -> [f32; 2] {
+        [
+            (pos[0] - uniforms[4]) / uniforms[0],
+            (pos[1] - uniforms[5]) / uniforms[1],
+        ]
+    }
+
+    #[test]
+    fn each_widget_instance_claims_its_own_uniform_slot() {
+        let field = Field::Desk {
+            origin: [0.0, 0.0],
+            extent: [1920.0, 1200.0],
+        };
+        let first = BackgroundProgram::new(3, Duration::ZERO, field);
+        let second = BackgroundProgram::new(3, Duration::ZERO, field);
+        assert_eq!(first.index, second.index);
+        assert_ne!(
+            first.slot, second.slot,
+            "two windows showing the same shader must not share a uniform slot"
+        );
+    }
+
+    #[test]
+    fn slots_are_aligned_and_a_full_ring_never_repeats() {
+        let claimed = (0..UNIFORM_SLOTS).map(slot_offset).collect::<Vec<_>>();
+        for slot in &claimed {
+            assert_eq!(slot % UNIFORM_SLOT, 0, "dynamic offsets must stay aligned");
+            assert!(slot + UNIFORM_SLOT <= UNIFORM_SLOTS * UNIFORM_SLOT);
+        }
+        assert_eq!(
+            claimed.iter().copied().collect::<BTreeSet<_>>().len(),
+            UNIFORM_SLOTS as usize
+        );
+        assert_eq!(slot_offset(UNIFORM_SLOTS), slot_offset(0));
+    }
+
+    #[test]
+    fn desk_windows_show_slices_of_one_field() {
+        let extent = [3840.0, 1200.0];
+        let bounds = rect(0.0, 0.0, 1920.0, 1200.0);
+        let left = primitive(Field::Desk {
+            origin: [0.0, 0.0],
+            extent,
+        })
+        .uniforms(&bounds, 1.0);
+        let right = primitive(Field::Desk {
+            origin: [1920.0, 0.0],
+            extent,
+        })
+        .uniforms(&bounds, 1.0);
+
+        // Both measure the desk rather than their own window, so neither can
+        // overwrite the other's idea of `res`.
+        assert_eq!([left[0], left[1]], extent);
+        assert_eq!([right[0], right[1]], extent);
+        // The seam is continuous: the right window's left edge carries on from
+        // the left window's right edge instead of restarting the field.
+        assert_eq!(uv(&left, [1920.0, 0.0]), uv(&right, [0.0, 0.0]));
+        assert_eq!(uv(&left, [0.0, 0.0]), [0.0, 0.0]);
+        assert_eq!(uv(&right, [1920.0, 1200.0]), [1.0, 1.0]);
+    }
+
+    #[test]
+    fn a_mixed_size_and_mixed_dpi_desk_still_joins_up() {
+        // A 1920-wide retina laptop left of a 2560-wide monitor at 1x.
+        let extent = [4480.0, 1440.0];
+        let laptop = primitive(Field::Desk {
+            origin: [0.0, 0.0],
+            extent,
+        })
+        .uniforms(&rect(0.0, 0.0, 1920.0, 1200.0), 2.0);
+        let monitor = primitive(Field::Desk {
+            origin: [1920.0, 0.0],
+            extent,
+        })
+        .uniforms(&rect(0.0, 0.0, 2560.0, 1440.0), 1.0);
+
+        // `res` is the desk in each window's own physical pixels, so it follows
+        // the scale factor and not the window it happens to be drawn in.
+        assert_eq!([laptop[0], laptop[1]], [8960.0, 2880.0]);
+        assert_eq!([monitor[0], monitor[1]], [4480.0, 1440.0]);
+        // The seam still lands at the same point of the field on both sides.
+        let seam = uv(&laptop, [1920.0 * 2.0, 0.0])[0];
+        assert!((seam - uv(&monitor, [0.0, 0.0])[0]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_widget_field_stays_widget_local() {
+        let tile = primitive(Field::Widget).uniforms(&rect(1100.0, 40.0, 220.0, 124.0), 1.0);
+        assert_eq!([tile[0], tile[1]], [220.0, 124.0]);
+        // A tile far from the framebuffer origin still runs 0..1 over itself.
+        assert_eq!(uv(&tile, [1100.0, 40.0]), [0.0, 0.0]);
+        assert_eq!(uv(&tile, [1320.0, 164.0]), [1.0, 1.0]);
+    }
+
+    #[test]
+    fn a_degenerate_field_never_divides_by_zero() {
+        let collapsed = primitive(Field::Desk {
+            origin: [0.0, 0.0],
+            extent: [0.0, 0.0],
+        })
+        .uniforms(&rect(0.0, 0.0, 0.0, 0.0), 1.0);
+        assert_eq!([collapsed[0], collapsed[1]], [1.0, 1.0]);
+    }
 
     #[test]
     fn manifest_is_complete_and_credited() {

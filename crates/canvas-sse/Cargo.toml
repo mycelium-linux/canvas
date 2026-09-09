@@ -1,0 +1,15 @@
+[package]
+name = "canvas-sse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SSE connector that emits Canvas widget snapshots"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+# For the facts both connectors must agree on: the datagram ceiling, the
+# contract, the placeholder shapes and the timestamp format. Duplicating those
+# is how one of them silently becomes wrong. See notes/live-subscription.md for
+# the shared crate they should eventually live in.
+canvas-metrics = { path = "../canvas-metrics" }

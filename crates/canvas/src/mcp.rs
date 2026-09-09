@@ -610,8 +610,10 @@ impl Canvas {
                 ReconcileAction::ApplyPatch { patch } => Command::ApplyPatch {
                     patch: patch.clone(),
                 },
+                // reconcile boxes this variant so a no_change plan does not cost a
+                // workspace-sized move; the control command still takes it unboxed.
                 ReconcileAction::ApplyDocument { document } => Command::ApplyDocument {
-                    document: document.clone(),
+                    document: (**document).clone(),
                 },
             };
             let apply_request = ControlRequest {
