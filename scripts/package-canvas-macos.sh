@@ -19,7 +19,7 @@ test -x "$binary" || {
 
 app=$target/macos/DockCanvas.app
 mkdir -p "$app/Contents/MacOS"
-cp -f "$binary" "$app/Contents/MacOS/canvas"
+cp -f "$binary" "$app/Contents/MacOS/dock-canvas"
 cp -f crates/canvas/macos/Info.plist "$app/Contents/Info.plist"
 codesign --force --sign - --identifier dev.fpl.dock.canvas "$app"
 printf '%s\n' "$PWD/$app"

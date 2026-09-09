@@ -33,14 +33,18 @@
       "window_seconds": 1800,
       "step_seconds": 30,
       "label": "In-flight requests by node",
-      "series_labels": ["node"]
+      "series_labels": [
+        "node"
+      ]
     },
     "fleet/latency": {
       "kind": "ranked_bar",
       "query": "bifrost_yggdrasil_runtime_latency_ms",
       "label": "Runtime latency",
       "unit": "ms",
-      "series_labels": ["runtime"]
+      "series_labels": [
+        "runtime"
+      ]
     },
     "fleet/sessions": {
       "kind": "stat",
@@ -53,9 +57,10 @@
       "window_seconds": 1800,
       "step_seconds": 30,
       "label": "Gateway connections",
-      "series_labels": ["instance"]
+      "series_labels": [
+        "instance"
+      ]
     },
-
     "bifrost/health": {
       "kind": "stat",
       "query": "sum(bifrost_backend_up)",
@@ -69,7 +74,9 @@
       "window_seconds": 1800,
       "step_seconds": 30,
       "label": "Queue depth by node",
-      "series_labels": ["node"]
+      "series_labels": [
+        "node"
+      ]
     },
     "bifrost/latency": {
       "kind": "heatmap",
@@ -78,7 +85,9 @@
       "step_seconds": 30,
       "label": "Runtime latency",
       "unit": "ms",
-      "series_labels": ["runtime"]
+      "series_labels": [
+        "runtime"
+      ]
     },
     "bifrost/cache": {
       "kind": "gauge",
@@ -93,7 +102,7 @@
       "unavailable": "Bifrost exposes no token counter"
     },
     "bifrost/fallbacks": {
-      "kind": "stat",
+      "kind": "event_log",
       "query": "",
       "label": "Fallbacks",
       "unavailable": "Bifrost exposes no fallback events"
@@ -105,16 +114,40 @@
       "unavailable": "Bifrost exposes a provider price list, not spend"
     },
     "bifrost/slo": {
-      "kind": "stat",
+      "kind": "slo_burn_rate",
       "query": "",
       "label": "Error budget",
       "unavailable": "No SLO or error-budget metric is recorded"
     },
-
-    "elmers/loop": { "kind": "stat", "query": "", "label": "Loop health", "unavailable": "No elmers job is scraped by Prometheus" },
-    "elmers/runs": { "kind": "stat", "query": "", "label": "In flight", "unavailable": "No elmers job is scraped by Prometheus" },
-    "elmers/budget": { "kind": "gauge", "query": "", "label": "Budget", "unavailable": "No elmers job is scraped by Prometheus" },
-    "elmers/models": { "kind": "ranked_bar", "query": "", "label": "Model usage", "unavailable": "No elmers job is scraped by Prometheus" },
-    "elmers/workflows": { "kind": "time_series", "query": "", "label": "Workflow rate", "unavailable": "No elmers job is scraped by Prometheus" }
+    "elmers/loop": {
+      "kind": "stat",
+      "query": "",
+      "label": "Loop health",
+      "unavailable": "No elmers job is scraped by Prometheus"
+    },
+    "elmers/runs": {
+      "kind": "stat",
+      "query": "",
+      "label": "In flight",
+      "unavailable": "No elmers job is scraped by Prometheus"
+    },
+    "elmers/budget": {
+      "kind": "gauge",
+      "query": "",
+      "label": "Budget",
+      "unavailable": "No elmers job is scraped by Prometheus"
+    },
+    "elmers/models": {
+      "kind": "ranked_bar",
+      "query": "",
+      "label": "Model usage",
+      "unavailable": "No elmers job is scraped by Prometheus"
+    },
+    "elmers/workflows": {
+      "kind": "time_series",
+      "query": "",
+      "label": "Workflow rate",
+      "unavailable": "No elmers job is scraped by Prometheus"
+    }
   }
 }

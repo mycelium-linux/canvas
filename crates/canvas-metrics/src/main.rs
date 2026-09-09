@@ -130,7 +130,7 @@ fn main() -> Result<(), String> {
                 &window_label(spec),
             )?;
             let bytes = serde_json::to_vec(&event).map_err(|error| error.to_string())?;
-            if bytes.len() > canvas_metrics::MAX_STREAM_MESSAGE {
+            if bytes.len() > canvas_metrics::MAX_DATAGRAM {
                 eprintln!("canvas-metrics: {id} snapshot too large; skipped");
                 continue;
             }

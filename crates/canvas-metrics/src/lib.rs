@@ -10,9 +10,19 @@ use std::collections::BTreeMap;
 
 pub const STREAM_SCHEMA_VERSION: u32 = 1;
 pub const CONTRACT: &str = "canvas.widget.snapshot.v1";
-/// Canvas refuses datagrams above this; a snapshot that would exceed it is
-/// downsampled rather than silently dropped on the floor.
+/// Canvas's own ceiling on a stream event.
 pub const MAX_STREAM_MESSAGE: usize = 64 * 1024;
+
+/// The limit that actually binds. macOS caps an AF_UNIX datagram at
+/// `net.local.dgram.maxdgram`, 2048 bytes by default, so Canvas's 64KB ceiling
+/// is never reached in practice: an oversized send fails with EMSGSIZE rather
+/// than being truncated. Snapshots are fitted to this, with headroom for the
+/// envelope around the widget.
+pub const MAX_DATAGRAM: usize = 2048;
+
+/// Bytes the envelope adds around the widget: identity, contract, sequence,
+/// timestamps and the data block. Measured against the widest ids in use.
+pub const ENVELOPE_OVERHEAD: usize = 420;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -147,6 +157,12 @@ fn number(value: &Value) -> Option<f64> {
 /// Builds the `widget` half of a snapshot payload. Returns `None` when the query
 /// succeeded but matched nothing, which is a no-data state rather than an error.
 pub fn widget(spec: &SourceSpec, result: &Value) -> Option<Value> {
+    widget_within(spec, result, 180)
+}
+
+/// `points` caps samples per series so a snapshot can be shrunk to fit the
+/// datagram limit without changing what it means.
+pub fn widget_within(spec: &SourceSpec, result: &Value, points: usize) -> Option<Value> {
     let samples = samples(result);
     if samples.is_empty() {
         return None;
@@ -195,12 +211,12 @@ pub fn widget(spec: &SourceSpec, result: &Value) -> Option<Value> {
         "time_series" => {
             let series: Vec<Value> = samples
                 .iter()
-                .take(8)
+                .take(points.min(8).max(1))
                 .filter_map(|sample| {
                     let raw = sample.get("values")?.as_array()?;
                     // Canvas caps a datagram at 64KB; thin long ranges rather
                     // than emit a snapshot the socket will reject.
-                    let stride = raw.len().div_ceil(180).max(1);
+                    let stride = raw.len().div_ceil(points.max(2)).max(1);
                     let points: Vec<Value> = raw
                         .iter()
                         .step_by(stride)
@@ -228,11 +244,11 @@ pub fn widget(spec: &SourceSpec, result: &Value) -> Option<Value> {
         "heatmap" => {
             let rows: Vec<String> = samples
                 .iter()
-                .take(12)
+                .take(points.min(12).max(1))
                 .filter_map(|sample| Some(label_for(spec, sample.get("metric")?)))
                 .collect();
             let first = samples.first()?.get("values")?.as_array()?;
-            let stride = first.len().div_ceil(48).max(1);
+            let stride = first.len().div_ceil(points.min(48).max(2)).max(1);
             let columns: Vec<String> = first
                 .iter()
                 .step_by(stride)
@@ -240,7 +256,7 @@ pub fn widget(spec: &SourceSpec, result: &Value) -> Option<Value> {
                 .collect();
             let values: Vec<Vec<f64>> = samples
                 .iter()
-                .take(12)
+                .take(points.min(12).max(1))
                 .map(|sample| {
                     sample
                         .get("values")
@@ -267,6 +283,48 @@ pub fn widget(spec: &SourceSpec, result: &Value) -> Option<Value> {
             }))
         }
         _ => None,
+    }
+}
+
+/// Produces the largest snapshot that still fits `budget` bytes.
+///
+/// Shrinking is preferable to dropping: a thinner series still shows the shape
+/// of the data, whereas an EMSGSIZE leaves the widget on its previous value with
+/// no indication anything failed.
+pub fn widget_fitted(spec: &SourceSpec, result: &Value, budget: usize) -> Option<(Value, bool)> {
+    let mut thinned = false;
+    for points in [180usize, 90, 45, 20, 10, 5, 2] {
+        let widget = widget_within(spec, result, points)?;
+        let size = serde_json::to_vec(&widget).map(|bytes| bytes.len()).ok()?;
+        if size <= budget {
+            return Some((widget, thinned));
+        }
+        thinned = true;
+    }
+    None
+}
+
+/// An empty widget of the target's own kind.
+///
+/// Canvas rejects a snapshot whose widget kind differs from the surface it
+/// targets, so a placeholder must not default to `stat`: a gauge that goes
+/// no-data has to stay a gauge or the mutation is dropped entirely.
+pub fn placeholder(kind: &str, label: &str) -> Value {
+    match kind {
+        "gauge" => json!({"kind": "gauge", "value": 0.0, "label": label}),
+        "time_series" => json!({"kind": "time_series", "title": label, "series": []}),
+        "heatmap" => {
+            json!({"kind": "heatmap", "title": label, "rows": [], "columns": [], "values": []})
+        }
+        "ranked_bar" => json!({"kind": "ranked_bar", "title": label, "bars": []}),
+        "event_log" => json!({"kind": "event_log", "title": label, "entries": []}),
+        "slo_burn_rate" => {
+            json!({"kind": "slo_burn_rate", "title": label, "objective": 0.0, "windows": []})
+        }
+        "table" => json!({"kind": "table", "title": label, "columns": [], "rows": []}),
+        "state_timeline" => json!({"kind": "state_timeline", "title": label, "lanes": []}),
+        "histogram" => json!({"kind": "histogram", "title": label, "buckets": []}),
+        _ => json!({"kind": "stat", "label": label, "value": 0.0, "state": "neutral"}),
     }
 }
 
@@ -328,8 +386,9 @@ pub fn envelope(
         (None, None) => (Unavailable::Stale, None),
         (None, Some(result)) => match classify(result) {
             Some(reason) => (reason, None),
-            None => match widget(spec, result) {
-                Some(widget) => {
+            None => match widget_fitted(spec, result, MAX_DATAGRAM.saturating_sub(ENVELOPE_OVERHEAD)) {
+                Some((widget, thinned)) => {
+                    let _ = thinned;
                     let data = json!({
                         "state": "ready",
                         "source": source,
@@ -360,7 +419,7 @@ pub fn envelope(
         "sequence": sequence,
         "emitted_at_ms": now_ms,
         "payload": {
-            "widget": {"kind": "stat", "label": spec.label.clone().unwrap_or_else(|| source_id.into()), "value": 0.0, "state": "neutral"},
+            "widget": placeholder(&spec.kind, &spec.label.clone().unwrap_or_else(|| source_id.into())),
             "data": {
                 "state": state.state(),
                 "source": source,
@@ -494,13 +553,30 @@ mod tests {
     }
 
     #[test]
-    fn long_ranges_are_thinned_to_fit_the_datagram() {
+    fn long_ranges_are_fitted_to_the_real_datagram_limit() {
+        // macOS caps AF_UNIX datagrams at 2048 bytes, far below Canvas's 64KB
+        // constant. Sizing against the constant sends EMSGSIZE, not a snapshot.
         let spec = spec("time_series");
-        let thinned = widget(&spec, &range(2000)).unwrap();
-        let points = thinned["series"][0]["points"].as_array().unwrap().len();
-        assert!(points <= 180, "{points} points would risk the 64KB cap");
-        let bytes = serde_json::to_vec(&thinned).unwrap().len();
-        assert!(bytes < MAX_STREAM_MESSAGE, "{bytes} bytes");
+        let budget = MAX_DATAGRAM - ENVELOPE_OVERHEAD;
+        let (fitted, thinned) = widget_fitted(&spec, &range(2000), budget).unwrap();
+        assert!(thinned, "a 2000-point range must be thinned");
+        let bytes = serde_json::to_vec(&fitted).unwrap().len();
+        assert!(bytes <= budget, "{bytes} bytes exceeds the {budget} budget");
+    }
+
+    #[test]
+    fn a_whole_envelope_fits_the_datagram_for_every_kind() {
+        for (kind, result) in [
+            ("stat", instant("1")),
+            ("gauge", instant("1")),
+            ("time_series", range(2000)),
+            ("heatmap", range(2000)),
+            ("ranked_bar", instant("1")),
+        ] {
+            let event = envelope("bifrost/some-long-source-name", &spec(kind), Some(&result), 1, 0, "2026-09-09T00:00:00Z", "30m").unwrap();
+            let bytes = serde_json::to_vec(&event).unwrap().len();
+            assert!(bytes <= MAX_DATAGRAM, "{kind}: {bytes} bytes exceeds {MAX_DATAGRAM}");
+        }
     }
 
     #[test]
@@ -566,6 +642,20 @@ mod tests {
             event["payload"]["data"]["detail"],
             "Bifrost exposes no cache metric"
         );
+    }
+
+    #[test]
+    fn a_no_data_placeholder_keeps_the_target_widget_kind() {
+        // Canvas drops a mutation whose kind differs from the surface, so a
+        // gauge going no-data must stay a gauge.
+        let empty = json!({"ok":true,"data":{"data":{"result":[]}}});
+        for kind in ["stat", "gauge", "time_series", "heatmap", "ranked_bar", "event_log", "slo_burn_rate"] {
+            let mut s = spec(kind);
+            s.kind = kind.into();
+            let event = envelope("bifrost/x", &s, Some(&empty), 1, 0, "t", "now").unwrap();
+            assert_eq!(event["payload"]["widget"]["kind"], kind, "{kind}");
+            assert_eq!(event["payload"]["data"]["state"], "no_data");
+        }
     }
 
     #[test]
