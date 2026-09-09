@@ -31,6 +31,7 @@ use ::canvas::{
     SurfaceChrome, SurfaceContent, SurfaceTitleMode, ThemeRef, WorkspaceDocument, WorkspacePatch,
 };
 use base64::Engine as _;
+use canvas_core::display_watch::{DisplayWatch, WatchStatus};
 use canvas_core::global_hotkey::{GlobalHotkey, HotkeySpec};
 use canvas_core::{
     Catalog, ThemeMetrics, ThemePalette, VisualTheme, desktop::WallpaperRequest, layout::Rect,
@@ -261,6 +262,32 @@ fn window_action_label(action: WindowAction, maximized: bool) -> &'static str {
     }
 }
 
+/// The surfaces a canvas layout presents, in layer order.
+fn placement_surface_ids(layout: &Layout) -> Vec<String> {
+    match layout {
+        Layout::Canvas { placements } => placements
+            .iter()
+            .map(|placement| placement.surface_id.clone())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Names the widgets a frame is too small to draw legibly, for a status line.
+///
+/// Empty when everything fits, so it appends to a status message without one
+/// needing to know whether there was anything to say.
+fn undersized_note(undersized: &[String]) -> String {
+    if undersized.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " Too small to read at this size: {}.",
+            undersized.join(", ")
+        )
+    }
+}
+
 fn surface_title_visible(mode: SurfaceTitleMode, focused: bool) -> bool {
     match mode {
         SurfaceTitleMode::Hidden => false,
@@ -276,6 +303,11 @@ struct App {
     frame: Rect,
     display_frames: Vec<Rect>,
     displays: Vec<DisplayInfo>,
+    /// The one owner of the display inventory: it takes the first enumeration
+    /// and every settled one after it. `!Send`, like the `GlobalHotkey` fields
+    /// below and for the same reason — the platform observer is registered on
+    /// the GUI main thread and delivers there.
+    display_watch: DisplayWatch<DisplayInfo>,
     selected_display_ids: Vec<String>,
     canvas_visible: bool,
     overlays: OverlaySettings,
@@ -375,7 +407,17 @@ impl App {
         let active_project_workspace = restored_document
             .as_ref()
             .map(|document| document.project_id.clone());
-        let displays = platform::displays().unwrap_or_default();
+        let mut shortcut_errors = Vec::new();
+        // One owner of the display inventory: the watch takes the first one and
+        // every settled one after it, so nothing else enumerates and drifts.
+        let display_watch = DisplayWatch::start(platform::displays);
+        if let Some(error) = display_watch.last_error() {
+            shortcut_errors.push(format!("display inventory unavailable: {error}"));
+        }
+        if let WatchStatus::Unobserved(_) = display_watch.status() {
+            shortcut_errors.push(display_watch.status().to_string());
+        }
+        let displays = display_watch.displays().to_vec();
         let display_frames = displays.iter().map(|display| display.frame).collect();
         let desktop_frame = DisplayTopology::new(displays.clone())
             .and_then(|topology| topology.resolve(&DisplayTarget::All))
@@ -386,7 +428,6 @@ impl App {
             .find(|display| display.frame == frame)
             .map(|display| vec![display.id.clone()])
             .unwrap_or_default();
-        let mut shortcut_errors = Vec::new();
         #[cfg(feature = "lua-scenes")]
         let (stream_inbox, stream_socket) = if cfg!(test) {
             (::canvas::stream_binding::StreamInbox::default(), None)
@@ -479,6 +520,7 @@ impl App {
             frame: desktop_frame,
             display_frames,
             displays,
+            display_watch,
             selected_display_ids,
             canvas_visible: true,
             overlays: OverlaySettings::default(),
@@ -718,9 +760,9 @@ impl App {
             self.status = "No saved view is active to snap to.".into();
             return;
         };
-        match ::canvas::operational_views::materialize(&view_id, &self.document) {
-            Ok(document) => {
-                if document.layout == self.document.layout {
+        match ::canvas::operational_views::materialize(&view_id, &self.document, self.view_fit()) {
+            Ok(snapped) => {
+                if snapped.document.layout == self.document.layout {
                     self.status = format!("Layout already matches {view_id}.");
                     return;
                 }
@@ -731,9 +773,12 @@ impl App {
                 // from the current document, so existing surfaces are preserved.
                 self.free_layout = Some(self.document.layout.clone());
                 self.start_transition();
-                self.document = document;
+                self.document = snapped.document;
                 self.bump();
-                self.status = format!("Snapped to {view_id}.");
+                self.status = format!(
+                    "Snapped to {view_id}.{}",
+                    undersized_note(&snapped.undersized)
+                );
                 self.emit_event(format!("layout_snapped {view_id}"));
             }
             // A view that no longer loads must not strand the key in a state
@@ -780,6 +825,9 @@ impl App {
                 #[cfg(feature = "lua-scenes")]
                 self.drain_stream_events();
                 let mut tasks = vec![self.drain_commands()];
+                if let Some(settled) = self.display_watch.poll() {
+                    tasks.push(self.apply_display_change(settled));
+                }
                 if toggle_visibility {
                     tasks.push(self.set_canvas_visible(!self.canvas_visible));
                 }
@@ -1392,6 +1440,125 @@ impl App {
             Task::none()
         };
         Ok((resolved, task))
+    }
+
+    /// React to a settled change in the display topology.
+    ///
+    /// The watch has already coalesced the burst and re-enumerated, so this is
+    /// the whole of Canvas's answer to a monitor being plugged in, woken, or
+    /// switched off — including the case that used to be terminal, where Canvas
+    /// started before any display answered and stayed blank until a restart.
+    fn apply_display_change(&mut self, settled: Result<Vec<DisplayInfo>, String>) -> Task<Message> {
+        let displays = match settled {
+            Ok(displays) => displays,
+            Err(error) => {
+                self.status = format!("Display inventory failed: {error}");
+                return Task::none();
+            }
+        };
+        // The fit the active view was last laid out against. Captured before the
+        // frame moves, so an arrangement someone changed by hand can be told
+        // from one that is still the view's own.
+        let previous_fit = self.view_fit();
+        self.displays = displays;
+        self.display_frames = self.displays.iter().map(|display| display.frame).collect();
+        // Keep the displays the operator had selected where they survived the
+        // change; a selection that is entirely gone — including the startup case
+        // where there were none — falls back to the whole desktop.
+        let surviving = self
+            .selected_display_ids
+            .iter()
+            .filter(|id| self.displays.iter().any(|display| display.id == **id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let target = if surviving.is_empty() {
+            DisplayTarget::All
+        } else {
+            DisplayTarget::Exact {
+                display_ids: surviving,
+            }
+        };
+        // apply_display_target sets selected_display_ids and (for a reflow view)
+        // self.frame, bumps the revision, and reopens the host windows on the
+        // new frames, which is what makes a Canvas that started with displays=0
+        // finally draw.
+        match self.apply_display_target(&target) {
+            Ok((_, task)) => {
+                self.emit_event(format!("displays_changed {}", self.displays.len()));
+                self.refit_active_view(previous_fit);
+                task
+            }
+            Err(failure) => {
+                self.status = format!(
+                    "Displays changed but the layout could not follow: {}",
+                    failure.message
+                );
+                Task::none()
+            }
+        }
+    }
+
+    /// Recompute the active view against the room Canvas now has.
+    ///
+    /// `apply_display_target` has already applied the view's own layout policy —
+    /// a reflow view's frame followed the displays, a fixed one's deliberately
+    /// did not — and normalized geometry rides along with the frame. What it
+    /// cannot do is re-run the readable-minimum fit, because minimums are
+    /// logical pixels: unchanged proportions on a smaller frame still put
+    /// widgets under them. So a reflow view comes out of here fitted to its new
+    /// frame, and a fixed view comes out untouched, which is what fixed means.
+    fn refit_active_view(&mut self, previous: ::canvas::operational_views::Fit) {
+        let Some(view_id) = self.snapped_view.clone() else {
+            return;
+        };
+        // Only a view still showing its own arrangement is recomputed. Someone
+        // who moved surfaces since it opened keeps what they arranged: a monitor
+        // waking up is not a reason to undo their work.
+        let untouched =
+            ::canvas::operational_views::materialize(&view_id, &self.document, previous)
+                .is_ok_and(|before| before.document.layout == self.document.layout);
+        if !untouched {
+            return;
+        }
+        match ::canvas::operational_views::materialize(&view_id, &self.document, self.view_fit()) {
+            Ok(fitted) => {
+                if fitted.document == self.document {
+                    return;
+                }
+                let surface_ids = placement_surface_ids(&fitted.document.layout);
+                self.start_transition();
+                self.document = fitted.document;
+                for surface_id in &surface_ids {
+                    self.decoded.remove(surface_id);
+                }
+                self.ensure_scene_decoded();
+                // A stashed arrangement was drawn for displays that may no
+                // longer exist, so snapping back to it would restore geometry
+                // for a topology that is gone.
+                self.free_layout = None;
+                self.bump();
+                self.status = format!(
+                    "Re-fitted {view_id} to {} display(s).{}",
+                    self.selected_display_ids.len().max(1),
+                    undersized_note(&fitted.undersized)
+                );
+                self.emit_event(format!("operational_view_refitted {view_id}"));
+            }
+            Err(error) => {
+                self.status =
+                    format!("Displays changed but {view_id} could not be re-fitted: {error}");
+            }
+        }
+    }
+
+    /// The room a view has to lay itself out in right now: the frame Canvas
+    /// currently occupies, at the type scale it is drawn in.
+    fn view_fit(&self) -> ::canvas::operational_views::Fit {
+        ::canvas::operational_views::Fit {
+            width: self.frame.width as f32,
+            height: self.frame.height as f32,
+            metrics: self.presented_visual_theme().metrics,
+        }
     }
 
     fn toggle_display_ordinal(&mut self, ordinal: usize) -> Task<Message> {
@@ -2805,23 +2972,21 @@ impl App {
                 }
             },
             Command::OpenOperationalView { view_id } => {
-                match ::canvas::operational_views::materialize(&view_id, &self.document) {
-                    Ok(document) => {
-                        if let Err(error) = document.validate(&self.catalog) {
+                match ::canvas::operational_views::materialize(
+                    &view_id,
+                    &self.document,
+                    self.view_fit(),
+                ) {
+                    Ok(opened) => {
+                        if let Err(error) = opened.document.validate(&self.catalog) {
                             self.fail(pending, Failure::invalid(error.to_string()));
                             return Task::none();
                         }
-                        let surface_ids = match &document.layout {
-                            Layout::Canvas { placements } => placements
-                                .iter()
-                                .map(|placement| placement.surface_id.clone())
-                                .collect::<Vec<_>>(),
-                            _ => unreachable!("operational views always materialize as a canvas"),
-                        };
-                        let changed = document != self.document;
+                        let surface_ids = placement_surface_ids(&opened.document.layout);
+                        let changed = opened.document != self.document;
                         if changed {
                             self.start_transition();
-                            self.document = document;
+                            self.document = opened.document;
                             for surface_id in &surface_ids {
                                 self.decoded.remove(surface_id);
                             }
@@ -2836,7 +3001,10 @@ impl App {
                         self.layout_policy = ::canvas::operational_views::load(&view_id)
                             .map(|view| view.layout_policy)
                             .unwrap_or_default();
-                        self.status = format!("Opened operational view {view_id}.");
+                        self.status = format!(
+                            "Opened operational view {view_id}.{}",
+                            undersized_note(&opened.undersized)
+                        );
                         if changed {
                             self.emit_event(format!("operational_view_opened {view_id}"));
                         }
@@ -7997,6 +8165,167 @@ mod tests {
         assert_eq!(app.frame, desktop, "a fixed view must not be reflowed");
     }
 
+    fn one_display(width: u32, height: u32) -> Vec<DisplayInfo> {
+        vec![DisplayInfo {
+            id: "display-0".into(),
+            name: "Display 0".into(),
+            frame: Rect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+            primary: true,
+        }]
+    }
+
+    /// An app already showing `bifrost/runtime` on one display of the given size.
+    fn app_showing_a_view(width: u32, height: u32) -> App {
+        let mut app = test_app();
+        app.displays = one_display(width, height);
+        app.frame = Rect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+        app.selected_display_ids = vec!["display-0".into()];
+        app.snapped_view = Some("bifrost/runtime".into());
+        let fit = app.view_fit();
+        app.document =
+            ::canvas::operational_views::materialize("bifrost/runtime", &app.document, fit)
+                .expect("built-in view materializes")
+                .document;
+        app
+    }
+
+    #[test]
+    fn a_display_appearing_rescues_a_canvas_that_started_with_none() {
+        // The trap this exists to fix: Canvas started before any display backend
+        // answered, so it enumerated nothing and drew on nothing, forever.
+        let mut app = test_app();
+        app.displays = Vec::new();
+        app.selected_display_ids = Vec::new();
+        assert!(app.windows.is_empty());
+
+        drop(app.apply_display_change(Ok(three_displays())));
+
+        assert_eq!(app.displays.len(), 3, "the new topology must be adopted");
+        assert_eq!(
+            app.selected_display_ids.len(),
+            3,
+            "no surviving selection falls back to the whole desktop"
+        );
+        assert_eq!(
+            app.frame.width, 5_760,
+            "the frame must become the desktop that now exists"
+        );
+        assert_eq!(app.display_frames.len(), 3);
+    }
+
+    #[test]
+    fn a_display_that_survives_a_change_keeps_the_operator_s_selection() {
+        let mut app = test_app();
+        app.displays = three_displays();
+        app.selected_display_ids = vec!["display-1".into(), "display-2".into()];
+
+        // display-2 is unplugged; display-1 is untouched and must stay chosen.
+        let remaining = three_displays()
+            .into_iter()
+            .filter(|display| display.id != "display-2")
+            .collect::<Vec<_>>();
+        drop(app.apply_display_change(Ok(remaining)));
+
+        assert_eq!(
+            app.selected_display_ids,
+            vec!["display-1".to_owned()],
+            "a surviving selection must not be reshuffled"
+        );
+    }
+
+    #[test]
+    fn a_failed_re_enumeration_reports_rather_than_blanking_the_desktop() {
+        let mut app = test_app();
+        app.displays = three_displays();
+        let before = app.displays.clone();
+
+        drop(app.apply_display_change(Err("Dock Control is not running".into())));
+
+        assert_eq!(app.displays, before, "a failure must not drop the topology");
+        assert!(
+            app.status.contains("Dock Control is not running"),
+            "status was {:?}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn a_display_change_refits_the_active_view_to_the_room_it_now_has() {
+        let mut app = app_showing_a_view(3_840, 2_160);
+        let roomy = app.document.layout.clone();
+
+        drop(app.apply_display_change(Ok(one_display(640, 560))));
+
+        assert_eq!(app.frame.width, 640);
+        assert_ne!(
+            app.document.layout, roomy,
+            "the same proportions on a much smaller frame leave widgets unreadable, \
+             so the view must be re-fitted rather than merely rescaled"
+        );
+        let view = ::canvas::operational_views::load("bifrost/runtime").expect("view loads");
+        let metrics = app.view_fit().metrics;
+        for (placement, widget) in match &app.document.layout {
+            Layout::Canvas { placements } => placements,
+            _ => unreachable!("operational views materialize as a canvas"),
+        }
+        .iter()
+        .zip(view.widgets.values())
+        {
+            let hint = canvas_widgets::size_hint(&widget.spec.kind, &metrics);
+            assert!(
+                placement.bounds.width * 640.0 + 0.5 >= hint.min_width,
+                "{} is {}px wide, below its {}px minimum",
+                placement.surface_id,
+                placement.bounds.width * 640.0,
+                hint.min_width
+            );
+        }
+    }
+
+    #[test]
+    fn a_fixed_view_is_left_alone_by_a_display_change() {
+        // The other half of the policy: a hand-arranged workspace is navigated
+        // from spatial memory, so a monitor appearing must not move anything.
+        // The frame it is drawn across stays put, and the fit therefore has
+        // nothing to recompute.
+        let mut app = app_showing_a_view(3_840, 2_160);
+        app.layout_policy = ::canvas::view::LayoutPolicy::Fixed;
+        let arranged = app.document.layout.clone();
+        let frame = app.frame;
+
+        drop(app.apply_display_change(Ok(one_display(1_280, 800))));
+
+        assert_eq!(app.frame, frame, "a fixed view must not be reflowed");
+        assert_eq!(app.document.layout, arranged, "nor re-fitted");
+    }
+
+    #[test]
+    fn a_display_change_does_not_undo_an_arrangement_someone_made_by_hand() {
+        let mut app = app_showing_a_view(3_840, 2_160);
+        match &mut app.document.layout {
+            Layout::Canvas { placements } => placements[0].bounds.x = 0.123,
+            _ => unreachable!("operational views materialize as a canvas"),
+        }
+        let moved = app.document.layout.clone();
+
+        drop(app.apply_display_change(Ok(one_display(1_920, 1_080))));
+
+        assert_eq!(
+            app.document.layout, moved,
+            "a monitor waking up is not a reason to throw away someone's work"
+        );
+    }
+
     #[test]
     fn fitting_is_available_as_an_escape_hatch_for_a_fixed_view() {
         let mut app = test_app();
@@ -8039,8 +8368,11 @@ mod tests {
         app.snapped_view = Some("bifrost/runtime".into());
         // Open the view for real first: its layout references its own surfaces,
         // so the document must carry them before any layout can be valid.
-        app.document = ::canvas::operational_views::materialize("bifrost/runtime", &app.document)
-            .expect("built-in view materializes");
+        let fit = app.view_fit();
+        app.document =
+            ::canvas::operational_views::materialize("bifrost/runtime", &app.document, fit)
+                .expect("built-in view materializes")
+                .document;
         let saved = app.document.layout.clone();
 
         // A layout must hold at least one placement, so "moved" is the saved
@@ -8074,10 +8406,14 @@ mod tests {
         // next press would silently do nothing.
         let mut app = test_app();
         app.snapped_view = Some("bifrost/runtime".into());
-        app.document.layout =
-            ::canvas::operational_views::materialize("bifrost/runtime", &app.document)
+        // The whole document, not just its layout: a layout on its own names
+        // surfaces the document does not have, and every path that reaches this
+        // state in Canvas opens the view for real first.
+        let fit = app.view_fit();
+        app.document =
+            ::canvas::operational_views::materialize("bifrost/runtime", &app.document, fit)
                 .expect("built-in view materializes")
-                .layout;
+                .document;
         app.toggle_snapped_layout();
         assert!(
             app.free_layout.is_none(),

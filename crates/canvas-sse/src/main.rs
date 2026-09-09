@@ -4,19 +4,21 @@
 //! poll. This process holds no credential: the transport names a topic, attaches
 //! the owner's bearer and hands frames up; nothing here sees one.
 //!
-//! No transport is wired yet. Until one is, [`Unsubscribed`] stands in and every
-//! widget reports `disconnected` with a reason — which is the point of running
-//! this today, because the alternative is three widgets on Loading forever with
-//! nothing saying why. `notes/live-subscription.md` records what a real
-//! subscription needs.
+//! No transport is compiled in yet: `canvas_sse::SseSubscription` holds the
+//! whole lifecycle a real one plugs into, but opening an authenticated stream
+//! needs a brokered subscribe this crate does not have. Until it does,
+//! [`Unsubscribed`] stands in and every widget reports `disconnected` with a
+//! reason — which is the point of running this today, because the alternative is
+//! three widgets on Loading forever with nothing saying why.
+//! `notes/live-subscription.md` records what is left.
 use canvas_sse::{
-    Delivery, Mapping, Subscription, Unavailable, Unsubscribed, Window, envelope, observe,
-    stream_identity,
+    Delivery, Mapping, SEND_SPACING, Subscription, Unavailable, Unsubscribed, Window, envelope,
+    observe, send_retrying, stream_identity,
 };
 use std::{
     collections::BTreeMap,
     os::unix::net::UnixDatagram,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -36,6 +38,33 @@ fn arg(args: &[String], flag: &str) -> Option<String> {
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1))
         .cloned()
+}
+
+/// Sends one snapshot, waiting out a congested socket buffer rather than losing
+/// it, and saying so if it is lost anyway.
+///
+/// A dropped datagram is the failure that hides: the widget keeps its previous
+/// value at `state: ready`, so it reads as current while being minutes old.
+/// Retrying is what makes that rare; the message is what makes it visible when
+/// retrying was not enough.
+fn deliver(datagram: &UnixDatagram, path: &Path, id: &str, bytes: &[u8]) {
+    match send_retrying(
+        || datagram.send_to(bytes, path).map(|_| ()),
+        std::thread::sleep,
+    ) {
+        Ok(1) => {}
+        Ok(attempts) => {
+            eprintln!("canvas-sse: {id} snapshot sent on attempt {attempts} (socket congested)");
+        }
+        Err((attempts, error)) => {
+            // Canvas may simply not be running, which is not fatal: the next
+            // tick re-sends the whole snapshot, since none of them are deltas.
+            eprintln!(
+                "canvas-sse: {id} snapshot lost after {attempts} attempt(s) ({error}); \
+                 the widget keeps its previous value until the next tick"
+            );
+        }
+    }
 }
 
 /// Opens the browser sign-in. `fpl login` is idempotent on an enrolled machine
@@ -88,6 +117,7 @@ fn main() -> Result<(), String> {
     loop {
         let now = now_ms();
         let mut unauthorized = false;
+        let mut sent_any = false;
         for (id, spec) in &mapping.sources {
             let window = windows
                 .entry(id.clone())
@@ -97,7 +127,7 @@ fn main() -> Result<(), String> {
                 // transport could say about a topic that does not exist.
                 None
             } else {
-                match transport.drain(&spec.topic) {
+                match transport.drain(&spec.topic, now) {
                     Delivery::Frames(frames) => {
                         for frame in &frames {
                             if let Some(observation) = observe(spec, frame, now) {
@@ -122,11 +152,13 @@ fn main() -> Result<(), String> {
             }
             match &socket {
                 Some(path) => {
-                    if let Err(error) = datagram.send_to(&bytes, path) {
-                        // Canvas may not be running. That is not fatal: keep
-                        // ticking so widgets populate as soon as it comes back.
-                        eprintln!("canvas-sse: cannot reach Canvas ({error})");
+                    // Pace the burst. Every source emits on the same tick, and a
+                    // datagram socket has no flow control to slow a writer down.
+                    if sent_any {
+                        std::thread::sleep(SEND_SPACING);
                     }
+                    deliver(&datagram, path, id, &bytes);
+                    sent_any = true;
                 }
                 None => println!("{event}"),
             }

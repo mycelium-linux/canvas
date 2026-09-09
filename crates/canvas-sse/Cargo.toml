@@ -8,6 +8,9 @@ description = "SSE connector that emits Canvas widget snapshots"
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+# For `ENOBUFS` only. The number differs per platform and `io::ErrorKind` has no
+# name for it, so the alternative is a hand-maintained errno table per target.
+libc = "0.2"
 # For the facts both connectors must agree on: the datagram ceiling, the
 # contract, the placeholder shapes and the timestamp format. Duplicating those
 # is how one of them silently becomes wrong. See notes/live-subscription.md for

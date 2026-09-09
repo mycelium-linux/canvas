@@ -12,10 +12,16 @@
 //! every tick. A snapshot is therefore self-contained, a dropped frame costs
 //! detail rather than correctness, and a stream that has gone quiet still emits
 //! — reporting its own freshness instead of leaving the last value looking live.
+//!
+//! The subscription's own lifecycle — connect, resume, frame, back off,
+//! reconnect — is [`SseSubscription`], above the [`Connector`] boundary and
+//! driven by a `now_ms` it is handed rather than a clock it reads. A real
+//! transport supplies sockets and credentials; every state it can be in is
+//! reachable in a test without either.
 use canvas_metrics::placeholder;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, io, time::Duration};
 
 pub use canvas_metrics::{
     CONTRACT, ENVELOPE_OVERHEAD, MAX_DATAGRAM, MAX_STREAM_MESSAGE, STREAM_SCHEMA_VERSION, rfc3339,
@@ -242,15 +248,106 @@ pub fn parse_block(block: &str) -> Option<Frame> {
     Some(frame)
 }
 
-/// Splits a stream chunk into frames. A trailing partial block is dropped: the
-/// caller keeps the remainder and prepends it to the next chunk.
+/// Splits a whole stream chunk into frames, dropping a trailing partial block.
+///
+/// A live subscription uses [`FrameBuffer`] instead, which keeps that remainder;
+/// this is the one-shot form, for a chunk already known to be complete.
 pub fn parse_stream(text: &str) -> Vec<Frame> {
-    // The wire allows either line ending, and a CRLF stream split on "\n\n"
-    // yields one enormous block whose frames have silently merged.
-    text.replace("\r\n", "\n")
-        .split("\n\n")
-        .filter_map(parse_block)
-        .collect()
+    let mut buffer = FrameBuffer::default();
+    buffer.push(text.as_bytes());
+    buffer.take(usize::MAX)
+}
+
+/// Bytes one SSE block may occupy before it is refused rather than parsed. A
+/// block this large cannot reach a widget in any case — a whole snapshot must
+/// fit [`MAX_DATAGRAM`] — and a stream is a thing another process controls.
+pub const MAX_EVENT_BYTES: usize = 16 * 1024;
+
+/// Unparsed stream bytes held between drains. Reached only when a producer
+/// outruns the tick; the oldest blocks go first, which is also what keeps the
+/// reader near the live edge instead of working through a backlog.
+pub const MAX_BUFFERED_BYTES: usize = 256 * 1024;
+
+/// Frames parsed in one drain. Bounds the work a single tick can be made to do;
+/// the remainder stays buffered and is read on the next one.
+pub const MAX_FRAMES_PER_DRAIN: usize = 128;
+
+/// Where the first blank line in `pending` is: the bytes before it, and where
+/// the next block starts.
+///
+/// The wire ends a line with `\n` or `\r\n` and ends an event with a blank line,
+/// so the scan looks for one line ending immediately followed by another. A
+/// chunk that ends mid-terminator yields `None` and waits for more bytes, which
+/// is the whole reason this is a buffer and not a `split`.
+fn split_block(pending: &[u8]) -> Option<(usize, usize)> {
+    let ending = |at: usize| match pending.get(at)? {
+        b'\n' => Some(at + 1),
+        b'\r' if pending.get(at + 1) == Some(&b'\n') => Some(at + 2),
+        _ => None,
+    };
+    (0..pending.len()).find_map(|at| {
+        let after = ending(at).and_then(ending)?;
+        Some((at, after))
+    })
+}
+
+/// Accumulates stream bytes and hands out whole frames.
+///
+/// A read almost never ends on an event boundary, so the remainder is kept and
+/// prepended to the next chunk. Bytes are buffered rather than text because a
+/// read can also split a multi-byte character; a complete block never can, so
+/// decoding happens at the boundary.
+#[derive(Debug, Default)]
+pub struct FrameBuffer {
+    pending: Vec<u8>,
+    discarded: u64,
+}
+
+impl FrameBuffer {
+    /// Blocks refused for size, ever. Counted rather than logged here so the
+    /// caller decides how to be loud about it.
+    pub fn discarded(&self) -> u64 {
+        self.discarded
+    }
+
+    pub fn buffered(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn push(&mut self, chunk: &[u8]) {
+        self.pending.extend_from_slice(chunk);
+        while self.pending.len() > MAX_BUFFERED_BYTES {
+            self.discarded += 1;
+            match split_block(&self.pending) {
+                Some((_, next)) => drop(self.pending.drain(..next)),
+                // One partial block already over the ceiling: there is no
+                // boundary to resynchronize on until more bytes arrive.
+                None => self.pending.clear(),
+            }
+        }
+    }
+
+    /// Up to `limit` frames, oldest first. Blocks carrying no `data:` — comment
+    /// keepalives — are consumed without counting against the limit, because
+    /// they are not events and a stream of them must still make progress.
+    pub fn take(&mut self, limit: usize) -> Vec<Frame> {
+        let mut frames = Vec::new();
+        while frames.len() < limit {
+            let Some((end, next)) = split_block(&self.pending) else {
+                break;
+            };
+            let block: Vec<u8> = self.pending.drain(..next).collect();
+            let block = &block[..end];
+            if block.len() > MAX_EVENT_BYTES {
+                self.discarded += 1;
+                continue;
+            }
+            if let Some(frame) = parse_block(&String::from_utf8_lossy(block)) {
+                frames.push(frame);
+            }
+        }
+        frames
+    }
 }
 
 /// The four states Canvas renders. Mapping onto them is deliberately narrow:
@@ -694,16 +791,25 @@ pub fn widget_fitted(
 pub enum Unavailable {
     Unauthorized,
     Disconnected,
+    /// The stream was open and ended, and the connector is waiting to try again.
+    /// Distinct from `Disconnected` because a viewer reading a gap needs to know
+    /// whether anything is being done about it.
+    Reconnecting,
+    /// Reconnects were attempted to the bound and none held.
+    Unreachable,
     Stale,
     NoData,
     NotBacked,
 }
 
 impl Unavailable {
+    /// One of `canvas_widgets::WidgetDataState`'s own tags. A tag outside that
+    /// vocabulary fails to deserialize and the whole snapshot is discarded, so
+    /// `Reconnecting` reports as `disconnected` and says the rest in its detail.
     pub fn state(self) -> &'static str {
         match self {
-            Self::Unauthorized => "error",
-            Self::Disconnected => "disconnected",
+            Self::Unauthorized | Self::Unreachable => "error",
+            Self::Disconnected | Self::Reconnecting => "disconnected",
             Self::Stale => "stale",
             Self::NoData | Self::NotBacked => "no_data",
         }
@@ -712,6 +818,8 @@ impl Unavailable {
         match self {
             Self::Unauthorized => "FPL session expired; re-authenticating",
             Self::Disconnected => "Not subscribed to this stream",
+            Self::Reconnecting => "Stream ended; reconnecting",
+            Self::Unreachable => "Stream unreachable; reconnects exhausted, retrying later",
             Self::Stale => "No event within the freshness window",
             Self::NoData => "Subscribed; no event has arrived yet",
             Self::NotBacked => "No stream backs this source yet",
@@ -728,29 +836,276 @@ pub enum Delivery {
     Interrupted(Unavailable),
 }
 
-/// The transport boundary.
+/// What the emit loop reads each tick.
 ///
-/// A real implementation authenticates, opens the SSE connection, reconnects on
-/// drop and hands frames up. Nothing above this trait knows any of that, which
-/// is why every transform in this crate is testable with no network — and why
-/// swapping the transport later cannot change what a widget means.
+/// `now_ms` is passed rather than read, so a subscription's lifecycle — every
+/// backoff, every deadline — is exercised in a test without a clock or a sleep.
 pub trait Subscription {
     /// Frames delivered since the last call. Must not block past the tick.
-    fn drain(&mut self, topic: &str) -> Delivery;
+    fn drain(&mut self, topic: &str, now_ms: u64) -> Delivery;
 }
 
 /// The transport that exists today.
 ///
 /// It reports `Disconnected` for every topic, which is the truth: nothing is
 /// subscribed yet. Widgets fed by it say so instead of sitting on Loading
-/// forever (widget-quality rule 3), and the day a real transport lands, only
-/// this one type is replaced.
+/// forever (widget-quality rule 3). It is deliberately not an always-failing
+/// [`Connector`]: that would report `Reconnecting`, and claiming to be
+/// reconnecting when no transport is compiled in is exactly the kind of
+/// plausible lie this crate exists to avoid.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Unsubscribed;
 
 impl Subscription for Unsubscribed {
-    fn drain(&mut self, _topic: &str) -> Delivery {
+    fn drain(&mut self, _topic: &str, _now_ms: u64) -> Delivery {
         Delivery::Interrupted(Unavailable::Disconnected)
+    }
+}
+
+/// One live byte stream. Dropping it closes the connection.
+pub trait EventStream {
+    /// Bytes that have arrived since the last call. Empty means open and quiet,
+    /// which is not the same as ended. `Err` ends the connection and says why —
+    /// `Disconnected` for a server that closed cleanly, `Unauthorized` for a
+    /// credential the transport could not renew.
+    ///
+    /// Must not block past the tick: a real transport reads on its own thread
+    /// and this takes whatever that thread has queued.
+    fn read(&mut self) -> Result<Vec<u8>, Unavailable>;
+}
+
+/// Opens byte streams for a topic.
+///
+/// This is the whole transport boundary, and the only part a real transport has
+/// to write. Everything above it — reconnect, backoff, resume, framing and every
+/// bound — is [`SseSubscription`], which is why all of it is tested here with no
+/// network and no credential.
+pub trait Connector {
+    type Stream: EventStream;
+
+    /// `last_event_id` is the newest `id:` seen on this topic, to be sent as
+    /// `Last-Event-ID` so a server that supports resume sends what was missed
+    /// instead of replaying from the top.
+    fn connect(
+        &mut self,
+        topic: &str,
+        last_event_id: Option<&str>,
+    ) -> Result<Self::Stream, Unavailable>;
+}
+
+/// Reconnects attempted at growing intervals before a topic reports itself
+/// unreachable. Bounded because an endpoint that is gone must not be hammered,
+/// and because an unbounded ladder is indistinguishable from a hang.
+pub const MAX_RECONNECT_ATTEMPTS: u32 = 6;
+/// Wait before the first reconnect; doubles per attempt.
+const RECONNECT_BACKOFF_MS: u64 = 500;
+/// Ceiling on one wait in the ladder.
+const RECONNECT_BACKOFF_CAP_MS: u64 = 30_000;
+/// Wait after the ladder is exhausted before starting it again.
+///
+/// Exhaustion is loud (`Unreachable`, rendered as a source error) but not
+/// terminal: a wall display that needs a human to restart it after a router
+/// blip is a worse failure than the blip.
+pub const RECONNECT_COOLDOWN_MS: u64 = 300_000;
+
+/// Milliseconds to wait before reconnect attempt `attempt`, 1-based.
+pub fn reconnect_delay_ms(attempt: u32) -> u64 {
+    let doublings = attempt.saturating_sub(1).min(u32::BITS - 1);
+    RECONNECT_BACKOFF_MS
+        .saturating_mul(1u64 << doublings)
+        .min(RECONNECT_BACKOFF_CAP_MS)
+}
+
+/// A wait is over when its deadline passes — or when the deadline is further out
+/// than the longest this connector sets, which means the clock moved rather than
+/// the deadline. A backwards jump must not wedge a subscription shut.
+fn due(now_ms: u64, until_ms: u64) -> bool {
+    now_ms >= until_ms || until_ms - now_ms > RECONNECT_COOLDOWN_MS
+}
+
+enum Link<S> {
+    /// Nothing is open and there is nothing to wait for.
+    Idle,
+    Open(S),
+    /// Not connected, and not yet due to try again. Carries what a viewer is
+    /// being told meanwhile, so the answer does not change between ticks.
+    Waiting {
+        until_ms: u64,
+        reason: Unavailable,
+    },
+}
+
+struct Topic<S> {
+    link: Link<S>,
+    buffer: FrameBuffer,
+    last_event_id: Option<String>,
+    /// Consecutive failures since the stream last said anything.
+    attempts: u32,
+}
+
+impl<S> Default for Topic<S> {
+    fn default() -> Self {
+        Self {
+            link: Link::Idle,
+            buffer: FrameBuffer::default(),
+            last_event_id: None,
+            attempts: 0,
+        }
+    }
+}
+
+impl<S> Topic<S> {
+    /// Ends the connection, schedules the next attempt, and returns what the
+    /// viewer is told until then.
+    fn fail(&mut self, reason: Unavailable, now_ms: u64) -> Delivery {
+        // Dropping the stream is what closes the connection; nothing else does.
+        self.link = Link::Idle;
+        self.attempts += 1;
+        let exhausted = self.attempts >= MAX_RECONNECT_ATTEMPTS;
+        let wait = if exhausted {
+            // The cooldown replaces the ladder, so the ladder starts over after
+            // it rather than reporting unreachable forever after one bad night.
+            self.attempts = 0;
+            RECONNECT_COOLDOWN_MS
+        } else {
+            reconnect_delay_ms(self.attempts)
+        };
+        // An expired session outlives the ladder: retrying does not fix it, and
+        // this is the only reason that drives re-authentication.
+        let reason = match reason {
+            Unavailable::Unauthorized => Unavailable::Unauthorized,
+            _ if exhausted => Unavailable::Unreachable,
+            _ => Unavailable::Reconnecting,
+        };
+        self.link = Link::Waiting {
+            until_ms: now_ms.saturating_add(wait),
+            reason,
+        };
+        Delivery::Interrupted(reason)
+    }
+}
+
+/// Holds a subscription open per topic and hands the emit loop whole frames.
+///
+/// The lifecycle is deliberately all on this side of [`Connector`]: connect,
+/// read, resume from the last event id, back off when the stream ends, and say
+/// which of those is happening. A transport that only opens sockets inherits all
+/// of it, and none of it needs a network to test.
+pub struct SseSubscription<C: Connector> {
+    connector: C,
+    topics: BTreeMap<String, Topic<C::Stream>>,
+}
+
+impl<C: Connector> SseSubscription<C> {
+    pub fn new(connector: C) -> Self {
+        Self {
+            connector,
+            topics: BTreeMap::new(),
+        }
+    }
+
+    /// Blocks refused for size across every topic. The emit loop reports a rise
+    /// rather than letting a producer quietly lose events (rule 6).
+    pub fn discarded(&self) -> u64 {
+        self.topics
+            .values()
+            .map(|topic| topic.buffer.discarded())
+            .sum()
+    }
+}
+
+impl<C: Connector> Subscription for SseSubscription<C> {
+    fn drain(&mut self, topic: &str, now_ms: u64) -> Delivery {
+        let Self { connector, topics } = self;
+        let state = topics.entry(topic.to_owned()).or_default();
+
+        if let Link::Waiting { until_ms, reason } = state.link {
+            if !due(now_ms, until_ms) {
+                return Delivery::Interrupted(reason);
+            }
+            state.link = Link::Idle;
+        }
+
+        if matches!(state.link, Link::Idle) {
+            match connector.connect(topic, state.last_event_id.as_deref()) {
+                Ok(stream) => state.link = Link::Open(stream),
+                Err(reason) => return state.fail(reason, now_ms),
+            }
+        }
+
+        let Link::Open(stream) = &mut state.link else {
+            unreachable!("a link is open or has just been scheduled to retry");
+        };
+        let chunk = match stream.read() {
+            Ok(chunk) => chunk,
+            Err(reason) => return state.fail(reason, now_ms),
+        };
+        // A stream that said anything at all — a keepalive counts — is reachable,
+        // so the ladder starts from the top the next time it ends. Only silence
+        // followed by a drop keeps climbing it.
+        if !chunk.is_empty() {
+            state.attempts = 0;
+        }
+        state.buffer.push(&chunk);
+        let frames = state.buffer.take(MAX_FRAMES_PER_DRAIN);
+        if let Some(id) = frames.iter().rev().find_map(|frame| frame.id.clone()) {
+            state.last_event_id = Some(id);
+        }
+        Delivery::Frames(frames)
+    }
+}
+
+/// Gap left between consecutive datagrams in a burst.
+///
+/// `AF_UNIX` `SOCK_DGRAM` has no flow control: a connector that emits every
+/// source back to back outruns Canvas's drain loop and overruns the socket
+/// buffer, and the sends that lose that race fail with `ENOBUFS`. A couple of
+/// milliseconds per source is nothing against a tick measured in seconds.
+pub const SEND_SPACING: Duration = Duration::from_millis(2);
+
+/// Attempts one datagram gets before it is reported lost. Bounded so a receiver
+/// that has genuinely stopped cannot stall the tick.
+pub const MAX_SEND_ATTEMPTS: u32 = 5;
+
+/// Wait after the first congested send; doubles per attempt.
+const SEND_BACKOFF: Duration = Duration::from_millis(4);
+
+/// How long to wait after attempt `attempt`, 1-based.
+pub fn send_backoff(attempt: u32) -> Duration {
+    SEND_BACKOFF.saturating_mul(1u32 << attempt.saturating_sub(1).min(5))
+}
+
+/// Whether an error is the socket asking us to slow down rather than telling us
+/// something is wrong.
+///
+/// `ENOBUFS` is transient by construction — the receiver drains continuously —
+/// and `WouldBlock` is the same congestion reported by a non-blocking socket.
+/// Anything else is a real failure and must not be retried into silence.
+pub fn congested(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(libc::ENOBUFS) || error.kind() == io::ErrorKind::WouldBlock
+}
+
+/// Sends one datagram, retrying while the socket is merely congested.
+///
+/// Returns the number of attempts it took, or the attempt count and the error
+/// the last one failed with. The error is returned rather than logged because
+/// losing a snapshot has to be loud: the widget keeps its previous value at
+/// `state: ready`, so a dropped send reads as current data (rule 2) — it is
+/// precisely the failure that is invisible unless someone says it happened.
+pub fn send_retrying(
+    mut send: impl FnMut() -> io::Result<()>,
+    mut wait: impl FnMut(Duration),
+) -> Result<u32, (u32, io::Error)> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match send() {
+            Ok(()) => return Ok(attempt),
+            Err(error) if attempt >= MAX_SEND_ATTEMPTS || !congested(&error) => {
+                return Err((attempt, error));
+            }
+            Err(_) => wait(send_backoff(attempt)),
+        }
     }
 }
 
@@ -1145,7 +1500,7 @@ mod tests {
     #[test]
     fn an_unconnected_subscription_says_so_instead_of_loading_forever() {
         let mut transport = Unsubscribed;
-        let Delivery::Interrupted(reason) = transport.drain("activity") else {
+        let Delivery::Interrupted(reason) = transport.drain("activity", NOW_MS) else {
             panic!("the stub cannot deliver frames");
         };
         for kind in SUPPORTED_KINDS {
@@ -1265,6 +1620,395 @@ mod tests {
         assert_eq!(window_label(&spec), "15m");
         spec.window_seconds = None;
         assert_eq!(window_label(&spec), "live");
+    }
+
+    /// One `read` per entry, then the connection is over.
+    /// What one connection hands back, read by read: bytes, or the reason it
+    /// ended.
+    type Reads = Vec<Result<Vec<u8>, Unavailable>>;
+
+    struct ScriptedStream {
+        reads: std::collections::VecDeque<Result<Vec<u8>, Unavailable>>,
+    }
+
+    impl EventStream for ScriptedStream {
+        fn read(&mut self) -> Result<Vec<u8>, Unavailable> {
+            self.reads
+                .pop_front()
+                .unwrap_or(Err(Unavailable::Disconnected))
+        }
+    }
+
+    /// Hands out scripted connections in order and records what each one was
+    /// asked to resume from. An exhausted script is an endpoint that has gone.
+    #[derive(Default)]
+    struct ScriptedConnector {
+        connections: std::collections::VecDeque<Result<Reads, Unavailable>>,
+        resumed: Vec<Option<String>>,
+    }
+
+    impl Connector for ScriptedConnector {
+        type Stream = ScriptedStream;
+
+        fn connect(
+            &mut self,
+            _topic: &str,
+            last_event_id: Option<&str>,
+        ) -> Result<Self::Stream, Unavailable> {
+            self.resumed.push(last_event_id.map(str::to_owned));
+            match self.connections.pop_front() {
+                Some(Ok(reads)) => Ok(ScriptedStream {
+                    reads: reads.into(),
+                }),
+                Some(Err(reason)) => Err(reason),
+                None => Err(Unavailable::Disconnected),
+            }
+        }
+    }
+
+    fn block(event: &str, data: &str) -> Vec<u8> {
+        format!("event: {event}\ndata: {data}\n\n").into_bytes()
+    }
+
+    #[test]
+    fn a_partial_block_is_carried_to_the_next_read_rather_than_lost() {
+        let mut buffer = FrameBuffer::default();
+        buffer.push(b"event: run\ndata: {\"a\":1}\n\nevent: no");
+        let first = buffer.take(MAX_FRAMES_PER_DRAIN);
+        assert_eq!(first.len(), 1, "only the complete block is a frame");
+        buffer.push(b"te\ndata: two\n\n");
+        let second = buffer.take(MAX_FRAMES_PER_DRAIN);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].event.as_deref(), Some("note"));
+        assert_eq!(second[0].data, "two");
+        assert_eq!(buffer.buffered(), 0);
+    }
+
+    #[test]
+    fn crlf_framing_yields_the_same_frames_as_lf() {
+        // A CRLF stream framed on "\n\n" alone merges every event into one
+        // block, and a "\r" left on the end of a value corrupts it silently.
+        let lf = parse_stream("event: run\ndata: one\n\nevent: run\ndata: two\n\n");
+        let crlf = parse_stream("event: run\r\ndata: one\r\n\r\nevent: run\r\ndata: two\r\n\r\n");
+        assert_eq!(lf, crlf);
+        assert_eq!(crlf.len(), 2);
+        assert_eq!(crlf[0].data, "one");
+    }
+
+    #[test]
+    fn a_drain_takes_a_bounded_number_of_frames_and_keeps_the_rest_in_order() {
+        let mut buffer = FrameBuffer::default();
+        for index in 0..MAX_FRAMES_PER_DRAIN + 5 {
+            buffer.push(&block("run", &index.to_string()));
+        }
+        let first = buffer.take(MAX_FRAMES_PER_DRAIN);
+        assert_eq!(first.len(), MAX_FRAMES_PER_DRAIN);
+        assert_eq!(first[0].data, "0", "the oldest event is read first");
+        let rest = buffer.take(MAX_FRAMES_PER_DRAIN);
+        assert_eq!(rest.len(), 5, "nothing is dropped, only deferred");
+        assert_eq!(rest[0].data, MAX_FRAMES_PER_DRAIN.to_string());
+    }
+
+    #[test]
+    fn an_oversized_event_is_refused_and_parsing_resumes_at_the_next_one() {
+        let mut buffer = FrameBuffer::default();
+        buffer.push(&block("run", &"x".repeat(MAX_EVENT_BYTES + 1)));
+        buffer.push(&block("run", "small"));
+        let frames = buffer.take(MAX_FRAMES_PER_DRAIN);
+        assert_eq!(frames.len(), 1, "the readable event still arrives");
+        assert_eq!(frames[0].data, "small");
+        assert_eq!(buffer.discarded(), 1, "and the refusal is countable");
+    }
+
+    #[test]
+    fn a_producer_that_outruns_the_tick_cannot_grow_the_buffer_without_bound() {
+        let mut buffer = FrameBuffer::default();
+        let payload = "y".repeat(1_000);
+        // Enough to overrun the ceiling; the buffer's own trimming means it can
+        // never be observed above it, so the count is what has to exceed it.
+        for _ in 0..MAX_BUFFERED_BYTES / payload.len() + 8 {
+            buffer.push(&block("run", &payload));
+        }
+        buffer.push(&block("run", "newest"));
+        assert!(buffer.buffered() <= MAX_BUFFERED_BYTES);
+        assert!(buffer.discarded() > 0, "dropping bytes is not silent");
+        // The oldest blocks go first, which is what keeps a live tail live.
+        let frames = buffer.take(usize::MAX);
+        assert_eq!(frames.last().unwrap().data, "newest");
+    }
+
+    #[test]
+    fn a_subscription_connects_once_and_hands_up_the_frames_that_arrive() {
+        let mut subscription = SseSubscription::new(ScriptedConnector {
+            connections: [Ok(vec![Ok(block("run", "one")), Ok(Vec::new())])].into(),
+            resumed: Vec::new(),
+        });
+        let Delivery::Frames(frames) = subscription.drain("events", NOW_MS) else {
+            panic!("the first drain should deliver");
+        };
+        assert_eq!(frames.len(), 1);
+        // A quiet connection is open, not ended: no reconnect, no frames.
+        assert_eq!(
+            subscription.drain("events", NOW_MS + 1_000),
+            Delivery::Frames(Vec::new())
+        );
+        assert_eq!(subscription.connector.resumed.len(), 1, "one connect");
+    }
+
+    #[test]
+    fn a_dropped_stream_reads_as_reconnecting_and_waits_before_trying_again() {
+        // The gap itself is the thing a viewer must not be left to infer.
+        let mut subscription = SseSubscription::new(ScriptedConnector {
+            connections: [
+                Ok(vec![
+                    Ok(block("run", "one")),
+                    Err(Unavailable::Disconnected),
+                ]),
+                Ok(vec![Ok(block("run", "two"))]),
+            ]
+            .into(),
+            resumed: Vec::new(),
+        });
+        assert!(matches!(
+            subscription.drain("events", NOW_MS),
+            Delivery::Frames(frames) if frames.len() == 1
+        ));
+        assert_eq!(
+            subscription.drain("events", NOW_MS),
+            Delivery::Interrupted(Unavailable::Reconnecting)
+        );
+        let wait = reconnect_delay_ms(1);
+        assert_eq!(
+            subscription.drain("events", NOW_MS + wait - 1),
+            Delivery::Interrupted(Unavailable::Reconnecting),
+            "the answer does not change while the backoff runs"
+        );
+        assert_eq!(
+            subscription.connector.resumed.len(),
+            1,
+            "and nothing reconnects inside it"
+        );
+        assert!(matches!(
+            subscription.drain("events", NOW_MS + wait),
+            Delivery::Frames(frames) if frames.len() == 1
+        ));
+        assert_eq!(subscription.connector.resumed.len(), 2);
+    }
+
+    #[test]
+    fn reconnects_are_bounded_and_the_ladder_restarts_after_a_cooldown() {
+        let mut subscription = SseSubscription::new(ScriptedConnector::default());
+        let mut now = NOW_MS;
+        for attempt in 1..MAX_RECONNECT_ATTEMPTS {
+            assert_eq!(
+                subscription.drain("events", now),
+                Delivery::Interrupted(Unavailable::Reconnecting),
+                "attempt {attempt} is still a retry"
+            );
+            now += reconnect_delay_ms(attempt);
+        }
+        assert_eq!(
+            subscription.drain("events", now),
+            Delivery::Interrupted(Unavailable::Unreachable),
+            "the ladder ends loudly rather than climbing forever"
+        );
+        let attempts = subscription.connector.resumed.len() as u32;
+        assert_eq!(attempts, MAX_RECONNECT_ATTEMPTS);
+        assert_eq!(
+            subscription.drain("events", now + RECONNECT_COOLDOWN_MS - 1),
+            Delivery::Interrupted(Unavailable::Unreachable),
+        );
+        assert_eq!(
+            subscription.connector.resumed.len() as u32,
+            attempts,
+            "an unreachable endpoint is not hammered during the cooldown"
+        );
+        // Unreachable is loud, not terminal: a stream that comes back is picked
+        // up without anyone restarting the connector.
+        assert_eq!(
+            subscription.drain("events", now + RECONNECT_COOLDOWN_MS),
+            Delivery::Interrupted(Unavailable::Reconnecting),
+        );
+    }
+
+    #[test]
+    fn a_stream_that_spoke_earns_a_fresh_ladder_when_it_ends() {
+        // A blip on a healthy stream must not inherit the backoff of an endpoint
+        // that was already failing, or the first drop after a bad night waits
+        // half a minute for no reason.
+        let mut subscription = SseSubscription::new(ScriptedConnector {
+            connections: [
+                Err(Unavailable::Disconnected),
+                Err(Unavailable::Disconnected),
+                Ok(vec![
+                    Ok(block("run", "one")),
+                    Err(Unavailable::Disconnected),
+                ]),
+                Ok(vec![Ok(block("run", "two"))]),
+            ]
+            .into(),
+            resumed: Vec::new(),
+        });
+        let mut now = NOW_MS;
+        subscription.drain("events", now);
+        now += reconnect_delay_ms(1);
+        subscription.drain("events", now);
+        now += reconnect_delay_ms(2);
+        assert!(matches!(
+            subscription.drain("events", now),
+            Delivery::Frames(frames) if frames.len() == 1
+        ));
+        assert_eq!(
+            subscription.drain("events", now),
+            Delivery::Interrupted(Unavailable::Reconnecting)
+        );
+        assert!(
+            matches!(
+                subscription.drain("events", now + reconnect_delay_ms(1)),
+                Delivery::Frames(frames) if frames.len() == 1
+            ),
+            "the ladder restarted at its first rung"
+        );
+    }
+
+    #[test]
+    fn an_expired_session_is_reported_as_itself_so_re_authentication_can_happen() {
+        // Reporting this as `Reconnecting` would retry an expired credential
+        // until the cooldown and never open the re-auth path.
+        let mut subscription = SseSubscription::new(ScriptedConnector {
+            connections: [Err(Unavailable::Unauthorized)].into(),
+            resumed: Vec::new(),
+        });
+        assert_eq!(
+            subscription.drain("events", NOW_MS),
+            Delivery::Interrupted(Unavailable::Unauthorized)
+        );
+        assert_eq!(
+            subscription.drain("events", NOW_MS + 1),
+            Delivery::Interrupted(Unavailable::Unauthorized),
+            "and it stays that way while the backoff runs"
+        );
+    }
+
+    #[test]
+    fn a_reconnect_resumes_from_the_last_event_id_it_saw() {
+        let mut subscription = SseSubscription::new(ScriptedConnector {
+            connections: [
+                Ok(vec![
+                    Ok(b"id: 41\ndata: one\n\nid: 42\ndata: two\n\n".to_vec()),
+                    Err(Unavailable::Disconnected),
+                ]),
+                Ok(vec![Ok(Vec::new())]),
+            ]
+            .into(),
+            resumed: Vec::new(),
+        });
+        subscription.drain("events", NOW_MS);
+        subscription.drain("events", NOW_MS);
+        subscription.drain("events", NOW_MS + reconnect_delay_ms(1));
+        assert_eq!(
+            subscription.connector.resumed,
+            vec![None, Some("42".to_string())],
+            "the newest id seen, not the first"
+        );
+    }
+
+    #[test]
+    fn a_clock_that_jumps_backwards_does_not_wedge_a_subscription_shut() {
+        let mut subscription = SseSubscription::new(ScriptedConnector::default());
+        subscription.drain("events", NOW_MS);
+        // A deadline further out than any this connector sets is a moved clock,
+        // not a wait to honour.
+        assert_eq!(
+            subscription.drain("events", NOW_MS - RECONNECT_COOLDOWN_MS * 2),
+            Delivery::Interrupted(Unavailable::Reconnecting)
+        );
+        assert_eq!(subscription.connector.resumed.len(), 2, "it tried again");
+    }
+
+    #[test]
+    fn a_reconnecting_source_says_so_in_the_snapshot_a_widget_reads() {
+        for (reason, state) in [
+            (Unavailable::Reconnecting, "disconnected"),
+            (Unavailable::Unreachable, "error"),
+        ] {
+            let event = envelope(
+                "elmers/activity",
+                &spec("event_log"),
+                &window(4, 10),
+                Some(reason),
+                1,
+                NOW_MS,
+            )
+            .unwrap();
+            assert_eq!(event["payload"]["data"]["state"], state);
+            assert_eq!(event["payload"]["data"]["detail"], reason.detail());
+            // Canvas drops a mutation whose kind differs from the surface.
+            assert_eq!(event["payload"]["widget"]["kind"], "event_log");
+        }
+    }
+
+    fn congestion() -> io::Error {
+        io::Error::from_raw_os_error(libc::ENOBUFS)
+    }
+
+    #[test]
+    fn a_congested_send_is_waited_out_rather_than_dropped() {
+        // A dropped snapshot leaves the widget on its previous value at
+        // state=ready, so it reads as current while being a tick old.
+        let mut attempts = 0;
+        let mut waits = Vec::new();
+        let sent = send_retrying(
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Err(congestion())
+                } else {
+                    Ok(())
+                }
+            },
+            |wait| waits.push(wait),
+        );
+        assert_eq!(sent.ok(), Some(3), "the snapshot still went out");
+        assert_eq!(waits, vec![send_backoff(1), send_backoff(2)]);
+    }
+
+    #[test]
+    fn a_send_that_stays_congested_is_reported_rather_than_retried_forever() {
+        let mut waits = Vec::new();
+        let outcome = send_retrying(|| Err(congestion()), |wait| waits.push(wait));
+        let Err((attempts, error)) = outcome else {
+            panic!("a socket that never drains cannot succeed");
+        };
+        assert_eq!(attempts, MAX_SEND_ATTEMPTS, "the retry is bounded");
+        assert!(congested(&error), "and the caller is handed the reason");
+        assert_eq!(waits.len() as u32, MAX_SEND_ATTEMPTS - 1);
+        // The whole ladder has to stay well inside a tick, or pacing one source
+        // delays every source behind it.
+        assert!(waits.iter().sum::<Duration>() < Duration::from_millis(500));
+    }
+
+    #[test]
+    fn an_error_that_is_not_congestion_fails_immediately() {
+        // Retrying a socket that does not exist just delays the report.
+        let mut waits = Vec::new();
+        let outcome = send_retrying(
+            || Err(io::Error::from(io::ErrorKind::NotFound)),
+            |wait| waits.push(wait),
+        );
+        assert!(matches!(outcome, Err((1, _))));
+        assert!(waits.is_empty());
+    }
+
+    #[test]
+    fn every_wait_this_connector_takes_grows_and_stays_bounded() {
+        let sends: Vec<Duration> = (1..=MAX_SEND_ATTEMPTS).map(send_backoff).collect();
+        assert!(sends.windows(2).all(|pair| pair[0] <= pair[1]));
+        let reconnects: Vec<u64> = (1..=MAX_RECONNECT_ATTEMPTS + 4)
+            .map(reconnect_delay_ms)
+            .collect();
+        assert!(reconnects.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!(reconnects.iter().all(|wait| *wait <= RECONNECT_COOLDOWN_MS));
     }
 
     /// The bug this crate exists for: `elmers-now` declares `sse:` sources that

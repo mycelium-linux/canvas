@@ -458,6 +458,7 @@ name = "canvas-sse"
 version = "0.1.0"
 dependencies = [
  "canvas-metrics",
+ "libc",
  "serde",
  "serde_json",
 ]

@@ -6,7 +6,7 @@
 //! so the mapping is testable without a network or a keyring.
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, io, time::Duration};
 
 pub const STREAM_SCHEMA_VERSION: u32 = 1;
 pub const CONTRACT: &str = "canvas.widget.snapshot.v1";
@@ -37,6 +37,12 @@ pub struct Mapping {
 fn default_poll() -> u64 {
     30
 }
+
+/// Bounds a configured poll interval is held to. The floor is what the send
+/// pacing below is budgeted against: a burst has to finish well inside the
+/// shortest interval anyone can ask for.
+pub const MIN_POLL_SECONDS: u64 = 5;
+pub const MAX_POLL_SECONDS: u64 = 3600;
 
 /// How one logical widget source is produced. The PromQL lives here, host-side,
 /// deliberately not in the view JSON: views are shared and reconfigurable, and a
@@ -476,9 +482,154 @@ pub fn rfc3339(epoch_seconds: u64) -> String {
     )
 }
 
+/// Wait between datagrams in one poll's burst.
+///
+/// AF_UNIX SOCK_DGRAM has no flow control. Canvas drains its stream socket
+/// continuously, but a poll emits every source back to back, and that burst can
+/// fill the receive buffer faster than it empties: the surplus sends fail with
+/// `ENOBUFS` and those snapshots are gone. Losing one is worse than delivering
+/// it late, because the widget keeps its previous value and stays `ready` —
+/// stale while reading as current, which is the failure `docs/widget-quality.md`
+/// rule 2 exists to prevent. At a 30 s poll a few milliseconds per datagram is
+/// invisible, so the burst is spread rather than raced.
+pub const SEND_SPACING: Duration = Duration::from_millis(3);
+
+/// Wait after the first `ENOBUFS`; each further retry doubles it.
+pub const SEND_BACKOFF: Duration = Duration::from_millis(10);
+
+/// Retries after the first attempt. Bounded on purpose: a buffer still full
+/// after this is not a burst, and waiting longer would trade a reported loss
+/// for an unreported stall.
+pub const SEND_RETRIES: u32 = 4;
+
+/// `ENOBUFS` as the host kernel numbers it. std decodes it as
+/// `ErrorKind::Uncategorized`, so the raw errno is the only stable way to
+/// recognise it, and the BSD-derived kernels and Linux disagree on the number.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const ENOBUFS: i32 = 105;
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const ENOBUFS: i32 = 55;
+
+/// Whether a send failed because the socket buffer is full — the one failure
+/// that clears on its own, since the receiver is draining the whole time.
+pub fn is_buffer_full(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(ENOBUFS)
+}
+
+/// How hard a burst is held back. Injectable so the pacing can be exercised
+/// without waiting through it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pacing {
+    pub spacing: Duration,
+    pub backoff: Duration,
+    pub retries: u32,
+}
+
+impl Default for Pacing {
+    fn default() -> Self {
+        Self {
+            spacing: SEND_SPACING,
+            backoff: SEND_BACKOFF,
+            retries: SEND_RETRIES,
+        }
+    }
+}
+
+/// A snapshot that never reached Canvas. Carries the attempts behind it so the
+/// report can distinguish a buffer that stayed full from a Canvas that is not
+/// running at all.
+#[derive(Debug)]
+pub struct SendFailure {
+    pub error: io::Error,
+    pub attempts: u32,
+}
+
+impl std::fmt::Display for SendFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let plural = if self.attempts == 1 { "" } else { "s" };
+        write!(
+            formatter,
+            "{} (after {} attempt{plural})",
+            self.error, self.attempts
+        )
+    }
+}
+
+impl std::error::Error for SendFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+/// Emits datagrams at a pace the receiver can drain, retrying the transient
+/// full buffer a burst provokes.
+///
+/// The socket and the clock are both injected: the pacing is ordinary logic and
+/// is tested as such, with no socket to bind and no wall time to spend.
+pub struct PacedSender<E, W> {
+    emit: E,
+    wait: W,
+    pacing: Pacing,
+    /// Spacing goes *between* datagrams, so the very first one never waits.
+    /// One sender spans every poll, which costs a later poll's first datagram a
+    /// spacing it did not need — cheaper than tracking a cycle boundary the
+    /// socket itself has no notion of.
+    started: bool,
+}
+
+impl<E, W> PacedSender<E, W>
+where
+    E: FnMut(&[u8]) -> io::Result<()>,
+    W: FnMut(Duration),
+{
+    pub fn new(emit: E, wait: W) -> Self {
+        Self::with_pacing(emit, wait, Pacing::default())
+    }
+
+    pub fn with_pacing(emit: E, wait: W, pacing: Pacing) -> Self {
+        Self {
+            emit,
+            wait,
+            pacing,
+            started: false,
+        }
+    }
+
+    /// Places one datagram, reporting how many retries it took — zero on the
+    /// ordinary path, which is what the caller stays quiet about.
+    pub fn send(&mut self, bytes: &[u8]) -> Result<u32, SendFailure> {
+        if self.started {
+            (self.wait)(self.pacing.spacing);
+        }
+        self.started = true;
+        let mut backoff = self.pacing.backoff;
+        let mut retries = 0;
+        loop {
+            match (self.emit)(bytes) {
+                Ok(()) => return Ok(retries),
+                // Every other errno — Canvas absent, socket path gone — fails
+                // identically on a retry, so it is reported now instead of
+                // several waits from now.
+                Err(error) if is_buffer_full(&error) && retries < self.pacing.retries => {
+                    (self.wait)(backoff);
+                    backoff = backoff.saturating_mul(2);
+                    retries += 1;
+                }
+                Err(error) => {
+                    return Err(SendFailure {
+                        error,
+                        attempts: retries + 1,
+                    });
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::{Cell, RefCell};
 
     fn spec(kind: &str) -> SourceSpec {
         SourceSpec {
@@ -711,5 +862,152 @@ mod tests {
         assert_eq!(rfc3339(1_788_949_087), "2026-09-09T10:18:07Z");
         // A leap day must not shift the calendar by one.
         assert_eq!(rfc3339(1_709_164_800), "2024-02-29T00:00:00Z");
+    }
+
+    /// Stands in for the socket and the clock: counts sends and records every
+    /// wait the pacer asks for, so a burst can be replayed instantly.
+    #[derive(Default)]
+    struct Recorder {
+        sends: Cell<u32>,
+        waits: RefCell<Vec<Duration>>,
+    }
+
+    impl Recorder {
+        /// A send that fails `failures` times with `error`, then succeeds.
+        fn failing(&self, failures: u32, error: i32) -> impl FnMut(&[u8]) -> io::Result<()> {
+            move |_bytes| {
+                let attempt = self.sends.get();
+                self.sends.set(attempt + 1);
+                if attempt < failures {
+                    Err(io::Error::from_raw_os_error(error))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        fn wait(&self) -> impl FnMut(Duration) {
+            move |waited| self.waits.borrow_mut().push(waited)
+        }
+        fn waits(&self) -> Vec<Duration> {
+            self.waits.borrow().clone()
+        }
+    }
+
+    fn pacing() -> Pacing {
+        Pacing {
+            spacing: Duration::from_millis(3),
+            backoff: Duration::from_millis(10),
+            retries: 4,
+        }
+    }
+
+    #[test]
+    fn the_errno_the_pacer_retries_is_this_platforms_full_buffer() {
+        // The retry hinges on one number that differs between kernels, so check
+        // it against the host's own errno table rather than trusting a constant.
+        let full = io::Error::from_raw_os_error(ENOBUFS);
+        assert!(
+            full.to_string().to_lowercase().contains("no buffer space"),
+            "{ENOBUFS} is not this platform's ENOBUFS: {full}"
+        );
+        assert!(is_buffer_full(&full));
+        assert!(!is_buffer_full(&io::Error::from(
+            io::ErrorKind::ConnectionRefused
+        )));
+    }
+
+    #[test]
+    fn a_burst_is_paced_behind_the_previous_datagram() {
+        let log = Recorder::default();
+        let pacing = pacing();
+        let mut sender = PacedSender::with_pacing(log.failing(0, ENOBUFS), log.wait(), pacing);
+        let burst = 21;
+        for _ in 0..burst {
+            assert_eq!(sender.send(b"{}").unwrap(), 0);
+        }
+        // The first datagram leaves immediately; every later one waits behind
+        // the one before it, which is the whole point at a 30 s poll.
+        assert_eq!(log.sends.get(), burst);
+        assert_eq!(log.waits().len() as u32, burst - 1);
+        assert!(log.waits().iter().all(|waited| *waited == pacing.spacing));
+    }
+
+    #[test]
+    fn a_full_socket_buffer_is_retried_until_it_drains() {
+        let log = Recorder::default();
+        let pacing = pacing();
+        let mut sender = PacedSender::with_pacing(log.failing(2, ENOBUFS), log.wait(), pacing);
+        assert_eq!(sender.send(b"{}").unwrap(), 2);
+        assert_eq!(log.sends.get(), 3, "the snapshot must actually be resent");
+        let waits = log.waits();
+        assert_eq!(waits.len(), 2, "one wait per retry, none before the first");
+        assert_eq!(waits[0], pacing.backoff);
+        assert!(waits[1] > waits[0], "backoff must grow, not repeat");
+    }
+
+    #[test]
+    fn a_buffer_that_never_drains_is_reported_rather_than_retried_forever() {
+        let log = Recorder::default();
+        let pacing = pacing();
+        let mut sender =
+            PacedSender::with_pacing(log.failing(u32::MAX, ENOBUFS), log.wait(), pacing);
+        let failure = sender.send(b"{}").unwrap_err();
+        assert_eq!(failure.attempts, pacing.retries + 1);
+        assert_eq!(log.sends.get(), pacing.retries + 1);
+        assert!(is_buffer_full(&failure.error));
+        // A retry must never make a persistent loss quiet: the report says how
+        // hard it tried, because the widget is now stale but still reads ready.
+        assert!(
+            failure
+                .to_string()
+                .contains(&format!("{} attempts", failure.attempts)),
+            "{failure}"
+        );
+    }
+
+    #[test]
+    fn an_error_that_is_not_a_full_buffer_is_reported_at_once() {
+        // Canvas not running fails identically on every attempt; backing off
+        // would only delay the report, once per widget, every poll.
+        let log = Recorder::default();
+        let mut sender =
+            PacedSender::with_pacing(log.failing(u32::MAX, econnrefused()), log.wait(), pacing());
+        let failure = sender.send(b"{}").unwrap_err();
+        assert_eq!(failure.attempts, 1);
+        assert_eq!(log.sends.get(), 1);
+        assert!(log.waits().is_empty());
+        assert!(!is_buffer_full(&failure.error));
+    }
+
+    /// `ECONNREFUSED`, what a socket with no Canvas behind it gives. Any
+    /// non-`ENOBUFS` errno would do; this is the one seen in practice.
+    fn econnrefused() -> i32 {
+        if cfg!(any(target_os = "linux", target_os = "android")) {
+            111
+        } else {
+            61
+        }
+    }
+
+    #[test]
+    fn the_send_budget_stays_small_against_the_shortest_poll() {
+        // Pacing protects a poll; it must never be able to outlast one. Both
+        // halves are checked against the configured floor rather than a literal
+        // so the constants cannot drift apart unnoticed.
+        let pacing = Pacing::default();
+        let interval = Duration::from_secs(MIN_POLL_SECONDS);
+        let mut worst = Duration::ZERO;
+        let mut backoff = pacing.backoff;
+        for _ in 0..pacing.retries {
+            worst += backoff;
+            backoff *= 2;
+        }
+        assert!(
+            worst < interval / 10,
+            "a stuck buffer holds the burst for {worst:?}"
+        );
+        // Ordinary spacing has to be invisible even for a view far larger than
+        // the 21 sources shipped today.
+        assert!(pacing.spacing * 64 < interval / 10);
     }
 }

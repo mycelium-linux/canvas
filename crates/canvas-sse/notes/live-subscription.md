@@ -1,24 +1,36 @@
 # Connecting canvas-sse to a real stream
 
-What this pass shipped: the mapping, the transforms and the emit loop, with the
-transport stubbed by `Unsubscribed`. `config/views/elmers-now.json`'s three
-`sse:` widgets stop sitting on Loading — they report `disconnected` with a
-reason, which is the honest state until something subscribes.
+What shipped: the mapping, the transforms, the emit loop, and the whole
+subscription lifecycle above the transport — `SseSubscription` connects, frames,
+resumes from the last event id, backs off when a stream ends, and reports which
+of those is happening. `config/views/elmers-now.json`'s three `sse:` widgets stop
+sitting on Loading — with no transport compiled in they report `disconnected`
+with a reason, which is the honest state until something subscribes.
 
 ## What a follow-up has to supply
 
-**1. One implementation of `Subscription`.** The whole transport boundary is:
+**1. One implementation of `Connector`.** The whole transport boundary is now two
+methods:
 
 ```rust
-fn drain(&mut self, topic: &str) -> Delivery;   // Frames(Vec<Frame>) | Interrupted(Unavailable)
+fn connect(&mut self, topic: &str, last_event_id: Option<&str>) -> Result<Self::Stream, Unavailable>;
+fn read(&mut self) -> Result<Vec<u8>, Unavailable>;   // Ok(vec![]) is open and quiet
 ```
 
-It must not block past `tick_seconds`, so the connection belongs on its own
-thread with a bounded channel back to `drain`. `parse_stream` already handles the
-wire format (multi-line `data:`, `event:`, `id:`, comment keepalives); it drops a
-trailing partial block, so the reader keeps the remainder and prepends it to the
-next chunk. Nothing above the trait changes, and the transforms stay testable
-with no network.
+Neither may block past `tick_seconds`, so the connection belongs on its own
+thread with a bounded channel that `read` takes from. Everything else is already
+here and already tested: `FrameBuffer` handles the wire format (multi-line
+`data:`, `event:`, `id:`, comment keepalives, LF and CRLF) and keeps a partial
+block for the next read; reconnect backoff, the attempt bound, the cooldown that
+restarts the ladder, and the `Reconnecting` / `Unreachable` / `Unauthorized`
+states a viewer sees are all above the trait. `SseSubscription::drain` is handed
+`now_ms` rather than reading a clock, which is why every one of those states is
+reachable in a test with no network.
+
+Bounds to respect rather than re-invent: `MAX_EVENT_BYTES` per block,
+`MAX_BUFFERED_BYTES` of unparsed stream, `MAX_FRAMES_PER_DRAIN` per tick,
+`MAX_RECONNECT_ATTEMPTS` before `Unreachable`. `FrameBuffer::discarded` counts
+what size refused; a transport that has somewhere loud to put that should.
 
 **2. The brokered read, not a bearer.** `canvas-metrics` names an operation and
 lets `fpl-desktop-bridge` attach the owner's credential (`metric-read`). SSE
@@ -58,6 +70,22 @@ which is the fastest way to see what a widget would receive.
 - **Fitting shrinks entry count *and* text.** `canvas-metrics` only thins sample
   counts, which is enough for numbers. One 8KB log line overflows even a
   one-entry log, so the ladder shrinks both.
+- **Reconnecting is a state, not a gap.** `Unavailable::Reconnecting` renders as
+  `disconnected` — Canvas has no other tag for it, and inventing one would fail
+  to deserialize and lose the whole snapshot — but its detail says the stream
+  ended and something is being done. A viewer who cannot tell "reconnecting" from
+  "never subscribed" cannot tell whether to go and look.
+- **Exhausting the ladder is loud, not terminal.** `MAX_RECONNECT_ATTEMPTS`
+  failures report `Unreachable` (a source error) and then wait
+  `RECONNECT_COOLDOWN_MS` before starting the ladder again. A wall display that
+  needs a human to restart it after a router blip is a worse failure than the
+  blip; hammering a dead endpoint every tick is worse than both.
+- **The burst is paced and a congested send is retried.** `AF_UNIX` datagrams
+  have no flow control, so emitting every source back to back overruns the
+  receive buffer and loses snapshots to `ENOBUFS` — and a lost snapshot leaves
+  the widget on its previous value at `state: ready`, which reads as current.
+  `SEND_SPACING` between sources and `send_retrying` for `ENOBUFS` alone; a
+  failure that survives the retry is printed, never swallowed.
 - **`stale_after_seconds` is declared, not inferred.** A subscription genuinely
   cannot tell "nothing happened" from "nothing arrived", so the operator says how
   long quiet is still healthy. This is the one place the crate takes a

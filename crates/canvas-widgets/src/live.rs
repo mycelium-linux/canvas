@@ -46,10 +46,23 @@ pub fn element<'a, Message: 'a>(
     spec: &'a WidgetSpec,
     visual: &VisualTheme,
 ) -> Element<'a, Message> {
-    let palette = &visual.palette;
+    // Freshness is carried by the value, so the body draws from a palette the
+    // data state has already been applied to. `panel` is handed the true theme:
+    // the provenance badge, the state dot and the footer have to stay legible
+    // in exactly the states that drain everything else.
+    let fresh = freshness(spec.data.state, visual);
+    let palette = &fresh.values;
     let metrics = visual.metrics;
     match &spec.kind {
-        WidgetKind::Quant { widget } => quant::element(spec, widget, visual),
+        // Quant draws through its own module, so the drained palette has to be
+        // handed over inside a theme rather than as a loose palette — without
+        // this a stale candlestick renders identically to a live one, which is
+        // the exact failure rule 2 names.
+        WidgetKind::Quant { widget } => {
+            let mut drained = *visual;
+            drained.palette = fresh.values;
+            quant::element(spec, widget, &drained)
+        }
         WidgetKind::Stat {
             label,
             value,
@@ -635,30 +648,22 @@ pub(crate) fn panel<'a, Message: 'a>(
     visual: &VisualTheme,
 ) -> Element<'a, Message> {
     let surface = color(visual.surface_raised);
-    let border = color(visual.palette.border);
     let metrics = visual.metrics;
     let panel_opacity = visual.panel_opacity;
-    let muted_opacity = visual.muted_opacity;
+    // Resolved before the closure below: capturing `visual` would tie the style
+    // to the theme's lifetime, and Color is Copy.
+    let border = freshness(spec.data.state, visual).border;
     let content: Element<'a, Message> = match spec.data.state {
         WidgetDataState::Loading
         | WidgetDataState::NoData
         | WidgetDataState::Disconnected
         | WidgetDataState::Error => data_state_content(spec, visual),
-        // Stale keeps its body, because a stale number is still information,
-        // but must not read as current. The footer already names the state; this
-        // carries it into the value, which is the part anyone actually looks at.
-        WidgetDataState::Stale | WidgetDataState::Partial => {
-            // Resolved before the closure: capturing `visual` would tie the
-            // style to the theme's lifetime, and Color is Copy.
-            let dimmed = with_alpha(color(visual.palette.text), muted_opacity);
-            container(body)
-                .style(move |_| container::Style {
-                    text_color: Some(dimmed),
-                    ..Default::default()
-                })
-                .into()
-        }
-        WidgetDataState::Ready => body,
+        // Stale and Partial keep their body: an old number and an incomplete
+        // set are both still information. Neither is dimmed — the value itself
+        // already carries Stale (drained of colour by [`freshness`] where the
+        // body was built) and the border carries Partial, so dimming here would
+        // only cost the labels contrast they need in every state.
+        WidgetDataState::Ready | WidgetDataState::Stale | WidgetDataState::Partial => body,
     };
     let mut layout = column![].spacing(metrics.space_2);
     // The badge sits above the body and is drawn in every state, including
@@ -678,7 +683,7 @@ pub(crate) fn panel<'a, Message: 'a>(
         .style(move |_| container::Style {
             background: Some(with_alpha(surface, panel_opacity).into()),
             border: iced::Border {
-                color: with_alpha(border, muted_opacity),
+                color: border,
                 width: 1.0,
                 radius: metrics.radius_lg.into(),
             },
@@ -688,6 +693,108 @@ pub(crate) fn panel<'a, Message: 'a>(
             ..Default::default()
         })
         .into()
+}
+
+/// How a data state marks the widget it belongs to.
+///
+/// Stale and Partial are different claims and must not share a mark: Stale says
+/// the number is old, Partial says the number is current but the set behind it
+/// is incomplete. Both used to dim the whole body to `muted_opacity`, which
+/// stated neither — it faded the labels and the chrome along with the value, so
+/// a stale widget read as a widget in a low-contrast theme.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Freshness {
+    /// The palette the body draws from. Every value-bearing mark in this
+    /// library resolves through a palette role, so a state is applied once here
+    /// rather than at each of the marks.
+    values: ThemePalette,
+    /// The panel's border.
+    border: Color,
+}
+
+fn freshness(state: WidgetDataState, visual: &VisualTheme) -> Freshness {
+    let palette = visual.palette;
+    let quiet = with_alpha(color(palette.border), visual.muted_opacity);
+    match state {
+        // A stale value keeps its size, its weight and its opacity — it is
+        // still the number someone reads from across the room — and gives up
+        // its chroma at fixed perceptual lightness. Contrast is untouched,
+        // which is what separates "this is old" from "this theme is washed
+        // out"; the value reads as drained rather than dim.
+        WidgetDataState::Stale => Freshness {
+            values: drain(palette, STALE_CHROMA),
+            border: quiet,
+        },
+        // Partial data is current, so the value is drawn exactly as a live one.
+        // What is incomplete is the extent the panel claims to cover, so the
+        // panel edge is what carries it.
+        WidgetDataState::Partial => Freshness {
+            values: palette,
+            border: with_alpha(data_state_color(state, &palette), visual.muted_opacity),
+        },
+        // The remaining states replace the body outright, so they have no value
+        // left to mark.
+        WidgetDataState::Ready
+        | WidgetDataState::Loading
+        | WidgetDataState::NoData
+        | WidgetDataState::Disconnected
+        | WidgetDataState::Error => Freshness {
+            values: palette,
+            border: quiet,
+        },
+    }
+}
+
+/// The share of a role's chroma a stale value keeps.
+///
+/// Not zero: colour is identity as well as vitality, and six series drained to
+/// one grey is a chart whose legend no longer maps to anything. Where a drained
+/// role meets a rule with a chroma floor of its own — [`series_colors`] — the
+/// floor wins, and that is the right way round: staleness may take colour from
+/// an identity, but never the identity.
+const STALE_CHROMA: f32 = 0.35;
+
+/// Every role pulled toward grey at its own perceptual lightness.
+///
+/// The whole palette, rather than an enumerated list of "value" roles: text,
+/// surface and border carry almost no chroma to begin with and barely move, so
+/// the visible change lands on exactly the marks that carry a value — the
+/// sparkline, the gauge fill, the change percentage, the status dots — without
+/// anything having to keep a list of those in step with the widget kinds.
+fn drain(palette: ThemePalette, keep: f32) -> ThemePalette {
+    let role = |rgb: [u8; 3]| {
+        let value = to_oklch(color(rgb));
+        let drained = from_oklch(Oklch {
+            c: value.c * keep,
+            ..value
+        });
+        [
+            channel_u8(drained.r),
+            channel_u8(drained.g),
+            channel_u8(drained.b),
+        ]
+    };
+    // Named field by field on purpose: a role added to the palette upstream
+    // should stop this build rather than quietly keep its colour when stale.
+    ThemePalette {
+        background: role(palette.background),
+        background_strong: role(palette.background_strong),
+        surface: role(palette.surface),
+        surface_muted: role(palette.surface_muted),
+        text: role(palette.text),
+        text_muted: role(palette.text_muted),
+        primary: role(palette.primary),
+        success: role(palette.success),
+        warning: role(palette.warning),
+        danger: role(palette.danger),
+        info: role(palette.info),
+        border: role(palette.border),
+        border_strong: role(palette.border_strong),
+    }
+}
+
+fn channel_u8(channel: f32) -> u8 {
+    (channel.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 /// A persistent mark on any widget whose values are not real.
@@ -757,20 +864,21 @@ fn data_footer<'a, Message: 'a>(
     spec: &'a WidgetSpec,
     visual: &VisualTheme,
 ) -> Option<Element<'a, Message>> {
-    let metadata = [
-        spec.data.source.as_deref(),
-        spec.data.window.as_deref(),
-        spec.data.observed_at.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join("  ·  ");
-    if metadata.is_empty() && spec.data.state == WidgetDataState::Ready {
+    let state = spec.data.state;
+    // The observed time is drawn on its own rather than inside the metadata
+    // run, because it is the one field the state label makes a claim about.
+    let observed = observed_label(state, spec.data.observed_at.as_deref());
+    let metadata = [spec.data.source.as_deref(), spec.data.window.as_deref()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(FOOTER_SEPARATOR);
+    let has_metadata = !metadata.is_empty();
+    if !has_metadata && observed.is_none() && state == WidgetDataState::Ready {
         return None;
     }
     let metrics = visual.metrics;
-    let state = spec.data.state;
+    let muted = color(visual.palette.text_muted);
     let mut footer = row![].spacing(metrics.space_2);
     if state != WidgetDataState::Ready {
         footer = footer
@@ -781,14 +889,49 @@ fn data_footer<'a, Message: 'a>(
                     .color(data_state_color(state, &visual.palette)),
             );
     }
-    if !metadata.is_empty() {
-        footer = footer.push(space::horizontal()).push(
-            text(metadata)
-                .size(metrics.small)
-                .color(color(visual.palette.text_muted)),
-        );
+    if has_metadata || observed.is_some() {
+        footer = footer.push(space::horizontal());
+    }
+    if has_metadata {
+        footer = footer.push(text(metadata).size(metrics.small).color(muted));
+    }
+    if let Some(observed) = observed {
+        if has_metadata {
+            footer = footer.push(
+                text(FOOTER_SEPARATOR.trim())
+                    .size(metrics.small)
+                    .color(muted),
+            );
+        }
+        // "Stale" is a claim about this time, so the two are drawn as one
+        // statement in one colour instead of a state badge at one end of the
+        // footer and an unrelated-looking timestamp at the other. A second
+        // freshness indicator would be a second thing to keep in agreement.
+        footer = footer.push(text(observed).size(metrics.small).color(
+            if state == WidgetDataState::Stale {
+                data_state_color(state, &visual.palette)
+            } else {
+                muted
+            },
+        ));
     }
     Some(footer.align_y(iced::alignment::Vertical::Center).into())
+}
+
+/// Between fields in the footer's metadata run.
+const FOOTER_SEPARATOR: &str = "  ·  ";
+
+/// When the widget's value was observed, as the footer states it.
+///
+/// A widget that claims to be stale but cannot say what it is stale *since*
+/// is a payload bug, and saying so is louder than showing a bare "Stale" that
+/// a reader will silently date to now.
+fn observed_label(state: WidgetDataState, observed_at: Option<&str>) -> Option<String> {
+    match (observed_at, state) {
+        (Some(observed), _) => Some(observed.to_string()),
+        (None, WidgetDataState::Stale) => Some("observed time unknown".to_string()),
+        (None, _) => None,
+    }
 }
 
 fn data_state_label(state: WidgetDataState) -> &'static str {
@@ -1918,6 +2061,126 @@ mod tests {
         ((a - b + 180.0).rem_euclid(360.0) - 180.0).abs()
     }
 
+    /// Distance in Oklab, where a fixed step means the same perceived
+    /// difference anywhere in the space — the property a ramp built by
+    /// rotating RGB hue does not have.
+    fn separation(a: Oklch, b: Oklch) -> f32 {
+        let point = |c: Oklch| {
+            let (sin, cos) = c.h.to_radians().sin_cos();
+            (c.l, c.c * cos, c.c * sin)
+        };
+        let (l1, a1, b1) = point(a);
+        let (l2, a2, b2) = point(b);
+        ((l1 - l2).powi(2) + (a1 - a2).powi(2) + (b1 - b2).powi(2)).sqrt()
+    }
+
+    fn visual(palette: ThemePalette) -> VisualTheme {
+        canvas_core::ThemeSelection::Palette { palette }.visual_theme()
+    }
+
+    #[test]
+    fn every_data_state_a_widget_keeps_its_body_in_reads_differently() {
+        for (name, palette) in palettes() {
+            let visual = visual(palette);
+            let ready = freshness(WidgetDataState::Ready, &visual);
+            let stale = freshness(WidgetDataState::Stale, &visual);
+            let partial = freshness(WidgetDataState::Partial, &visual);
+            assert_ne!(ready, stale, "{name} draws a stale widget as a live one");
+            assert_ne!(ready, partial, "{name} draws partial data as complete");
+            assert_ne!(stale, partial, "{name} cannot tell old from incomplete");
+        }
+    }
+
+    #[test]
+    fn stale_marks_the_value_and_partial_marks_the_extent() {
+        for (name, palette) in palettes() {
+            let visual = visual(palette);
+            let ready = freshness(WidgetDataState::Ready, &visual);
+            let stale = freshness(WidgetDataState::Stale, &visual);
+            let partial = freshness(WidgetDataState::Partial, &visual);
+            // Partial data is current. The number is not old, so it is drawn
+            // exactly as a live one and the frame says what is missing.
+            assert_eq!(partial.values, ready.values, "{name} ages a current value");
+            assert_ne!(
+                partial.border, ready.border,
+                "{name} leaves incomplete data unmarked"
+            );
+            // Staleness is the other way round: the value carries it, and the
+            // chrome — which has to stay legible — does not.
+            assert_ne!(stale.values, ready.values, "{name} hides staleness");
+            assert_eq!(stale.border, ready.border, "{name} marks age on the frame");
+        }
+    }
+
+    #[test]
+    fn a_stale_value_gives_up_colour_and_not_contrast() {
+        for (name, palette) in palettes() {
+            let stale = drain(palette, STALE_CHROMA);
+            for (role, live, drained) in [
+                ("primary", palette.primary, stale.primary),
+                ("success", palette.success, stale.success),
+                ("warning", palette.warning, stale.warning),
+                ("danger", palette.danger, stale.danger),
+                ("info", palette.info, stale.info),
+            ] {
+                let (live, drained) = (to_oklch(color(live)), to_oklch(color(drained)));
+                assert!(
+                    drained.c < live.c,
+                    "{name} {role} keeps {:.3} of its {:.3} chroma when stale",
+                    drained.c,
+                    live.c
+                );
+                // Lightness is contrast, and a stale number is still read from
+                // across the room: draining must not cost it any. This is the
+                // difference from the dimming this replaced, which cost only
+                // contrast and no colour at all.
+                assert!(
+                    (drained.l - live.l).abs() < 0.02,
+                    "{name} {role} moved from lightness {:.3} to {:.3}",
+                    live.l,
+                    drained.l
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_stale_chart_can_still_be_read_against_its_legend() {
+        // Draining is how staleness shows, but colour is identity too: six
+        // series collapsed toward one grey is a chart whose legend maps to
+        // nothing, and that is worse than an old chart. The ramp's own chroma
+        // floor is what bounds the drain.
+        for (name, palette) in palettes() {
+            let colors = series_colors(&drain(palette, STALE_CHROMA));
+            for (index, first) in colors.iter().enumerate() {
+                for second in &colors[index + 1..] {
+                    let apart = separation(to_oklch(*first), to_oklch(*second));
+                    assert!(apart > 0.05, "{name} has two stale series {apart:.3} apart");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_widget_claiming_staleness_always_states_an_observed_time() {
+        assert_eq!(observed_label(WidgetDataState::Ready, None), None);
+        assert_eq!(observed_label(WidgetDataState::Partial, None), None);
+        assert_eq!(
+            observed_label(WidgetDataState::Ready, Some("19:30Z")).as_deref(),
+            Some("19:30Z")
+        );
+        // One statement, one time: the footer already renders `observed_at`, so
+        // "Stale" qualifies that field rather than implying a second one.
+        assert_eq!(
+            observed_label(WidgetDataState::Stale, Some("19:30Z")).as_deref(),
+            Some("19:30Z")
+        );
+        assert_eq!(
+            observed_label(WidgetDataState::Stale, None).as_deref(),
+            Some("observed time unknown")
+        );
+    }
+
     #[test]
     fn a_series_colour_is_never_a_status_colour() {
         // The defect this ramp replaces: `ops-stacked-bar` declares
@@ -1947,18 +2210,6 @@ mod tests {
 
     #[test]
     fn series_colours_stay_apart_from_each_other() {
-        // Distance in Oklab, where a fixed step means the same perceived
-        // difference anywhere in the space — the property a ramp built by
-        // rotating RGB hue does not have.
-        let separation = |a: Oklch, b: Oklch| {
-            let point = |c: Oklch| {
-                let (sin, cos) = c.h.to_radians().sin_cos();
-                (c.l, c.c * cos, c.c * sin)
-            };
-            let (l1, a1, b1) = point(a);
-            let (l2, a2, b2) = point(b);
-            ((l1 - l2).powi(2) + (a1 - a2).powi(2) + (b1 - b2).powi(2)).sqrt()
-        };
         for (name, palette) in palettes() {
             let colors = series_colors(&palette);
             assert!(

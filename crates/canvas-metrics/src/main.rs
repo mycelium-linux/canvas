@@ -4,7 +4,10 @@
 //! bridge attaches the owner's bearer and returns bounded JSON. When the session
 //! has expired the bridge says so distinctly, and this re-authenticates by
 //! running `fpl login`, which opens a browser where one exists.
-use canvas_metrics::{Mapping, Unavailable, classify, envelope, rfc3339, stream_identity};
+use canvas_metrics::{
+    MAX_POLL_SECONDS, MIN_POLL_SECONDS, Mapping, PacedSender, Unavailable, classify, envelope,
+    rfc3339, stream_identity,
+};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -94,7 +97,18 @@ fn main() -> Result<(), String> {
         stream_identity(id)?;
     }
 
-    let datagram = UnixDatagram::unbound().map_err(|error| error.to_string())?;
+    // Bound to the socket for the life of the process: a poll's snapshots are
+    // paced against each other, so the pacing state has to outlive one poll.
+    let mut sender = match &socket {
+        Some(path) => {
+            let datagram = UnixDatagram::unbound().map_err(|error| error.to_string())?;
+            Some(PacedSender::new(
+                move |bytes: &[u8]| datagram.send_to(bytes, path).map(|_| ()),
+                std::thread::sleep,
+            ))
+        }
+        None => None,
+    };
     let mut sequence: BTreeMap<String, u64> = BTreeMap::new();
     let mut last_reauth: Option<SystemTime> = None;
 
@@ -134,14 +148,22 @@ fn main() -> Result<(), String> {
                 eprintln!("canvas-metrics: {id} snapshot too large; skipped");
                 continue;
             }
-            match &socket {
-                Some(path) => {
-                    if let Err(error) = datagram.send_to(&bytes, path) {
-                        // Canvas may not be running. That is not fatal: keep
-                        // polling so widgets populate as soon as it comes back.
-                        eprintln!("canvas-metrics: cannot reach Canvas ({error})");
+            match &mut sender {
+                Some(sender) => match sender.send(&bytes) {
+                    Ok(0) => {}
+                    // The snapshot landed, but the socket buffer was full on the
+                    // way: say so, because it is the warning before a loss.
+                    Ok(retries) => eprintln!(
+                        "canvas-metrics: {id} snapshot needed {retries} retries (socket buffer full)"
+                    ),
+                    // Canvas may not be running. That is not fatal: keep polling
+                    // so widgets populate as soon as it comes back. It is still
+                    // named per source, because a widget whose snapshot never
+                    // arrives keeps its previous value and still reads ready.
+                    Err(failure) => {
+                        eprintln!("canvas-metrics: cannot reach Canvas for {id} ({failure})")
                     }
-                }
+                },
                 None => println!("{event}"),
             }
         }
@@ -154,6 +176,10 @@ fn main() -> Result<(), String> {
         if once {
             return Ok(());
         }
-        std::thread::sleep(Duration::from_secs(mapping.poll_seconds.clamp(5, 3600)));
+        std::thread::sleep(Duration::from_secs(
+            mapping
+                .poll_seconds
+                .clamp(MIN_POLL_SECONDS, MAX_POLL_SECONDS),
+        ));
     }
 }

@@ -10,6 +10,7 @@ use std::{
 pub use coherence_tokens;
 pub mod desktop;
 pub mod desktop_theme;
+pub mod display_watch;
 pub mod global_hotkey;
 pub mod layout;
 pub mod theme_file;
