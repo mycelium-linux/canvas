@@ -180,6 +180,7 @@ enum Message {
     WindowEvent(iced::window::Id, iced::window::Event),
     MouseEvent(iced::window::Id, iced::mouse::Event),
     RestoreSurface(String),
+    BackgroundTileClicked(usize),
     ScaleFactorChanged(iced::window::Id, f32),
     ContentLoaded {
         pending: Box<Pending>,
@@ -326,6 +327,14 @@ struct App {
     screensaver_piece_elapsed: Duration,
     screensaver_last_frame: Option<Instant>,
     screensaver_elapsed: Duration,
+    /// A clock for the background picker's previews.
+    ///
+    /// Separate from `screensaver_elapsed` because that one is deliberately
+    /// stopped when the workspace background is frozen — and a frozen desktop
+    /// is exactly when someone opens the picker to choose a different one.
+    /// Sharing it left every preview stuck at whatever instant the workspace
+    /// stopped at, which reads as most of the shaders being broken.
+    picker_elapsed: Duration,
     screensaver_fps: f32,
 }
 
@@ -505,6 +514,7 @@ impl App {
             screensaver_piece_elapsed: Duration::ZERO,
             screensaver_last_frame: None,
             screensaver_elapsed: Duration::ZERO,
+            picker_elapsed: Duration::ZERO,
             screensaver_fps: 0.0,
         };
         app.ensure_scene_decoded();
@@ -714,6 +724,30 @@ impl App {
                     self.emit_event(format!("surface_restored {surface_id}"));
                 }
                 Task::none()
+            }
+            Message::BackgroundTileClicked(index) => {
+                // Click to highlight, click again to commit — the pointer takes
+                // the same two steps the keyboard does, so a stray click cannot
+                // restyle the desktop. The decision is taken before the borrow
+                // ends so that applying it can touch the rest of `self`.
+                let commit = match self.background_picker.as_mut() {
+                    Some(picker) if picker.is_selected(index) => Some(picker.background()),
+                    Some(picker) => {
+                        picker.select(index);
+                        None
+                    }
+                    None => return Task::none(),
+                };
+                match commit {
+                    Some(background) => {
+                        self.background_picker = None;
+                        self.apply_picked_background(background)
+                    }
+                    None => {
+                        self.bump();
+                        Task::none()
+                    }
+                }
             }
             Message::ScaleFactorChanged(_window, scale) => {
                 self.scale_factor = f64::from(scale);
@@ -2829,7 +2863,8 @@ impl App {
             Background::Shader { shader_id, speed } if *speed > 0.0 => Some((*shader_id, *speed)),
             _ => None,
         };
-        if (!self.screensaver_settings.enabled && document_shader.is_none())
+        let picker_open = self.background_picker.is_some();
+        if (!self.screensaver_settings.enabled && document_shader.is_none() && !picker_open)
             || !self.screensaver_clock.record_if_due(now)
         {
             return;
@@ -2852,6 +2887,11 @@ impl App {
         } else if let Some((shader_id, speed)) = document_shader {
             self.screensaver_index = screensaver::index_for(shader_id);
             self.screensaver_piece_elapsed += delta.mul_f32(speed);
+        }
+        // Advances on its own so the previews move even when the workspace
+        // background does not.
+        if picker_open {
+            self.picker_elapsed += delta;
         }
         self.screensaver_elapsed = self.screensaver_piece_elapsed;
         self.screensaver_fps = self.screensaver_clock.measured_fps();
@@ -4120,7 +4160,11 @@ impl App {
         if let Some(picker) = self.background_picker.as_ref() {
             // Above the content, because it is a modal choice, but still below
             // the minimized dock so the desktop's own furniture stays reachable.
-            layers.push(picker.view(self.screensaver_elapsed, &self.presented_palette()));
+            layers.push(
+                picker.view(self.picker_elapsed, &self.presented_palette(), &|index| {
+                    Message::BackgroundTileClicked(index)
+                }),
+            );
         }
         if let Some(picker) = self.theme_picker.as_ref() {
             layers.push(picker.view());
@@ -6468,7 +6512,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             || app.presence_preview.is_some()
             || app.transition.is_some();
         let background_animated = app.document.background.is_animated();
-        let cadence = if app.screensaver_settings.enabled || background_animated {
+        // An open picker needs frames whatever the workspace background is doing.
+        let cadence = if app.screensaver_settings.enabled
+            || background_animated
+            || app.background_picker.is_some()
+        {
             let screensaver = app.screensaver_clock.interval();
             if animated {
                 screensaver.min(Duration::from_millis(16))

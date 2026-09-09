@@ -15,7 +15,7 @@
 
 use std::time::Duration;
 
-use iced::widget::{column, container, row, text};
+use iced::widget::{column, container, mouse_area, row, text};
 use iced::{Color, Element, Length};
 
 use crate::screensaver::{self, SHADERS};
@@ -94,7 +94,11 @@ impl BackgroundPicker {
         let Event::KeyPressed { key, modifiers, .. } = event else {
             return Action::Ignored;
         };
-        if !modifiers.is_empty() {
+        // Shift is allowed through: `+` and `_` are shifted keys, and rejecting
+        // every modifier meant the picker advertised `−/+` while silently
+        // ignoring the only way to type `+`. Command, control and option still
+        // belong to the desktop underneath.
+        if modifiers.control() || modifiers.alt() || modifiers.logo() {
             return Action::Ignored;
         }
         let count = SHADERS.len();
@@ -121,10 +125,25 @@ impl BackgroundPicker {
         Action::Consumed
     }
 
-    pub fn view<'a, Message: 'a>(
+    /// Move the highlight to a tile the pointer chose.
+    pub fn select(&mut self, index: usize) {
+        self.index = index % SHADERS.len();
+    }
+
+    /// Whether a click on `index` is a second click on the already-chosen tile.
+    ///
+    /// Click to highlight, click again to commit: the same two steps the
+    /// keyboard takes with arrows and Enter, rather than a single click
+    /// silently changing the desktop under the pointer.
+    pub fn is_selected(&self, index: usize) -> bool {
+        index % SHADERS.len() == self.index % SHADERS.len()
+    }
+
+    pub fn view<'a, Message: Clone + 'a>(
         &self,
         elapsed: Duration,
         palette: &canvas_core::ThemePalette,
+        on_pick: &'a dyn Fn(usize) -> Message,
     ) -> Element<'a, Message> {
         let text_color = rgb(palette.text);
         let muted = rgb(palette.text_muted);
@@ -134,7 +153,7 @@ impl BackgroundPicker {
         for chunk in (0..SHADERS.len()).collect::<Vec<_>>().chunks(COLUMNS) {
             let mut line = row![].spacing(10);
             for &index in chunk {
-                line = line.push(self.tile(index, elapsed, text_color, muted, accent));
+                line = line.push(self.tile(index, elapsed, text_color, muted, accent, on_pick));
             }
             grid = grid.push(line);
         }
@@ -147,7 +166,7 @@ impl BackgroundPicker {
         .size(16)
         .color(text_color);
         let detail = text(format!(
-            "{}   ·   speed {}   ·   ←→↑↓ choose   −/+ speed   Enter apply   Esc cancel",
+            "{}   ·   speed {}   ·   ←→↑↓ choose   − / + speed   Enter apply   Esc cancel",
             screensaver::attribution(self.index),
             if speed == 0.0 {
                 "frozen".to_string()
@@ -178,22 +197,25 @@ impl BackgroundPicker {
             .into()
     }
 
-    fn tile<'a, Message: 'a>(
+    fn tile<'a, Message: Clone + 'a>(
         &self,
         index: usize,
         elapsed: Duration,
         text_color: Color,
         muted: Color,
         accent: Color,
+        on_pick: &'a dyn Fn(usize) -> Message,
     ) -> Element<'a, Message> {
         let chosen = index == self.index % SHADERS.len();
         // The selected tile previews at the chosen speed and the rest run at a
         // steady reference rate. Showing every tile at the selected speed would
         // make a speed change look like all seven shaders changed.
+        // A frozen background is a real choice, but freezing the tile under the
+        // cursor makes the picker look broken — the one preview a person is
+        // looking at is the one that stops. Frozen previews at the reference
+        // rate and says "frozen" in the caption instead.
         let tile_elapsed = if chosen && self.speed() > 0.0 {
             elapsed.mul_f32(self.speed())
-        } else if chosen {
-            Duration::ZERO
         } else {
             elapsed
         };
@@ -208,13 +230,16 @@ impl BackgroundPicker {
                 },
                 ..Default::default()
             });
-        column![
-            preview,
-            text(SHADERS[index].name)
-                .size(12)
-                .color(if chosen { text_color } else { muted })
-        ]
-        .spacing(4)
+        mouse_area(
+            column![
+                preview,
+                text(SHADERS[index].name)
+                    .size(12)
+                    .color(if chosen { text_color } else { muted })
+            ]
+            .spacing(4),
+        )
+        .on_press(on_pick(index))
         .into()
     }
 }
@@ -335,6 +360,20 @@ mod tests {
             assert_eq!(picker.selected(), shader.id, "down then up returns");
             assert!(BackgroundShader::ALL.contains(&after_down));
         }
+    }
+
+    #[test]
+    fn the_shifted_speed_key_the_caption_promises_actually_works() {
+        // `+` is shift-`=`. Rejecting every modifier made the advertised key
+        // silently do nothing, which reads as the picker being stuck.
+        let mut picker = BackgroundPicker::opened_from(&Background::Theme);
+        let before = picker.speed();
+        let mut shifted = keypress(iced::keyboard::Key::Character("+".into()));
+        if let iced::keyboard::Event::KeyPressed { modifiers, .. } = &mut shifted {
+            *modifiers = iced::keyboard::Modifiers::SHIFT;
+        }
+        assert_eq!(picker.handle(&shifted), Action::Consumed);
+        assert!(picker.speed() > before, "shift-= must raise the speed");
     }
 
     #[test]

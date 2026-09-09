@@ -20,8 +20,24 @@ struct Uniforms {
     res: vec2<f32>,
     time: f32,
     _pad: f32,
+    // Where this widget starts in the framebuffer.
+    //
+    // `@builtin(position)` is a framebuffer coordinate, not a widget-local one.
+    // A full-screen background can ignore that because the two coincide; a tile
+    // at x=1100 cannot, and dividing its framebuffer position by its own width
+    // put `uv` somewhere around 3.0 instead of 0..1 — flat colour for the
+    // gradient shaders, black for the rest.
+    origin: vec2<f32>,
+    _pad2: vec2<f32>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
+
+/// Widget-local pixel coordinate. Every shader starts here rather than from
+/// `pos.xy`, so one of them cannot quietly go back to assuming it owns the
+/// whole framebuffer.
+fn local(pos: vec4<f32>) -> vec2<f32> {
+    return pos.xy - u.origin;
+}
 
 @vertex
 fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
@@ -37,7 +53,7 @@ fn vs_main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
 const TIDEPOOL: &str = r#"
 @fragment
 fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let uv = pos.xy / u.res;
+    let uv = local(pos) / u.res;
     let t = u.time;
     var c = mix(vec3<f32>(0.02, 0.05, 0.11), vec3<f32>(0.05, 0.14, 0.21), uv.y);
     var w = sin(uv.x * 4.2 + uv.y * 1.3 + t * 0.10) * 0.5 + 0.5;
@@ -55,7 +71,7 @@ fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 const AURORA_DRIFT: &str = r#"
 @fragment
 fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let uv = pos.xy / u.res;
+    let uv = local(pos) / u.res;
     let t = u.time;
     var c = mix(vec3<f32>(0.02, 0.03, 0.07), vec3<f32>(0.05, 0.08, 0.14), uv.y);
     let cx = uv.x + 0.10 * sin(uv.y * 2.0 - t * 0.06);
@@ -74,7 +90,7 @@ fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 const DUSK_EMBER: &str = r#"
 @fragment
 fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let uv = pos.xy / u.res;
+    let uv = local(pos) / u.res;
     let t = u.time;
     var c = mix(vec3<f32>(0.03, 0.03, 0.08), vec3<f32>(0.10, 0.07, 0.13), uv.y);
     let center = vec2<f32>(0.5 + 0.08 * sin(t * 0.03), 0.22 + 0.05 * sin(t * 0.021 + 1.3));
@@ -89,7 +105,7 @@ fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 const SLOW_RIPPLE: &str = r#"
 @fragment
 fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let uv = pos.xy / u.res;
+    let uv = local(pos) / u.res;
     let t = u.time;
     var c = mix(vec3<f32>(0.04, 0.05, 0.08), vec3<f32>(0.07, 0.08, 0.12), uv.y);
     let center = vec2<f32>(0.5 + 0.06 * sin(t * 0.02), 0.5 + 0.06 * cos(t * 0.017));
@@ -111,7 +127,7 @@ fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     var z: f32 = u.time;
     var l: f32 = 0.0;
     for (var i: i32 = 0; i < 3; i = i + 1) {
-        let base: vec2<f32> = pos.xy / u.res;
+        let base: vec2<f32> = local(pos) / u.res;
         var uv: vec2<f32> = base;
         var p: vec2<f32> = base - vec2<f32>(0.5);
         p.x = p.x * u.res.x / u.res.y;
@@ -184,7 +200,7 @@ fn rotate2d(angle: f32) -> mat2x2<f32> {
 
 @fragment
 fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    var uv = pos.xy / u.res * 2.0 - vec2<f32>(1.0);
+    var uv = local(pos) / u.res * 2.0 - vec2<f32>(1.0);
     uv.x = uv.x * u.res.x / u.res.y;
     let t = u.time;
     let bgColor = vec3<f32>(0.01, 0.16, 0.42);
@@ -242,7 +258,7 @@ fn noise(p: vec2<f32>) -> f32 {
 
 @fragment
 fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let uv = (pos.xy - 0.5 * u.res) / u.res.y;
+    let uv = (local(pos) - 0.5 * u.res) / u.res.y;
     var col: vec3<f32> = vec3<f32>(0.0);
     let tt = 0.05 * u.time;
     let pxAng = atan2(uv.y, uv.x);
@@ -461,10 +477,27 @@ impl<Message> shader::Program<Message> for BackgroundProgram {
     }
 }
 
+/// Bytes between uniform slots.
+///
+/// wgpu requires a dynamic uniform offset to be a multiple of
+/// `min_uniform_buffer_offset_alignment`, whose guaranteed ceiling across
+/// backends is 256 — so the four floats each shader needs sit in a 256-byte
+/// stride rather than packed.
+const UNIFORM_SLOT: u64 = 256;
+
 #[derive(Debug, Clone, Copy)]
 struct BackgroundPrimitive {
     index: usize,
     elapsed_seconds: f32,
+}
+
+impl BackgroundPrimitive {
+    /// Where this shader's uniforms live. Keyed by shader rather than by widget
+    /// because each shader appears at most once on screen, which keeps the slot
+    /// stable without the primitive having to be told who it is.
+    fn slot(&self) -> u64 {
+        (self.index % SHADERS.len()) as u64 * UNIFORM_SLOT
+    }
 }
 
 struct BackgroundPipeline {
@@ -477,7 +510,13 @@ impl shader::Pipeline for BackgroundPipeline {
     fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Canvas screensaver uniforms"),
-            size: 16,
+            // One slot per shader, not one buffer total. iced keeps a single
+            // pipeline per primitive type, so every shader widget on screen
+            // shares this one — and with a single slot each `prepare` overwrote
+            // the last, leaving every tile drawing at whichever tile happened to
+            // prepare last. That is invisible with one full-screen background
+            // and immediately visible in a grid of previews.
+            size: (SHADERS.len() as u64) * UNIFORM_SLOT,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -488,8 +527,8 @@ impl shader::Pipeline for BackgroundPipeline {
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(16),
+                    has_dynamic_offset: true,
+                    min_binding_size: wgpu::BufferSize::new(32),
                 },
                 count: None,
             }],
@@ -499,7 +538,12 @@ impl shader::Pipeline for BackgroundPipeline {
             layout: &bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
+                // Bound as one slot; the offset is chosen per draw.
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &uniform_buffer,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(32),
+                }),
             }],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -568,15 +612,19 @@ impl shader::Primitive for BackgroundPrimitive {
             (bounds.height * scale).max(1.0),
             self.elapsed_seconds,
             0.0,
+            bounds.x * scale,
+            bounds.y * scale,
+            0.0,
+            0.0,
         ];
-        queue.write_buffer(&pipeline.uniform_buffer, 0, unsafe {
-            std::slice::from_raw_parts(uniforms.as_ptr().cast::<u8>(), 16)
+        queue.write_buffer(&pipeline.uniform_buffer, self.slot(), unsafe {
+            std::slice::from_raw_parts(uniforms.as_ptr().cast::<u8>(), 32)
         });
     }
 
     fn draw(&self, pipeline: &Self::Pipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
         render_pass.set_pipeline(&pipeline.pipelines[self.index % pipeline.pipelines.len()]);
-        render_pass.set_bind_group(0, &pipeline.bind_group, &[]);
+        render_pass.set_bind_group(0, &pipeline.bind_group, &[self.slot() as u32]);
         render_pass.draw(0..3, 0..1);
         true
     }
