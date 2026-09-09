@@ -12,8 +12,18 @@ argued about. Where a rule is currently violated, the violation is named.
 ## 1. Provenance is always visible
 
 A widget may render synthetic data. Designing a surface before its source
-exists is legitimate and useful. What a widget may never do is render synthetic
-data that looks like real data.
+exists is legitimate and useful. Two things follow, and the second is the one
+that is easy to get wrong.
+
+**Demo data is ordinary data in the real shape, supplied from outside.** A
+widget never contains the ability to invent a value. A demo payload is a
+fixture that travels the same path a live payload does, so the widget cannot
+tell the difference and nothing special-cases it. A widget that can fabricate
+is self-sourcing (rule 5) wearing a different hat, and it will drift from the
+real shape the moment the real source lands.
+
+**What a widget may never do is render synthetic data that looks like real
+data.**
 
 Provenance is carried next to the data state, not inside it, because a demo
 widget can be perfectly `Ready`:
@@ -29,20 +39,29 @@ is not a tooltip: someone walking past must see it.
 > **Violation.** `canvas-widgets/src/live.rs:22` `mock_price()` hashes a symbol
 > into a price and a change, and `ticker_text` renders `AAPL $437.82 (+ 3.2%)`
 > with nothing marking it as invented. Fabricated financial figures that read as
-> quotes are the most damaging form this can take.
+> quotes are the most damaging form this can take. The fix is not to mark that
+> function's output: it is to delete the function, give `Ticker` values like
+> every other widget, and supply the demo values as a fixture.
 
 ## 2. Freshness is always visible
 
 `Stale` must not render identically to `Ready`. A value ten minutes old and a
-value from this second look the same today, which quietly turns a dashboard
-into a liar during exactly the incident it exists for.
+value from this second looking the same turns a dashboard into a liar during
+exactly the incident it exists for.
 
 Stale keeps the body — a stale number is still information — but carries a
 visible freshness treatment and an observed-at time.
 
-> **Violation.** `canvas-widgets/src/live.rs:622` gates
-> `Loading | NoData | Disconnected | Error` into a status treatment and lets
-> `Ready | Stale | Partial` fall through to the identical body.
+> **Met, weakly.** `canvas-widgets/src/live.rs:701` renders a coloured status
+> dot and a "Stale" label in the footer whenever the state is not `Ready`, and
+> `data_state_color` gives it its own colour. So freshness *is* disclosed.
+>
+> What is not disclosed is in the value itself: the number is styled identically
+> whether it is a second old or an hour old, and the only signal is small text at
+> the bottom edge of the panel. On a wall, at a glance, that is close to
+> invisible. This is a rule 7 legibility question rather than a correctness bug,
+> and the fix is to carry the freshness treatment into the value, not to add a
+> second label.
 
 ## 3. Absent data says why
 

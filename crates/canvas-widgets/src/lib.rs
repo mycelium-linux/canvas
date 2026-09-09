@@ -57,6 +57,36 @@ pub struct WidgetSpec {
     #[serde(default)]
     pub data: WidgetData,
 }
+/// Where a widget's values came from.
+///
+/// This sits alongside [`WidgetDataState`] rather than inside it because the two
+/// are independent: a demo widget can be perfectly `Ready`, and must still say
+/// so on its face. Demo values are ordinary values in the real shape, supplied
+/// from outside like any other payload — a widget never contains the ability to
+/// invent one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum Provenance {
+    /// Real values from the widget's declared source.
+    #[default]
+    Live,
+    /// Stand-in values for designing or demonstrating a surface.
+    Demo,
+    /// Representative values shipped as documentation of the payload shape.
+    Sample,
+}
+
+impl Provenance {
+    /// The badge a viewer sees, or `None` when the values are real.
+    pub fn badge(self) -> Option<&'static str> {
+        match self {
+            Self::Live => None,
+            Self::Demo => Some("DEMO"),
+            Self::Sample => Some("SAMPLE"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -72,6 +102,11 @@ pub struct WidgetData {
     pub window: Option<String>,
     #[serde(default)]
     pub detail: Option<String>,
+    /// Absent in specs written before provenance existed, hence `default`.
+    /// Defaulting to `Live` is safe only because nothing may fabricate: a widget
+    /// that cannot invent a value cannot silently claim a real one.
+    #[serde(default)]
+    pub provenance: Provenance,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

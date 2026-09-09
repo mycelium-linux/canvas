@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "id": "ops-state-timeline",
+  "kind": "state_timeline",
+  "title": "Node availability",
+  "lanes": [
+    {"label": "agora-one", "segments": [
+      {"label": "up", "state": "good", "start": 0.0, "end": 0.62},
+      {"label": "degraded", "state": "warning", "start": 0.62, "end": 0.71},
+      {"label": "up", "state": "good", "start": 0.71, "end": 1.0}
+    ]},
+    {"label": "dustkernel", "segments": [
+      {"label": "up", "state": "good", "start": 0.0, "end": 0.88},
+      {"label": "unreachable", "state": "critical", "start": 0.88, "end": 1.0}
+    ]}
+  ],
+  "data": {"state": "ready", "provenance": "demo", "window": "1h"}
+}

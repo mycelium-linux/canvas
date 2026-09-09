@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "ops-heatmap",
+  "kind": "heatmap",
+  "title": "Runtime latency by hour",
+  "rows": ["mlx", "vllm", "llama.cpp", "macos-say-tts"],
+  "columns": ["09", "10", "11", "12", "13", "14"],
+  "values": [
+    [120, 138, 141, 402, 388, 150],
+    [88, 91, 87, 95, 210, 102],
+    [310, 296, 305, 288, 301, 297],
+    [42, 40, 45, 44, 41, 43]
+  ],
+  "unit": "ms",
+  "data": {"state": "ready", "provenance": "demo", "window": "6h"}
+}

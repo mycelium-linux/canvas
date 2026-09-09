@@ -626,7 +626,14 @@ pub(crate) fn panel<'a, Message: 'a>(
         | WidgetDataState::Error => data_state_content(spec, visual),
         WidgetDataState::Ready | WidgetDataState::Stale | WidgetDataState::Partial => body,
     };
-    let mut layout = column![content].spacing(metrics.space_2);
+    let mut layout = column![].spacing(metrics.space_2);
+    // The badge sits above the body and is drawn in every state, including
+    // Ready: a demo widget that has data is exactly the one that would
+    // otherwise pass for real.
+    if let Some(badge) = provenance_badge(spec, visual) {
+        layout = layout.push(badge);
+    }
+    layout = layout.push(content);
     if let Some(footer) = data_footer(spec, visual) {
         layout = layout.push(footer);
     }
@@ -649,6 +656,41 @@ pub(crate) fn panel<'a, Message: 'a>(
             ..Default::default()
         })
         .into()
+}
+
+/// A persistent mark on any widget whose values are not real.
+///
+/// Deliberately not a tooltip and not dismissible: someone walking past has to
+/// see it, and the whole point is that it survives the widget looking healthy.
+fn provenance_badge<'a, Message: 'a>(
+    spec: &'a WidgetSpec,
+    visual: &VisualTheme,
+) -> Option<Element<'a, Message>> {
+    let label = spec.data.provenance.badge()?;
+    let metrics = visual.metrics;
+    let accent = color(visual.palette.warning);
+    Some(
+        row![
+            space::horizontal(),
+            container(
+                text(label)
+                    .size(metrics.small)
+                    .color(color(visual.palette.background)),
+            )
+            .padding([2, 6])
+            .style(move |_| container::Style {
+                background: Some(accent.into()),
+                border: iced::Border {
+                    color: accent,
+                    width: 1.0,
+                    radius: metrics.radius_sm.into(),
+                },
+                ..Default::default()
+            }),
+        ]
+        .align_y(iced::alignment::Vertical::Center)
+        .into(),
+    )
 }
 
 fn data_state_content<'a, Message: 'a>(

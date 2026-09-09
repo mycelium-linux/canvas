@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "ops-stacked-bar",
+  "kind": "stacked_bar",
+  "title": "Requests by outcome",
+  "series": ["ok", "retried", "failed"],
+  "bars": [
+    {"label": "agora-one", "values": [1840, 96, 12]},
+    {"label": "dustkernel", "values": [1210, 44, 3]},
+    {"label": "mac-studio", "values": [905, 18, 0]}
+  ],
+  "unit": "req",
+  "data": {"state": "ready", "provenance": "demo", "window": "24h"}
+}

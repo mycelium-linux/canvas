@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "id": "demo-module",
+  "kind": "module",
+  "module": "activity-graph",
+  "inputs": {},
+  "data": {"state": "ready", "provenance": "demo"}
+}
