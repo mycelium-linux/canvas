@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/canvas", "crates/canvas-core", "crates/canvas-linux", "crates/canvas-mac", "crates/canvas-control", "crates/canvas-widgets"]
+members = ["crates/canvas-metrics", "crates/canvas", "crates/canvas-core", "crates/canvas-linux", "crates/canvas-mac", "crates/canvas-control", "crates/canvas-widgets"]
 default-members = ["crates/canvas-core", "crates/canvas-linux", "crates/canvas-mac"]
 exclude = ["vendor/coherence-tokens"]
 resolver = "2"
