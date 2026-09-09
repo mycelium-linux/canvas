@@ -2385,6 +2385,46 @@ impl App {
                     Task::none()
                 }
             },
+            Command::OpenOperationalView { view_id } => {
+                match ::canvas::operational_views::materialize(&view_id, &self.document) {
+                    Ok(document) => {
+                        if let Err(error) = document.validate(&self.catalog) {
+                            self.fail(pending, Failure::invalid(error.to_string()));
+                            return Task::none();
+                        }
+                        let surface_ids = match &document.layout {
+                            Layout::Canvas { placements } => placements
+                                .iter()
+                                .map(|placement| placement.surface_id.clone())
+                                .collect::<Vec<_>>(),
+                            _ => unreachable!("operational views always materialize as a canvas"),
+                        };
+                        self.start_transition();
+                        self.document = document;
+                        for surface_id in &surface_ids {
+                            self.decoded.remove(surface_id);
+                        }
+                        self.ensure_scene_decoded();
+                        self.bump();
+                        self.status = format!("Opened operational view {view_id}.");
+                        self.emit_event(format!("operational_view_opened {view_id}"));
+                        self.answer(
+                            pending,
+                            Outcome::Ok {
+                                receipt: Receipt::OperationalViewOpened {
+                                    view_id,
+                                    surface_ids,
+                                },
+                            },
+                        );
+                        Task::none()
+                    }
+                    Err(error) => {
+                        self.fail(pending, Failure::invalid(error.to_string()));
+                        Task::none()
+                    }
+                }
+            }
             Command::OpenDataViz {
                 surface_id,
                 file,

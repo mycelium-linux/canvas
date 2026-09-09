@@ -131,6 +131,9 @@ pub enum Command {
         surface_id: String,
         spec_path: PathBuf,
     },
+    OpenOperationalView {
+        view_id: String,
+    },
     WorkspaceSave {
         name: String,
     },
@@ -557,6 +560,10 @@ pub enum Receipt {
         surface_id: String,
         view: Box<SharedViewDocument>,
     },
+    OperationalViewOpened {
+        view_id: String,
+        surface_ids: Vec<String>,
+    },
     SurfaceClosed {
         surface_id: String,
     },
@@ -922,6 +929,9 @@ impl ControlRequest {
                     return Err("invalid project workspace id".into());
                 }
             }
+            Command::OpenOperationalView { view_id } => {
+                crate::operational_views::load(view_id).map_err(|error| error.to_string())?;
+            }
             Command::ApplyDocument { .. }
             | Command::ApplyPatch { .. }
             | Command::Inspect
@@ -1192,6 +1202,12 @@ pub mod text {
                     spec_path: std::path::PathBuf::from(&tokens[1]),
                 })
             }
+            "open_view" | "view" => {
+                req(tokens, 2, "view <project/view>")?;
+                Ok(Command::OpenOperationalView {
+                    view_id: tokens[1].clone(),
+                })
+            }
             "bg" | "theme" => {
                 req(tokens, 2, "bg <project_id>")?;
                 if !identifier(&tokens[1]) {
@@ -1408,6 +1424,10 @@ pub mod text {
                     Receipt::ViewPatched { surface_id, view } => {
                         format!("view={} revision={}", surface_id, view.revision)
                     }
+                    Receipt::OperationalViewOpened {
+                        view_id,
+                        surface_ids,
+                    } => format!("view={view_id} surfaces={}", surface_ids.join(",")),
                     Receipt::SurfaceClosed { surface_id } => {
                         format!("closed={}", surface_id)
                     }
