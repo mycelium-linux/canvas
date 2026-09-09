@@ -1277,6 +1277,7 @@ mod tests {
             height: 640,
         };
         let view = SharedViewDocument {
+            layout_policy: Default::default(),
             schema_version: crate::SCHEMA_VERSION,
             id: "document-view".into(),
             revision: 7,

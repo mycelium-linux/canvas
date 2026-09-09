@@ -241,13 +241,27 @@ pub struct Surface {
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum SurfaceContent {
-    ProjectResource { resource_id: String },
-    Asset { asset: AssetRef },
-    Chart { chart: chart::ChartDocument },
-    Widget { spec: canvas_widgets::WidgetSpec },
-    Scene { scene: Scene },
-    Terminal { resource_id: String },
-    Stream { url: String },
+    ProjectResource {
+        resource_id: String,
+    },
+    Asset {
+        asset: AssetRef,
+    },
+    Chart {
+        chart: chart::ChartDocument,
+    },
+    Widget {
+        spec: canvas_widgets::WidgetSpec,
+    },
+    Scene {
+        scene: Scene,
+    },
+    Terminal {
+        resource_id: String,
+    },
+    Stream {
+        url: String,
+    },
     /// Content from a newer Canvas, kept exactly as written.
     #[serde(untagged)]
     Unsupported(serde_json::Value),
@@ -348,7 +362,9 @@ enum Known {
 impl Known {
     fn into_content(self) -> SurfaceContent {
         match self {
-            Self::ProjectResource { resource_id } => SurfaceContent::ProjectResource { resource_id },
+            Self::ProjectResource { resource_id } => {
+                SurfaceContent::ProjectResource { resource_id }
+            }
             Self::Asset { asset } => SurfaceContent::Asset { asset },
             Self::Chart { chart } => SurfaceContent::Chart { chart },
             Self::Widget { spec } => SurfaceContent::Widget { spec },
@@ -870,7 +886,10 @@ impl WorkspaceDocument {
                 SurfaceContent::Unsupported(raw) => {
                     check(
                         raw.is_object(),
-                        format!("Unsupported surface content must be an object: {}", surface.id),
+                        format!(
+                            "Unsupported surface content must be an object: {}",
+                            surface.id
+                        ),
                     )?;
                 }
             }
@@ -1104,7 +1123,11 @@ mod forward_compatibility_tests {
         let content: SurfaceContent = serde_json::from_value(raw.clone()).expect("degrades");
         assert!(matches!(content, SurfaceContent::Unsupported(_)));
         assert_eq!(content.kind_tag(), "hologram");
-        assert!(content.unsupported_reason().is_some_and(|r| r.contains("hologram")));
+        assert!(
+            content
+                .unsupported_reason()
+                .is_some_and(|r| r.contains("hologram"))
+        );
     }
 
     #[test]
@@ -1133,11 +1156,17 @@ mod forward_compatibility_tests {
         // this build owns, so a missing field is a mistake, not a newer Canvas.
         let wrong: std::result::Result<SurfaceContent, _> =
             serde_json::from_value(json!({"kind": "stream"}));
-        assert!(wrong.is_err(), "a known kind must not degrade into a blank tile");
+        assert!(
+            wrong.is_err(),
+            "a known kind must not degrade into a blank tile"
+        );
 
         let typo: std::result::Result<SurfaceContent, _> =
             serde_json::from_value(json!({"kind": "stream", "ur1": "x"}));
-        assert!(typo.is_err(), "an unknown field in a known kind is still an error");
+        assert!(
+            typo.is_err(),
+            "an unknown field in a known kind is still an error"
+        );
     }
 
     #[test]
@@ -1148,7 +1177,10 @@ mod forward_compatibility_tests {
             "schema_version": 1, "id": "burn", "kind": "slo_burn_rate", "budget": 0.5
         }});
         let parsed: std::result::Result<SurfaceContent, _> = serde_json::from_value(raw);
-        assert!(parsed.is_err(), "a known widget kind must fail loudly on a bad field");
+        assert!(
+            parsed.is_err(),
+            "a known widget kind must fail loudly on a bad field"
+        );
     }
 
     #[test]

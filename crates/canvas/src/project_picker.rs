@@ -115,7 +115,11 @@ impl ProjectPicker {
         Action::Consumed
     }
 
-    pub fn view<'a, Message: 'a>(&self, catalog: &'a Catalog, current: &str) -> Element<'a, Message> {
+    pub fn view<'a, Message: 'a>(
+        &self,
+        catalog: &'a Catalog,
+        current: &str,
+    ) -> Element<'a, Message> {
         let matches = self.matches(catalog);
         let palette = catalog
             .projects

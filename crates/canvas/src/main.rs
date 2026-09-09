@@ -88,6 +88,7 @@ const SURFACE_RESIZE_HANDLE_SIZE: f64 = 10.0;
 const SURFACE_TOP_BAR_GRAB_WIDTH: f64 = 72.0;
 const CANVAS_TOGGLE_KEYS: &str = "Ctrl-Option-C";
 const SNAP_LAYOUT_KEYS: &str = "Ctrl-Option-L";
+const FIT_LAYOUT_KEYS: &str = "Ctrl-Option-F";
 const JARVIS_TOGGLE_KEYS: &str = "Ctrl-Option-J";
 const SHORTCUT_HELP_KEYS: &str = "Ctrl-Option-?";
 const FOCUSED_HELP_KEYS: &str = "?";
@@ -278,6 +279,11 @@ struct App {
     overlays: OverlaySettings,
     visibility_hotkey: Option<GlobalHotkey>,
     snap_hotkey: Option<GlobalHotkey>,
+    fit_hotkey: Option<GlobalHotkey>,
+    /// The active view's own answer to whether a display change reflows its
+    /// arrangement. Views default to reflow; a hand-arranged workspace can
+    /// declare `fixed` and keep its geometry while displays reveal parts of it.
+    layout_policy: ::canvas::view::LayoutPolicy,
     /// The view whose saved layout Ctrl-Option-L snaps back to. Set whenever a
     /// view is materialized, so the key always refers to what is on screen.
     snapped_view: Option<String>,
@@ -400,6 +406,19 @@ impl App {
                 None
             }
         };
+        let fit_hotkey = match GlobalHotkey::register(HotkeySpec {
+            signature: *b"CnvF",
+            id: 5,
+            key_code: 0x03,                   // kVK_ANSI_F
+            modifiers: (1 << 11) | (1 << 12), // optionKey | controlKey
+            label: FIT_LAYOUT_KEYS,
+        }) {
+            Ok(hotkey) => Some(hotkey),
+            Err(error) => {
+                shortcut_errors.push(error);
+                None
+            }
+        };
         let snap_hotkey = match GlobalHotkey::register(HotkeySpec {
             signature: *b"CnvL",
             id: 4,
@@ -463,6 +482,8 @@ impl App {
             overlays: OverlaySettings::default(),
             visibility_hotkey,
             snap_hotkey,
+            fit_hotkey,
+            layout_policy: ::canvas::view::LayoutPolicy::default(),
             snapped_view: None,
             free_layout: None,
             shortcuts_hotkey,
@@ -624,6 +645,55 @@ impl App {
         }
     }
 
+    /// The rectangle the normalized layout is mapped across: the union of the
+    /// displays Canvas currently occupies.
+    ///
+    /// Each display window is a viewport into this rectangle, so making it the
+    /// selected displays rather than the whole desktop is what causes a layout
+    /// to fill one monitor instead of showing a slice of a wider arrangement.
+    fn occupied_frame(&self) -> Rect {
+        let frames = self.selected_display_frames();
+        let Some((first, rest)) = frames.split_first() else {
+            return self.frame;
+        };
+        rest.iter().fold(*first, |acc, frame| {
+            let x = acc.x.min(frame.x);
+            let y = acc.y.min(frame.y);
+            Rect {
+                x,
+                y,
+                width: (acc.x + acc.width as i32)
+                    .max(frame.x + frame.width as i32)
+                    .saturating_sub(x) as u32,
+                height: (acc.y + acc.height as i32)
+                    .max(frame.y + frame.height as i32)
+                    .saturating_sub(y) as u32,
+            }
+        })
+    }
+
+    /// Remaps the layout onto the displays Canvas is on, right now.
+    ///
+    /// This is the manual escape hatch for a view that declares `fixed`, and a
+    /// no-op for one already filling its displays.
+    fn fit_layout_to_displays(&mut self) {
+        let target = self.occupied_frame();
+        if target == self.frame {
+            self.status = "Layout already fits the current displays.".into();
+            return;
+        }
+        self.start_transition();
+        self.frame = target;
+        self.bump();
+        self.status = format!(
+            "Fitted layout to {}x{} across {} display(s).",
+            target.width,
+            target.height,
+            self.selected_display_ids.len().max(1)
+        );
+        self.emit_event("layout_fitted".to_owned());
+    }
+
     /// Snaps the layout back to the active view's saved arrangement, or
     /// restores what was on screen before the last snap.
     ///
@@ -681,6 +751,10 @@ impl App {
                     .snap_hotkey
                     .as_ref()
                     .is_some_and(GlobalHotkey::poll_pressed);
+                let fit_layout = self
+                    .fit_hotkey
+                    .as_ref()
+                    .is_some_and(GlobalHotkey::poll_pressed);
                 let toggle_shortcuts = self
                     .shortcuts_hotkey
                     .as_ref()
@@ -709,6 +783,9 @@ impl App {
                 }
                 if snap_layout {
                     self.toggle_snapped_layout();
+                }
+                if fit_layout {
+                    self.fit_layout_to_displays();
                 }
                 if toggle_shortcuts {
                     tasks.push(self.toggle_shortcut_help());
@@ -1291,6 +1368,13 @@ impl App {
             .filter_map(|id| topology.get(id).map(|display| display.frame))
             .collect::<Vec<_>>();
         self.selected_display_ids = resolved.display_ids.clone();
+        // A reflow view fills whatever Canvas now occupies; a fixed one keeps
+        // its geometry on the whole desktop and lets displays reveal parts of
+        // it. Without this the frame stays the full desktop and selecting one
+        // display shows a slice of a wider arrangement rather than fitting it.
+        if self.layout_policy == ::canvas::view::LayoutPolicy::Reflow {
+            self.frame = resolved.frame;
+        }
         self.bump();
         self.status = format!(
             "Canvas spans {} display(s) at {},{} {}x{}.",
@@ -2673,6 +2757,9 @@ impl App {
                         // view, so it must not survive the switch.
                         self.snapped_view = Some(view_id.clone());
                         self.free_layout = None;
+                        self.layout_policy = ::canvas::operational_views::load(&view_id)
+                            .map(|view| view.layout_policy)
+                            .unwrap_or_default();
                         self.status = format!("Opened operational view {view_id}.");
                         if changed {
                             self.emit_event(format!("operational_view_opened {view_id}"));
@@ -4662,6 +4749,7 @@ fn shortcut_help<'a>(
          Ctrl-1 / 2 / 3         Toggle left / center / right display\n\
          Ctrl-0                 Show Canvas on every display\n\
          {SNAP_LAYOUT_KEYS:<22} Snap layout to saved view (again to restore)\n\
+         {FIT_LAYOUT_KEYS:<22} Fit layout to the displays Canvas is on\n\
          {CANVAS_TOGGLE_KEYS:<22} Toggle Canvas\n\
          {JARVIS_TOGGLE_KEYS:<22} Toggle JARVIS presence\n\
          {FOCUSED_HELP_KEYS:<22} Toggle Help (Canvas focused)\n\
@@ -5908,6 +5996,7 @@ fn shared_view_for_loaded(loaded: &LoadedContent) -> Option<SharedViewDocument> 
     };
     let source_id = format!("asset-{}", loaded.asset.sha256);
     let view = SharedViewDocument {
+        layout_policy: Default::default(),
         schema_version: SCHEMA_VERSION,
         id: loaded.snapshot.id.clone(),
         revision: 1,
@@ -6653,6 +6742,7 @@ mod tests {
 
     fn test_shared_view(id: &str, revision: u64) -> SharedViewDocument {
         SharedViewDocument {
+            layout_policy: Default::default(),
             schema_version: SCHEMA_VERSION,
             id: id.into(),
             revision,
@@ -7515,6 +7605,103 @@ mod tests {
         assert_eq!(app.windows.len(), 2);
         drop(app.toggle_display_ordinal(0));
         assert_eq!(app.selected_display_ids.len(), 3);
+    }
+
+    fn three_displays() -> Vec<DisplayInfo> {
+        (0..3)
+            .map(|index| DisplayInfo {
+                id: format!("display-{index}"),
+                name: format!("Display {index}"),
+                frame: Rect {
+                    x: index * 1_920,
+                    y: 0,
+                    width: 1_920,
+                    height: 1_200,
+                },
+                primary: index == 0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_reflow_view_fills_one_display_instead_of_showing_a_slice() {
+        let mut app = test_app();
+        app.displays = three_displays();
+        app.frame = Rect {
+            x: 0,
+            y: 0,
+            width: 5_760,
+            height: 1_200,
+        };
+        app.layout_policy = ::canvas::view::LayoutPolicy::Reflow;
+
+        let target = DisplayTarget::Exact {
+            display_ids: vec!["display-1".into()],
+        };
+        drop(app.apply_display_target(&target).expect("target resolves"));
+
+        // The frame is what normalized bounds are mapped across, so it must
+        // become the one display; leaving it at the desktop union is exactly
+        // what showed a third of the arrangement.
+        assert_eq!(app.frame.width, 1_920, "frame should follow the display");
+        assert_eq!(app.frame.x, 1_920);
+    }
+
+    #[test]
+    fn a_fixed_view_keeps_its_geometry_when_displays_change() {
+        let mut app = test_app();
+        app.displays = three_displays();
+        let desktop = Rect {
+            x: 0,
+            y: 0,
+            width: 5_760,
+            height: 1_200,
+        };
+        app.frame = desktop;
+        app.layout_policy = ::canvas::view::LayoutPolicy::Fixed;
+
+        let target = DisplayTarget::Exact {
+            display_ids: vec!["display-1".into()],
+        };
+        drop(app.apply_display_target(&target).expect("target resolves"));
+
+        assert_eq!(app.frame, desktop, "a fixed view must not be reflowed");
+    }
+
+    #[test]
+    fn fitting_is_available_as_an_escape_hatch_for_a_fixed_view() {
+        let mut app = test_app();
+        app.displays = three_displays();
+        app.frame = Rect {
+            x: 0,
+            y: 0,
+            width: 5_760,
+            height: 1_200,
+        };
+        app.layout_policy = ::canvas::view::LayoutPolicy::Fixed;
+        app.selected_display_ids = vec!["display-2".into()];
+
+        app.fit_layout_to_displays();
+        assert_eq!(app.frame.width, 1_920, "fit applies regardless of policy");
+        assert_eq!(app.frame.x, 3_840);
+
+        // Fitting again changes nothing and says so rather than churning.
+        app.fit_layout_to_displays();
+        assert!(
+            app.status.contains("already fits"),
+            "status was {:?}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn views_reflow_unless_they_say_otherwise() {
+        // A view written before this existed, and every operational view, should
+        // fill the displays it is given without declaring anything.
+        let view: ::canvas::view::SharedViewDocument =
+            serde_json::from_str(include_str!("../../../config/views/fleet-runtime.json"))
+                .expect("fleet view parses");
+        assert_eq!(view.layout_policy, ::canvas::view::LayoutPolicy::Reflow);
     }
 
     #[test]

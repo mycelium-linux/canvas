@@ -141,6 +141,26 @@ pub struct PlacedWidget {
     #[serde(default)]
     pub rect: ViewRect,
 }
+/// Whether a view's arrangement should fill the displays Canvas currently
+/// occupies, or keep its geometry on the full desktop while displays reveal and
+/// hide parts of it.
+///
+/// This is a property of the view rather than a global mode because the two
+/// behaviours serve different uses, not different tastes: an operational
+/// dashboard wants to fill whatever screens exist, while a workspace someone
+/// arranged by hand is navigated from spatial memory and should stay put. A
+/// global switch would force one answer for both and leave "why did my layout
+/// move" answerable only by recalling which mode is active.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
+pub enum LayoutPolicy {
+    /// Fill the displays Canvas is on; a display change reflows the layout.
+    #[default]
+    Reflow,
+    /// Keep the arrangement on the whole desktop; displays reveal and hide it.
+    Fixed,
+}
 
 /// The exact visual context shared between Canvas, a person, and an agent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -162,6 +182,10 @@ pub struct SharedViewDocument {
     /// Absent in documents written before widgets existed, hence `default`.
     #[serde(default)]
     pub widgets: BTreeMap<String, PlacedWidget>,
+    /// Absent in views written before display reflow existed, hence `default`.
+    /// Reflow is the default because a saved view is usually operational.
+    #[serde(default)]
+    pub layout_policy: LayoutPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -460,6 +484,7 @@ mod tests {
 
     fn image_view() -> SharedViewDocument {
         SharedViewDocument {
+            layout_policy: Default::default(),
             schema_version: SCHEMA_VERSION,
             id: "inspection-view".into(),
             revision: 4,
@@ -639,6 +664,7 @@ mod placed_widget_tests {
 
     fn widget_only_view() -> SharedViewDocument {
         SharedViewDocument {
+            layout_policy: Default::default(),
             schema_version: SCHEMA_VERSION,
             id: "dash".into(),
             revision: 1,
