@@ -87,6 +87,7 @@ const SURFACE_CONTROL_INSET: f64 = 4.0;
 const SURFACE_RESIZE_HANDLE_SIZE: f64 = 10.0;
 const SURFACE_TOP_BAR_GRAB_WIDTH: f64 = 72.0;
 const CANVAS_TOGGLE_KEYS: &str = "Ctrl-Option-C";
+const SNAP_LAYOUT_KEYS: &str = "Ctrl-Option-L";
 const JARVIS_TOGGLE_KEYS: &str = "Ctrl-Option-J";
 const SHORTCUT_HELP_KEYS: &str = "Ctrl-Option-?";
 const FOCUSED_HELP_KEYS: &str = "?";
@@ -276,6 +277,13 @@ struct App {
     canvas_visible: bool,
     overlays: OverlaySettings,
     visibility_hotkey: Option<GlobalHotkey>,
+    snap_hotkey: Option<GlobalHotkey>,
+    /// The view whose saved layout Ctrl-Option-L snaps back to. Set whenever a
+    /// view is materialized, so the key always refers to what is on screen.
+    snapped_view: Option<String>,
+    /// The arrangement in effect before the last snap. `Some` means we are
+    /// currently showing the saved layout and a second press restores this.
+    free_layout: Option<Layout>,
     shortcuts_hotkey: Option<GlobalHotkey>,
     jarvis_hotkey: Option<GlobalHotkey>,
     shortcuts_visible: bool,
@@ -392,6 +400,19 @@ impl App {
                 None
             }
         };
+        let snap_hotkey = match GlobalHotkey::register(HotkeySpec {
+            signature: *b"CnvL",
+            id: 4,
+            key_code: 0x25,                   // kVK_ANSI_L
+            modifiers: (1 << 11) | (1 << 12), // optionKey | controlKey
+            label: SNAP_LAYOUT_KEYS,
+        }) {
+            Ok(hotkey) => Some(hotkey),
+            Err(error) => {
+                shortcut_errors.push(error);
+                None
+            }
+        };
         let shortcuts_hotkey = match GlobalHotkey::register(HotkeySpec {
             signature: *b"Cnvs",
             id: 2,
@@ -441,6 +462,9 @@ impl App {
             canvas_visible: true,
             overlays: OverlaySettings::default(),
             visibility_hotkey,
+            snap_hotkey,
+            snapped_view: None,
+            free_layout: None,
             shortcuts_hotkey,
             jarvis_hotkey,
             shortcuts_visible: false,
@@ -600,11 +624,61 @@ impl App {
         }
     }
 
+    /// Snaps the layout back to the active view's saved arrangement, or
+    /// restores what was on screen before the last snap.
+    ///
+    /// This is a peek, not a commit: moving surfaces around and pressing the key
+    /// returns you to the saved layout, and pressing it again gives your own
+    /// arrangement back. Nothing is written to the saved view, so the key can
+    /// never destroy a layout someone arranged deliberately.
+    fn toggle_snapped_layout(&mut self) {
+        if let Some(previous) = self.free_layout.take() {
+            self.start_transition();
+            self.document.layout = previous;
+            self.bump();
+            self.status = "Restored your arrangement.".into();
+            self.emit_event("layout_restored".to_owned());
+            return;
+        }
+        let Some(view_id) = self.snapped_view.clone() else {
+            // Nothing has been materialized, so there is no saved arrangement to
+            // snap to. Say so rather than silently doing nothing.
+            self.status = "No saved view is active to snap to.".into();
+            return;
+        };
+        match ::canvas::operational_views::materialize(&view_id, &self.document) {
+            Ok(document) => {
+                if document.layout == self.document.layout {
+                    self.status = format!("Layout already matches {view_id}.");
+                    return;
+                }
+                // Take the whole materialized document, not just its layout: the
+                // saved layout references the view's surfaces, and if any were
+                // closed since it was opened, a layout-only assignment would
+                // reference a surface that no longer exists. materialize starts
+                // from the current document, so existing surfaces are preserved.
+                self.free_layout = Some(self.document.layout.clone());
+                self.start_transition();
+                self.document = document;
+                self.bump();
+                self.status = format!("Snapped to {view_id}.");
+                self.emit_event(format!("layout_snapped {view_id}"));
+            }
+            // A view that no longer loads must not strand the key in a state
+            // where the stash is gone and the layout did not change.
+            Err(error) => self.status = format!("Could not snap to {view_id}: {error}"),
+        }
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick => {
                 let toggle_visibility = self
                     .visibility_hotkey
+                    .as_ref()
+                    .is_some_and(GlobalHotkey::poll_pressed);
+                let snap_layout = self
+                    .snap_hotkey
                     .as_ref()
                     .is_some_and(GlobalHotkey::poll_pressed);
                 let toggle_shortcuts = self
@@ -632,6 +706,9 @@ impl App {
                 let mut tasks = vec![self.drain_commands()];
                 if toggle_visibility {
                     tasks.push(self.set_canvas_visible(!self.canvas_visible));
+                }
+                if snap_layout {
+                    self.toggle_snapped_layout();
                 }
                 if toggle_shortcuts {
                     tasks.push(self.toggle_shortcut_help());
@@ -2591,6 +2668,11 @@ impl App {
                             self.ensure_scene_decoded();
                             self.bump();
                         }
+                        // A newly opened view becomes what the snap key returns
+                        // to, and any stashed arrangement belonged to the old
+                        // view, so it must not survive the switch.
+                        self.snapped_view = Some(view_id.clone());
+                        self.free_layout = None;
                         self.status = format!("Opened operational view {view_id}.");
                         if changed {
                             self.emit_event(format!("operational_view_opened {view_id}"));
@@ -4579,6 +4661,7 @@ fn shortcut_help<'a>(
          Ctrl-P                 Find project\n\
          Ctrl-1 / 2 / 3         Toggle left / center / right display\n\
          Ctrl-0                 Show Canvas on every display\n\
+         {SNAP_LAYOUT_KEYS:<22} Snap layout to saved view (again to restore)\n\
          {CANVAS_TOGGLE_KEYS:<22} Toggle Canvas\n\
          {JARVIS_TOGGLE_KEYS:<22} Toggle JARVIS presence\n\
          {FOCUSED_HELP_KEYS:<22} Toggle Help (Canvas focused)\n\
@@ -7432,6 +7515,76 @@ mod tests {
         assert_eq!(app.windows.len(), 2);
         drop(app.toggle_display_ordinal(0));
         assert_eq!(app.selected_display_ids.len(), 3);
+    }
+
+    #[test]
+    fn snapping_is_a_peek_that_never_loses_a_deliberate_arrangement() {
+        let mut app = test_app();
+        app.snapped_view = Some("bifrost/runtime".into());
+        // Open the view for real first: its layout references its own surfaces,
+        // so the document must carry them before any layout can be valid.
+        app.document = ::canvas::operational_views::materialize("bifrost/runtime", &app.document)
+            .expect("built-in view materializes");
+        let saved = app.document.layout.clone();
+
+        // A layout must hold at least one placement, so "moved" is the saved
+        // arrangement with a surface dragged elsewhere rather than an empty one.
+        let moved = match &saved {
+            Layout::Canvas { placements } => {
+                let mut placements = placements.clone();
+                placements[0].bounds.x = 0.123;
+                Layout::Canvas { placements }
+            }
+            _ => unreachable!("operational views materialize as a canvas"),
+        };
+        assert_ne!(moved, saved, "the test must actually move something");
+        app.document.layout = moved.clone();
+
+        // First press snaps to the saved arrangement and stashes mine.
+        app.toggle_snapped_layout();
+        assert_eq!(app.document.layout, saved, "should snap to the saved view");
+        assert!(app.free_layout.is_some(), "my arrangement must be stashed");
+
+        // Second press hands my arrangement back untouched.
+        app.toggle_snapped_layout();
+        assert_eq!(app.document.layout, moved, "should restore what I had");
+        assert!(app.free_layout.is_none());
+    }
+
+    #[test]
+    fn snapping_twice_from_the_saved_layout_is_not_a_trap() {
+        // Already snapped: the layout matches, so there is nothing to stash. A
+        // press must not record the saved layout as "my arrangement", or the
+        // next press would silently do nothing.
+        let mut app = test_app();
+        app.snapped_view = Some("bifrost/runtime".into());
+        app.document.layout =
+            ::canvas::operational_views::materialize("bifrost/runtime", &app.document)
+                .expect("built-in view materializes")
+                .layout;
+        app.toggle_snapped_layout();
+        assert!(
+            app.free_layout.is_none(),
+            "must not stash the saved layout as mine"
+        );
+        assert!(
+            app.status.contains("already matches"),
+            "status was {:?}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn snapping_with_no_active_view_reports_rather_than_panicking() {
+        let mut app = test_app();
+        let before = app.document.layout.clone();
+        app.toggle_snapped_layout();
+        assert_eq!(app.document.layout, before, "layout must not change");
+        assert!(
+            app.status.contains("No saved view"),
+            "status was {:?}",
+            app.status
+        );
     }
 
     #[test]
