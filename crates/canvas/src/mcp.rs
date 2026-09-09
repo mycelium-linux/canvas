@@ -93,6 +93,16 @@ struct OpenWidget {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct OpenOperationalView {
+    request_id: String,
+    #[serde(default)]
+    expected_revision: Option<u64>,
+    /// Exact stable view id, for example `bifrost/runtime` or `elmers/now`.
+    view_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct SaveWorkspace {
     request_id: String,
     #[serde(default)]
@@ -287,6 +297,10 @@ fn tools() -> Vec<Tool> {
             "canvas_open_widget",
             "Open a validated Canvas widget specification as a live Canvas surface. The widget renderer and schema are shared with Lua and native Canvas; omit expected_revision for fire-and-forget.",
         ),
+        tool::<OpenOperationalView>(
+            "canvas_open_view",
+            "Open one exact named operational view as a deterministic layout of movable Canvas widgets. Existing workspace surfaces retain their state and can be recalled later. Repeating the same view is a no-op.",
+        ),
         tool::<SaveWorkspace>(
             "canvas_workspace_save",
             "Persist the current validated Canvas document under its exact project_id so surfaces, layout, theme, background, and focus survive restart.",
@@ -449,6 +463,17 @@ fn parse(name: &str, args: Value) -> Result<ControlRequest, String> {
                 Command::OpenWidget {
                     surface_id: args.surface_id,
                     spec_path: args.spec_path.into(),
+                },
+            )
+        }
+        "canvas_open_view" => {
+            let args: OpenOperationalView =
+                serde_json::from_value(args).map_err(|e| e.to_string())?;
+            (
+                args.request_id,
+                args.expected_revision,
+                Command::OpenOperationalView {
+                    view_id: args.view_id,
                 },
             )
         }
@@ -1179,6 +1204,15 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(widget.command, Command::OpenWidget { .. }));
+        let view = parse(
+            "canvas_open_view",
+            json!({"request_id":"view-1","view_id":"bifrost/runtime"}),
+        )
+        .unwrap();
+        assert!(matches!(
+            view.command,
+            Command::OpenOperationalView { ref view_id } if view_id == "bifrost/runtime"
+        ));
         let save = parse(
             "canvas_workspace_save",
             json!({"request_id":"save-1","name":"dock"}),
@@ -1199,7 +1233,7 @@ mod tests {
     #[test]
     fn schemas_include_native_document_and_patch_definitions() {
         let tools = tools();
-        assert_eq!(tools.len(), 18);
+        assert_eq!(tools.len(), 19);
         let tool = |name: &str| tools.iter().find(|tool| tool.name == name).unwrap();
         assert!(
             tool("canvas_apply_document").input_schema["$defs"]
@@ -1631,7 +1665,7 @@ mod tests {
                 .unwrap()
         });
         let client = ().serve(client_io).await.unwrap();
-        assert_eq!(client.list_all_tools().await.unwrap().len(), 18);
+        assert_eq!(client.list_all_tools().await.unwrap().len(), 19);
         let result = client
             .call_tool(CallToolRequestParams::new("canvas_inspect"))
             .await
