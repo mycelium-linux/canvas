@@ -280,6 +280,7 @@ struct App {
     shortcuts_visible: bool,
     background_picker: Option<::canvas::background_picker::BackgroundPicker>,
     theme_picker: Option<::canvas::theme_picker::ThemePicker>,
+    project_picker: Option<::canvas::project_picker::ProjectPicker>,
     jarvis_visible: bool,
     hud_visible: bool,
     scale_factor: f64,
@@ -436,6 +437,7 @@ impl App {
             shortcuts_visible: false,
             background_picker: None,
             theme_picker: None,
+            project_picker: None,
             jarvis_visible: true,
             hud_visible: true,
             scale_factor: 1.0,
@@ -773,11 +775,34 @@ impl App {
                         Action::Ignored => {}
                     }
                 }
+                if let Some(picker) = self.project_picker.as_mut() {
+                    use ::canvas::project_picker::Action;
+                    match picker.handle(&kbd_event, &self.catalog) {
+                        Action::Consumed => {
+                            self.bump();
+                            return Task::none();
+                        }
+                        Action::Apply(project) => {
+                            self.project_picker = None;
+                            return self.switch_project(project);
+                        }
+                        Action::Cancel => {
+                            self.project_picker = None;
+                            self.status = "Kept the current project.".into();
+                            self.bump();
+                            return Task::none();
+                        }
+                        Action::Ignored => {}
+                    }
+                }
                 if background_picker_requested(&kbd_event) {
                     return self.toggle_background_picker();
                 }
                 if theme_picker_requested(&kbd_event) {
                     return self.toggle_theme_picker();
+                }
+                if project_picker_requested(&kbd_event) {
+                    return self.toggle_project_picker();
                 }
                 if diagnostics_toggle_requested(&kbd_event) {
                     self.hud_visible = !self.hud_visible;
@@ -1286,15 +1311,17 @@ impl App {
             .position(|project| project == &self.document.project_id)
             .unwrap_or(0) as i32;
         let next = (current + direction).rem_euclid(projects.len() as i32) as usize;
+        self.switch_project(projects[next].clone())
+    }
+
+    fn switch_project(&mut self, project: String) -> Task<Message> {
         let (reply, _replies) = mpsc::sync_channel(1);
         self.execute(Pending {
             request: ControlRequest {
                 schema_version: CONTROL_VERSION,
                 request_id: "key-workspace".into(),
                 expected_revision: Some(self.runtime_revision),
-                command: Command::WorkspaceSwitch {
-                    name: projects[next].clone(),
-                },
+                command: Command::WorkspaceSwitch { name: project },
             },
             reply,
         })
@@ -1353,6 +1380,7 @@ impl App {
     }
 
     fn toggle_theme_picker(&mut self) -> Task<Message> {
+        self.project_picker = None;
         self.background_picker = None;
         self.theme_picker = match self.theme_picker {
             Some(_) => None,
@@ -1372,6 +1400,31 @@ impl App {
         self.bump();
         self.emit_event(format!(
             "theme_picker {}",
+            if open { "shown" } else { "hidden" }
+        ));
+        if open && !self.canvas_visible {
+            self.set_canvas_visible(true)
+        } else {
+            Task::none()
+        }
+    }
+
+    fn toggle_project_picker(&mut self) -> Task<Message> {
+        self.background_picker = None;
+        self.theme_picker = None;
+        self.project_picker = match self.project_picker {
+            Some(_) => None,
+            None => Some(::canvas::project_picker::ProjectPicker::default()),
+        };
+        let open = self.project_picker.is_some();
+        self.status = if open {
+            "Choose a project: type to filter, Enter to switch.".into()
+        } else {
+            "Kept the current project.".into()
+        };
+        self.bump();
+        self.emit_event(format!(
+            "project_picker {}",
             if open { "shown" } else { "hidden" }
         ));
         if open && !self.canvas_visible {
@@ -4072,6 +4125,9 @@ impl App {
         if let Some(picker) = self.theme_picker.as_ref() {
             layers.push(picker.view());
         }
+        if let Some(picker) = self.project_picker.as_ref() {
+            layers.push(picker.view(&self.catalog, &self.document.project_id));
+        }
         if let Some(dock) = self.minimized_dock() {
             layers.push(dock);
         }
@@ -4458,6 +4514,7 @@ fn shortcut_help<'a>(
          F2                     Choose background\n\
          F3                     Toggle diagnostics\n\
          F4                     Choose theme / palette\n\
+         Ctrl-P                 Find project\n\
          Ctrl-1 / 2 / 3         Toggle left / center / right display\n\
          Ctrl-0                 Show Canvas on every display\n\
          {CANVAS_TOGGLE_KEYS:<22} Toggle Canvas\n\
@@ -4633,6 +4690,19 @@ fn theme_picker_requested(event: &iced::keyboard::Event) -> bool {
             repeat: false,
             ..
         } if modifiers.is_empty()
+    )
+}
+
+fn project_picker_requested(event: &iced::keyboard::Event) -> bool {
+    use iced::keyboard::{Event, Key};
+    matches!(
+        event,
+        Event::KeyPressed {
+            key: Key::Character("p"),
+            modifiers,
+            repeat: false,
+            ..
+        } if modifiers.control() && !modifiers.alt() && !modifiers.logo()
     )
 }
 
