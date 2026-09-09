@@ -626,6 +626,7 @@ mod placed_widget_tests {
                 theme: None,
                 refresh_ms: None,
                 chrome: canvas_widgets::WidgetChrome::DragOnly,
+                data: canvas_widgets::WidgetData::default(),
             },
             rect: ViewRect {
                 x: 0.0,

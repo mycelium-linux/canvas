@@ -1,10 +1,14 @@
-use crate::quant::{Candle, QuantWidget};
+use crate::{
+    WidgetSpec,
+    quant::{Candle, QuantWidget},
+};
 use canvas_core::VisualTheme;
 use iced::mouse;
 use iced::widget::{Canvas, canvas, column, row, space, text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 pub(super) fn element<'a, Message: 'a>(
+    spec: &'a WidgetSpec,
     widget: &'a QuantWidget,
     visual: &VisualTheme,
 ) -> Element<'a, Message> {
@@ -43,7 +47,11 @@ pub(super) fn element<'a, Message: 'a>(
             })
             .width(Length::Fill)
             .height(Length::Fill);
-            super::panel(column![header, chart].spacing(m.space_3).into(), visual)
+            super::panel(
+                spec,
+                column![header, chart].spacing(m.space_3).into(),
+                visual,
+            )
         }
     }
 }

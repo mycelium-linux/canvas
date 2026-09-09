@@ -51,6 +51,41 @@ pub struct WidgetSpec {
     /// Window treatment when this widget is opened as a movable Canvas surface.
     #[serde(default)]
     pub chrome: WidgetChrome,
+    /// Source health and provenance supplied by the connector that owns the data.
+    /// Renderers consume this uniformly; individual widget kinds do not invent
+    /// their own freshness badges or empty-state conventions.
+    #[serde(default)]
+    pub data: WidgetData,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WidgetData {
+    #[serde(default)]
+    pub state: WidgetDataState,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub observed_at: Option<String>,
+    #[serde(default)]
+    pub window: Option<String>,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum WidgetDataState {
+    #[default]
+    Ready,
+    Loading,
+    NoData,
+    Stale,
+    Partial,
+    Disconnected,
+    Error,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -351,6 +386,14 @@ impl WidgetSpec {
                 self.schema_version
             ));
         }
+        optional_bounded_text(&self.data.source, "widget data source", 256)?;
+        optional_bounded_text(&self.data.observed_at, "widget observed time", 128)?;
+        optional_bounded_text(&self.data.window, "widget data window", 128)?;
+        optional_bounded_text(
+            &self.data.detail,
+            "widget data detail",
+            MAX_INPUT_TEXT_BYTES,
+        )?;
         match &self.kind {
             WidgetKind::Quant { widget } => widget.validate()?,
             WidgetKind::Stat {
@@ -568,6 +611,17 @@ fn optional_label(value: &Option<String>, name: &str) -> Result<()> {
     }
 }
 
+fn optional_bounded_text(value: &Option<String>, name: &str, max: usize) -> Result<()> {
+    if let Some(value) = value {
+        check(
+            !value.is_empty() && value.len() <= max,
+            &format!("{name} must contain 1-{max} bytes"),
+        )
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_f32_series(values: &[f32], name: &str) -> Result<()> {
     check(
         values.len() <= MAX_SERIES_POINTS && values.iter().all(|value| value.is_finite()),
@@ -684,8 +738,46 @@ mod tests {
             theme: None,
             refresh_ms: None,
             chrome: WidgetChrome::DragOnly,
+            data: WidgetData::default(),
         };
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn connector_metadata_and_data_state_roundtrip() {
+        let spec = WidgetSpec::from_json(
+            br#"{
+                "id":"requests",
+                "kind":"stat",
+                "label":"Requests",
+                "value":42,
+                "data":{
+                    "state":"stale",
+                    "source":"prometheus:bifrost",
+                    "observed_at":"2026-09-08T19:30:00Z",
+                    "window":"5m",
+                    "detail":"Last scrape was 42s ago"
+                }
+            }"#,
+        )
+        .expect("metadata is valid");
+        assert_eq!(spec.data.state, WidgetDataState::Stale);
+        assert_eq!(spec.data.source.as_deref(), Some("prometheus:bifrost"));
+        let round_trip = WidgetSpec::from_json(&serde_json::to_vec(&spec).unwrap()).unwrap();
+        assert_eq!(round_trip, spec);
+    }
+
+    #[test]
+    fn connector_metadata_is_bounded() {
+        let detail = "x".repeat(MAX_INPUT_TEXT_BYTES + 1);
+        let json = serde_json::json!({
+            "id": "requests",
+            "kind": "stat",
+            "label": "Requests",
+            "value": 42,
+            "data": { "detail": detail }
+        });
+        assert!(WidgetSpec::from_json(&serde_json::to_vec(&json).unwrap()).is_err());
     }
 }
 

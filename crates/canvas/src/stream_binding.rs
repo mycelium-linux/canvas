@@ -311,6 +311,7 @@ mod tests {
             theme: None,
             refresh_ms: None,
             chrome: WidgetChrome::DragOnly,
+            data: canvas_widgets::WidgetData::default(),
         }
     }
 

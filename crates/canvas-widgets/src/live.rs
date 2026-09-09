@@ -5,7 +5,9 @@
 //! presence orb, ticker text) — extracted so Lua, MCP, and the text protocol
 //! all render through one library.
 
-use crate::{ChartType, MeterStyle, StatusLevel, StatusState, WidgetKind, WidgetSpec};
+use crate::{
+    ChartType, MeterStyle, StatusLevel, StatusState, WidgetDataState, WidgetKind, WidgetSpec,
+};
 use canvas_core::{ThemePalette, VisualTheme};
 use iced::mouse;
 use iced::widget::canvas::{Geometry, Path};
@@ -46,7 +48,7 @@ pub fn element<'a, Message: 'a>(
     let palette = &visual.palette;
     let metrics = visual.metrics;
     match &spec.kind {
-        WidgetKind::Quant { widget } => quant::element(widget, visual),
+        WidgetKind::Quant { widget } => quant::element(spec, widget, visual),
         WidgetKind::Stat {
             label,
             value,
@@ -89,7 +91,7 @@ pub fn element<'a, Message: 'a>(
                 .height(Length::Fill),
             ]
             .spacing(metrics.space_2);
-            panel(body.into(), visual)
+            panel(spec, body.into(), visual)
         }
         WidgetKind::TimeSeries {
             title,
@@ -138,7 +140,7 @@ pub fn element<'a, Message: 'a>(
                 .height(Length::Fill),
             ]
             .spacing(metrics.space_2);
-            panel(body.into(), visual)
+            panel(spec, body.into(), visual)
         }
         // A module kind is resolved by the Canvas Lua host before it reaches this
         // crate, which has no Lua runtime of its own. Reaching here is a wiring
@@ -193,7 +195,7 @@ pub fn element<'a, Message: 'a>(
                     .into()
                 })
                 .collect::<Vec<Element<'_, Message>>>();
-            panel(row(quotes).spacing(metrics.space_5).into(), visual)
+            panel(spec, row(quotes).spacing(metrics.space_5).into(), visual)
         }
         WidgetKind::Status { state } => {
             let orb = match state.unwrap_or(StatusState::Unknown) {
@@ -202,6 +204,7 @@ pub fn element<'a, Message: 'a>(
                 StatusState::Unknown => with_alpha(color(palette.warning), 0.85),
             };
             panel(
+                spec,
                 row![
                     status_dot(orb, 12.0),
                     text(match state.unwrap_or(StatusState::Unknown) {
@@ -248,6 +251,7 @@ pub fn element<'a, Message: 'a>(
                 })
                 .collect();
             panel(
+                spec,
                 column![
                     text("Level")
                         .size(metrics.small)
@@ -263,6 +267,7 @@ pub fn element<'a, Message: 'a>(
             let pct = format!("{:.0}%", value);
             let label = label.clone().unwrap_or_default();
             panel(
+                spec,
                 iced::widget::Column::<Message>::new()
                     .push(
                         text(pct)
@@ -293,6 +298,7 @@ pub fn element<'a, Message: 'a>(
             buckets,
             unit,
         } => panel(
+            spec,
             column![
                 row![
                     text(title).size(metrics.body).color(color(palette.text)),
@@ -344,6 +350,7 @@ pub fn element<'a, Message: 'a>(
                 },
             );
             panel(
+                spec,
                 column![
                     text(title).size(metrics.body).color(color(palette.text)),
                     lines
@@ -372,6 +379,7 @@ pub fn element<'a, Message: 'a>(
                 },
             );
             panel(
+                spec,
                 column![
                     text(title).size(metrics.body).color(color(palette.text)),
                     lines
@@ -402,6 +410,7 @@ pub fn element<'a, Message: 'a>(
                         )
                     });
             panel(
+                spec,
                 column![
                     text(title).size(metrics.body).color(color(palette.text)),
                     lines
@@ -425,7 +434,8 @@ pub fn element<'a, Message: 'a>(
     }
 }
 
-fn panel<'a, Message: 'a>(
+pub(crate) fn panel<'a, Message: 'a>(
+    spec: &'a WidgetSpec,
     body: Element<'a, Message>,
     visual: &VisualTheme,
 ) -> Element<'a, Message> {
@@ -437,7 +447,18 @@ fn panel<'a, Message: 'a>(
     let shadow_opacity = visual.shadow_opacity;
     let shadow_offset_y = visual.shadow_offset_y;
     let shadow_blur = visual.shadow_blur;
-    container(body)
+    let content: Element<'a, Message> = match spec.data.state {
+        WidgetDataState::Loading
+        | WidgetDataState::NoData
+        | WidgetDataState::Disconnected
+        | WidgetDataState::Error => data_state_content(spec, visual),
+        WidgetDataState::Ready | WidgetDataState::Stale | WidgetDataState::Partial => body,
+    };
+    let mut layout = column![content].spacing(metrics.space_2);
+    if let Some(footer) = data_footer(spec, visual) {
+        layout = layout.push(footer);
+    }
+    container(layout)
         .padding(metrics.space_4)
         .width(Length::Fill)
         .height(Length::Fill)
@@ -456,6 +477,94 @@ fn panel<'a, Message: 'a>(
             ..Default::default()
         })
         .into()
+}
+
+fn data_state_content<'a, Message: 'a>(
+    spec: &'a WidgetSpec,
+    visual: &VisualTheme,
+) -> Element<'a, Message> {
+    let metrics = visual.metrics;
+    let state = spec.data.state;
+    let mut content = column![
+        status_dot(data_state_color(state, &visual.palette), 9.0),
+        text(data_state_label(state))
+            .size(metrics.body)
+            .color(color(visual.palette.text)),
+    ]
+    .spacing(metrics.space_2)
+    .align_x(iced::alignment::Horizontal::Center);
+    if let Some(detail) = &spec.data.detail {
+        content = content.push(
+            text(detail)
+                .size(metrics.small)
+                .color(color(visual.palette.text_muted)),
+        );
+    }
+    container(content)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center(Length::Fill)
+        .into()
+}
+
+fn data_footer<'a, Message: 'a>(
+    spec: &'a WidgetSpec,
+    visual: &VisualTheme,
+) -> Option<Element<'a, Message>> {
+    let metadata = [
+        spec.data.source.as_deref(),
+        spec.data.window.as_deref(),
+        spec.data.observed_at.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("  ·  ");
+    if metadata.is_empty() && spec.data.state == WidgetDataState::Ready {
+        return None;
+    }
+    let metrics = visual.metrics;
+    let state = spec.data.state;
+    let mut footer = row![].spacing(metrics.space_2);
+    if state != WidgetDataState::Ready {
+        footer = footer
+            .push(status_dot(data_state_color(state, &visual.palette), 6.0))
+            .push(
+                text(data_state_label(state))
+                    .size(metrics.small)
+                    .color(data_state_color(state, &visual.palette)),
+            );
+    }
+    if !metadata.is_empty() {
+        footer = footer.push(space::horizontal()).push(
+            text(metadata)
+                .size(metrics.small)
+                .color(color(visual.palette.text_muted)),
+        );
+    }
+    Some(footer.align_y(iced::alignment::Vertical::Center).into())
+}
+
+fn data_state_label(state: WidgetDataState) -> &'static str {
+    match state {
+        WidgetDataState::Ready => "Live",
+        WidgetDataState::Loading => "Loading",
+        WidgetDataState::NoData => "No data",
+        WidgetDataState::Stale => "Stale",
+        WidgetDataState::Partial => "Partial data",
+        WidgetDataState::Disconnected => "Disconnected",
+        WidgetDataState::Error => "Source error",
+    }
+}
+
+fn data_state_color(state: WidgetDataState, palette: &ThemePalette) -> Color {
+    color(match state {
+        WidgetDataState::Ready => palette.success,
+        WidgetDataState::Loading => palette.info,
+        WidgetDataState::NoData => palette.text_muted,
+        WidgetDataState::Stale | WidgetDataState::Partial => palette.warning,
+        WidgetDataState::Disconnected | WidgetDataState::Error => palette.danger,
+    })
 }
 
 fn status_dot<'a, Message: 'a>(fill: Color, size: f32) -> Element<'a, Message> {
