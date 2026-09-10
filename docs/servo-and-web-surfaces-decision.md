@@ -222,3 +222,41 @@ Servo is improving at roughly 1.5 WPT points a month. Deciding "no, permanently"
 **The one argument that would flip this early:** if agent browsing is scoped to a known, bounded set of origins — your own docs, rustdoc, one vendor's API reference — the compat risk collapses to something you measure once and allowlist, and Servo at 83.6% DOM parity on static-ish content is fine for that today. So the question to put to whoever owns `dock-8cd` is not "is Servo web-compatible." It is **"is the agent's browsing surface bounded?"** If it is bounded, Servo becomes viable sooner than these gates suggest. If it is "whatever the agent decides to look at," Servo is worse than no browser at all — because a wrong render the agent cannot detect produces a confident wrong report, and a tool that refuses is strictly better than a tool that lies.
 
 That is a product decision. No further engine research settles it.
+---
+
+## 9. Amendment, 2026-09-10: the bounded surface, and what it changes
+
+The trigger in s8 fired the same day it was written. Agent browsing IS bounded to start: origins we
+own - fpl login, enrollment, our own consoles - with SSO handled by injecting a session rather than
+driving a login form. `dock-ybc.14` is closed with that answer.
+
+That moves Servo from "not yet" to "yes, on this list", and it does so without contradicting
+anything above, because the bounded set inverts both disqualifiers:
+
+- **Silent failure becomes affordable to detect.** s3 rejected per-target plausibility checks because
+  they "erode the entire cost argument" across the open web. Across eight or ten internal origins
+  they are an afternoon. The mitigation was never wrong, only unaffordable at open-web scale.
+- **Web compatibility becomes a spec we own.** If our console does not render in Servo, we fix our
+  console. "Internal tools must render in Servo" is a progressive-enhancement discipline that is
+  independently good for accessibility and no-JS resilience, and nobody else's roadmap is involved.
+
+**The split worth naming: Servo for what we own the app; Chromium for what we own only the
+credential.** Vendor portals and dashboards we cannot fix keep the isolated-Chromium lane
+(`dock-ybc.16`) and the credential broker (`dock-ybc.12`). Neither engine has to be universal, which
+is precisely why both are affordable.
+
+**And the starting path is servoshell over WebDriver, not embedding `libservo`** (`dock-ybc.19`).
+s2a listed the prebuilt servoshell as a limitation - "the application only, no embedder artifact" -
+which is true for embedding and irrelevant for driving pages. That sidesteps every cost this document
+raised: no 1.99 GB from-source build, no monthly breaking bump, no `RenderingContext` on an
+unguaranteed crate, no GL-to-wgpu question, and no Servo dependency in Canvas at all. Canvas is not
+involved; this is an agent-driving lane.
+
+The four gates in s8 do not go away. They stop being the test for *starting* and become the test for
+*leaving the list*.
+
+One requirement that is new and does not appear above: the injected session must be an
+**agent-scoped principal**, not a copy of the human's (`dock-ybc.20`). Owning the IdP is what makes
+this stronger than any browser isolation story - `playwright --isolated` gives an agent a clean
+cookie jar, but not a different identity. A prompt-injected agent should be bounded by what its own
+principal can do.
