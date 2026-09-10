@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><style>
+/* Only constructs that actually appear in the doc-forge template corpus.
+   Property census taken from fixtures/templates/*.html, fixtures/css/*.css,
+   fixtures/letterheads/* and gsg_thermal_packing_slip/letterhead.css. */
+@page { size: 4in 6in; margin: 0.15in; }
+:root { --brand-primary: #1b4d3e; --surface-muted: #ededed; --divider: #999; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: 'IBM Plex Sans', -apple-system, sans-serif;
+       font-size: 11.5px; line-height: 1.35; color: #000; background: #fff; }
+.probe { border-bottom: 1px solid #ccc; padding: 1.5mm 2mm; }
+.tag { font-size: 8px; text-transform: uppercase; letter-spacing: 0.12em; color: #777; }
+
+/* 1. flex column + mm gap */
+.p1 { display: flex; flex-direction: column; gap: 2mm; }
+.p1 span { background: var(--surface-muted); }
+
+/* 2. grid with minmax percentage tracks */
+.p2 { display: grid; grid-template-columns: minmax(0, 70%) minmax(0, 30%); gap: 1.4mm; align-items: start; }
+.p2 div { background: var(--surface-muted); }
+
+/* 3. table-layout:fixed + colgroup + border-collapse */
+table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 10px; }
+col.c1 { width: 58%; } col.c2 { width: 28%; } col.c3 { width: 14%; }
+th { border-bottom: 1px solid #bbb; text-align: left; padding-bottom: 1.2mm; }
+td { padding: 1.2mm 0; border-bottom: 1px solid #eee; vertical-align: top; }
+td.r { text-align: right; }
+
+/* 4. text-overflow ellipsis */
+.p4 { font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.14em;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; width: 40mm; }
+
+/* 5. border-radius + dashed border + box-shadow */
+.p5 { border: 1px solid #c9c9c9; border-radius: 4px; padding: 2mm;
+      background: var(--surface-muted); box-shadow: 0 1px 3px rgba(0,0,0,0.25); }
+.p5b { border-top: 1px dashed var(--divider); padding-top: 2mm; margin-top: 2mm; }
+
+/* 6. word-break on a long token */
+.p6 { width: 30mm; word-break: break-all; overflow-wrap: break-word; font-size: 9.8px; }
+
+/* 7. ::before content string */
+.p7::before { content: "» "; color: var(--brand-primary); font-weight: 700; }
+
+/* 8. position absolute inside relative + justify-content: space-between */
+.p8 { position: relative; height: 12mm; background: var(--surface-muted);
+      display: flex; justify-content: space-between; align-items: center; padding: 0 2mm; }
+.p8 .pin { position: absolute; top: 1mm; left: 50%; font-size: 8px; color: var(--brand-primary); }
+
+/* 9. paged-media break control */
+.p9 { page-break-inside: avoid; }
+</style></head>
+<body>
+  <div class="probe"><span class="tag">1 flex-col + mm gap</span>
+    <div class="p1"><span>alpha</span><span>beta</span></div></div>
+
+  <div class="probe"><span class="tag">2 grid minmax 70/30</span>
+    <div class="p2"><div>left column</div><div>right</div></div></div>
+
+  <div class="probe p9"><span class="tag">3 table fixed + colgroup + collapse + vertical-align:top</span>
+    <table><colgroup><col class="c1"><col class="c2"><col class="c3"></colgroup>
+      <thead><tr><th>Item</th><th>SKU</th><th class="r">Qty</th></tr></thead>
+      <tbody>
+        <tr><td>Rounded Detent Pin<br>with a second line to test top alignment</td><td>GSG-04</td><td class="r">5</td></tr>
+        <tr><td>Safety Cable</td><td>GSG-22</td><td class="r">2</td></tr>
+      </tbody></table></div>
+
+  <div class="probe"><span class="tag">4 text-overflow: ellipsis</span>
+    <div class="p4">GSG MANUFACTURING LIMITED LIABILITY CO</div></div>
+
+  <div class="probe"><span class="tag">5 radius + dashed + shadow + var()</span>
+    <div class="p5">SAFETYFIRST</div><div class="p5b">dashed rule above</div></div>
+
+  <div class="probe"><span class="tag">6 word-break: break-all</span>
+    <div class="p6">1Z999AA10123456784ABCDEFGHIJKLMNOP</div></div>
+
+  <div class="probe"><span class="tag">7 ::before content string</span>
+    <div class="p7">generated marker</div></div>
+
+  <div class="probe"><span class="tag">8 absolute inside relative + space-between</span>
+    <div class="p8"><span>left</span><span class="pin">pinned</span><span>right</span></div></div>
+</body>
+</html>

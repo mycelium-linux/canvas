@@ -1,0 +1,25 @@
+[workspace]
+
+[package]
+name = "iced-aw-spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# Exact feature set Canvas uses (crates/canvas/Cargo.toml:18)
+iced = { version = "0.14", default-features = false, features = [
+    "wgpu", "tokio", "canvas", "image-without-codecs",
+    "x11", "wayland", "markdown", "highlighter",
+] }
+# Only the interaction-relevant iced_aw features. `default = ["full"]` pulls
+# chrono + num-format + canvas; we deliberately do not take those.
+iced_aw = { version = "0.14", default-features = false, features = [
+    "menu", "card", "badge", "context_menu", "drop_down", "tabs",
+] }
+# NOTE: iced_aw pulls iced_fonts ^0.3 (feature `advanced_text`) unconditionally,
+# even with default-features = false. It is not optional.
+
+[[bin]]
+name = "iced-aw-spike"
+path = "src/main.rs"

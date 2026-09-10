@@ -1,0 +1,11 @@
+[package]
+name = "palette-colour-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Detach from the enclosing Canvas workspace: this is a spike, not a member.
+[workspace]
+
+[dependencies]
+palette = "0.7"

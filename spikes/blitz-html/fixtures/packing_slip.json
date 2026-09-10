@@ -1,0 +1,36 @@
+{
+  "company": {
+    "name": "Grey Summit Gear",
+    "legal_name": "GSG Mfg LLC",
+    "store_url": "store.greysummitgear.com"
+  },
+  "order": {
+    "id": "PO-2048",
+    "ship_date": "2024-04-14",
+    "carrier": "UPS Ground",
+    "tracking": "1Z999AA10123456784",
+    "shipping": {
+      "name": "Jordan Safety",
+      "address_line1": "845 Harbor Way",
+      "address_line2": "Dock 4",
+      "city": "Seattle",
+      "region": "WA",
+      "postal_code": "98101",
+      "country": "USA"
+    },
+    "line_items": [
+      {"sku": "GSG-04", "name": "Rounded Detent Pin", "qty": 5,
+       "customizations": [{"label": "Engraving", "value": "CREW 12"}]},
+      {"sku": "GSG-22", "name": "Safety Cable", "qty": 2, "variant": "1/8 in x 6 ft"}
+    ],
+    "summary": {
+      "item_count": 7,
+      "notes": "Leave dock door unlocked"
+    }
+  },
+  "marketing": {
+    "discount": "SAFETYFIRST",
+    "percent": "15",
+    "thank_you": "Thank you for keeping safety first!"
+  }
+}
