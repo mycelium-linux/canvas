@@ -14,6 +14,8 @@ pub mod display_watch;
 pub mod global_hotkey;
 pub mod layout;
 pub mod theme_file;
+pub mod boot_budget;
+pub mod manifest_query;
 pub mod working_set;
 
 #[derive(Debug)]
