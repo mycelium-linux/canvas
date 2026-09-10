@@ -103,9 +103,10 @@ end
 
 return {
   kind = "snapshot",
+  -- Only the KIND and its own fields. The snapshot replaces the widget kind
+  -- inside the surface's existing spec, so identity - schema_version, id, theme,
+  -- chrome - belongs to the surface and must not be resent here.
   widget = {
-    schema_version = 1,
-    id = "machine/lockout",
     kind = "table",
     title = title,
     columns = { "state", "repo", "command", "wait", "run" },
