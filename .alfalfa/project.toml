@@ -1,0 +1,13 @@
+version = 1
+resource = []
+experiments = []
+
+[project]
+id = "dock"
+name = "Canvas"
+purpose = "The shared visualization plane between a person, their agents, and the systems that own the data. Presents surfaces; never owns the data behind them."
+owner = "Avery Wagar"
+status = "active"
+
+[appearance]
+colorway = "profile"
