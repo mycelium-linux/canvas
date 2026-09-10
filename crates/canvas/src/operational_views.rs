@@ -17,9 +17,13 @@ use std::{
 
 pub const NAMES: &[&str] = &["bifrost/runtime", "elmers/now", "fleet/runtime"];
 
+/// Bytes a stored view may occupy. One ceiling for both directions, so a
+/// document that saves is a document that loads back.
+const MAX_VIEW_BYTES: u64 = 256 * 1024;
+
 pub fn load(name: &str) -> Result<SharedViewDocument> {
     let relative = view_path(name)?;
-    if let Some(bytes) = crate::runtime_config::read(&relative, 256 * 1024)? {
+    if let Some(bytes) = crate::runtime_config::read(&relative, MAX_VIEW_BYTES)? {
         let document: SharedViewDocument = serde_json::from_slice(&bytes)
             .map_err(|error| Error(format!("Invalid runtime operational view {name}: {error}")))?;
         document.validate()?;
@@ -41,6 +45,33 @@ pub fn load(name: &str) -> Result<SharedViewDocument> {
         .map_err(|error| Error(format!("Invalid built-in operational view {name}: {error}")))?;
     document.validate()?;
     Ok(document)
+}
+
+/// Save a view to the runtime root, where [`load`] will find it ahead of the
+/// built-in copy.
+///
+/// Validated before it is written, never after: a document that would not load
+/// must not reach the disk, because [`load`] refuses a malformed view and the
+/// operator would be left with a name that no longer resolves. The same id rule
+/// [`load`] enforces is enforced here, so a view cannot be saved under a name it
+/// will be rejected under.
+///
+/// This is what makes a view a document rather than a constant, and therefore
+/// what lets a view record anything — a position, a layout the operator moved,
+/// a parameter they set.
+pub fn save(name: &str, document: &SharedViewDocument) -> Result<PathBuf> {
+    let relative = view_path(name)?;
+    document.validate()?;
+    let expected = name.replace('/', "-");
+    if document.id != expected {
+        return Err(Error(format!(
+            "Cannot save operational view {name}: document id is {}, expected {expected}",
+            document.id
+        )));
+    }
+    let serialized = serde_json::to_vec_pretty(document)
+        .map_err(|error| Error(format!("Cannot serialize operational view {name}: {error}")))?;
+    crate::runtime_config::write(&relative, &serialized, MAX_VIEW_BYTES)
 }
 
 fn view_path(name: &str) -> Result<PathBuf> {
@@ -623,6 +654,41 @@ mod tests {
     fn names_are_exact_and_unknown_views_fail_loudly() {
         assert!(load("Bifrost Runtime").is_err());
         assert!(load("bifrost/runtime").is_ok());
+    }
+
+    #[test]
+    fn saving_refuses_a_name_load_would_refuse() {
+        let view = load("fleet/runtime").expect("built-in view");
+        assert!(
+            save("Fleet Runtime", &view).is_err(),
+            "a view must not be saved under a name load() will not resolve"
+        );
+        assert!(save("", &view).is_err());
+        assert!(save("../escape", &view).is_err());
+    }
+
+    #[test]
+    fn saving_refuses_a_document_whose_id_does_not_match_the_name() {
+        let view = load("fleet/runtime").expect("built-in view");
+        assert_eq!(view.id, "fleet-runtime");
+        // load() rejects this pairing on the way back in, so save() has to
+        // reject it on the way out - otherwise the operator writes a file that
+        // makes the name stop resolving.
+        assert!(save("bifrost/runtime", &view).is_err());
+    }
+
+    #[test]
+    fn saving_refuses_a_document_that_would_not_validate() {
+        let mut view = load("fleet/runtime").expect("built-in view");
+        view.schema_version = 0;
+        assert!(
+            view.validate().is_err(),
+            "precondition: this document is invalid"
+        );
+        assert!(
+            save("fleet/runtime", &view).is_err(),
+            "an invalid document must never reach the disk"
+        );
     }
 
     #[test]
