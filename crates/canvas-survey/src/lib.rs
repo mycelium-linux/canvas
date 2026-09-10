@@ -1039,7 +1039,11 @@ impl Draft {
     }
 }
 
-fn classify(family: &FamilyGroup, group: &str, options: &SurveyOptions) -> Result<Candidate, Reported> {
+fn classify(
+    family: &FamilyGroup,
+    group: &str,
+    options: &SurveyOptions,
+) -> Result<Candidate, Reported> {
     let primary = family.primary();
     let base = family.base.as_str();
     let rate = options.rate_window.as_str();
@@ -1386,8 +1390,10 @@ fn build(family: &FamilyGroup, group: &str, draft: Draft, options: &SurveyOption
             source: Some(format!("prometheus:{source_id}")),
             observed_at: None,
             window: Some(window_label(window_seconds)),
+            // Names the rule, so the panel on the wall and the rationale in the
+            // survey can be tied together without looking anything up.
             detail: Some(format!(
-                "candidate from {:?}; no snapshot yet",
+                "No snapshot yet — candidate proposed by the {:?} rule",
                 draft.rule
             )),
             provenance: Provenance::Live,
@@ -1488,7 +1494,12 @@ mod tests {
                 &["runtime"],
             ),
             fact("palisade_active_connections", Gauge, 1, &[]),
-            fact("palisade_bytes_transferred_total", Counter, 2, &["direction"]),
+            fact(
+                "palisade_bytes_transferred_total",
+                Counter,
+                2,
+                &["direction"],
+            ),
             fact("palisade_request_failures_total", Counter, 3, &["code"]),
             fact(
                 "palisade_request_latency_seconds_bucket",
@@ -1577,7 +1588,10 @@ mod tests {
         let covers = covering(&survey, used);
         assert_eq!(covers.len(), 1, "the pair must not produce two widgets");
         let candidate = covers[0];
-        assert_eq!(covered_by(&survey, total), vec![candidate.source_id.clone()]);
+        assert_eq!(
+            covered_by(&survey, total),
+            vec![candidate.source_id.clone()]
+        );
 
         assert_eq!(candidate.rationale.rule, Rule::Utilization);
         assert_eq!(candidate.rationale.evidence.family, Family::Utilization);
@@ -1637,13 +1651,25 @@ mod tests {
                 continue;
             }
             for candidate in covering(&survey, &fact.name) {
+                let query = &candidate.source.query;
+                // Wherever the counter is named, it is named inside a rate. A
+                // counter absorbed into a family may not be named at all — the
+                // latency _count rides on the rate of its own _bucket — and
+                // that still satisfies the rule.
+                for (at, _) in query.match_indices(fact.name.as_str()) {
+                    let before = &query[..at];
+                    assert!(
+                        before.ends_with("rate(") || before.ends_with("increase("),
+                        "{} is drawn raw by {}: {query}",
+                        fact.name,
+                        candidate.source_id,
+                    );
+                }
                 assert!(
-                    candidate.source.query.contains(&format!("rate({}", fact.name))
-                        || candidate.source.query.contains(&format!("rate({}[", fact.name)),
-                    "{} is drawn raw by {}: {}",
+                    query.contains("rate("),
+                    "{} feeds {} with no rate at all: {query}",
                     fact.name,
                     candidate.source_id,
-                    candidate.source.query
                 );
             }
         }
@@ -1732,7 +1758,12 @@ mod tests {
     #[test]
     fn info_metrics_are_reported_as_enrichment_not_drawn() {
         let mut facts = observed();
-        facts.push(fact("bifrost_build_info", MetricType::Gauge, 3, &["version"]));
+        facts.push(fact(
+            "bifrost_build_info",
+            MetricType::Gauge,
+            3,
+            &["version"],
+        ));
         let survey = survey(&facts, &SurveyOptions::default()).unwrap();
         assert!(covering(&survey, "bifrost_build_info").is_empty());
         let reported = survey
@@ -1765,7 +1796,12 @@ mod tests {
     #[test]
     fn nothing_is_silently_dropped() {
         let mut facts = observed();
-        facts.push(fact("bifrost_build_info", MetricType::Gauge, 3, &["version"]));
+        facts.push(fact(
+            "bifrost_build_info",
+            MetricType::Gauge,
+            3,
+            &["version"],
+        ));
         facts.push(fact("elmers_mystery", MetricType::Untyped, 2, &[]));
         let survey = survey(&facts, &SurveyOptions::default()).unwrap();
 
@@ -1822,7 +1858,12 @@ mod tests {
                 .alternatives
                 .contains(&WidgetKind::TimeSeries)
         );
-        assert!(trend.rationale.alternatives.contains(&WidgetKind::RankedBar));
+        assert!(
+            trend
+                .rationale
+                .alternatives
+                .contains(&WidgetKind::RankedBar)
+        );
     }
 
     #[test]
@@ -1846,7 +1887,12 @@ mod tests {
 
     #[test]
     fn a_wide_gauge_discloses_the_tail_it_drops() {
-        let facts = vec![fact("mesh_node_temperature_celsius", MetricType::Gauge, 37, &["node"])];
+        let facts = vec![fact(
+            "mesh_node_temperature_celsius",
+            MetricType::Gauge,
+            37,
+            &["node"],
+        )];
         let instant = survey(&facts, &SurveyOptions::default()).unwrap();
         let candidate = &instant.candidates[0];
         assert_eq!(candidate.rationale.rule, Rule::TopNGauge);
@@ -1882,7 +1928,12 @@ mod tests {
     fn a_summary_pair_becomes_one_average() {
         let facts = vec![
             fact("queue_wait_seconds_sum", MetricType::Counter, 2, &["queue"]),
-            fact("queue_wait_seconds_count", MetricType::Counter, 2, &["queue"]),
+            fact(
+                "queue_wait_seconds_count",
+                MetricType::Counter,
+                2,
+                &["queue"],
+            ),
         ];
         let survey = survey(&facts, &SurveyOptions::default()).unwrap();
         assert_eq!(survey.candidates.len(), 1, "one average, not two counters");
@@ -1944,8 +1995,12 @@ mod tests {
                 spec.data.detail.is_some(),
                 "{filename} says why it has no data"
             );
-            assert!(spec.data.source.as_deref().is_some_and(|source| source
-                .starts_with("prometheus:")));
+            assert!(
+                spec.data
+                    .source
+                    .as_deref()
+                    .is_some_and(|source| source.starts_with("prometheus:"))
+            );
         }
     }
 
@@ -2001,7 +2056,12 @@ mod tests {
 
     #[test]
     fn a_declared_unit_wins_over_an_inferred_one() {
-        let mut facts = vec![fact("palisade_active_connections", MetricType::Gauge, 1, &[])];
+        let mut facts = vec![fact(
+            "palisade_active_connections",
+            MetricType::Gauge,
+            1,
+            &[],
+        )];
         facts[0].unit = Some("connections".into());
         let survey = survey(&facts, &SurveyOptions::default()).unwrap();
         assert_eq!(
@@ -2069,7 +2129,11 @@ mod tests {
         let survey = survey(&facts, &SurveyOptions::default()).unwrap();
         let report = survey.report();
         for candidate in &survey.candidates {
-            assert!(report.contains(&candidate.source_id), "{}", candidate.source_id);
+            assert!(
+                report.contains(&candidate.source_id),
+                "{}",
+                candidate.source_id
+            );
         }
         assert!(report.contains("elmers_mystery"));
     }

@@ -464,6 +464,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "canvas-survey"
+version = "0.1.0"
+dependencies = [
+ "canvas-metrics",
+ "canvas-widgets",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "canvas-widgets"
 version = "0.1.0"
 dependencies = [

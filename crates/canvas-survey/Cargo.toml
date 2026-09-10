@@ -1,19 +1,13 @@
 [package]
 name = "canvas-survey"
-version = "0.1.0"
-edition = "2024"
-license = "LicenseRef-Proprietary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Classifies Prometheus metadata into candidate Canvas widget definitions"
 
-# Standalone workspace root, so this crate resolves before the root workspace
-# lists it. Delete this stanza — and the version/edition/license literals above,
-# which shadow the `*.workspace = true` the sibling crates use — in the same
-# change that adds `crates/canvas-survey` to the root `workspace.members`.
-[workspace]
-
 [dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
 # The two crates that own the shapes a candidate is emitted in. Depending on
 # them is what makes an accepted candidate a file copy rather than a
 # translation: a candidate that would not load is a compile error here.
