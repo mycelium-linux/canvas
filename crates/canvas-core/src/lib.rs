@@ -14,6 +14,7 @@ pub mod display_watch;
 pub mod global_hotkey;
 pub mod layout;
 pub mod theme_file;
+pub mod working_set;
 
 #[derive(Debug)]
 pub struct Error(pub String);
