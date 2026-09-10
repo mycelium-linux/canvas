@@ -1,15 +1,11 @@
-//! An **externally supplied** palette.
+//! Field-for-field mirror of `canvas_core::ThemePalette` (crates/canvas-core/src/lib.rs:128).
 //!
-//! This mirrors the *shape* of `canvas_core::ThemePalette` (one RGB byte
-//! triple per semantic role) without depending on the crate, so the spike
-//! stays standalone. On adoption this whole file is deleted and
-//! `canvas_core::ThemePalette` / `ThemeMetrics` are used directly — the point
-//! of the spike is that plotters never sees a colour it did not receive.
+//! The spike copies the shape deliberately so that the mapping to the real type
+//! is mechanical: `From<canvas_core::ThemePalette> for Palette` would be a
+//! 13-line struct literal. Nothing here invents a colour.
 
-use plotters::style::{RGBAColor, RGBColor};
+use plotters::style::RGBColor;
 
-/// Field-for-field the roles in `canvas_core::ThemePalette`
-/// (crates/canvas-core/src/lib.rs:128).
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
     pub background: [u8; 3],
@@ -27,135 +23,69 @@ pub struct Palette {
     pub border_strong: [u8; 3],
 }
 
-/// The only names a Lua plot may use for a colour. There is deliberately no
-/// escape hatch to a literal hex value: a script that wants a colour Coherence
-/// does not define is a script the theme cannot re-skin, which is the
-/// regression we are guarding against.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Role {
-    Background,
-    BackgroundStrong,
-    Surface,
-    SurfaceMuted,
-    Text,
-    TextMuted,
-    Primary,
-    Success,
-    Warning,
-    Danger,
-    Info,
-    Border,
-    BorderStrong,
-}
+/// The complete set of role names a script may reference. A script that names
+/// anything else is rejected, loudly, at load time.
+pub const ROLES: [&str; 13] = [
+    "background",
+    "background_strong",
+    "surface",
+    "surface_muted",
+    "text",
+    "text_muted",
+    "primary",
+    "success",
+    "warning",
+    "danger",
+    "info",
+    "border",
+    "border_strong",
+];
 
-impl Role {
-    pub const NAMES: &'static [&'static str] = &[
-        "background",
-        "background_strong",
-        "surface",
-        "surface_muted",
-        "text",
-        "text_muted",
-        "primary",
-        "success",
-        "warning",
-        "danger",
-        "info",
-        "border",
-        "border_strong",
-    ];
-
-    pub fn parse(name: &str) -> Option<Self> {
+impl Palette {
+    pub fn role(&self, name: &str) -> Option<[u8; 3]> {
         Some(match name {
-            "background" => Self::Background,
-            "background_strong" => Self::BackgroundStrong,
-            "surface" => Self::Surface,
-            "surface_muted" => Self::SurfaceMuted,
-            "text" => Self::Text,
-            "text_muted" => Self::TextMuted,
-            "primary" => Self::Primary,
-            "success" => Self::Success,
-            "warning" => Self::Warning,
-            "danger" => Self::Danger,
-            "info" => Self::Info,
-            "border" => Self::Border,
-            "border_strong" => Self::BorderStrong,
+            "background" => self.background,
+            "background_strong" => self.background_strong,
+            "surface" => self.surface,
+            "surface_muted" => self.surface_muted,
+            "text" => self.text,
+            "text_muted" => self.text_muted,
+            "primary" => self.primary,
+            "success" => self.success,
+            "warning" => self.warning,
+            "danger" => self.danger,
+            "info" => self.info,
+            "border" => self.border,
+            "border_strong" => self.border_strong,
             _ => return None,
         })
     }
-}
 
-impl Palette {
-    pub fn rgb(&self, role: Role) -> [u8; 3] {
-        match role {
-            Role::Background => self.background,
-            Role::BackgroundStrong => self.background_strong,
-            Role::Surface => self.surface,
-            Role::SurfaceMuted => self.surface_muted,
-            Role::Text => self.text,
-            Role::TextMuted => self.text_muted,
-            Role::Primary => self.primary,
-            Role::Success => self.success,
-            Role::Warning => self.warning,
-            Role::Danger => self.danger,
-            Role::Info => self.info,
-            Role::Border => self.border,
-            Role::BorderStrong => self.border_strong,
-        }
-    }
-
-    pub fn color(&self, role: Role) -> RGBColor {
-        let [r, g, b] = self.rgb(role);
+    /// Resolve a validated role to a plotters colour. Panics only on a role that
+    /// `PlotSpec` validation already proved present.
+    pub fn rgb(&self, name: &str) -> RGBColor {
+        let [r, g, b] = self
+            .role(name)
+            .unwrap_or_else(|| panic!("unvalidated palette role reached the renderer: {name}"));
         RGBColor(r, g, b)
     }
-
-    /// Palette colour at partial opacity — how gridlines stay subordinate
-    /// without introducing an off-palette grey.
-    pub fn faded(&self, role: Role, alpha: f64) -> RGBAColor {
-        let [r, g, b] = self.rgb(role);
-        RGBAColor(r, g, b, alpha)
-    }
-
-    pub fn iced(&self, role: Role) -> iced::Color {
-        let [r, g, b] = self.rgb(role);
-        iced::Color::from_rgb8(r, g, b)
-    }
 }
 
-/// The subset of `canvas_core::ThemeMetrics` a chart needs. `micro` is the
-/// documented floor for labels a renderer draws itself and cannot reflow —
-/// exactly what axis ticks are (crates/canvas-core/src/lib.rs:215).
-#[derive(Debug, Clone, Copy)]
-pub struct Metrics {
-    pub space_3: f32,
-    pub micro: f32,
-    pub small: f32,
-    pub body: f32,
-    pub title: f32,
-}
-
-/// Stand-in for a Coherence dark theme. Values are placeholders; adoption
-/// resolves them from the real token crate.
-pub const DARK: Palette = Palette {
-    background: [0x12, 0x14, 0x18],
-    background_strong: [0x0b, 0x0d, 0x10],
-    surface: [0x1b, 0x1f, 0x26],
-    surface_muted: [0x24, 0x29, 0x32],
-    text: [0xe6, 0xe9, 0xef],
-    text_muted: [0x8b, 0x93, 0xa3],
-    primary: [0x5c, 0x9d, 0xff],
-    success: [0x4c, 0xc9, 0x8a],
-    warning: [0xe8, 0xb3, 0x39],
-    danger: [0xe5, 0x64, 0x5f],
-    info: [0x7d, 0xd3, 0xd8],
-    border: [0x2e, 0x34, 0x3f],
-    border_strong: [0x44, 0x4c, 0x5a],
-};
-
-pub const METRICS: Metrics = Metrics {
-    space_3: 12.0,
-    micro: 11.0,
-    small: 13.0,
-    body: 15.0,
-    title: 20.0,
+/// Stand-in for a Coherence dark token set. Values are arbitrary; the point is
+/// that *every* mark below resolves through this struct and plotters' own
+/// palette (`Palette99`, `RED`, `BLUE`, ...) is never referenced.
+pub const DEMO_DARK: Palette = Palette {
+    background: [0x0e, 0x11, 0x16],
+    background_strong: [0x07, 0x09, 0x0c],
+    surface: [0x16, 0x1b, 0x22],
+    surface_muted: [0x1f, 0x25, 0x2d],
+    text: [0xe6, 0xed, 0xf3],
+    text_muted: [0x8b, 0x94, 0x9e],
+    primary: [0x58, 0xa6, 0xff],
+    success: [0x3f, 0xb9, 0x50],
+    warning: [0xd2, 0x99, 0x22],
+    danger: [0xf8, 0x51, 0x49],
+    info: [0x79, 0xc0, 0xff],
+    border: [0x30, 0x36, 0x3d],
+    border_strong: [0x48, 0x4f, 0x58],
 };

@@ -24,7 +24,27 @@ mod palettes;
 
 use canvas_impl as hand;
 use palette::color_difference::Ciede2000;
-use palette::{Clamp, FromColor, IntoColor, IsWithinBounds, Lab, Okhsl, Oklch as PalOklch, Srgb};
+use palette::convert::FromColorUnclamped;
+use palette::{
+    Clamp, FromColor, IntoColor, IsWithinBounds, Lab, Okhsl, Oklab, Oklch as PalOklch, Srgb,
+};
+
+/// RUN 1 FINDING, kept as the reason this file uses `from_color_unclamped`.
+///
+/// The obvious spelling — `Srgb::<f32>::from_color(oklch)` — CLAMPS during the
+/// conversion, silently. palette defines `FromColor = FromColorUnclamped +
+/// Clamp`. So `Srgb::from_color(v).is_within_bounds()` is *always* true, a
+/// chroma-reducing search behind that guard never fires, and the caller gets
+/// channel-clipped colour believing it got a conversion. Run 1 of this spike
+/// did exactly that: the "palette + Canvas's gamut policy" route came out
+/// byte-identical to the naive clipping route, and a 332,640-sample sweep of
+/// OKLCH reported zero colours outside sRGB. See run1-fromcolor-clamps.log.
+///
+/// Every route below therefore converts with `from_color_unclamped` and applies
+/// its gamut policy explicitly.
+fn to_srgb_unclamped(v: PalOklch<f32>) -> Srgb<f32> {
+    Srgb::<f32>::from_color_unclamped(v)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Color {
@@ -86,19 +106,25 @@ fn hand_oklch(v: PalOklch<f32>) -> hand::Oklch {
     }
 }
 
+/// True out-of-gamut test: convert WITHOUT clamping, then ask.
+fn pal_out_of_gamut(v: PalOklch<f32>) -> bool {
+    !to_srgb_unclamped(v).is_within_bounds()
+}
+
 /// palette maths, palette's own way back into range: per-channel clamp.
+/// This is what `Srgb::from_color(oklch)` does for you without saying so.
 fn route_pal_clamp(v: PalOklch<f32>) -> Color {
-    Color::of(Srgb::<f32>::from_color(v).clamp())
+    Color::of(to_srgb_unclamped(v).clamp())
 }
 
 /// palette maths, Canvas's gamut policy (binary search on chroma).
 fn route_pal_bsearch(v: PalOklch<f32>) -> Color {
     let mut chroma = v.chroma;
-    if !Srgb::<f32>::from_color(v).is_within_bounds() {
+    if pal_out_of_gamut(v) {
         let (mut lo, mut hi) = (0.0f32, v.chroma);
         for _ in 0..8 {
             let mid = (lo + hi) / 2.0;
-            if Srgb::<f32>::from_color(PalOklch::new(v.l, mid, v.hue)).is_within_bounds() {
+            if !pal_out_of_gamut(PalOklch::new(v.l, mid, v.hue)) {
                 lo = mid;
             } else {
                 hi = mid;
@@ -106,25 +132,47 @@ fn route_pal_bsearch(v: PalOklch<f32>) -> Color {
         }
         chroma = lo;
     }
-    Color::of(Srgb::<f32>::from_color(PalOklch::new(v.l, chroma, v.hue)).clamp())
+    Color::of(to_srgb_unclamped(PalOklch::new(v.l, chroma, v.hue)).clamp())
 }
 
 /// palette maths plus Ottosson's analytic gamut cusp, via Okhsl saturation.
+/// This is palette's own documented advice: oklab.rs's type docs say "To ensure
+/// a color is within the sRGB gamut, first convert it to `Okhsl` ... and convert
+/// it back". Okhsl normalises chroma against Ottosson's analytic sRGB cusp, so
+/// saturation > 1 means out of gamut.
 fn route_pal_okhsl(v: PalOklch<f32>) -> Color {
-    let mut hsl: Okhsl<f32> = Okhsl::from_color(v);
+    let lab: Oklab<f32> = Oklab::from_color_unclamped(v);
+    let mut hsl: Okhsl<f32> = Okhsl::from_color_unclamped(lab);
     if hsl.saturation > 1.0 {
         hsl.saturation = 1.0;
     }
-    Color::of(Srgb::<f32>::from_color(hsl).clamp())
+    let back: Oklab<f32> = Oklab::from_color_unclamped(hsl);
+    Color::of(Srgb::<f32>::from_color_unclamped(back).clamp())
+}
+
+/// NOT palette. Canvas's own maths with the naive policy its doc-comment
+/// rejects, so the 14-degree claim can be tested without palette in the way.
+fn route_hand_clip(v: PalOklch<f32>) -> Color {
+    hand::from_oklch_by_clipping(hand::Oklch {
+        l: v.l,
+        c: v.chroma,
+        h: v.hue.into_positive_degrees(),
+    })
 }
 
 type Route = fn(PalOklch<f32>) -> Color;
 
-const ROUTES: [(&str, Route); 3] = [
+const ROUTES: [(&str, Route); 4] = [
     ("pal+bsearch", route_pal_bsearch),
     ("pal+Clamp", route_pal_clamp),
     ("pal+Okhsl", route_pal_okhsl),
+    ("hand+clip", route_hand_clip),
 ];
+const N: usize = ROUTES.len();
+
+fn tags() -> [(f32, String); N] {
+    std::array::from_fn(|_| (0.0, String::new()))
+}
 
 /// `series_colors` rebuilt on palette. Structure identical to the hand-written
 /// one; only the colour-space calls change.
@@ -234,6 +282,81 @@ fn main() {
     section_4_status_guard();
     section_5_drain();
     section_6_api_surface();
+    section_7_separation_floor();
+}
+
+/// 7. The one place palette measures something Canvas currently cannot.
+///
+/// live.rs asserts series are `separation() > 0.05` apart — Euclidean distance
+/// in Oklab, hand-rolled in the test module. Nobody has ever checked what 0.05
+/// Oklab is worth perceptually. palette's CIEDE2000 can say.
+fn section_7_separation_floor() {
+    println!("== 7. Is the ramp's own separation floor (0.05 Oklab) perceptually real? ==");
+    println!(
+        "  {:<30} {:>10} {:>10} | {:>10} {:>10}",
+        "palette", "min dEok", "min dE2000", "stale dEok", "stale dE2000"
+    );
+    let mut worst_live = (f32::INFINITY, String::new());
+    let mut worst_stale = (f32::INFINITY, String::new());
+    for (name, p) in palettes::all() {
+        let mut row = [0.0f32; 4];
+        for (slot, colors) in [
+            hand::series_colors(&p),
+            hand::series_colors(&hand::drain(p, hand::STALE_CHROMA)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (mut ok, mut de) = (f32::INFINITY, f32::INFINITY);
+            for (i, a) in colors.iter().enumerate() {
+                for b in &colors[i + 1..] {
+                    ok = ok.min(delta_e_ok(*a, *b));
+                    de = de.min(delta_e2000(*a, *b));
+                }
+            }
+            row[slot * 2] = ok;
+            row[slot * 2 + 1] = de;
+            let target = if slot == 0 {
+                &mut worst_live
+            } else {
+                &mut worst_stale
+            };
+            if de < target.0 {
+                *target = (de, name.to_string());
+            }
+        }
+        println!(
+            "  {:<30} {:>10.4} {:>10.3} | {:>10.4} {:>10.3}",
+            name, row[0], row[1], row[2], row[3]
+        );
+    }
+    println!();
+    println!(
+        "  worst live ramp: dE2000 {:.3} ({})",
+        worst_live.0, worst_live.1
+    );
+    println!(
+        "  worst stale ramp: dE2000 {:.3} ({})",
+        worst_stale.0, worst_stale.1
+    );
+    println!("  reference: dE2000 ~1 = JND; a categorical ramp wants >= ~10 between neighbours");
+    println!();
+    println!("== code footprint (measured in crates/canvas-widgets/src/live.rs) ==");
+    for (what, lines, fate) in [
+        ("Oklch struct", 5, "palette::Oklch"),
+        ("to_oklch", 16, "Oklch::from_color(Srgb)"),
+        ("oklch_to_linear + in_srgb_gamut", 16, "Srgb::from_color + is_within_bounds"),
+        ("srgb_decode / srgb_encode", 14, "palette encoding"),
+        ("from_oklch gamut policy", 17, "STAYS - palette has none"),
+        ("series_colors", 26, "STAYS"),
+        ("categorical_arcs", 31, "STAYS"),
+        ("arc_span / arc_hue / arc_offset", 28, "STAYS"),
+        ("drain + channel_u8", 32, "STAYS"),
+        ("ramp constants", 8, "STAYS"),
+    ] {
+        println!("  {what:<34} {lines:>3} lines  -> {fate}");
+    }
+    println!("  replaceable 51 lines of 193; 142 lines stay hand-written either way");
 }
 
 /// 1. Do the two implementations agree on what OKLCH a real theme colour has?
@@ -291,14 +414,14 @@ fn section_1_conversion_agreement() {
 
 /// 2. The actual deliverable: the six-colour series ramp, every route.
 fn section_2_ramp_agreement() {
-    println!("== 2. Series ramp: hand-written vs each palette route ==");
-    println!(
-        "{:<30} {:>2}  {:<8} | {:<8} {:>7} {:>7} | {:<8} {:>7} | {:<8} {:>7}",
-        "palette", "i", "hand", "pal+bsrch", "dE2000", "dEok", "pal+Clmp", "dE2000", "pal+Okhsl",
-        "dE2000"
-    );
-    let mut worst = [(0.0f32, String::new()), (0.0, String::new()), (0.0, String::new())];
-    let mut sum = [0.0f32; 3];
+    println!("== 2. Series ramp: hand-written vs each route ==");
+    print!("{:<30} {:>2}  {:<8}", "palette", "i", "hand");
+    for (label, _) in ROUTES {
+        print!(" | {label:<11} {:>6}", "dE2000");
+    }
+    println!();
+    let mut worst = tags();
+    let mut sum = [0.0f32; N];
     let mut count = 0;
     for (name, p) in palettes::all() {
         let a = hand::series_colors(&p);
@@ -308,30 +431,25 @@ fn section_2_ramp_agreement() {
             .collect();
         for i in 0..a.len() {
             count += 1;
-            let d: Vec<f32> = (0..3).map(|r| delta_e2000(a[i], by_route[r][i])).collect();
-            for r in 0..3 {
-                sum[r] += d[r];
-                if d[r] > worst[r].0 {
-                    worst[r] = (d[r], format!("{name} series {i}"));
-                }
-            }
-            println!(
-                "{:<30} {:>2}  {:<8} | {:<8} {:>7.3} {:>7.4} | {:<8} {:>7.3} | {:<8} {:>7.3}",
+            print!(
+                "{:<30} {:>2}  {:<8}",
                 if i == 0 { name } else { "" },
                 i,
-                a[i].hex(),
-                by_route[0][i].hex(),
-                d[0],
-                delta_e_ok(a[i], by_route[0][i]),
-                by_route[1][i].hex(),
-                d[1],
-                by_route[2][i].hex(),
-                d[2],
+                a[i].hex()
             );
+            for r in 0..N {
+                let d = delta_e2000(a[i], by_route[r][i]);
+                sum[r] += d;
+                if d > worst[r].0 {
+                    worst[r] = (d, format!("{name} series {i}"));
+                }
+                print!(" | {:<11} {d:>6.3}", by_route[r][i].hex());
+            }
+            println!();
         }
     }
     println!();
-    for r in 0..3 {
+    for r in 0..N {
         println!(
             "  {:<12} mean dE2000 = {:.4}   worst = {:.4}  ({})",
             ROUTES[r].0,
@@ -361,29 +479,34 @@ fn section_3_gamut_policy() {
         ("light saturated red", 0.75, 0.22, 25.0),
         ("light saturated green", 0.92, 0.25, 145.0),
     ];
-    println!(
-        "  {:<32} {:>5} {:>5} {:>6} | {:<8} {:>7} | {:<8} {:>7} | {:<8} {:>7} | {:<8} {:>7}",
-        "case", "L", "C", "hue", "hand", "d_hue", "pal+bsrch", "d_hue", "pal+Clamp", "d_hue",
-        "pal+Okhsl", "d_hue"
+    print!(
+        "  {:<32} {:>5} {:>5} {:>6} {:>4} | {:<8} {:>6}",
+        "case", "L", "C", "hue", "oog", "hand", "d_hue"
     );
+    for (label, _) in ROUTES {
+        print!(" | {label:<11} {:>6}", "d_hue");
+    }
+    println!();
     for (label, l, c, h) in &cases {
         let hv = hand::Oklch { l: *l, c: *c, h: *h };
         let pv = PalOklch::new(*l, *c, *h);
-        let out = [
-            hand::from_oklch(hv),
-            route_pal_bsearch(pv),
-            route_pal_clamp(pv),
-            route_pal_okhsl(pv),
-        ];
+        let base = hand::from_oklch(hv);
         let shift = |c: Color| hue_gap(hand::to_oklch(c).h, *h);
-        println!(
-            "  {:<32} {:>5.2} {:>5.3} {:>6.1} | {:<8} {:>7.2} | {:<8} {:>7.2} | {:<8} {:>7.2} | {:<8} {:>7.2}",
-            label, l, c, h,
-            out[0].hex(), shift(out[0]),
-            out[1].hex(), shift(out[1]),
-            out[2].hex(), shift(out[2]),
-            out[3].hex(), shift(out[3]),
+        print!(
+            "  {:<32} {:>5.2} {:>5.3} {:>6.1} {:>4} | {:<8} {:>6.2}",
+            label,
+            l,
+            c,
+            h,
+            if pal_out_of_gamut(pv) { "yes" } else { "no" },
+            base.hex(),
+            shift(base)
         );
+        for (_, f) in ROUTES {
+            let out = f(pv);
+            print!(" | {:<11} {:>6.2}", out.hex(), shift(out));
+        }
+        println!();
     }
     println!();
 
@@ -397,10 +520,10 @@ fn section_3_gamut_policy() {
             for h in 240..=290 {
                 let h = h as f32;
                 let pv = PalOklch::new(l, c, h);
-                if Srgb::<f32>::from_color(pv).is_within_bounds() {
+                if !pal_out_of_gamut(pv) {
                     continue;
                 }
-                let d = hue_gap(hand::to_oklch(route_pal_clamp(pv)).h, h);
+                let d = hue_gap(hand::to_oklch(route_hand_clip(pv)).h, h);
                 if d > worst_blue.0 {
                     worst_blue = (d, format!("L={l:.2} C={c:.2} h={h:.0}"));
                 }
@@ -414,8 +537,8 @@ fn section_3_gamut_policy() {
 
     // Whole-space sweep: how far apart are the two chroma-reducing routes, and
     // how bad does clipping get anywhere?
-    let mut stats = [(0.0f32, String::new()), (0.0, String::new()), (0.0, String::new())];
-    let mut de_vs_hand = [(0.0f32, String::new()), (0.0, String::new()), (0.0, String::new())];
+    let mut stats = tags();
+    let mut de_vs_hand = tags();
     let mut oog = 0u32;
     let mut total = 0u32;
     for l in (30..=95).step_by(1) {
@@ -426,7 +549,7 @@ fn section_3_gamut_policy() {
                 let h = h as f32;
                 total += 1;
                 let pv = PalOklch::new(l, c, h);
-                if Srgb::<f32>::from_color(pv).is_within_bounds() {
+                if !pal_out_of_gamut(pv) {
                     continue;
                 }
                 oog += 1;
@@ -448,7 +571,7 @@ fn section_3_gamut_policy() {
         }
     }
     println!("  sweep: {oog} of {total} OKLCH samples fall outside sRGB");
-    for r in 0..3 {
+    for r in 0..N {
         println!(
             "    {:<12} worst hue shift {:>6.2} deg ({:<28}) | worst dE2000 vs hand {:>7.3} ({})",
             ROUTES[r].0, stats[r].0, stats[r].1, de_vs_hand[r].0, de_vs_hand[r].1

@@ -1,25 +1,44 @@
+# Detached from the enclosing Canvas workspace on purpose: this is a spike, not
+# a member crate. Removing the empty [workspace] table below makes cargo try to
+# absorb it into /Users/ajmwagar/src/fpl/dock/Cargo.toml.
 [workspace]
 
 [package]
-name = "iced-aw-spike"
-version = "0.1.0"
-edition = "2021"
+name = "spike-iced-aw"
+version = "0.0.0"
+edition = "2024"
 publish = false
 
 [dependencies]
-# Exact feature set Canvas uses (crates/canvas/Cargo.toml:18)
+# Canvas ships iced 0.14 with the wgpu renderer. The spike uses tiny-skia
+# instead: iced_aw depends only on iced_core + iced_widget and has no renderer
+# dependency at all, so renderer choice cannot change the API-compatibility
+# answer, and skipping wgpu/naga keeps this build off a disk that has 18 GiB
+# free while other agents compile.
+# `thread-pool` rather than Canvas's `tokio`: iced refuses to compile without
+# some executor, and which one is chosen cannot affect an API-compatibility or
+# styling answer.
 iced = { version = "0.14", default-features = false, features = [
-    "wgpu", "tokio", "canvas", "image-without-codecs",
-    "x11", "wayland", "markdown", "highlighter",
+    "tiny-skia",
+    "advanced",
+    "thread-pool",
 ] }
-# Only the interaction-relevant iced_aw features. `default = ["full"]` pulls
-# chrono + num-format + canvas; we deliberately do not take those.
-iced_aw = { version = "0.14", default-features = false, features = [
-    "menu", "card", "badge", "context_menu", "drop_down", "tabs",
+
+# Only the features the four planned interaction surfaces would actually use.
+# default = "full" drags in chrono, num-format and iced_widget/canvas.
+iced_aw = { version = "0.14.1", default-features = false, features = [
+    "card",
+    "badge",
+    "menu",
+    "drop_down",
+    "quad",
 ] }
-# NOTE: iced_aw pulls iced_fonts ^0.3 (feature `advanced_text`) unconditionally,
-# even with default-features = false. It is not optional.
+
+# The real thing, not a mock: this is the palette Canvas surfaces resolve
+# through. If an externally supplied palette cannot reach an iced_aw mark, it
+# has to fail here.
+canvas-core = { path = "../../crates/canvas-core" }
 
 [[bin]]
-name = "iced-aw-spike"
+name = "spike-iced-aw"
 path = "src/main.rs"

