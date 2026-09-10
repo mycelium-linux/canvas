@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub mod quant;
+pub mod roster;
 
 pub const WIDGET_SCHEMA_VERSION: u32 = 1;
 const MAX_SPEC_BYTES: u64 = 256 * 1024;
@@ -123,12 +124,19 @@ pub enum WidgetDataState {
     Error,
 }
 
+/// Window treatment for a widget opened as a Canvas surface.
+///
+/// `Standard` is the default because the close and minimise dots are the only
+/// way a person standing at the wall can dismiss a surface: everything else
+/// goes through the control socket. `DragOnly` deliberately drops those dots
+/// for a quiet instrument-panel strip, so it is opt-in — a widget that never
+/// says `"chrome": "drag_only"` must not silently become unclosable.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum WidgetChrome {
-    Standard,
     #[default]
+    Standard,
     DragOnly,
 }
 
@@ -1448,12 +1456,19 @@ mod tests {
     }
 
     #[test]
-    fn operational_inputs_are_bounded_and_drag_only_by_default() {
+    fn operational_inputs_are_bounded_and_closable_by_default() {
         let stat = WidgetSpec::from_json(
             br#"{"id":"cpu","kind":"stat","label":"CPU","value":42,"history":[1,2,3]}"#,
         )
         .unwrap();
-        assert_eq!(stat.chrome, WidgetChrome::DragOnly);
+        // A widget that never asked for the quiet strip keeps its close and
+        // minimise dots; drag-only is opt-in and says so in the JSON.
+        assert_eq!(stat.chrome, WidgetChrome::Standard);
+        let quiet = WidgetSpec::from_json(
+            br#"{"id":"cpu","kind":"stat","label":"CPU","value":42,"chrome":"drag_only"}"#,
+        )
+        .unwrap();
+        assert_eq!(quiet.chrome, WidgetChrome::DragOnly);
 
         let oversized_rows = vec![vec!["ok".to_string()]; 257];
         let invalid = WidgetSpec {
