@@ -1,0 +1,76 @@
+{
+            "company": {
+                "name": "Grey Summit Gear",
+                "tagline": "Industrial safety redefined",
+                "address": "110 Elliott Ave W Suite 182, Seattle, WA 98119",
+                "phone": "+1 (206) 651-4573",
+                "email": "gsgmfg@proton.me",
+                "website": "https://greysummitgear.com",
+                "initials": "GSG"
+            },
+            "invoice": {
+                "id": "INV-2048",
+                "po": "PO-2048",
+                "issued_at": "2024-04-12",
+                "due_at": "2024-05-12",
+                "terms": "Net 30",
+                "billing": {
+                    "name": "Jordan Safety",
+                    "company": "Grey Summit Maintenance",
+                    "address_line1": "845 Harbor Way",
+                    "address_line2": "Suite 210",
+                    "city": "Seattle",
+                    "region": "WA",
+                    "postal_code": "98101",
+                    "country": "USA",
+                    "email": "jordan.safety@example.com"
+                },
+                "shipping": {
+                    "name": "Jordan Safety",
+                    "company": "Grey Summit Maintenance",
+                    "address_line1": "845 Harbor Way",
+                    "address_line2": "Dock 4",
+                    "city": "Seattle",
+                    "region": "WA",
+                    "postal_code": "98101",
+                    "country": "USA"
+                },
+                "line_items": [
+                    {
+                        "sku": "GSG-04",
+                        "name": "Rounded Detent Pin",
+                        "description": "Hardened stainless detent pin with lanyard",
+                        "qty": 5,
+                        "unit_price": "$15.00",
+                        "total": "$75.00"
+                    },
+                    {
+                        "sku": "GSG-22",
+                        "name": "Safety Cable",
+                        "description": "Braided steel cable with quick-release",
+                        "qty": 2,
+                        "unit_price": "$25.00",
+                        "total": "$50.00"
+                    },
+                    {
+                        "sku": "GSG-90",
+                        "name": "Inspection Service",
+                        "description": "On-site yearly inspection and certification",
+                        "qty": 1,
+                        "unit_price": "$60.00",
+                        "total": "$60.00"
+                    }
+                ],
+                "summary": {
+                    "subtotal": "$185.00",
+                    "shipping": "$12.00",
+                    "tax": "$15.73",
+                    "total": "$212.73",
+                    "balance_due": "$212.73",
+                    "due_status": "Balance Due"
+                },
+                "notes": "Please include invoice number with remittance.",
+                "payment_instructions": "ACH preferred: Routing 125108095 · Account 000567890"
+            },
+            "customer": { "name": "Jordan Safety" }
+        }
