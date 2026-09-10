@@ -108,13 +108,25 @@ fn handle_line(line: &str) -> Result<(), String> {
             if snapshot.display_frames.is_empty() {
                 println!("No displays reported.");
             } else {
-                println!("Connected displays:");
+                // Say "last known" when a later query failed: these frames are
+                // retained geometry, not a fresh reading.
+                println!(
+                    "{}:",
+                    if snapshot.display_error.is_some() {
+                        "Last known displays"
+                    } else {
+                        "Connected displays"
+                    }
+                );
                 for frame in &snapshot.display_frames {
                     println!(
                         "  {}x{} at {},{}",
                         frame.width, frame.height, frame.x, frame.y
                     );
                 }
+            }
+            if let Some(error) = &snapshot.display_error {
+                println!("Display geometry unavailable: {error}");
             }
         } else {
             println!("{}", text::format_reply(&reply));

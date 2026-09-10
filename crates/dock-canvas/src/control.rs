@@ -668,6 +668,13 @@ pub struct RuntimeSnapshot {
     pub display_frames: Vec<Rect>,
     #[serde(default)]
     pub displays: Vec<DisplayInfo>,
+    /// Why the display inventory is empty or stale, when the platform refused it.
+    ///
+    /// An empty `displays` alone cannot distinguish "no displays attached" from
+    /// "the permission-bearing helper never answered", and those need different
+    /// fixes from whoever is reading the snapshot.
+    #[serde(default)]
+    pub display_error: Option<String>,
     #[serde(default)]
     pub selected_display_ids: Vec<String>,
     #[serde(default)]

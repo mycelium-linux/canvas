@@ -268,6 +268,10 @@ struct App {
     frame: Rect,
     display_frames: Vec<Rect>,
     displays: Vec<DisplayInfo>,
+    display_error: Option<String>,
+    /// Where display geometry comes from. A field rather than a direct call so
+    /// multi-display behavior is testable without attaching real hardware.
+    display_source: fn() -> Result<Vec<DisplayInfo>, String>,
     selected_display_ids: Vec<String>,
     canvas_visible: bool,
     overlays: OverlaySettings,
@@ -338,7 +342,13 @@ impl App {
         let active_project_workspace = restored_document
             .as_ref()
             .map(|document| document.project_id.clone());
-        let displays = platform::displays().unwrap_or_default();
+        // Losing this error strands Canvas as a display-unaware window with no
+        // way to say why, so keep it and report it alongside the other
+        // degraded-startup conditions below.
+        let (displays, display_error) = match platform::displays() {
+            Ok(displays) => (displays, None),
+            Err(error) => (Vec::new(), Some(error)),
+        };
         let display_frames = displays.iter().map(|display| display.frame).collect();
         let desktop_frame = DisplayTopology::new(displays.clone())
             .and_then(|topology| topology.resolve(&DisplayTarget::All))
@@ -408,6 +418,8 @@ impl App {
             frame: desktop_frame,
             display_frames,
             displays,
+            display_error: display_error.clone(),
+            display_source: platform::displays,
             selected_display_ids,
             canvas_visible: true,
             overlays: OverlaySettings::default(),
@@ -446,13 +458,22 @@ impl App {
             metrics_last: Instant::now(),
             system: sysinfo::System::new(),
             networks: sysinfo::Networks::new(),
-            status: if shortcut_errors.is_empty() {
-                "Canvas is ready; Ctrl+Option+C toggles its displays.".into()
-            } else {
-                format!(
-                    "Canvas is ready; unavailable shortcut(s): {}",
-                    shortcut_errors.join("; ")
-                )
+            status: {
+                let mut degraded = Vec::new();
+                if !shortcut_errors.is_empty() {
+                    degraded.push(format!(
+                        "unavailable shortcut(s): {}",
+                        shortcut_errors.join("; ")
+                    ));
+                }
+                if let Some(error) = &display_error {
+                    degraded.push(format!("no display geometry: {error}"));
+                }
+                if degraded.is_empty() {
+                    "Canvas is ready; Ctrl+Option+C toggles its displays.".into()
+                } else {
+                    format!("Canvas is ready; {}", degraded.join("; "))
+                }
             },
             interaction: interaction_engine(desktop_frame),
             cursor: None,
@@ -963,11 +984,47 @@ impl App {
         }
     }
 
+    /// Re-read display geometry from the platform before acting on it.
+    ///
+    /// The helper that owns this geometry is installed and granted access
+    /// independently of Canvas, so it can start answering at any point in a
+    /// session. Querying once at startup would strand the runtime without
+    /// display awareness until a restart, which is exactly the failure this
+    /// reports rather than hides.
+    ///
+    /// A later refusal keeps the last known inventory: acting on stale
+    /// geometry is recoverable, while dropping to zero displays would silently
+    /// collapse Canvas onto a single fallback frame. Either way the reason is
+    /// retained and reported.
+    fn refresh_displays(&mut self) {
+        match (self.display_source)() {
+            Ok(displays) => {
+                self.display_error = None;
+                if displays != self.displays {
+                    self.display_frames = displays.iter().map(|display| display.frame).collect();
+                    self.displays = displays;
+                }
+            }
+            Err(error) => self.display_error = Some(error),
+        }
+    }
+
+    /// The reason a display operation has nothing to work with, preferring the
+    /// platform's own words over a generic "inventory is empty".
+    fn display_failure(&self, fallback: String) -> Failure {
+        Failure::platform(match &self.display_error {
+            Some(error) => format!("display geometry unavailable: {error}"),
+            None => fallback,
+        })
+    }
+
     fn apply_display_target(
         &mut self,
         target: &DisplayTarget,
     ) -> Result<(ResolvedDisplayTarget, Task<Message>), Failure> {
-        let topology = DisplayTopology::new(self.displays.clone()).map_err(Failure::platform)?;
+        self.refresh_displays();
+        let topology = DisplayTopology::new(self.displays.clone())
+            .map_err(|error| self.display_failure(error))?;
         let resolved = topology.resolve(target).map_err(Failure::invalid)?;
         let frames = resolved
             .display_ids
@@ -993,13 +1050,17 @@ impl App {
     }
 
     fn toggle_display_ordinal(&mut self, ordinal: usize) -> Task<Message> {
+        self.refresh_displays();
         let target = if ordinal == 0 {
             DisplayTarget::All
         } else {
             let mut ordered = self.displays.iter().collect::<Vec<_>>();
             ordered.sort_by_key(|display| (display.frame.x, display.frame.y));
             let Some(display) = ordered.get(ordinal - 1) else {
-                self.status = format!("Display {ordinal} is not connected.");
+                self.status = match &self.display_error {
+                    Some(error) => format!("Display {ordinal} is unavailable: {error}"),
+                    None => format!("Display {ordinal} is not connected."),
+                };
                 return Task::none();
             };
             let mut ids = self.selected_display_ids.clone();
@@ -1205,6 +1266,10 @@ impl App {
                 Task::none()
             }
             Command::Inspect => {
+                // Agents read display geometry from here to decide placement;
+                // answering from a startup-time cache would hand them a stale
+                // or empty inventory long after the platform recovered.
+                self.refresh_displays();
                 let snapshot = self.snapshot();
                 self.answer(
                     pending,
@@ -2530,6 +2595,7 @@ impl App {
             maximized_surface_ids: self.maximized_surfaces.iter().cloned().collect(),
             events: self.events.clone(),
             display_frames: self.display_frames.clone(),
+            display_error: self.display_error.clone(),
             displays: self.displays.clone(),
             selected_display_ids: self.selected_display_ids.clone(),
             overlays: self.overlays,
@@ -6030,7 +6096,25 @@ mod tests {
         .unwrap();
         app.frame = INITIAL_FRAME;
         app.interaction = interaction_engine(INITIAL_FRAME);
+        // No display helper exists under test. Refusing is the honest answer,
+        // and it leaves any inventory a test injects directly in place.
+        app.display_source = || Err("no display source under test".into());
+        app.display_error = None;
         app
+    }
+
+    fn one_test_display() -> Result<Vec<DisplayInfo>, String> {
+        Ok(vec![DisplayInfo {
+            id: "refreshed-display".into(),
+            name: "Refreshed Display".into(),
+            frame: Rect {
+                x: 0,
+                y: 0,
+                width: 1_408,
+                height: 881,
+            },
+            primary: true,
+        }])
     }
 
     fn execute(app: &mut App, request_id: &str, command: Command) -> ControlReply {
@@ -6773,6 +6857,100 @@ mod tests {
             },
             &displays,
         ));
+    }
+
+    #[test]
+    fn a_late_display_grant_takes_effect_without_restarting_canvas() {
+        // Canvas started before the permission-bearing helper would answer,
+        // which is what happens when the grant is made while it is running.
+        let mut app = test_app();
+        app.displays = Vec::new();
+        app.display_frames = Vec::new();
+        app.display_source = || Err("Dock Control did not return display geometry".into());
+
+        let refused = execute(
+            &mut app,
+            "span-all-refused",
+            Command::SetDisplayTarget {
+                target: dock_canvas::display::DisplayTarget::All,
+            },
+        );
+        let Outcome::Error { message, .. } = &refused.outcome else {
+            panic!("expected a refusal while the helper is untrusted");
+        };
+        assert!(
+            message.contains("Dock Control did not return display geometry"),
+            "the platform reason must reach the caller, got: {message}"
+        );
+
+        // The grant lands; nothing restarts.
+        app.display_source = one_test_display;
+        let reply = execute(
+            &mut app,
+            "span-all",
+            Command::SetDisplayTarget {
+                target: dock_canvas::display::DisplayTarget::All,
+            },
+        );
+        assert!(matches!(
+            reply.outcome,
+            Outcome::Ok {
+                receipt: Receipt::DisplayTargetSet { .. }
+            }
+        ));
+        assert_eq!(app.snapshot().selected_display_ids, ["refreshed-display"]);
+        assert_eq!(app.snapshot().display_error, None);
+    }
+
+    #[test]
+    fn a_refused_display_query_is_reported_rather_than_discarded() {
+        let mut app = test_app();
+        app.display_source = || Err("Dock Control is not running".into());
+        app.refresh_displays();
+        assert_eq!(
+            app.snapshot().display_error.as_deref(),
+            Some("Dock Control is not running"),
+            "an empty inventory alone cannot explain itself"
+        );
+    }
+
+    #[test]
+    fn a_later_refusal_keeps_the_last_known_display_inventory() {
+        let mut app = test_app();
+        app.display_source = one_test_display;
+        app.refresh_displays();
+        let known = app.displays.clone();
+        assert_eq!(known.len(), 1);
+
+        // The helper dies mid-session; collapsing to zero displays would drop
+        // Canvas onto a fallback frame with no way to recover placement.
+        app.display_source = || Err("Dock Control stopped responding".into());
+        app.refresh_displays();
+        assert_eq!(app.displays, known);
+        assert_eq!(
+            app.snapshot().display_error.as_deref(),
+            Some("Dock Control stopped responding")
+        );
+    }
+
+    #[test]
+    fn inspect_reports_displays_that_appeared_after_startup() {
+        let mut app = test_app();
+        app.displays = Vec::new();
+        app.display_frames = Vec::new();
+        assert!(app.snapshot().displays.is_empty());
+
+        app.display_source = one_test_display;
+        let reply = execute(&mut app, "inspect", Command::Inspect);
+        let Outcome::Ok {
+            receipt: Receipt::Snapshot { snapshot },
+        } = &reply.outcome
+        else {
+            panic!("inspect must answer with a snapshot");
+        };
+        assert_eq!(snapshot.displays.len(), 1);
+        assert_eq!(snapshot.display_frames.len(), 1);
+        assert_eq!(snapshot.display_error, None);
     }
 
     #[test]
