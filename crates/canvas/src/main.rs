@@ -93,7 +93,7 @@ const CANVAS_TOGGLE_KEYS: &str = "Ctrl-Option-C";
 const SNAP_LAYOUT_KEYS: &str = "Ctrl-Option-L";
 const FIT_LAYOUT_KEYS: &str = "Ctrl-Option-F";
 const JARVIS_TOGGLE_KEYS: &str = "Ctrl-Option-J";
-const JARVIS_TEXT_KEYS: &str = "Ctrl-Space";
+const JARVIS_TEXT_KEYS: &str = "Ctrl-Option-T";
 const SHORTCUT_HELP_KEYS: &str = "Ctrl-Option-?";
 const FOCUSED_HELP_KEYS: &str = "?";
 
@@ -515,8 +515,8 @@ impl App {
         let jarvis_text_hotkey = match GlobalHotkey::register(HotkeySpec {
             signature: *b"Cnvs",
             id: 4,
-            key_code: 0x31,           // kVK_Space
-            modifiers: 1 << 12,       // controlKey only (no option/alt)
+            key_code: 0x13,           // kVK_ANSI_T
+            modifiers: (1 << 9) | (1 << 11) | (1 << 12), // shift | option | control
             label: JARVIS_TEXT_KEYS,
         }) {
             Ok(hotkey) => Some(hotkey),
@@ -3930,25 +3930,29 @@ impl App {
         self.runtime_revision = self.runtime_revision.saturating_add(1);
     }
 
-    /// Open a typed-to-JARVIS dialog. The OS handles the text input; the result
-    /// is piped to `jarvis text-turn`, which runs the LLM+tools but skips TTS
-    /// playback (quiet text-only reply). This is the "don't wake the room" path.
+    /// Open a typed-to-JARVIS dialog. Uses the existing jarvis-text.sh helper
+    /// which opens a macOS text dialog, pipes the input to `jarvis text-turn`
+    /// (quiet, no TTS), and shows the reply as a notification. This is the
+    /// "don't wake the room" path: text-only, system notification for the reply.
     fn spawn_jarvis_text_turn(&mut self) {
-        let jarvis_root = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+        let home = std::env::var("HOME").unwrap_or_default();
+        let jarvis_root = std::path::PathBuf::from(&home)
             .join("Documents/src/fpl/JARVIS");
-        let jarvis_bin = jarvis_root.join("target/debug/jarvis");
-        if jarvis_bin.exists() {
-            let _ = std::process::Command::new(jarvis_bin)
-                .arg("text-turn")
+        let text_script = jarvis_root.join("scripts/jarvis-text.sh");
+        if text_script.exists() {
+            let _ = std::process::Command::new("zsh")
+                .arg(&text_script)
                 .current_dir(&jarvis_root)
-                .env("JARVIS_VOICE_TRANSCRIPT_LOG_DIR", 
-                     std::env::var("HOME").unwrap_or_default()
-                         + "/Library/Application Support/JARVIS/transcripts")
                 .spawn();
             self.status = "JARVIS text dialog opened.".into();
             self.emit_event("jarvis_text_open".to_string());
         } else {
-            self.status = "JARVIS binary not found — install it first.".into();
+            // Fallback: use osascript directly for the dialog
+            let _ = std::process::Command::new("osascript")
+                .arg("-e")
+                .arg("display dialog \"Say to Jarvis (quiet)\" default answer \"\" buttons {\"Cancel\", \"Send\"} default button \"Send\" with title \"Jarvis\" with hidden answer")
+                .spawn();
+            self.status = "JARVIS dialog opened (jarvis-text.sh not found, using fallback).".into();
         }
     }
 
