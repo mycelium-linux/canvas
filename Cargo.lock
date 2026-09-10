@@ -383,6 +383,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "canvas-agents"
+version = "0.1.0"
+dependencies = [
+ "canvas-core",
+ "canvas-widgets",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "canvas-control"
 version = "0.1.0"
 dependencies = [
