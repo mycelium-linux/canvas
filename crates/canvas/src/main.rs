@@ -93,6 +93,7 @@ const CANVAS_TOGGLE_KEYS: &str = "Ctrl-Option-C";
 const SNAP_LAYOUT_KEYS: &str = "Ctrl-Option-L";
 const FIT_LAYOUT_KEYS: &str = "Ctrl-Option-F";
 const JARVIS_TOGGLE_KEYS: &str = "Ctrl-Option-J";
+const JARVIS_TEXT_KEYS: &str = "Ctrl-Space";
 const SHORTCUT_HELP_KEYS: &str = "Ctrl-Option-?";
 const FOCUSED_HELP_KEYS: &str = "?";
 
@@ -326,6 +327,7 @@ struct App {
     free_layout: Option<Layout>,
     shortcuts_hotkey: Option<GlobalHotkey>,
     jarvis_hotkey: Option<GlobalHotkey>,
+    jarvis_text_hotkey: Option<GlobalHotkey>,
     shortcuts_visible: bool,
     background_picker: Option<::canvas::background_picker::BackgroundPicker>,
     theme_picker: Option<::canvas::theme_picker::ThemePicker>,
@@ -510,6 +512,19 @@ impl App {
                 None
             }
         };
+        let jarvis_text_hotkey = match GlobalHotkey::register(HotkeySpec {
+            signature: *b"Cnvs",
+            id: 4,
+            key_code: 0x31,           // kVK_Space
+            modifiers: 1 << 12,       // controlKey only (no option/alt)
+            label: JARVIS_TEXT_KEYS,
+        }) {
+            Ok(hotkey) => Some(hotkey),
+            Err(error) => {
+                shortcut_errors.push(error);
+                None
+            }
+        };
         let mut app = Self {
             catalog,
             document: restored_document.unwrap_or_else(|| WorkspaceDocument {
@@ -541,6 +556,7 @@ impl App {
             free_layout: None,
             shortcuts_hotkey,
             jarvis_hotkey,
+            jarvis_text_hotkey,
             shortcuts_visible: false,
             background_picker: None,
             theme_picker: None,
@@ -821,6 +837,10 @@ impl App {
                     .jarvis_hotkey
                     .as_ref()
                     .is_some_and(GlobalHotkey::poll_pressed);
+                let toggle_jarvis_text = self
+                    .jarvis_text_hotkey
+                    .as_ref()
+                    .is_some_and(GlobalHotkey::poll_pressed);
                 if self.metrics_last.elapsed() >= METRICS_REFRESH {
                     self.refresh_metrics();
                 }
@@ -862,6 +882,9 @@ impl App {
                             "hidden"
                         }
                     ));
+                }
+                if toggle_jarvis_text {
+                    self.spawn_jarvis_text_turn();
                 }
                 Task::batch(tasks)
             }
@@ -3907,6 +3930,28 @@ impl App {
         self.runtime_revision = self.runtime_revision.saturating_add(1);
     }
 
+    /// Open a typed-to-JARVIS dialog. The OS handles the text input; the result
+    /// is piped to `jarvis text-turn`, which runs the LLM+tools but skips TTS
+    /// playback (quiet text-only reply). This is the "don't wake the room" path.
+    fn spawn_jarvis_text_turn(&mut self) {
+        let jarvis_root = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+            .join("Documents/src/fpl/JARVIS");
+        let jarvis_bin = jarvis_root.join("target/debug/jarvis");
+        if jarvis_bin.exists() {
+            let _ = std::process::Command::new(jarvis_bin)
+                .arg("text-turn")
+                .current_dir(&jarvis_root)
+                .env("JARVIS_VOICE_TRANSCRIPT_LOG_DIR", 
+                     std::env::var("HOME").unwrap_or_default()
+                         + "/Library/Application Support/JARVIS/transcripts")
+                .spawn();
+            self.status = "JARVIS text dialog opened.".into();
+            self.emit_event("jarvis_text_open".to_string());
+        } else {
+            self.status = "JARVIS binary not found — install it first.".into();
+        }
+    }
+
     fn apply_background(&mut self, background: Background) -> Result<(), Failure> {
         let patch = WorkspacePatch {
             schema_version: SCHEMA_VERSION,
@@ -5153,6 +5198,7 @@ fn shortcut_help<'a>(
          {FIT_LAYOUT_KEYS:<22} Fit layout to the displays Canvas is on\n\
          {CANVAS_TOGGLE_KEYS:<22} Toggle Canvas\n\
          {JARVIS_TOGGLE_KEYS:<22} Toggle JARVIS presence\n\
+         {JARVIS_TEXT_KEYS:<22} Text to JARVIS\n\
          {FOCUSED_HELP_KEYS:<22} Toggle Help (Canvas focused)\n\
          {SHORTCUT_HELP_KEYS:<22} Toggle Help globally"
     ))
