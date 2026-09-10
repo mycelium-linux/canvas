@@ -68,4 +68,4 @@
 export.auto: true
 no-git-ops: false
 sync:
-    remote: "git@github.com:FuturePresentLabs/dock.git"
+    remote: "git+ssh://git@github.com/./FuturePresentLabs/dock.git"
