@@ -341,6 +341,11 @@ struct App {
     _stream_socket: Option<::canvas::stream_binding::StreamSocketGuard>,
     #[cfg(feature = "lua-scenes")]
     stream_sequences: BTreeMap<String, u64>,
+    /// This screen's position in the retained stream log. Held rather than
+    /// implied by consumption, so a gap can be named instead of looking like a
+    /// quiet producer.
+    #[cfg(feature = "lua-scenes")]
+    stream_position: u64,
     windows: BTreeMap<iced::window::Id, Rect>,
     decoded: BTreeMap<String, RuntimeSurface>,
     shared_views: BTreeMap<String, SharedViewDocument>,
@@ -547,6 +552,8 @@ impl App {
             _stream_socket: stream_socket,
             #[cfg(feature = "lua-scenes")]
             stream_sequences: BTreeMap::new(),
+            #[cfg(feature = "lua-scenes")]
+            stream_position: 0,
             windows: BTreeMap::new(),
             decoded: BTreeMap::new(),
             shared_views: BTreeMap::new(),
@@ -1286,7 +1293,19 @@ impl App {
     #[cfg(feature = "lua-scenes")]
     fn drain_stream_events(&mut self) {
         const MAX_EVENTS_PER_FRAME: usize = 256;
-        let events = self.stream_inbox.drain(MAX_EVENTS_PER_FRAME);
+        let read = self
+            .stream_inbox
+            .read_from(self.stream_position, MAX_EVENTS_PER_FRAME);
+        self.stream_position = read.position;
+        if read.missed > 0 {
+            // Fail loud: this screen is now discontinuous with what it last
+            // drew, and a widget left at state=ready would show a stale value
+            // as though it were current.
+            let missed = read.missed;
+            eprintln!("Canvas missed {missed} stream events - fell behind the retained window");
+            self.emit_event(format!("stream_gap missed={missed}"));
+        }
+        let events = read.events;
         if events.is_empty() {
             return;
         }
@@ -1370,8 +1389,9 @@ impl App {
             self.bump();
             let stats = self.stream_inbox.stats();
             self.emit_event(format!(
-                "stream_tick applied={applied} rejected={rejected} age_ms={oldest_age} queue={} dropped={}",
-                stats.queue_depth, stats.dropped
+                "stream_tick applied={applied} rejected={rejected} age_ms={oldest_age} \
+                 position={} retained={} evicted={}",
+                self.stream_position, stats.retained, stats.evicted
             ));
         }
     }

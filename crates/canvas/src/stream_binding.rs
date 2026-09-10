@@ -62,44 +62,97 @@ impl StreamEnvelope {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StreamStats {
+    /// Every event ever accepted. Also the next log position to be assigned.
     pub received: u64,
-    pub dropped: u64,
-    pub queue_depth: usize,
+    /// Events that fell out of the retention window. Eviction is normal — the
+    /// window is finite by design — so this is not by itself a fault. A reader
+    /// only loses something when `InboxRead::missed` is non-zero.
+    pub evicted: u64,
+    /// Events currently inside the window.
+    pub retained: usize,
 }
 
+/// One read of the log, and what it cost the reader.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct InboxRead {
+    pub events: Vec<StreamEnvelope>,
+    /// Where the reader should ask from next.
+    pub position: u64,
+    /// Events this reader will never see, because they were evicted before it
+    /// asked. Non-zero means a real gap: the reader fell behind the window, and
+    /// whatever it renders next is discontinuous with what it rendered last.
+    pub missed: u64,
+}
+
+/// A bounded retained log of stream events.
+///
+/// Readers hold a position rather than consuming, so a reader that reconnects
+/// or falls behind can tell the difference between "nothing new" and "I missed
+/// something" — which a drain queue cannot express, because a dropped event and
+/// an idle producer look identical to it.
 #[derive(Clone, Default)]
 pub struct StreamInbox(Arc<Mutex<InboxState>>);
 
 #[derive(Default)]
 struct InboxState {
-    pending: VecDeque<StreamEnvelope>,
+    retained: VecDeque<StreamEnvelope>,
+    /// Log position of `retained.front()`. Everything below this is gone.
+    base: u64,
+    /// Total accepted; `base + retained.len() == received` always holds.
     received: u64,
-    dropped: u64,
+    evicted: u64,
 }
 
 impl StreamInbox {
     pub fn push(&self, event: StreamEnvelope) {
         let mut state = self.0.lock().expect("stream inbox lock poisoned");
         state.received = state.received.saturating_add(1);
-        if state.pending.len() == MAX_PENDING_EVENTS {
-            state.pending.pop_front();
-            state.dropped = state.dropped.saturating_add(1);
+        if state.retained.len() == MAX_PENDING_EVENTS {
+            state.retained.pop_front();
+            state.base = state.base.saturating_add(1);
+            state.evicted = state.evicted.saturating_add(1);
         }
-        state.pending.push_back(event);
+        state.retained.push_back(event);
     }
 
-    pub fn drain(&self, limit: usize) -> Vec<StreamEnvelope> {
-        let mut state = self.0.lock().expect("stream inbox lock poisoned");
-        let count = limit.min(state.pending.len());
-        state.pending.drain(..count).collect()
+    /// Read up to `limit` events starting at `position`.
+    ///
+    /// A position below the retained window is not an error — it is a gap, and
+    /// it is reported rather than silently skipped.
+    pub fn read_from(&self, position: u64, limit: usize) -> InboxRead {
+        let state = self.0.lock().expect("stream inbox lock poisoned");
+        let missed = state.base.saturating_sub(position);
+        let start = position.max(state.base);
+        // A position above the head means the caller is ahead of the log, which
+        // only happens if the inbox was replaced underneath it. Treat it as
+        // caught up rather than panicking on the subtraction.
+        let offset = usize::try_from(start.saturating_sub(state.base)).unwrap_or(usize::MAX);
+        let events: Vec<StreamEnvelope> = state
+            .retained
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .cloned()
+            .collect();
+        InboxRead {
+            position: start.saturating_add(events.len() as u64),
+            missed,
+            events,
+        }
+    }
+
+    /// The next position that will be assigned. A reader starting here sees only
+    /// what arrives after it asked.
+    pub fn head(&self) -> u64 {
+        self.0.lock().expect("stream inbox lock poisoned").received
     }
 
     pub fn stats(&self) -> StreamStats {
         let state = self.0.lock().expect("stream inbox lock poisoned");
         StreamStats {
             received: state.received,
-            dropped: state.dropped,
-            queue_depth: state.pending.len(),
+            evicted: state.evicted,
+            retained: state.retained.len(),
         }
     }
 }
@@ -373,8 +426,105 @@ mod tests {
             inbox.push(item);
         }
         let stats = inbox.stats();
-        assert_eq!(stats.queue_depth, MAX_PENDING_EVENTS);
-        assert_eq!(stats.dropped, 20);
+        assert_eq!(stats.retained, MAX_PENDING_EVENTS);
+        assert_eq!(stats.evicted, 20);
+        assert_eq!(stats.received, MAX_PENDING_EVENTS as u64 + 20);
+    }
+
+    fn numbered(inbox: &StreamInbox, count: u64) {
+        for sequence in 0..count {
+            let mut item = event(sequence as i64, 100.0);
+            item.sequence = sequence;
+            inbox.push(item);
+        }
+    }
+
+    #[test]
+    fn a_reader_that_keeps_up_sees_every_event_exactly_once() {
+        let inbox = StreamInbox::default();
+        numbered(&inbox, 5);
+        let first = inbox.read_from(0, 3);
+        assert_eq!(first.missed, 0);
+        assert_eq!(first.position, 3);
+        assert_eq!(
+            first.events.iter().map(|e| e.sequence).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+
+        let second = inbox.read_from(first.position, 3);
+        assert_eq!(second.missed, 0);
+        assert_eq!(second.position, 5);
+        assert_eq!(
+            second.events.iter().map(|e| e.sequence).collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+
+        // Reading again with nothing new is idle, not a gap.
+        let third = inbox.read_from(second.position, 3);
+        assert!(third.events.is_empty());
+        assert_eq!(third.missed, 0);
+        assert_eq!(third.position, 5);
+    }
+
+    #[test]
+    fn reading_does_not_consume_so_two_readers_are_independent() {
+        let inbox = StreamInbox::default();
+        numbered(&inbox, 4);
+        let a = inbox.read_from(0, 4);
+        let b = inbox.read_from(0, 4);
+        assert_eq!(a.events, b.events);
+        assert_eq!(inbox.stats().retained, 4);
+    }
+
+    #[test]
+    fn a_reader_that_falls_behind_the_window_is_told_how_much_it_lost() {
+        let inbox = StreamInbox::default();
+        numbered(&inbox, MAX_PENDING_EVENTS as u64 + 20);
+
+        // Still parked at the origin while 20 events aged out beneath it.
+        let read = inbox.read_from(0, 4);
+        assert_eq!(
+            read.missed, 20,
+            "a gap must be reported, not silently skipped"
+        );
+        assert_eq!(
+            read.events.first().map(|e| e.sequence),
+            Some(20),
+            "the read resumes at the oldest event still retained"
+        );
+        assert_eq!(read.position, 24);
+
+        // Having been told, the reader is caught up and loses nothing further.
+        assert_eq!(inbox.read_from(read.position, 4).missed, 0);
+    }
+
+    #[test]
+    fn starting_at_head_skips_history_without_reporting_a_gap() {
+        let inbox = StreamInbox::default();
+        numbered(&inbox, 10);
+        let head = inbox.head();
+        assert_eq!(head, 10);
+        let read = inbox.read_from(head, 8);
+        assert!(read.events.is_empty());
+        assert_eq!(
+            read.missed, 0,
+            "deliberately joining live is not the same as falling behind"
+        );
+
+        numbered(&inbox, 2);
+        let next = inbox.read_from(head, 8);
+        assert_eq!(next.events.len(), 2);
+        assert_eq!(next.missed, 0);
+    }
+
+    #[test]
+    fn a_position_beyond_the_head_reads_as_caught_up_rather_than_panicking() {
+        let inbox = StreamInbox::default();
+        numbered(&inbox, 3);
+        let read = inbox.read_from(9_000, 4);
+        assert!(read.events.is_empty());
+        assert_eq!(read.missed, 0);
+        assert_eq!(read.position, 9_000);
     }
 
     #[test]
