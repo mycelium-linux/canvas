@@ -14,6 +14,7 @@ pub mod display_watch;
 pub mod global_hotkey;
 pub mod layout;
 pub mod theme_file;
+pub mod appearance;
 pub mod boot_budget;
 pub mod manifest_query;
 pub mod working_set;
@@ -349,7 +350,59 @@ fn luminance(rgb: [u8; 3]) -> f64 {
 }
 impl ThemeMetrics {
     /// Both current upstream modes share geometry. Never hand-maintain tokens.
+    /// The scale this process is rendering at.
+    ///
+    /// Reads the runtime appearance rather than a literal, so every font size,
+    /// gap and radius in the library follows one configurable number. Every
+    /// widget already routes through here, which is why this is the whole
+    /// wiring rather than a change per call site.
     pub fn shared() -> Self {
+        Self::scaled(crate::appearance::current().density.scale)
+    }
+
+    /// The same scale, read from further away.
+    ///
+    /// A 5760-wide wall seen from across a room is not a laptop at arm's length,
+    /// but the Coherence tokens are sized for the laptop. Rather than let each
+    /// widget pick its own bigger number - which is how eight unreadable
+    /// literals got into the library in the first place - one factor multiplies
+    /// the whole scale, so the relationships between `small`, `body` and `hero`
+    /// survive being made legible.
+    ///
+    /// Spacing and radii scale too. Type that grows while its padding does not
+    /// reads as cramped rather than large, which is a different kind of hard to
+    /// look at.
+    pub fn scaled(factor: f32) -> Self {
+        // A non-finite or absurd factor would silently produce an unrenderable
+        // theme, so it is clamped rather than trusted.
+        let factor = if factor.is_finite() {
+            factor.clamp(0.5, 4.0)
+        } else {
+            1.0
+        };
+        let base = Self::tokens();
+        ThemeMetrics {
+            space_1: base.space_1 * factor,
+            space_2: base.space_2 * factor,
+            space_3: base.space_3 * factor,
+            space_4: base.space_4 * factor,
+            space_5: base.space_5 * factor,
+            radius_xs: base.radius_xs * factor,
+            radius_sm: base.radius_sm * factor,
+            radius_md: base.radius_md * factor,
+            radius_lg: base.radius_lg * factor,
+            radius: base.radius * factor,
+            micro: base.micro * factor,
+            body: base.body * factor,
+            small: base.small * factor,
+            large: base.large * factor,
+            title: base.title * factor,
+            display: base.display * factor,
+            hero: base.hero * factor,
+        }
+    }
+
+    fn tokens() -> Self {
         use coherence_tokens::light as t;
         ThemeMetrics {
             space_1: t::SPACE_1,
@@ -737,6 +790,57 @@ impl StateStore {
         change(&mut state)?;
         state.save(&self.path, catalog)?;
         Ok(state)
+    }
+}
+
+#[cfg(test)]
+mod metrics_scale_tests {
+    use super::*;
+
+    #[test]
+    fn the_default_scale_is_unchanged() {
+        assert_eq!(ThemeMetrics::shared(), ThemeMetrics::scaled(1.0));
+    }
+
+    #[test]
+    fn scaling_grows_every_size_together() {
+        let one = ThemeMetrics::shared();
+        let big = ThemeMetrics::scaled(1.5);
+        assert!((big.body - one.body * 1.5).abs() < 0.001);
+        assert!((big.hero - one.hero * 1.5).abs() < 0.001);
+        assert!(
+            (big.space_2 - one.space_2 * 1.5).abs() < 0.001,
+            "type that grows while its padding does not reads as cramped"
+        );
+        assert!((big.radius_md - one.radius_md * 1.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn the_order_of_the_scale_survives_being_enlarged() {
+        for factor in [0.5, 1.0, 1.75, 4.0] {
+            let m = ThemeMetrics::scaled(factor);
+            assert!(m.micro < m.small, "micro is the floor at {factor}");
+            assert!(m.small < m.body);
+            assert!(m.body < m.large);
+            assert!(m.large < m.title);
+            assert!(m.title < m.display);
+            assert!(m.display < m.hero, "hero stays the one dominant size");
+        }
+    }
+
+    #[test]
+    fn an_absurd_or_broken_factor_cannot_produce_an_unrenderable_theme() {
+        // Non-finite is not "very large" - it is a broken input, and the safe
+        // reading of a broken size factor is the default rather than the
+        // maximum.
+        assert_eq!(ThemeMetrics::scaled(f32::NAN), ThemeMetrics::shared());
+        assert_eq!(ThemeMetrics::scaled(f32::INFINITY), ThemeMetrics::shared());
+        assert_eq!(ThemeMetrics::scaled(f32::NEG_INFINITY), ThemeMetrics::shared());
+        // A finite but absurd factor clamps rather than falling back, because it
+        // is a real request, just an unreasonable one.
+        assert_eq!(ThemeMetrics::scaled(99.0), ThemeMetrics::scaled(4.0));
+        assert_eq!(ThemeMetrics::scaled(0.0), ThemeMetrics::scaled(0.5));
+        assert_eq!(ThemeMetrics::scaled(-3.0), ThemeMetrics::scaled(0.5));
     }
 }
 
