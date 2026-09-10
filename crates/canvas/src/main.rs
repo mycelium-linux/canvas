@@ -3401,7 +3401,7 @@ impl App {
             }),
             active_indicators: self.indicators.values().cloned().collect(),
             mesh: self.mesh.clone(),
-            presence: self.presence.clone(),
+            presence: assemble_presence(self.presence.as_ref(), now_unix_ms()),
             presence_preview_active: self.presence_preview.is_some(),
             screensaver: ScreensaverSnapshot {
                 settings: self.screensaver_settings,
@@ -7098,6 +7098,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Wall-clock milliseconds. Local rather than `stream_binding::now_ms`, which
+/// lives behind the `lua-scenes` feature; presence narrowing must not be
+/// feature-gated.
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+/// Builds the presence a caller may see, rather than handing out the roster.
+///
+/// Canvas is not an identity authority: it renders what a publisher observed.
+/// What it must not do is repeat an observation more widely, or more
+/// confidently, than the observation itself supports. Two narrowings, both of
+/// which only ever remove:
+///
+/// 1. An expired observation empties rather than being marked stale. A sensor
+///    that stopped reporting cannot keep asserting who is in a room, and a
+///    disconnected camera must not hold a room open indefinitely. The same
+///    semantics are already proven on the JARVIS side, at
+///    `jarvis-presence/src/publication.rs:96-104`, which additionally assumes
+///    others are present once an observation expires.
+/// 2. An occupant whose identity is not `Verified` is omitted entirely rather
+///    than published as an unknown row. A detection is evidence that *someone*
+///    is there; it is not evidence of *who*, and a row carrying a display name
+///    on `Detected` alone is exactly the claim
+///    `jarvis/distributed-topology.md` forbids: "a face observation alone must
+///    not silently give an unknown speaker another person's private history".
+///
+/// `occupied` survives both narrowings, because whether a room is occupied is
+/// what the sensor observed; only the identities are withheld.
+fn assemble_presence(
+    observation: Option<&::canvas::control::PresenceSnapshot>,
+    now_unix_ms: u64,
+) -> Option<::canvas::control::PresenceSnapshot> {
+    use ::canvas::control::PresenceSignalState;
+    let observation = observation?;
+    let mut assembled = observation.clone();
+    let age = now_unix_ms.saturating_sub(observation.observed_at_unix_ms);
+    if age >= observation.expires_after_ms {
+        // Expired: the room's occupancy is unknown, not empty and not held.
+        assembled.occupants.clear();
+        assembled.occupied = false;
+        return Some(assembled);
+    }
+    assembled
+        .occupants
+        .retain(|occupant| occupant.face.state == PresenceSignalState::Verified);
+    Some(assembled)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7813,8 +7867,128 @@ mod tests {
                 }
             } if zone == "bedroom"
         ));
-        assert_eq!(app.snapshot().presence, Some(snapshot));
+        // Deliberately NOT a round trip. What a caller sees is assembled from the
+        // observation rather than echoed, so this asserts the assembled value.
+        // The fixture is stamped at 1000ms past the epoch, which against a real
+        // clock is long expired — so the correct result is a zone with nobody
+        // named in it, not the roster that was published.
+        let seen = app
+            .snapshot()
+            .presence
+            .expect("an expired observation still reports its zone");
+        assert_eq!(seen.zone, snapshot.zone);
+        assert!(
+            seen.occupants.is_empty(),
+            "an expired observation names nobody"
+        );
+        assert!(!seen.occupied, "and stops claiming the room is occupied");
+        // The publisher's own record is untouched; only disclosure narrows.
+        assert_eq!(app.presence, Some(snapshot));
         assert_eq!(app.document, durable_document);
+    }
+
+    fn occupant(
+        id: &str,
+        face: ::canvas::control::PresenceSignalState,
+    ) -> ::canvas::control::PresenceOccupant {
+        use ::canvas::control::{PresenceOccupant, PresenceSignal, PresenceSignalState};
+        let sig = |state| PresenceSignal {
+            state,
+            confidence: Some(0.9),
+            age_ms: 10,
+        };
+        PresenceOccupant {
+            id: id.into(),
+            display_name: format!("Name of {id}"),
+            presence: sig(PresenceSignalState::Detected),
+            face: sig(face),
+            voice: sig(PresenceSignalState::Unknown),
+        }
+    }
+
+    fn observation(
+        occupants: Vec<::canvas::control::PresenceOccupant>,
+    ) -> ::canvas::control::PresenceSnapshot {
+        ::canvas::control::PresenceSnapshot {
+            zone: "bedroom".into(),
+            observed_at_unix_ms: 1_000,
+            expires_after_ms: 5_000,
+            occupied: true,
+            occupants,
+        }
+    }
+
+    #[test]
+    fn stale_presence_draws_no_name() {
+        // A sensor that stopped reporting cannot keep asserting who is in a
+        // room. Expiry empties rather than marking, so a disconnected camera
+        // cannot hold a room open indefinitely.
+        use ::canvas::control::PresenceSignalState;
+        let obs = observation(vec![occupant("avery", PresenceSignalState::Verified)]);
+        let fresh = assemble_presence(Some(&obs), 1_000 + 4_999).expect("still fresh");
+        assert_eq!(
+            fresh.occupants.len(),
+            1,
+            "an unexpired verified occupant is kept"
+        );
+
+        let expired =
+            assemble_presence(Some(&obs), 1_000 + 5_000).expect("expiry still reports a zone");
+        assert!(
+            expired.occupants.is_empty(),
+            "an expired observation names nobody"
+        );
+        assert!(
+            !expired.occupied,
+            "and does not keep claiming the room is occupied"
+        );
+    }
+
+    #[test]
+    fn unidentified_occupant_draws_no_name() {
+        // Detection is evidence that someone is there; it is not evidence of
+        // who. Publishing a display name on Detected alone is the claim
+        // distributed-topology.md forbids.
+        use ::canvas::control::PresenceSignalState;
+        for unverified in [
+            PresenceSignalState::Detected,
+            PresenceSignalState::Unknown,
+            PresenceSignalState::Unavailable,
+        ] {
+            let obs = observation(vec![occupant("stranger", unverified)]);
+            let seen = assemble_presence(Some(&obs), 1_100).expect("assembled");
+            assert!(
+                seen.occupants.is_empty(),
+                "{unverified:?} must not publish a name"
+            );
+            assert!(
+                seen.occupied,
+                "occupancy is what the sensor saw, and survives"
+            );
+        }
+    }
+
+    #[test]
+    fn narrowing_only_ever_removes() {
+        // Whatever else changes, assembly must never invent an occupant or
+        // widen what the observation claimed.
+        use ::canvas::control::PresenceSignalState;
+        let obs = observation(vec![
+            occupant("avery", PresenceSignalState::Verified),
+            occupant("stranger", PresenceSignalState::Detected),
+        ]);
+        let seen = assemble_presence(Some(&obs), 1_100).expect("assembled");
+        assert!(seen.occupants.len() <= obs.occupants.len());
+        for shown in &seen.occupants {
+            assert!(
+                obs.occupants.iter().any(|o| o.id == shown.id),
+                "invented an occupant"
+            );
+        }
+        assert!(
+            assemble_presence(None, 1_100).is_none(),
+            "no observation means nothing to show"
+        );
     }
 
     #[test]
