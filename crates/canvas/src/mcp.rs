@@ -25,6 +25,108 @@ use std::sync::Arc;
 #[serde(deny_unknown_fields)]
 struct Inspect {}
 
+/// Which store an artifact operation addresses.
+///
+/// Named rather than inferred, because the three differ in what their contents
+/// mean: project files are first-party, research-wing carries public
+/// provenance, and the wiki is generated or imported. A reader that cannot tell
+/// them apart will treat a generated page as a source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum ArtifactStore {
+    Project,
+    Research,
+    Wiki,
+}
+
+/// The four artifact request shapes below are the served schema — schemars reads
+/// the types, not the values — so their fields are legitimately unread until the
+/// broker fan-out lands and starts consuming them. Kept as real types rather than
+/// hand-written JSON so the schema cannot drift from what the handler will parse.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct GetArtifact {
+    /// Correlation identifier: 1-64 lowercase letters, digits, hyphens or underscores.
+    request_id: String,
+    /// Lowercase hex sha256 of the artifact's content, 64 characters.
+    artifact: String,
+    /// Project the caller is acting in. Passed on every call rather than held as
+    /// a mode, so an agent cannot lose track of which project it is in and act
+    /// on the wrong one.
+    project: String,
+    /// Byte range for a large artifact, so a caller can page rather than pull
+    /// the whole thing.
+    #[serde(default)]
+    range: Option<ByteRange>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct ByteRange {
+    offset: u64,
+    length: u64,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct SaveArtifact {
+    request_id: String,
+    /// Project the artifact is filed under. Storing content that already exists
+    /// adds a backlink; it does not copy the bytes.
+    project: String,
+    /// Human-facing name. Identity is the content hash, so renaming does not
+    /// create a second artifact.
+    name: String,
+    /// Media type of the content, so a reader does not have to guess.
+    content_type: String,
+    /// Base64-encoded content.
+    content_base64: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct SearchArtifacts {
+    request_id: String,
+    project: String,
+    query: String,
+    /// Which store to search. Omitted means every store the caller may read.
+    #[serde(default)]
+    store: Option<ArtifactStore>,
+    /// Maximum hits to return, bounded by the server regardless.
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct CropArtifact {
+    request_id: String,
+    project: String,
+    /// Content hash of the image or PDF to crop.
+    artifact: String,
+    /// Zero-based page. Required for a PDF, ignored for an image.
+    #[serde(default)]
+    page: Option<u32>,
+    /// Region to keep, in fractions of the page or image from its top-left, so a
+    /// crop does not depend on the resolution it was measured at.
+    region: CropRegion,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct CropRegion {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ApplyDocument {
@@ -247,7 +349,67 @@ fn tool<T: JsonSchema>(name: &'static str, description: &'static str) -> Tool {
     )
 }
 
-fn tools() -> Vec<Tool> {
+/// What a connection is allowed to reach.
+///
+/// The split exists because a swarm agent and the human's own agent are not the
+/// same kind of caller. Swarm agents retrieve and save; they must not be able to
+/// place a surface, because nine of them deciding where to put things is a wall
+/// nobody can read — and the failure is silent, since each one succeeds.
+///
+/// Enforced by OMITTING tools from `list_tools`, not by refusing them on call. A
+/// tool an agent can see is a tool it will try, and a refusal it has to handle is
+/// worse than a capability it never knew about. `call_tool` still checks, because
+/// a name can be guessed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Role {
+    /// Retrieval and storage only. What the swarm gets.
+    #[default]
+    Broker,
+    /// The full surface, including placement and display control. For JARVIS and
+    /// for the agent the human is actively talking to.
+    Control,
+}
+
+/// Tools every caller reaches, whatever its role.
+///
+/// Retrieval is the attention signal: because the swarm reads through
+/// `canvas_get_artifact`, Canvas sees what an agent pulled by construction,
+/// with no second channel to emit on and nothing to forget.
+fn broker_tools() -> Vec<Tool> {
+    vec![
+        tool::<GetArtifact>(
+            "canvas_get_artifact",
+            "Fetch an artifact by content hash from project files, research-wing or the wiki. Authorization is checked against the caller's scope on every read; holding a hash is not permission to read it. Retrieving is also what makes the artifact visible on Canvas.",
+        ),
+        tool::<SaveArtifact>(
+            "canvas_save_artifact",
+            "Store bytes as an artifact in a project and return its content hash. Identical content stored twice is one artifact with two backlinks, not two copies. Indexing for search may lag the save.",
+        ),
+        tool::<SearchArtifacts>(
+            "canvas_search_artifacts",
+            "Search wiki, research-wing or project files. The query and its results are themselves an artifact, so a search is as visible as a retrieval.",
+        ),
+        tool::<CropArtifact>(
+            "canvas_crop_artifact",
+            "Derive a cropped region of an image or PDF page as its own artifact, recording the parent and rectangle as lineage. Deterministic: the same crop of the same artifact is the same hash.",
+        ),
+    ]
+}
+
+fn is_artifact_tool(name: &str) -> bool {
+    broker_tools().iter().any(|tool| tool.name == name)
+}
+
+fn tools_for(role: Role) -> Vec<Tool> {
+    let mut tools = broker_tools();
+    if role == Role::Broker {
+        return tools;
+    }
+    tools.extend(control_tools());
+    tools
+}
+
+fn control_tools() -> Vec<Tool> {
     vec![
         tool::<Inspect>(
             "canvas_inspect",
@@ -536,6 +698,7 @@ struct Canvas {
     send: Arc<Sender>,
     slot: Arc<tokio::sync::Semaphore>,
     catalog: Arc<Catalog>,
+    role: Role,
 }
 
 impl Default for Canvas {
@@ -544,11 +707,29 @@ impl Default for Canvas {
             send: Arc::new(control::send),
             slot: Arc::new(tokio::sync::Semaphore::new(1)),
             catalog: Arc::new(Catalog::bundled().expect("bundled project catalog must be valid")),
+            // Control, because the existing transports are the human's own: stdio
+            // reaches only a process its caller spawned, and the loopback port is
+            // behind a bearer the bridge holds. A swarm connection is built with
+            // `broker()` and has to opt *down* explicitly.
+            role: Role::Control,
         }
     }
 }
 
 impl Canvas {
+    /// A connection for swarm agents: retrieval and storage, no placement.
+    ///
+    /// The human's own agent and JARVIS keep [`Role::Control`]; everything else
+    /// gets this, so the swarm is visible on the wall without being able to
+    /// rearrange it.
+    #[allow(dead_code)]
+    fn broker() -> Self {
+        Self {
+            role: Role::Broker,
+            ..Self::default()
+        }
+    }
+
     async fn reconcile_intent(&self, args: Value) -> Result<CallToolResponse, ErrorData> {
         let args: ReconcileIntent = match serde_json::from_value(args) {
             Ok(args) => args,
@@ -966,12 +1147,12 @@ impl ServerHandler for Canvas {
         _: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
         Ok(ListToolsResult {
-            tools: tools(),
+            tools: tools_for(self.role),
             ..Default::default()
         })
     }
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        tools().into_iter().find(|t| t.name == name)
+        tools_for(self.role).into_iter().find(|t| t.name == name)
     }
     async fn call_tool(
         &self,
@@ -979,6 +1160,28 @@ impl ServerHandler for Canvas {
         _: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
         let arguments = Value::Object(request.arguments.unwrap_or_default());
+        // Hiding a tool keeps an honest caller away from it; this keeps a
+        // guessing one away. A broker connection must not reach placement even
+        // if it names the tool directly.
+        if !tools_for(self.role)
+            .iter()
+            .any(|tool| tool.name == request.name)
+        {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "{} is not available to this connection",
+                request.name
+            ))])
+            .into());
+        }
+        if is_artifact_tool(&request.name) {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "{} is not yet served: no artifact broker is connected. \
+                 The tool surface is defined; the fan-out to project files, \
+                 research-wing and the wiki is not built.",
+                request.name
+            ))])
+            .into());
+        }
         if request.name == "canvas_reconcile_intent" {
             return self.reconcile_intent(arguments).await;
         }
@@ -1122,6 +1325,85 @@ pub fn serve_http(port: u16) -> Result<(), String> {
 }
 
 #[cfg(test)]
+mod role_tests {
+    use super::*;
+
+    const PLACEMENT: &[&str] = &[
+        "canvas_apply_document",
+        "canvas_apply_patch",
+        "canvas_open_file",
+        "canvas_open_widget",
+        "canvas_open_view",
+        "canvas_place_surface",
+        "canvas_close_surface",
+        "canvas_display_target",
+        "canvas_set_visibility",
+    ];
+
+    fn names(role: Role) -> Vec<String> {
+        tools_for(role)
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_swarm_surface_is_exactly_four_tools() {
+        let broker = names(Role::Broker);
+        assert_eq!(
+            broker,
+            vec![
+                "canvas_get_artifact",
+                "canvas_save_artifact",
+                "canvas_search_artifacts",
+                "canvas_crop_artifact",
+            ],
+            "the minimized surface is the point; adding to it needs a reason"
+        );
+    }
+
+    #[test]
+    fn a_swarm_agent_cannot_see_any_tool_that_moves_a_screen() {
+        let broker = names(Role::Broker);
+        for tool in PLACEMENT {
+            assert!(
+                !broker.contains(&tool.to_string()),
+                "{tool} would let a swarm agent rearrange the wall"
+            );
+        }
+    }
+
+    #[test]
+    fn control_keeps_everything_the_broker_has() {
+        let control = names(Role::Control);
+        for tool in names(Role::Broker) {
+            assert!(
+                control.contains(&tool),
+                "{tool} vanished from the control surface"
+            );
+        }
+        for tool in PLACEMENT {
+            assert!(control.contains(&tool.to_string()), "{tool} missing");
+        }
+    }
+
+    #[test]
+    fn default_is_control_and_broker_is_opt_down() {
+        assert_eq!(Canvas::default().role, Role::Control);
+        assert_eq!(Canvas::broker().role, Role::Broker);
+    }
+
+    #[test]
+    fn every_advertised_name_is_unique() {
+        let mut all = names(Role::Control);
+        let before = all.len();
+        all.sort();
+        all.dedup();
+        assert_eq!(before, all.len(), "duplicate tool name advertised");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -1234,7 +1516,7 @@ mod tests {
 
     #[test]
     fn schemas_include_native_document_and_patch_definitions() {
-        let tools = tools();
+        let tools = tools_for(Role::Control);
         assert_eq!(tools.len(), 19);
         let tool = |name: &str| tools.iter().find(|tool| tool.name == name).unwrap();
         assert!(
@@ -1668,7 +1950,11 @@ mod tests {
                 .unwrap()
         });
         let client = ().serve(client_io).await.unwrap();
-        assert_eq!(client.list_all_tools().await.unwrap().len(), 19);
+        assert_eq!(
+            client.list_all_tools().await.unwrap().len(),
+            control_tools().len() + broker_tools().len(),
+            "a default connection is Control: every tool, artifact tools included"
+        );
         let result = client
             .call_tool(CallToolRequestParams::new("canvas_inspect"))
             .await
