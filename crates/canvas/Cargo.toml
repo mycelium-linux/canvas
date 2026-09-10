@@ -7,7 +7,7 @@ license.workspace = true
 [features]
 default = []
 lua-scenes = ["dep:mlua"]
-mcp = ["dep:rmcp", "dep:schemars", "dep:tokio", "dep:axum", "canvas-widgets/schema"]
+mcp = ["dep:rmcp", "dep:schemars", "dep:tokio", "dep:axum", "dep:reqwest", "canvas-widgets/schema"]
 
 [dependencies]
 base64 = "0.22"
@@ -28,6 +28,7 @@ wgpu = "27"
 rmcp = { version = "3.2", default-features = false, features = ["server", "transport-io", "transport-streamable-http-server"], optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "net", "signal"], optional = true }
 axum = { version = "0.8", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"], optional = true }
 subtle = "2.6"
 roxmltree = "0.20"
 svgtypes = "0.15"

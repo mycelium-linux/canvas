@@ -401,9 +401,13 @@ impl App {
         let base_catalog = Catalog::bundled().expect("bundled project catalog must remain valid");
         let workspaces = workspace_store::load(&workspace_store_path, &base_catalog)
             .map_err(|error| error.to_string())?;
-        let catalog = workspaces
+        let mut catalog = workspaces
             .effective_catalog(&base_catalog)
             .map_err(|error| error.to_string())?;
+        // Pull in the full Alfalfa project roster so Ctrl-P shows every project,
+        // not just the 2 bundled ones. New projects get a default Coherence theme;
+        // bundled projects keep their configured theme.
+        Self::merge_alfalfa_projects(&mut catalog);
         let project_id = workspaces
             .active_project_id
             .clone()
@@ -1699,16 +1703,99 @@ impl App {
     }
 
     fn switch_project(&mut self, project: String) -> Task<Message> {
-        let (reply, _replies) = mpsc::sync_channel(1);
-        self.execute(Pending {
-            request: ControlRequest {
-                schema_version: CONTROL_VERSION,
-                request_id: "key-workspace".into(),
-                expected_revision: Some(self.runtime_revision),
-                command: Command::WorkspaceSwitch { name: project },
-            },
-            reply,
-        })
+        // If a saved workspace exists for this project, switch to it.
+        // If not (e.g. a newly discovered Alfalfa project), create a new
+        // workspace document with that project's theme and apply it.
+        // This makes Ctrl-P → Enter work for all projects without prior setup.
+        if self.workspaces.get(&project).is_some() {
+            let (reply, _replies) = mpsc::sync_channel(1);
+            self.execute(Pending {
+                request: ControlRequest {
+                    schema_version: CONTROL_VERSION,
+                    request_id: "key-workspace".into(),
+                    expected_revision: Some(self.runtime_revision),
+                    command: Command::WorkspaceSwitch { name: project },
+                },
+                reply,
+            })
+        } else {
+            let project_id = project.clone();
+            let document = WorkspaceDocument {
+                schema_version: SCHEMA_VERSION,
+                id: project_id.clone(),
+                project_id,
+                revision: 1,
+                theme: ThemeRef::Project,
+                background: Background::Theme,
+                chrome: SurfaceChrome::default(),
+                surfaces: Vec::new(),
+                layout: Layout::Empty,
+                bindings: Vec::new(),
+                focused_surface_id: None,
+            };
+            let (reply, _replies) = mpsc::sync_channel(1);
+            self.execute(Pending {
+                request: ControlRequest {
+                    schema_version: CONTROL_VERSION,
+                    request_id: "key-workspace-new".into(),
+                    expected_revision: None,
+                    command: Command::ApplyDocument { document },
+                },
+                reply,
+            })
+        }
+    }
+
+    /// Fetch all projects from the local Alfalfa index and merge them into
+    /// the catalog. This makes Ctrl-P show the full project roster, not just
+    /// the 2 bundled entries in config/projects.json.
+    fn merge_alfalfa_projects(catalog: &mut Catalog) {
+        let alfalfa_url = std::env::var("FPL_ALFALFA_URL")
+            .ok()
+            .unwrap_or_else(|| "http://127.0.0.1:8787".to_string());
+        let addr = alfalfa_url.strip_prefix("http://").unwrap_or(&alfalfa_url);
+        let timeout = std::time::Duration::from_secs(3);
+        if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
+            &addr.parse().unwrap_or("127.0.0.1:8787".parse().unwrap()),
+            timeout,
+        ) {
+            use std::io::Write;
+            let request = format!(
+                "GET /api/v1/projects HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                addr
+            );
+            if stream.write_all(request.as_bytes()).is_err() {
+                return;
+            }
+            let mut response = String::new();
+            use std::io::Read;
+            let _ = stream.read_to_string(&mut response);
+            let body = response.split("\r\n\r\n").nth(1).unwrap_or("");
+            if let Ok(projects) = serde_json::from_str::<Vec<serde_json::Value>>(body) {
+                for project in projects {
+                    let proj = project.get("project")
+                        .and_then(|p| p.as_object())
+                        .map(|p| {
+                            (
+                                p.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                p.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                            )
+                        });
+                    if let Some((id, name)) = proj {
+                        if id.is_empty() { continue; }
+                        if catalog.projects.iter().any(|p| p.id == id) { continue; }
+                        let theme = canvas_core::ThemeSelection::Coherence {
+                            mode: canvas_core::ThemeMode::Dark,
+                            accent: canvas_core::Accent::Brand,
+                        };
+                        catalog.projects.push(canvas_core::Project {
+                            id, name, theme, resources: Vec::new(),
+                        });
+            }
+        }
+    }
+
+        }
     }
 
     fn set_canvas_visible(&mut self, visible: bool) -> Task<Message> {

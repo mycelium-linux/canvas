@@ -80,6 +80,13 @@ for index = 1, #jobs do
   end
 end
 
+-- An empty jobs array would serialize as {} (a map) instead of [] (a
+-- sequence), which fails the widget schema. A single idle row is both more
+-- useful and keeps the type honest.
+if #rows == 0 then
+  rows[#rows + 1] = { "idle", "none", "no active builds", "0s", "0s" }
+end
+
 -- The producer caps how many jobs fit one datagram, so trust its `total` over
 -- what arrived. Otherwise a queue trimmed for the wire would report itself as
 -- shorter than it is, which is the one thing this title exists to prevent.

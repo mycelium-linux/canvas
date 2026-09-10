@@ -1,7 +1,7 @@
 //! Bounded owner-local stream ingress and sandboxed event-to-widget adapters.
 
 use crate::{Error, Result};
-use canvas_widgets::{WidgetMutation, WidgetSpec};
+use canvas_widgets::{BriefingBeat, WidgetMutation, WidgetSpec};
 use mlua::{Function, Lua, LuaOptions, LuaSerdeExt, StdLib, VmState};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -20,7 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const STREAM_SCHEMA_VERSION: u32 = 1;
 pub const MAX_STREAM_MESSAGE: usize = 64 * 1024;
 const MAX_PENDING_EVENTS: usize = 512;
-const MAX_ADAPTER_BYTES: usize = 32 * 1024;
+pub const MAX_ADAPTER_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -260,6 +260,8 @@ pub fn apply_named_adapter_batch(
         return apply_lua_adapter_batch(source, events, target);
     }
     let source = match adapter {
+        "lockout-v1" => include_str!("../../../config/binders/lockout-v1.lua"),
+        "agent-activity-v1" => include_str!("../../../config/binders/agent-activity-v1.lua"),
         "market-ohlcv-v1" => include_str!("../../../config/binders/market-ohlcv-v1.lua"),
         "widget-snapshot-v1" => include_str!("../../../config/binders/widget-snapshot-v1.lua"),
         _ => return Err(Error(format!("unknown stream adapter: {adapter}"))),
@@ -346,6 +348,71 @@ pub fn apply_lua_adapter_batch(
 
 fn lua_error(error: mlua::Error) -> Error {
     Error(format!("Canvas Lua adapter failed: {error}"))
+}
+
+/// The stream contract a briefing producer emits. Each envelope's payload
+/// carries `{ beat: <index>, briefing: "<name>" }`; the binder renders the
+/// beat into a `BriefingBeat` with workspace patches and optional TTS text.
+pub const BRIEFING_CONTRACT: &str = "canvas.briefing.beat.v1";
+
+/// Run a briefing Lua binder against one beat event.
+///
+/// The binder source is sandboxed identically to widget adapters (TABLE,
+/// STRING, MATH only; 4 MB memory; 50 000 instruction budget; no io/debug/os).
+/// It receives the beat event and returns a [`BriefingBeat`] containing
+/// workspace patches and optional narration text.
+pub fn apply_briefing_binder(
+    source: &str,
+    event: &StreamEnvelope,
+) -> Result<BriefingBeat> {
+    if source.is_empty() || source.len() > MAX_ADAPTER_BYTES {
+        return Err(Error("Lua briefing must contain 1-32768 bytes".into()));
+    }
+    event.validate()?;
+
+    let lua = Lua::new_with(
+        StdLib::TABLE | StdLib::STRING | StdLib::MATH,
+        LuaOptions::default(),
+    )
+    .map_err(lua_error)?;
+    lua.set_memory_limit(4 * 1024 * 1024).map_err(lua_error)?;
+    let interrupts = Arc::new(AtomicU64::new(0));
+    let count = Arc::clone(&interrupts);
+    lua.set_interrupt(move |_| {
+        if count.fetch_add(1, Ordering::Relaxed) >= 50_000 {
+            Err(mlua::Error::RuntimeError(
+                "Canvas briefing budget exceeded".into(),
+            ))
+        } else {
+            Ok(VmState::Continue)
+        }
+    });
+    let globals = lua.globals();
+    for name in [
+        "collectgarbage", "debug", "dofile", "getfenv", "io", "load",
+        "loadfile", "loadstring", "os", "package", "require", "setfenv",
+    ] {
+        globals.raw_set(name, mlua::Value::Nil).map_err(lua_error)?;
+    }
+    lua.sandbox(true).map_err(lua_error)?;
+
+    let wrapped = format!("return function(event)\n{source}\nend");
+    let binder: Function = lua
+        .load(&wrapped)
+        .set_name("canvas-briefing-binder")
+        .eval()
+        .map_err(lua_error)?;
+
+    let value = binder
+        .call(lua.to_value(event).map_err(lua_error)?)
+        .map_err(lua_error)?;
+
+    let beat: BriefingBeat = lua
+        .from_value(value)
+        .map_err(|error| Error(format!("Canvas briefing output is not a valid beat: {error}")))?;
+    beat.validate()
+        .map_err(|error| Error(error.0))?;
+    Ok(beat)
 }
 
 #[cfg(test)]

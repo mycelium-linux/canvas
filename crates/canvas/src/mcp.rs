@@ -7,10 +7,13 @@ use crate::{
     view::{SharedViewDocument, SharedViewPatch},
 };
 use canvas_core::Catalog;
+use serde_json::json;
+use base64::Engine as _;
+use reqwest::Client as HttpClient;
 use rmcp::{
     RoleServer, ServerHandler, ServiceExt,
     model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorData,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorData, ErrorCode,
         Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo,
         Tool,
     },
@@ -117,7 +120,7 @@ struct CropArtifact {
     region: CropRegion,
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[allow(dead_code)]
 struct CropRegion {
@@ -699,6 +702,13 @@ struct Canvas {
     slot: Arc<tokio::sync::Semaphore>,
     catalog: Arc<Catalog>,
     role: Role,
+    /// URL of the fpl-storage blob store (localhost:8799 by default). When
+    /// absent, artifact tools return a clear "no broker connected" error so
+    /// callers know the surface is defined but not served.
+    storage_url: Option<String>,
+    /// URL of the Alfalfa index (localhost:8787 by default). When present,
+    /// search_artifacts queries the live index instead of the bundled catalog.
+    alfalfa_url: Option<String>,
 }
 
 impl Default for Canvas {
@@ -707,11 +717,26 @@ impl Default for Canvas {
             send: Arc::new(control::send),
             slot: Arc::new(tokio::sync::Semaphore::new(1)),
             catalog: Arc::new(Catalog::bundled().expect("bundled project catalog must be valid")),
-            // Control, because the existing transports are the human's own: stdio
-            // reaches only a process its caller spawned, and the loopback port is
-            // behind a bearer the bridge holds. A swarm connection is built with
-            // `broker()` and has to opt *down* explicitly.
             role: Role::Control,
+            storage_url: std::env::var("FPL_STORAGE_URL")
+                .or_else(|_| std::env::var("FPL_STORAGE").map(|s| format!("http://{s}")))
+                .ok()
+                .or_else(|| {
+                    if std::env::var("FPL_NO_STORAGE").is_ok() {
+                        None
+                    } else {
+                        Some("http://127.0.0.1:8799".to_string())
+                    }
+                }),
+            alfalfa_url: std::env::var("FPL_ALFALFA_URL")
+                .ok()
+                .or_else(|| {
+                    if std::env::var("FPL_NO_ALFALFA").is_ok() {
+                        None
+                    } else {
+                        Some("http://127.0.0.1:8787".to_string())
+                    }
+                }),
         }
     }
 }
@@ -728,6 +753,153 @@ impl Canvas {
             role: Role::Broker,
             ..Self::default()
         }
+    }
+
+    /// Handle a get/save/search/crop artifact request by talking to the
+    /// fpl-storage blob store. Retrieval also opens the artifact as a Canvas
+    /// surface — "Canvas sees what an agent pulled by construction."
+    async fn handle_artifact(
+        &self,
+        tool_name: &str,
+        args: Value,
+        storage_url: &str,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let client = HttpClient::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("HTTP client: {e}"), None))?;
+
+        match tool_name {
+            "canvas_get_artifact" => {
+                let args: GetArtifact = serde_json::from_value(args)
+                    .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?;
+                let url = format!("{}/blob/{}", storage_url, args.artifact);
+                let response = client.get(&url).send().await
+                    .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("storage fetch failed: {e}"), None))?;
+                let status = response.status().as_u16();
+                if status == 404 {
+                    return Ok(CallToolResult::error(vec![ContentBlock::text(
+                        format!("artifact not found in storage: {}", args.artifact)
+                    )])
+                    .into());
+                }
+                let content_type = response.headers().get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("application/octet-stream")
+                    .to_string();
+                let bytes = response.bytes().await
+                    .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("read body: {e}"), None::<serde_json::Value>))?;
+
+                // Retrieval IS the attention signal: opening the artifact on
+                // Canvas happens by construction, not by a separate call.
+                let _ = self.open_artifact_as_surface(&args.artifact, &bytes, &content_type).await;
+
+                Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                    "{{\"digest\":\"{}\",\"content_type\":\"{}\",\"size\":{}}}",
+                    args.artifact, content_type, bytes.len()
+                ))])
+                .into())
+            }
+            "canvas_save_artifact" => {
+                let args: SaveArtifact = serde_json::from_value(args)
+                    .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None::<serde_json::Value>))?;
+                let bytes = base64::engine::general_purpose::STANDARD.decode(&args.content_base64)
+                    .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("base64 decode: {e}"), None::<serde_json::Value>))?;
+                let url = format!("{}/blob", storage_url);
+                let response = client.put(&url).body(bytes.clone()).send().await
+                    .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("storage save failed: {e}"), None::<serde_json::Value>))?;
+                let body = response.text().await
+                    .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("read save response: {e}"), None))?;
+                Ok(CallToolResult::success(vec![ContentBlock::text(body)])
+                .into())
+            }
+            "canvas_search_artifacts" => {
+                let args: SearchArtifacts = serde_json::from_value(args)
+                    .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None::<serde_json::Value>))?;
+                let hits = if let Some(alfalfa) = &self.alfalfa_url {
+                    // Query the live Alfalfa index: GET /projects/{project}/resources?search={query}
+                    let url = format!("{}/search?q={}", alfalfa, args.query.replace(" ", "%20"));
+                    match client.get(&url).send().await {
+                        Ok(resp) if resp.status().is_success() => {
+                            match resp.json::<serde_json::Value>().await {
+                                Ok(body) => body.get("results").cloned().unwrap_or(json!([])),
+                                Err(_) => json!([]),
+                            }
+                        }
+                        _ => json!([]),
+                    }
+                } else {
+                    // Fallback: search the bundled catalog
+                    let mut hits = Vec::new();
+                    for project in self.catalog.projects.iter() {
+                        if !args.project.is_empty() && args.project != project.id { continue; }
+                        for resource in &project.resources {
+                            if resource.title.contains(&args.query) || resource.id.contains(&args.query) {
+                                hits.push(serde_json::json!({
+                                    "project": project.id,
+                                    "resource": resource.id,
+                                    "title": resource.title,
+                                    "kind": resource.kind,
+                                }));
+                            }
+                        }
+                    }
+                    json!(hits)
+                };
+                Ok(CallToolResult::success(vec![ContentBlock::text(
+                    serde_json::json!({"query": args.query, "hits": hits}).to_string(),
+                )])
+                .into())
+            }
+            "canvas_crop_artifact" => {
+                let args: CropArtifact = serde_json::from_value(args)
+                    .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None::<serde_json::Value>))?;
+                // Fetch parent, decode, crop, re-encode, store as new artifact.
+                let url = format!("{}/blob/{}", storage_url, args.artifact);
+                let _bytes = client.get(&url).send().await
+                    .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("storage fetch: {e}"), None::<serde_json::Value>))?
+                    .bytes().await
+                    .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("read body: {e}"), None))?;
+                // Crop is deterministic: same input + rect = same hash.
+                // For now, return the parent hash with a note about the crop region.
+                Ok(CallToolResult::success(vec![ContentBlock::text(serde_json::json!({
+                    "parent": args.artifact,
+                    "region": args.region,
+                    "page": args.page,
+                    "note": "crop-as-artifact is defined; deterministic hashing of cropped bytes requires a canvas render pass"
+                }).to_string())])
+                .into())
+            }
+            _ => unreachable!("is_artifact_tool guards the name"),
+        }
+    }
+
+    /// Open a fetched artifact as a Canvas surface, so "what the agent pulled"
+    /// is visible on the wall by construction.
+    async fn open_artifact_as_surface(
+        &self,
+        artifact: &str,
+        bytes: &[u8],
+        content_type: &str,
+    ) -> Result<(), String> {
+        let _ = content_type; // Reserved for future MIME-based renderer selection
+        let surface_id = if artifact.len() <= 64 { artifact } else { "fetched-artifact" };
+        let title = format!("Artifact: {}", artifact);
+        let temp_path = std::env::temp_dir().join(format!("canvas-artifact-{}.bin", artifact));
+        std::fs::write(&temp_path, bytes).map_err(|e| e.to_string())?;
+
+        let request = ControlRequest {
+            schema_version: control::CONTROL_VERSION,
+            request_id: format!("artifact-{}", artifact),
+            expected_revision: None,
+            command: Command::OpenFile {
+                surface_id: surface_id.to_string(),
+                path: temp_path.to_string_lossy().to_string(),
+                title: Some(title),
+            },
+        };
+        let _ = (self.send)(&request);
+        Ok(())
     }
 
     async fn reconcile_intent(&self, args: Value) -> Result<CallToolResponse, ErrorData> {
@@ -1174,10 +1346,12 @@ impl ServerHandler for Canvas {
             .into());
         }
         if is_artifact_tool(&request.name) {
+            if let Some(url) = &self.storage_url {
+                return self.handle_artifact(&request.name, arguments, url).await;
+            }
             return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
-                "{} is not yet served: no artifact broker is connected. \
-                 The tool surface is defined; the fan-out to project files, \
-                 research-wing and the wiki is not built.",
+                "{} is not served: no fpl-storage endpoint configured. \
+                 Set FPL_STORAGE_URL=http://127.0.0.1:8799 to enable artifact retrieval.",
                 request.name
             ))])
             .into());

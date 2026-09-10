@@ -796,7 +796,7 @@ impl Default for OverlaySettings {
             presence_orb: OverlayTarget::Hidden,
             system_hud: OverlayTarget::Rightmost,
             fpl_mark: OverlayTarget::Leftmost,
-            shortcut_help: OverlayTarget::Center,
+            shortcut_help: OverlayTarget::Rightmost,
         }
     }
 }
@@ -2163,10 +2163,10 @@ mod tests {
         let json = serde_json::to_string(&request).unwrap();
         let decoded: ControlRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, request);
-        assert_eq!(
-            serde_json::to_value(overlays).unwrap()["shortcut_help"],
-            "center"
-        );
+            assert_eq!(
+                serde_json::to_value(overlays).unwrap()["shortcut_help"],
+                "rightmost"
+            );
     }
 
     #[test]

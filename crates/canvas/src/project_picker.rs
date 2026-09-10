@@ -72,7 +72,11 @@ impl ProjectPicker {
         else {
             return Action::Ignored;
         };
-        if modifiers.control() || modifiers.alt() || modifiers.logo() {
+        // Arrow keys and Enter work even with Ctrl held: the picker opens via
+        // Ctrl-P, and a user who hasn't released Ctrl yet should not find the
+        // keys silently ignored. Alt and logo (Cmd) are still rejected to avoid
+        // colliding with desktop-level hotkeys.
+        if modifiers.alt() || modifiers.logo() {
             return Action::Ignored;
         }
         let count = self.matches(catalog).len();

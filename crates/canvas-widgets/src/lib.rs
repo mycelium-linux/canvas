@@ -340,6 +340,122 @@ pub enum WidgetMutation {
     },
 }
 
+/// A paced step in a Canvas briefing presentation.
+///
+/// Unlike [`WidgetMutation`], a `BriefingBeat` affects the whole workspace
+/// document (backgrounds, themes, layouts, surfaces) and may request TTS
+/// narration. Producers emit one envelope per beat; the binder renders the
+/// beat into this structure, and Canvas applies the patches atomically.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct BriefingBeat {
+    pub beat: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub narrate: Option<String>,
+    #[serde(default)]
+    pub wait_seconds: f32,
+    #[serde(default)]
+    pub patches: Vec<PatchOp>,
+    /// Actions applied before the first beat and after the last, respectively.
+    /// Each is a list of PatchOp that target the per-zone state: hiding a
+    /// mesh node (Conky), muting presence, etc. The zone is the display
+    /// Canvas is presenting on, so the effect is scoped rather than global.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pre_actions: Vec<PatchOp>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub post_actions: Vec<PatchOp>,
+    #[serde(default)]
+    pub done: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum PatchOp {
+    UpsertSurface { surface: BriefingSurface },
+    RemoveSurface { surface_id: String },
+    SetLayout { layout: serde_json::Value },
+    SetTheme { theme: serde_json::Value },
+    SetBackground { background: serde_json::Value },
+    SetChrome { chrome: serde_json::Value },
+    SetFocus { surface_id: Option<String> },
+    UpsertBinding { binding: serde_json::Value },
+    RemoveBinding { binding_id: String },
+    /// Hide a mesh node (e.g. Conky) for the duration of the briefing.
+    /// Restored by post_actions with SetMesh or by the mesh returning.
+    SetMeshNode { node_id: String, hidden: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct BriefingSurface {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub content: serde_json::Value,
+    #[serde(default)]
+    pub inputs: Vec<serde_json::Value>,
+}
+
+const MAX_BRIEFING_PATCHES: usize = 64;
+
+impl BriefingBeat {
+    pub fn validate(&self) -> Result<()> {
+        check(
+            self.wait_seconds.is_finite() && (0.0..=300.0).contains(&self.wait_seconds),
+            "wait_seconds must be between 0 and 300",
+        )?;
+        check(
+            self.patches.len() <= MAX_BRIEFING_PATCHES,
+            &format!("briefing beat exceeds {} patches", MAX_BRIEFING_PATCHES),
+        )?;
+        for patch in &self.patches {
+            match patch {
+                PatchOp::UpsertSurface { surface } => {
+                    check(
+                        !surface.id.is_empty() && surface.id.len() <= 64,
+                        "surface id must be 1-64 chars",
+                    )?;
+                    check(
+                        !surface.title.is_empty() && surface.title.len() <= 128,
+                        "surface title must be 1-128 chars",
+                    )?;
+                }
+                PatchOp::RemoveSurface { surface_id } => {
+                    check(
+                        !surface_id.is_empty() && surface_id.len() <= 64,
+                        "surface id must be 1-64 chars",
+                    )?;
+                }
+                PatchOp::SetFocus { surface_id: Some(id) } => {
+                    check(
+                        !id.is_empty() && id.len() <= 64,
+                        "surface id must be 1-64 chars",
+                    )?;
+                }
+                PatchOp::RemoveBinding { binding_id } => {
+                    check(
+                        !binding_id.is_empty() && binding_id.len() <= 64,
+                        "binding id must be 1-64 chars",
+                    )?;
+                }
+                PatchOp::SetMeshNode { node_id, .. } => {
+                    check(!node_id.is_empty() && node_id.len() <= 64, "mesh node id must be 1-64 chars")?;
+                }
+                _ => {}
+            }
+        }
+        if let Some(narrate) = &self.narrate {
+            check(narrate.len() <= 4096, "narration text exceeds 4096 bytes")?;
+        }
+        Ok(())
+    }
+}
+
 impl WidgetSpec {
     pub fn apply_mutation(&mut self, mutation: WidgetMutation) -> Result<()> {
         match (&mut self.kind, mutation) {
@@ -419,6 +535,76 @@ mod mutation_tests {
             .is_err()
         );
         assert_eq!(spec, before);
+    }
+
+    #[test]
+    fn briefing_beat_validates_bounds_and_ids() {
+        let valid = BriefingBeat {
+            beat: 0,
+            narrate: Some("hello".into()),
+            wait_seconds: 3.0,
+            patches: vec![],
+            pre_actions: vec![],
+            post_actions: vec![],
+            done: false,
+            message: None,
+        };
+        assert!(valid.validate().is_ok());
+
+        let negative_wait = BriefingBeat {
+            beat: 0,
+            narrate: None,
+            wait_seconds: -1.0,
+            patches: vec![],
+            pre_actions: vec![],
+            post_actions: vec![],
+            done: false,
+            message: None,
+        };
+        assert!(negative_wait.validate().is_err());
+
+        let empty_surface = BriefingBeat {
+            beat: 1,
+            narrate: None,
+            wait_seconds: 1.0,
+            patches: vec![PatchOp::UpsertSurface {
+                surface: BriefingSurface {
+                    id: String::new(),
+                    title: "t".into(),
+                    content: serde_json::Value::Null,
+                    inputs: vec![],
+                },
+            }],
+            pre_actions: vec![],
+            post_actions: vec![],
+            done: false,
+            message: None,
+        };
+        assert!(empty_surface.validate().is_err());
+    }
+
+    #[test]
+    fn briefing_beat_roundtrips_through_json() {
+        let beat = BriefingBeat {
+            beat: 3,
+            narrate: Some("What would you like to work on?".into()),
+            wait_seconds: 5.0,
+            patches: vec![
+                PatchOp::SetBackground {
+                    background: serde_json::json!({"kind": "shader", "shader_id": "smoke-rings", "speed": 0.6}),
+                },
+                PatchOp::SetChrome {
+                    chrome: serde_json::json!({"title": "focused", "canvas_padding": 24, "surface_gap": 16}),
+                },
+            ],
+            pre_actions: vec![],
+            post_actions: vec![],
+            done: false,
+            message: None,
+        };
+        let json = serde_json::to_string(&beat).unwrap();
+        let reparsed: BriefingBeat = serde_json::from_str(&json).unwrap();
+        assert_eq!(beat, reparsed);
     }
 }
 

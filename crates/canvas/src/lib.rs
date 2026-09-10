@@ -31,6 +31,7 @@ pub mod runtime_config;
 pub mod screensaver;
 #[cfg(feature = "lua-scenes")]
 pub mod stream_binding;
+pub mod briefing;
 pub mod theme_picker;
 pub mod view;
 pub mod workspace_store;
