@@ -7054,6 +7054,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args_os().len() != 1 {
         return Err("canvas takes no commands; control it through its owner-local socket".into());
     }
+    // Before anything renders, so the first frame is already at the configured
+    // scale rather than resizing under the viewer a moment later.
+    match ::canvas::runtime_config::load_appearance() {
+        Ok(appearance) => {
+            if appearance != canvas_core::appearance::Appearance::DEFAULT {
+                eprintln!(
+                    "Canvas appearance: scale {:.2}, panel opacity {:.2}, transition {}ms",
+                    appearance.density.scale,
+                    appearance.panels.opacity,
+                    appearance.motion.transition_ms
+                );
+            }
+        }
+        // Loud, and not fatal: a bad config should not stop the wall coming up.
+        Err(error) => eprintln!("Canvas appearance config ignored: {error}"),
+    }
     let (receiver, socket) = start_server()?;
     let initial_frame = platform::preferred_canvas_frame(INITIAL_FRAME);
     let workspace_store_path = workspace_store::default_path()?;
@@ -9265,17 +9281,38 @@ mod tests {
             Some(&[0.0, 0.0, 1.0, 1.0])
         );
 
-        let spec = canvas_widgets::WidgetSpec::from_json(
+        // A widget that never asked for the quiet strip is still closable: the
+        // dots are the only affordance a person at the wall has, so a surface
+        // must not lose them by default.
+        let plain = canvas_widgets::WidgetSpec::from_json(
             br#"{"id":"cpu","kind":"stat","label":"CPU","value":33}"#,
         )
         .unwrap();
-        app.document.surfaces[0].content = SurfaceContent::Widget { spec };
+        app.document.surfaces[0].content = SurfaceContent::Widget { spec: plain };
         app.decoded.clear();
         app.ensure_scene_decoded();
         app.cursor = Some(LogicalPoint {
             x: left + 8.0,
             y: top + 10.0,
         });
+        assert_eq!(
+            app.widget_chrome("sample"),
+            Some(canvas_widgets::WidgetChrome::Standard)
+        );
+        assert_eq!(
+            app.hit_test_surface_control(),
+            Some(("sample".into(), WindowAction::Close))
+        );
+
+        // Drag-only is opt-in, and hit testing matches the visible controls:
+        // no dots drawn, nothing to click.
+        let spec = canvas_widgets::WidgetSpec::from_json(
+            br#"{"id":"cpu","kind":"stat","label":"CPU","value":33,"chrome":"drag_only"}"#,
+        )
+        .unwrap();
+        app.document.surfaces[0].content = SurfaceContent::Widget { spec };
+        app.decoded.clear();
+        app.ensure_scene_decoded();
         assert_eq!(
             app.widget_chrome("sample"),
             Some(canvas_widgets::WidgetChrome::DragOnly)

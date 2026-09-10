@@ -89,6 +89,26 @@ fn write_under(root: &Path, relative: &Path, bytes: &[u8]) -> Result<PathBuf> {
     }
 }
 
+/// Load `appearance.json` from the runtime root and install it.
+///
+/// Absent means defaults, which is not an error: the file exists to override,
+/// and requiring one would make a fresh machine fail to start.
+///
+/// A malformed one IS an error and is reported, because the alternative -
+/// falling back silently - is indistinguishable from a setting that had no
+/// effect, and the reason these values moved out of the code was to be able to
+/// tell those apart.
+pub fn load_appearance() -> Result<canvas_core::appearance::Appearance> {
+    let relative = Path::new("appearance.json");
+    let Some(bytes) = read(relative, 64 * 1024)? else {
+        return Ok(canvas_core::appearance::current());
+    };
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|error| Error(format!("appearance.json is not UTF-8: {error}")))?;
+    let parsed = canvas_core::appearance::Appearance::parse(text).map_err(Error)?;
+    Ok(canvas_core::appearance::install(parsed))
+}
+
 pub fn root() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("CANVAS_CONFIG_DIR") {
         return Some(PathBuf::from(path));
