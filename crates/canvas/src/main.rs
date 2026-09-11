@@ -328,6 +328,9 @@ struct App {
     shortcuts_hotkey: Option<GlobalHotkey>,
     jarvis_hotkey: Option<GlobalHotkey>,
     jarvis_text_hotkey: Option<GlobalHotkey>,
+    jarvis_text_visible: bool,
+    jarvis_text: String,
+    jarvis_text_reply: Option<String>,
     shortcuts_visible: bool,
     background_picker: Option<::canvas::background_picker::BackgroundPicker>,
     theme_picker: Option<::canvas::theme_picker::ThemePicker>,
@@ -557,6 +560,9 @@ impl App {
             shortcuts_hotkey,
             jarvis_hotkey,
             jarvis_text_hotkey,
+            jarvis_text_visible: false,
+            jarvis_text: String::new(),
+            jarvis_text_reply: None,
             shortcuts_visible: false,
             background_picker: None,
             theme_picker: None,
@@ -884,7 +890,7 @@ impl App {
                     ));
                 }
                 if toggle_jarvis_text {
-                    self.spawn_jarvis_text_turn();
+                    self.toggle_jarvis_text();
                 }
                 Task::batch(tasks)
             }
@@ -1000,6 +1006,11 @@ impl App {
                 Task::none()
             }
             Message::TerminalInput(kbd_event) => {
+                // Canvas-native text input to JARVIS. The text appears on the
+                // wall as an overlay, not a macOS dialog.
+                if self.jarvis_text_visible {
+                    return self.handle_jarvis_text_input(kbd_event);
+                }
                 // First refusal while open: arrows and Enter mean something
                 // different inside a picker than they do on the desktop, and
                 // anything it does not claim still falls through below.
@@ -3930,30 +3941,91 @@ impl App {
         self.runtime_revision = self.runtime_revision.saturating_add(1);
     }
 
-    /// Open a typed-to-JARVIS dialog. Uses the existing jarvis-text.sh helper
-    /// which opens a macOS text dialog, pipes the input to `jarvis text-turn`
-    /// (quiet, no TTS), and shows the reply as a notification. This is the
-    /// "don't wake the room" path: text-only, system notification for the reply.
-    fn spawn_jarvis_text_turn(&mut self) {
+    /// Open a Canvas-native text input overlay for JARVIS. Unlike the
+    /// osascript dialog, this renders inside the Canvas surface itself — the
+    /// text appears on the wall, not as a separate macOS window.
+    fn handle_jarvis_text_input(&mut self, kbd_event: iced::keyboard::Event) -> Task<Message> {
+        use iced::keyboard::{Event, Key, key::Named};
+        let Event::KeyPressed { key, text, .. } = kbd_event else {
+            return Task::none();
+        };
+        match key {
+            Key::Named(Named::Backspace) => {
+                let _ = self.jarvis_text.pop();
+                Task::none()
+            }
+            Key::Named(Named::Enter) => {
+                self.submit_jarvis_text();
+                Task::none()
+            }
+            Key::Named(Named::Escape) => {
+                self.jarvis_text_visible = false;
+                self.jarvis_text.clear();
+                self.bump();
+                Task::none()
+            }
+            Key::Character(c) => {
+                if let Some(text) = text {
+                    self.jarvis_text.push_str(&text);
+                }
+                let _ = c;
+                Task::none()
+            }
+            _ => Task::none(),
+        }
+    }
+
+    fn toggle_jarvis_text(&mut self) {
+        self.jarvis_text_visible = !self.jarvis_text_visible;
+        self.jarvis_text.clear();
+        self.status = if self.jarvis_text_visible {
+            "Type your message to JARVIS. Enter to send, Esc to cancel.".into()
+        } else {
+            "JARVIS text dialog closed.".into()
+        };
+        self.bump();
+        self.emit_event(format!(
+            "jarvis_text {}",
+            if self.jarvis_text_visible { "shown" } else { "hidden" }
+        ));
+    }
+
+    /// Submit the visible jarvis_text to jarvis text-turn and capture the reply.
+    fn submit_jarvis_text(&mut self) {
+        let text = self.jarvis_text.clone();
+        if text.is_empty() {
+            return;
+        }
+        self.jarvis_text_visible = false;
+        self.jarvis_text.clear();
+        self.status = "Sending to JARVIS...".into();
         let home = std::env::var("HOME").unwrap_or_default();
         let jarvis_root = std::path::PathBuf::from(&home)
             .join("Documents/src/fpl/JARVIS");
-        let text_script = jarvis_root.join("scripts/jarvis-text.sh");
-        if text_script.exists() {
-            let _ = std::process::Command::new("zsh")
-                .arg(&text_script)
+        let jarvis_bin = jarvis_root.join("target/debug/jarvis");
+        if jarvis_bin.exists() {
+            match std::process::Command::new(&jarvis_bin)
+                .arg("text-turn")
+                .arg(&text)
                 .current_dir(&jarvis_root)
-                .spawn();
-            self.status = "JARVIS text dialog opened.".into();
-            self.emit_event("jarvis_text_open".to_string());
+                .env("JARVIS_VOICE_TRANSCRIPT_LOG_DIR",
+                     format!("{}/.jarvis/transcripts", home))
+                .output()
+            {
+                Ok(output) => {
+                    let reply = String::from_utf8_lossy(&output.stdout).to_string();
+                    self.jarvis_text_reply = Some(reply.trim().to_string());
+                    self.status = format!("JARVIS replied: {}", self.jarvis_text_reply.as_deref().unwrap_or(""));
+                }
+                Err(_) => {
+                    self.status = "JARVIS binary error".to_string();
+                }
+            }
         } else {
-            // Fallback: use osascript directly for the dialog
-            let _ = std::process::Command::new("osascript")
-                .arg("-e")
-                .arg("display dialog \"Say to Jarvis (quiet)\" default answer \"\" buttons {\"Cancel\", \"Send\"} default button \"Send\" with title \"Jarvis\" with hidden answer")
-                .spawn();
-            self.status = "JARVIS dialog opened (jarvis-text.sh not found, using fallback).".into();
+            self.status = "JARVIS binary not found".into();
         }
+        self.bump();
+        self.emit_event("jarvis_text_submitted".to_string());
     }
 
     fn apply_background(&mut self, background: Background) -> Result<(), Failure> {
@@ -5045,6 +5117,19 @@ impl App {
             ));
         }
 
+        // Canvas-native text input overlay for JARVIS. Appears as a text field
+        // on the wall, not as a macOS dialog. Submit with Enter.
+        if self.jarvis_text_visible {
+            layers.push(jarvis_text_input(
+                &self.jarvis_text,
+                self.jarvis_text_reply.as_deref(),
+                surface_color,
+                border_color,
+                text_color,
+                muted,
+            ));
+        }
+
         if self.screensaver_settings.enabled
             || matches!(self.document.background, Background::Shader { .. })
         {
@@ -5172,6 +5257,60 @@ impl App {
                 .is_none_or(|x| viewport.x == x),
         }
     }
+}
+
+fn jarvis_text_input<'a, Message: 'a>(
+    input_text: &'a str,
+    reply: Option<&'a str>,
+    surface: Color,
+    border: Color,
+    text_color: Color,
+    muted: Color,
+) -> Element<'a, Message> {
+    let display = if let Some(reply) = reply {
+        column![
+            text("JARVIS:").size(14).color(muted),
+            text(reply).size(16).color(text_color),
+        ]
+        .spacing(4)
+    } else {
+        let placeholder = text("Type message to JARVIS (Enter to send, Esc to close)")
+            .size(14)
+            .color(muted);
+        let label = if input_text.is_empty() {
+            placeholder
+        } else {
+            text(input_text).size(16).color(text_color)
+        };
+        column![
+            text("To JARVIS:").size(14).color(muted),
+            label,
+            text("▌").size(16).color(text_color),
+        ]
+        .spacing(4)
+    };
+
+    container(display)
+        .padding(18)
+        .width(Length::Fill)
+        .height(Length::Shrink)
+        .align_x(iced::alignment::Horizontal::Center)
+        .align_y(iced::alignment::Vertical::Bottom)
+        .style(move |_| container::Style {
+            background: Some(Color { a: 0.94, ..surface }.into()),
+            border: iced::Border {
+                color: border,
+                width: 1.0,
+                radius: 12.0.into(),
+            },
+            shadow: iced::Shadow {
+                color: Color::from_rgba8(0, 0, 0, 0.42),
+                offset: iced::Vector::new(0.0, 14.0),
+                blur_radius: 44.0,
+            },
+            ..Default::default()
+        })
+        .into()
 }
 
 fn shortcut_help<'a>(
