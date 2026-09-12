@@ -2,6 +2,10 @@
 //! pipeline pattern. The spec names the renderer; this module shells out,
 //! validates the result, and returns bytes. No rendering logic lives here:
 //! ownership of each backend stays with its owning tool (tenet 10).
+//!
+//! Charts reference data by content-addressed asset ID; the host passes the
+//! resolved local path via the workspace parameter. Widgets never hold or
+//! construct filesystem paths — the boundary is enforced by the type system.
 
 use crate::{ChartRenderer, Error, Result, WidgetKind, WidgetSpec};
 use std::path::{Path, PathBuf};
@@ -13,6 +17,9 @@ const MAX_PNG_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Render a widget spec to PNG bytes. Charts use the spec's renderer choice;
 /// every other kind falls back to the native plotters path.
+///
+/// `workspace` is the directory the host has resolved the chart's `source`
+/// asset ID into. This keeps filesystem paths out of the widget spec itself.
 pub fn render_png(spec: &WidgetSpec, workspace: &Path) -> Result<Vec<u8>> {
     let out = workspace.join(format!("{}.png", spec.id));
     match &spec.kind {
@@ -48,7 +55,7 @@ fn render_with_plotters(spec: &WidgetSpec, workspace: &Path, out: &Path) -> Resu
             .arg("--chart")
             .arg(chart_type_name(chart_type))
             .arg("--input")
-            .arg(absolute(source, workspace))
+            .arg(workspace.join(source))
             .arg("--output")
             .arg(out),
     )
@@ -56,7 +63,7 @@ fn render_with_plotters(spec: &WidgetSpec, workspace: &Path, out: &Path) -> Resu
 
 /// Shell out to python3 + matplotlib for richer styling. Fails loud when the
 /// interpreter or library is missing — no silent fallback (tenet 12).
-fn render_with_matplotlib(spec: &WidgetSpec, workspace: &Path, out: &Path) -> Result<()> {
+fn render_with_matplotlib(spec: &WidgetSpec, _workspace: &Path, out: &Path) -> Result<()> {
     let WidgetKind::Chart {
         chart_type, source, ..
     } = &spec.kind
@@ -65,7 +72,7 @@ fn render_with_matplotlib(spec: &WidgetSpec, workspace: &Path, out: &Path) -> Re
             "matplotlib renderer supports chart specs only".into(),
         ));
     };
-    let script = matplotlib_script(chart_type_name(chart_type), source, out, workspace);
+    let script = matplotlib_script(chart_type_name(chart_type), source, out);
     run_helper(Command::new("python3").arg("-c").arg(&script))
 }
 
@@ -91,14 +98,6 @@ fn chart_type_name(chart: &crate::ChartType) -> &'static str {
     }
 }
 
-fn absolute(path: &Path, workspace: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        workspace.join(path)
-    }
-}
-
 fn find_helper() -> Result<PathBuf> {
     let local =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/dock-widget-render");
@@ -116,9 +115,9 @@ fn which(name: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-fn matplotlib_script(chart: &str, source: &Path, out: &Path, workspace: &Path) -> String {
+fn matplotlib_script(chart: &str, source: &str, out: &Path) -> String {
     let chart_lit = format!("{:?}", chart);
-    let source_lit = format!("{:?}", absolute(source, workspace).to_string_lossy());
+    let source_lit = format!("{:?}", source);
     let out_lit = format!("{:?}", out.to_string_lossy());
     format!(
         r##"

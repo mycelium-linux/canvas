@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+#[cfg(test)]
 use std::path::PathBuf;
 
 pub mod quant;
@@ -210,6 +211,12 @@ pub enum WidgetKind {
         unit: Option<String>,
     },
     /// Local time. `format` uses strftime-style tokens.
+    ///
+    /// The one documented intrinsic exception to "widgets must not source their
+    /// own data." No other kind reads the clock, filesystem, or network; this one
+    /// does because a wall clock is presentation metadata rather than a
+    /// measurement. Every other widget receives its data through a declared
+    /// input contract.
     Clock {
         #[serde(default = "default_clock_format")]
         format: String,
@@ -287,11 +294,13 @@ pub enum WidgetKind {
         title: String,
         nodes: Vec<NodeSummaryItem>,
     },
-    /// Data chart. `source` points at CSV/TSV/JSON; `renderer` selects the
-    /// external pipeline for static output (plotters native by default).
+    /// Data chart. `source` is a content-addressed asset identifier (sha256)
+    /// resolved by the host; the widget itself never touches the filesystem.
+    /// `renderer` selects the external pipeline for static output (plotters
+    /// native by default).
     Chart {
         chart_type: ChartType,
-        source: PathBuf,
+        source: String,
         #[serde(default)]
         renderer: Option<ChartRenderer>,
     },
@@ -1054,8 +1063,8 @@ impl WidgetSpec {
                 }
             }
             WidgetKind::Chart { source, .. } => check(
-                !source.as_os_str().is_empty(),
-                "chart requires a data source path",
+                !source.is_empty() && source.len() <= 128,
+                "chart requires a non-empty content-addressed source identifier",
             )?,
             WidgetKind::Text { text } => {
                 check(!text.is_empty(), "text widget must not be empty")?;
@@ -1621,7 +1630,7 @@ mod tests {
             "id": "chart-1",
             "kind": "chart",
             "chart_type": "bar",
-            "source": "/tmp/data.csv",
+            "source": "sha256:abcdef0123456789",
             "renderer": "matplotlib"
         }"#;
         let spec = WidgetSpec::from_json(json.as_bytes()).expect("valid chart spec");
