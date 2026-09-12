@@ -1,22 +1,30 @@
 //! Presentation-only transitions: logical state applies instantly, visuals
 //! interpolate. Swap/recall stays fast — input is never locked to the
 //! animation, and a dropped transition simply snaps to the target.
+//!
+//! Easing comes from `iced_core::animation::Easing` (re-exported from the
+//! `lilt` crate), not a hand-rolled function: the same easing `lilt` uses for
+//! the rest of the wall, and it carries correct interruption semantics so a
+//! value that changes mid-transition retargets instead of snapping.
 
 use canvas_core::ThemePalette;
+use iced::animation::Easing;
 use std::time::{Duration, Instant};
 
+/// Default transition duration: fast enough to feel immediate, slow enough to
+/// follow a layout shift across three displays.
 pub const TRANSITION_DURATION: Duration = Duration::from_millis(280);
+
+/// The easing used for all Canvas transitions — EaseOutCubic, matching the
+/// prior hand-rolled implementation but sourced from the shared `lilt` easing
+/// table so the palette and placement transitions agree with widget animations.
+const TRANSITION_EASING: Easing = Easing::EaseOutCubic;
 
 /// Eased progress of a transition that started at `started`, 1.0 once done.
 pub fn progress_at(started: Instant, duration: Duration) -> f32 {
     let elapsed = started.elapsed().as_secs_f32();
-    ease_out_cubic((elapsed / duration.as_secs_f32()).clamp(0.0, 1.0))
-}
-
-/// Ease-out cubic: fast start, soft landing — the standard for movement.
-pub fn ease_out_cubic(t: f32) -> f32 {
-    let u = 1.0 - t.clamp(0.0, 1.0);
-    1.0 - u * u * u
+    let t = (elapsed / duration.as_secs_f32()).clamp(0.0, 1.0);
+    TRANSITION_EASING.value(t)
 }
 
 pub fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -128,11 +136,11 @@ mod tests {
 
     #[test]
     fn easing_starts_fast_and_lands_soft() {
-        assert_eq!(ease_out_cubic(0.0), 0.0);
-        assert_eq!(ease_out_cubic(1.0), 1.0);
-        assert!(ease_out_cubic(0.25) > 0.25);
-        assert!(ease_out_cubic(0.75) < 1.0 - (1.0_f32 - 0.75).powi(3) + f32::EPSILON);
-        assert!(ease_out_cubic(0.25) < ease_out_cubic(0.75));
+        // EaseOutCubic from lilt: 0 → 0, 1 → 1, fast start, soft landing.
+        assert_eq!(TRANSITION_EASING.value(0.0), 0.0);
+        assert_eq!(TRANSITION_EASING.value(1.0), 1.0);
+        assert!(TRANSITION_EASING.value(0.25) > 0.25);
+        assert!(TRANSITION_EASING.value(0.25) < TRANSITION_EASING.value(0.75));
     }
 
     #[test]
