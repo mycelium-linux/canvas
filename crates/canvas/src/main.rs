@@ -5251,11 +5251,11 @@ impl App {
                 .map(|frame| frame.x)
                 .min()
                 .is_some_and(|x| viewport.x == x),
-            OverlayTarget::Center => {
-                let frames = selected.collect::<Vec<_>>();
-                if frames.is_empty() {
-                    true
-                } else {
+             OverlayTarget::Center => {
+                 let frames = selected.collect::<Vec<_>>();
+                 if frames.is_empty() {
+                     false
+                 } else {
                     let left = frames
                         .iter()
                         .map(|frame| frame.x)
@@ -9244,6 +9244,18 @@ mod tests {
         assert!(!app.overlay_on_viewport(OverlayTarget::Center, app.displays[0].frame));
         assert!(app.overlay_on_viewport(OverlayTarget::All, app.displays[1].frame));
         assert!(!app.overlay_on_viewport(OverlayTarget::Hidden, app.displays[0].frame));
+    }
+
+    #[test]
+    fn overlay_fails_closed_without_selected_displays() {
+        let mut app = test_app();
+        app.selected_display_ids.clear();
+        let any_frame = app.displays[0].frame;
+        assert!(!app.overlay_on_viewport(OverlayTarget::Center, any_frame));
+        assert!(!app.overlay_on_viewport(OverlayTarget::Leftmost, any_frame));
+        assert!(!app.overlay_on_viewport(OverlayTarget::Rightmost, any_frame));
+        assert!(app.overlay_on_viewport(OverlayTarget::All, any_frame));
+        assert!(!app.overlay_on_viewport(OverlayTarget::Hidden, any_frame));
     }
 
     #[test]
