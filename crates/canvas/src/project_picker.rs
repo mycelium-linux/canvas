@@ -196,15 +196,36 @@ fn fuzzy_score(query: &str, project: &Project) -> Option<u32> {
     if query.is_empty() {
         return Some(0);
     }
+    // Theme filtering: "dark", "light", "brand", "info", "success" match themes.
+    // Only activates for single-word theme queries to avoid false positives.
+    let theme_desc = match project.theme {
+        canvas_core::ThemeSelection::Coherence { mode, accent } => {
+            format!("{} {}",
+                match mode { canvas_core::ThemeMode::Dark => "dark", canvas_core::ThemeMode::Light => "light" },
+                match accent { canvas_core::Accent::Brand => "brand", canvas_core::Accent::Info => "info", canvas_core::Accent::Success => "success" }
+            )
+        }
+        _ => "theme".into(),
+    };
+    // If query is a known theme keyword, match against theme description only.
+    if matches!(query.as_str(), "dark" | "light" | "brand" | "info" | "success" | "theme") {
+        if theme_desc.starts_with(&query) || theme_desc.contains(&query) {
+            return Some(10);
+        }
+        return None;
+    }
+    // Otherwise, match against id and name only (not theme description).
     let id = project.id.to_ascii_lowercase();
     let name = project.name.to_ascii_lowercase();
-    if id.starts_with(&query) || name.starts_with(&query) {
-        return Some(10);
+    for candidate in [&id, &name] {
+        if candidate.starts_with(&query) {
+            return Some(10);
+        }
+        if candidate.contains(&query) {
+            return Some(20);
+        }
     }
-    if id.contains(&query) || name.contains(&query) {
-        return Some(20);
-    }
-    let mut subsequence_score: Option<u32> = None;
+    // Subsequence fallback on id/name only.
     for candidate in [&id, &name] {
         let mut position = 0;
         let mut gaps = 0;
@@ -218,11 +239,10 @@ fn fuzzy_score(query: &str, project: &Project) -> Option<u32> {
             position += offset + character.len_utf8();
         }
         if found {
-            let score = 30 + gaps as u32;
-            subsequence_score = Some(subsequence_score.map_or(score, |best| best.min(score)));
+            return Some(30 + gaps as u32);
         }
     }
-    subsequence_score
+    None
 }
 
 fn rgb(value: [u8; 3]) -> Color {

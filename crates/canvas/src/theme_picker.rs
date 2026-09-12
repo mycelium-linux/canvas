@@ -1,7 +1,7 @@
 //! Visual selection of the bounded Coherence themes Canvas can persist.
 
 use canvas_core::{Accent, ThemeMode, ThemeSelection};
-use iced::widget::{column, container, row, text};
+use iced::widget::{column, container, mouse_area, row, text};
 use iced::{Color, Element, Length};
 
 const COLUMNS: usize = 3;
@@ -59,6 +59,14 @@ impl ThemePicker {
         CHOICES[self.index]
     }
 
+    pub fn selection_index(&self) -> usize {
+        self.index
+    }
+
+    pub fn select(&mut self, index: usize) {
+        self.index = index % CHOICES.len();
+    }
+
     pub fn handle(&mut self, event: &iced::keyboard::Event) -> Action {
         use iced::keyboard::{Event, Key, key::Named};
         let Event::KeyPressed { key, modifiers, .. } = event else {
@@ -80,14 +88,24 @@ impl ThemePicker {
         Action::Consumed
     }
 
-    pub fn view<'a, Message: 'a>(&self) -> Element<'a, Message> {
+    pub fn view<'a, Message: Clone + 'a>(
+        &self,
+        on_pick: &'a dyn Fn(usize) -> Message,
+    ) -> Element<'a, Message> {
         let selected = self.selection();
         let shell = selected.palette();
         let mut grid = column![].spacing(10);
         for chunk in CHOICES.chunks(COLUMNS) {
             let mut line = row![].spacing(10);
-            for choice in chunk {
-                line = line.push(theme_tile(*choice, *choice == selected));
+            for (index, choice) in chunk.iter().enumerate() {
+                let abs = CHOICES.iter().position(|c| c == choice).unwrap_or(0);
+                let _ = index; // chunk-local index; abs is the global index
+                let tile = theme_tile(*choice, *choice == selected);
+                line = line.push(
+                    mouse_area(tile)
+                        .on_press(on_pick(abs))
+                        .interaction(iced::mouse::Interaction::Pointer),
+                );
             }
             grid = grid.push(line);
         }

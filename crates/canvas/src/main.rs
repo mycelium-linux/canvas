@@ -209,6 +209,7 @@ enum Message {
     },
     LinkOpened(String),
     TerminalInput(iced::keyboard::Event),
+    ThemePickerSelect(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -1004,6 +1005,20 @@ impl App {
                     Err(error) => format!("Could not open link {url}: {error}"),
                 };
                 Task::none()
+            }
+            Message::ThemePickerSelect(index) => {
+                let Some(picker) = self.theme_picker.as_mut() else {
+                    return Task::none();
+                };
+                let selected_index = picker.selection_index();
+                if index == selected_index {
+                    let theme = picker.selection();
+                    self.theme_picker = None;
+                    self.apply_picked_theme(theme)
+                } else {
+                    picker.select(index);
+                    Task::none()
+                }
             }
             Message::TerminalInput(kbd_event) => {
                 // Canvas-native text input to JARVIS. The text appears on the
@@ -4876,7 +4891,7 @@ impl App {
             );
         }
         if let Some(picker) = self.theme_picker.as_ref() {
-            layers.push(picker.view());
+            layers.push(picker.view::<Message>(&|index| Message::ThemePickerSelect(index)));
         }
         if let Some(picker) = self.project_picker.as_ref() {
             layers.push(picker.view(&self.catalog, &self.document.project_id));
