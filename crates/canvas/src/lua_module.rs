@@ -542,6 +542,7 @@ fn install_module_context(
 fn install_widget_api(lua: &Lua, read_theme: bool, theme: ModuleThemeTokens) -> Result<()> {
     let widget = lua.create_table().map_err(lua_error)?;
 
+<<<<<<< /var/folders/hv/c73jtdq15nn09_hxm80x_zy80000gn/T/tmp.epYSGm3jPI.o
     widget
         .set(
             "time",
@@ -560,6 +561,8 @@ fn install_widget_api(lua: &Lua, read_theme: bool, theme: ModuleThemeTokens) -> 
         )
         .map_err(lua_error)?;
 
+=======
+>>>>>>> /var/folders/hv/c73jtdq15nn09_hxm80x_zy80000gn/T/tmp.epYSGm3jPI.t
     if read_theme {
         let theme_tokens = theme;
         widget
@@ -599,41 +602,16 @@ fn install_widget_api(lua: &Lua, read_theme: bool, theme: ModuleThemeTokens) -> 
             .map_err(lua_error)?,
         )
         .map_err(lua_error)?;
-    canvas
-        .set(
-            "webhook_post",
-            lua.create_function(|_, (url, payload): (String, String)| {
-                let result = std::process::Command::new("curl")
-                    .arg("-sS")
-                    .arg("-X")
-                    .arg("POST")
-                    .arg(&url)
-                    .arg("-H")
-                    .arg("Content-Type: application/json")
-                    .arg("-d")
-                    .arg(&payload)
-                    .arg("--max-time")
-                    .arg("10")
-                    .arg("--connect-timeout")
-                    .arg("5")
-                    .output();
-                match result {
-                    Ok(output) => Ok(format!(
-                        "ok status={} body={}",
-                        output.status,
-                        String::from_utf8_lossy(&output.stdout)
-                    )),
-                    Err(error) => Err(mlua::Error::RuntimeError(format!(
-                        "webhook failed: {error}"
-                    ))),
-                }
-            })
-            .map_err(lua_error)?,
-        )
-        .map_err(lua_error)?;
+    // canvas.webhook_post removed: Lua modules must never spawn curl or other
+    // external processes. Network I/O belongs in stream producers (Python
+    // feeds) that write canvas.widget.snapshot.v1 envelopes. Events are
+    // emitted through canvas.events and the stream socket, not direct HTTP.
     lua.globals().set("canvas", canvas).map_err(lua_error)
 }
 
+/// Build a `{ text = "..." }` table — used by host-side callers that need to
+/// return text content from Rust into a Lua module.
+#[allow(dead_code)]
 fn widget_set_text(lua: &Lua, text: &str) -> mlua::Result<mlua::Value> {
     let table = lua.create_table()?;
     table.set("text", text)?;
