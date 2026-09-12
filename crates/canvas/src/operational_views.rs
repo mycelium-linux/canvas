@@ -227,10 +227,16 @@ fn appetite(kind: &WidgetKind) -> f32 {
         | WidgetKind::RateBars { .. }
         | WidgetKind::Table { .. }
         | WidgetKind::EventLog { .. }
+<<<<<<< /var/folders/hv/c73jtdq15nn09_hxm80x_zy80000gn/T/tmp.e3UR7RNTeM.o
         | WidgetKind::StatusList { .. }
         | WidgetKind::Chart { .. }
+=======
+        | WidgetKind::NodeSummary { .. }
+        |         WidgetKind::Chart { .. }
+>>>>>>> /var/folders/hv/c73jtdq15nn09_hxm80x_zy80000gn/T/tmp.e3UR7RNTeM.t
         | WidgetKind::Quant { .. }
-        | WidgetKind::Module { .. } => 1.0,
+        | WidgetKind::Module { .. }
+        | WidgetKind::Launcher { .. } => 1.0,
         WidgetKind::Stat { .. }
         | WidgetKind::Gauge { .. }
         | WidgetKind::Meter { .. }

@@ -233,6 +233,53 @@ pub fn element<'a, Message: 'a>(
                 .into(),
             visual,
         ),
+        WidgetKind::Launcher { items, pinned: _, orientation: _ } => {
+            let tile_color = color(palette.surface);
+            let label_color = color(palette.text);
+            let alert_color = color(palette.danger);
+            let tiles: Vec<Element<'_, Message>> = if items.is_empty() {
+                vec![text("No projects").size(metrics.body).color(label_color).into()]
+            } else {
+                items
+                    .iter()
+                    .map(|item| {
+                        let dot = if item.unread {
+                            container(space::horizontal())
+                                .width(Length::Fixed(8.0))
+                                .height(Length::Fixed(8.0))
+                                .style(move |_| container::Style {
+                                    background: Some(alert_color.into()),
+                                    ..Default::default()
+                                })
+                        } else {
+                            container(space::horizontal())
+                                .width(Length::Fixed(8.0))
+                                .height(Length::Fixed(8.0))
+                        };
+                        container(
+                            row![
+                                dot,
+                                text(&item.label)
+                                    .size(metrics.body)
+                                    .color(label_color),
+                            ]
+                            .spacing(metrics.space_1)
+                        )
+                        .padding(4)
+                        .style(move |_| container::Style {
+                            background: Some(tile_color.into()),
+                            ..Default::default()
+                        })
+                        .into()
+                    })
+                    .collect()
+            };
+            panel(
+                spec,
+                row(tiles).spacing(metrics.space_2).into(),
+                visual,
+            )
+        }
         WidgetKind::Text { text: body } => panel(
             spec,
             container(text(body).color(color(palette.text)))

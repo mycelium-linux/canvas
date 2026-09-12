@@ -174,7 +174,7 @@ fn default_schema_version() -> u32 {
 ///
 /// Adding a variant to [`WidgetKind`] means adding its tag here;
 /// `every_known_widget_kind_is_listed` fails if they drift apart.
-pub const KNOWN_WIDGET_KINDS: [&str; 20] = [
+pub const KNOWN_WIDGET_KINDS: &[&str] = &[
     "quant",
     "stat",
     "time_series",
@@ -195,6 +195,7 @@ pub const KNOWN_WIDGET_KINDS: [&str; 20] = [
     "status",
     "text",
     "module",
+    "launcher",
 ];
 
 /// Whether this build can render `tag`, or it belongs to a newer Canvas.
@@ -354,6 +355,40 @@ pub enum WidgetKind {
         #[serde(default)]
         inputs: BTreeMap<String, WidgetInput>,
     },
+    /// A horizontal launcher bar of project tiles with unread indicators.
+    /// Each tile carries a project_id, label, optional icon, and unread flag.
+    /// Clicking a tile emits a `canvas.widget.activation` event with the
+    /// project_id — the host routes it to workspace switch.
+    Launcher {
+        items: Vec<LauncherItem>,
+        #[serde(default)]
+        pinned: Vec<String>,
+        #[serde(default)]
+        orientation: LauncherOrientation,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LauncherItem {
+    pub project_id: String,
+    pub label: String,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub unread: bool,
+    #[serde(default)]
+    pub last_used: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum LauncherOrientation {
+    #[default]
+    Horizontal,
+    Vertical,
 }
 
 /// Small, typed changes accepted from host-owned stream bindings.
@@ -765,6 +800,7 @@ pub enum StatusLevel {
 /// unbounded series is a denial of service against the renderer rather than a
 /// rendering bug.
 const MAX_MODULE_INPUTS: usize = 32;
+const MAX_LAUNCHER_ITEMS: usize = 32;
 const MAX_SERIES_POINTS: usize = 4096;
 const MAX_INPUT_TEXT_BYTES: usize = 4096;
 
@@ -1147,11 +1183,34 @@ impl WidgetSpec {
                 // ones it declares, is the host's to answer: this crate does not
                 // own module manifests. Everything checkable without one is
                 // checked here so a malformed spec never reaches a renderer.
+                }
+                WidgetKind::Launcher { items, .. } => {
+                    check(
+                        items.len() <= MAX_LAUNCHER_ITEMS,
+                        "launcher has too many items",
+                    )?;
+                    let mut seen_ids = std::collections::BTreeSet::new();
+                    for item in items {
+                        check(
+                            !item.project_id.is_empty()
+                                && item.project_id.len() <= 64
+                                && item.project_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+                            "launcher item project_id must be a valid identifier",
+                        )?;
+                        check(
+                            seen_ids.insert(item.project_id.as_str()),
+                            "launcher has duplicate project_id",
+                        )?;
+                        check(
+                            !item.label.is_empty() && item.label.len() <= 64,
+                            "launcher item label must be 1-64 characters",
+                        )?;
+                    }
+                }
             }
+            Ok(())
         }
-        Ok(())
     }
-}
 
 impl WidgetInput {
     pub fn validate(&self) -> Result<()> {
@@ -1394,6 +1453,9 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
         // rather than pretending to know.
         WidgetKind::Chart { .. } | WidgetKind::Quant { .. } | WidgetKind::Module { .. } => {
             SizeHint::new(220.0, 140.0, 420.0, 260.0, 1.6)
+        }
+        WidgetKind::Launcher { .. } => {
+            SizeHint::new(220.0, 40.0, 600.0, 60.0, 1.0)
         }
     }
 }
