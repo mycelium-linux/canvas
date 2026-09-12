@@ -410,7 +410,6 @@ pub fn apply_named_adapter_batch(
     }
     let source = match adapter {
         "lockout-v1" => include_str!("../../../config/binders/lockout-v1.lua"),
-        "agent-activity-v1" => include_str!("../../../config/binders/agent-activity-v1.lua"),
         "market-ohlcv-v1" => include_str!("../../../config/binders/market-ohlcv-v1.lua"),
         "widget-snapshot-v1" => include_str!("../../../config/binders/widget-snapshot-v1.lua"),
         "music-nowplaying-v1" => include_str!("../../../config/binders/music-nowplaying-v1.lua"),

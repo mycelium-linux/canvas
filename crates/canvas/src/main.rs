@@ -2236,6 +2236,11 @@ impl App {
             None => Some(::canvas::project_picker::ProjectPicker::default()),
         };
         let open = self.project_picker.is_some();
+        if open {
+            // Re-sync from the Alfalfa index so projects added while Canvas
+            // was running appear in the picker without a restart.
+            Self::merge_alfalfa_projects(&mut self.catalog);
+        }
         self.status = if open {
             "Choose a project: type to filter, Enter to switch.".into()
         } else {
