@@ -1369,9 +1369,19 @@ impl App {
         let mut oldest_age = 0_u64;
 
         for binding in bindings {
+            let project_id = &self.document.project_id;
             let mut matching = events
                 .iter()
                 .filter(|event| {
+                    // Events that carry a project_id are scoped: they only land
+                    // in the workspace whose project_id matches. This prevents
+                    // project X's agent activity from being drawn into project Y's
+                    // surface on a shared wall.
+                    if let Some(event_project) = &event.project_id
+                        && *event_project != *project_id
+                    {
+                        return false;
+                    }
                     event.owner == binding.source.owner
                         && event.stream == binding.source.stream
                         && event.contract == binding.source.contract

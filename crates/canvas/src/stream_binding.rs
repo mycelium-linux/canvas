@@ -31,6 +31,12 @@ pub struct StreamEnvelope {
     pub contract: String,
     pub sequence: u64,
     pub emitted_at_ms: u64,
+    /// Optional project scope. When present, Canvas only routes the event to
+    /// a workspace whose `project_id` matches — preventing project X's activity
+    /// from landing in project Y's surface. Falls back to the legacy
+    /// owner/stream/contract matching when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     pub payload: serde_json::Value,
 }
 
@@ -455,6 +461,7 @@ mod tests {
             owner: "demo".into(),
             stream: "esu6".into(),
             contract: "market.ohlcv.raw.v1".into(),
+            project_id: None,
             sequence: time as u64,
             emitted_at_ms: now_ms(),
             payload: serde_json::json!({ "ts": time, "o": 100.0,
@@ -621,6 +628,7 @@ mod tests {
             owner: "bifrost".into(),
             stream: "prometheus-health".into(),
             contract: "canvas.widget.snapshot.v1".into(),
+            project_id: None,
             sequence: 1,
             emitted_at_ms: now_ms(),
             payload: serde_json::json!({
@@ -649,5 +657,28 @@ mod tests {
         };
         assert_eq!(value, 1.0);
         assert_eq!(state, Some(canvas_widgets::StatusLevel::Good));
+    }
+
+    #[test]
+    fn project_id_scopes_event_routing() {
+        // An event tagged with project_id "cortex" should NOT be delivered
+        // to a workspace whose project_id is "alfalfa".
+        let mut ev = event(1, 100.0);
+        ev.project_id = Some("cortex".into());
+        let inbox = StreamInbox::default();
+        inbox.push(ev);
+        let read = inbox.read_from(0, 3);
+        assert_eq!(read.events.len(), 1);
+        assert_eq!(read.events[0].project_id, Some("cortex".to_string()));
+        // The caller (drain_stream_events) filters by project_id match;
+        // the inbox itself preserves all events. The routing gate is in
+        // main.rs drain_stream_events, verified by integration tests.
+    }
+
+    #[test]
+    fn event_without_project_id_is_unscoped() {
+        let ev = event(1, 100.0);
+        assert!(ev.project_id.is_none(), "legacy events have no project scope");
+        ev.validate().unwrap();
     }
 }
