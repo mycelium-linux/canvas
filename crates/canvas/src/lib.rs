@@ -1272,10 +1272,10 @@ mod forward_compatibility_tests {
 
     #[test]
     fn a_known_widget_kind_with_a_bad_field_is_an_error_not_a_placeholder() {
-        // Proven the hard way: `slo_burn_rate` exists in this build, so a wrong
+         // Proven the hard way: `rate_bars` exists in this build, so a wrong
         // field inside it is a mistake and must not be swallowed as "newer".
         let raw = json!({"kind": "widget", "spec": {
-            "schema_version": 1, "id": "burn", "kind": "slo_burn_rate", "budget": 0.5
+            "schema_version": 2, "id": "burn", "kind": "rate_bars", "budget": 0.5
         }});
         let parsed: std::result::Result<SurfaceContent, _> = serde_json::from_value(raw);
         assert!(

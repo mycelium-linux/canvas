@@ -1,7 +1,7 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "ops-slo-burn",
-  "kind": "slo_burn_rate",
+  "kind": "rate_bars",
   "title": "Gateway error budget",
   "objective": 99.9,
   "windows": [

@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "ops-state-timeline",
   "kind": "state_timeline",
   "title": "Node availability",

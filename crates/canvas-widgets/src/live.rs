@@ -535,7 +535,7 @@ pub fn element<'a, Message: 'a>(
             .into(),
             visual,
         ),
-        WidgetKind::SloBurnRate {
+        WidgetKind::RateBars {
             title,
             objective,
             windows,
@@ -653,7 +653,7 @@ pub fn element<'a, Message: 'a>(
                 visual,
             )
         }
-        WidgetKind::NodeSummary { title, nodes } => {
+        WidgetKind::StatusList { title, nodes } => {
             let lines =
                 nodes
                     .iter()

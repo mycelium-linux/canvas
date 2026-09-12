@@ -14,7 +14,7 @@ use std::path::PathBuf;
 pub mod quant;
 pub mod roster;
 
-pub const WIDGET_SCHEMA_VERSION: u32 = 1;
+pub const WIDGET_SCHEMA_VERSION: u32 = 2;
 const MAX_SPEC_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -32,6 +32,26 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 fn err<T>(message: impl Into<String>) -> Result<T> {
     Err(Error(message.into()))
+}
+
+/// Rewrites v1 widget `kind` tags to their v2 names, so old saved views
+/// still load after the schema bump. Returns `None` if no known v1 tag
+/// was found, so the caller can surface the original parse error.
+fn migrate_v1_kind(json: &[u8]) -> Option<Vec<u8>> {
+    let value: serde_json::Value = serde_json::from_slice(json).ok()?;
+    let kind = value.get("kind")?.as_str()?;
+    let new_kind = match kind {
+        "slo_burn_rate" => "rate_bars",
+        "node_summary" => "status_list",
+        _ => return None,
+    };
+    let mut migrated = value;
+    if let Some(obj) = migrated.as_object_mut() {
+        obj.insert("kind".to_string(), serde_json::Value::String(new_kind.to_string()));
+        serde_json::to_vec(&migrated).ok()
+    } else {
+        None
+    }
 }
 
 /// Durable widget description. Serializes to JSON; both live and static
@@ -167,10 +187,10 @@ pub const KNOWN_WIDGET_KINDS: [&str; 20] = [
     "ranked_bar",
     "stacked_bar",
     "state_timeline",
-    "slo_burn_rate",
+    "rate_bars",
     "table",
     "event_log",
-    "node_summary",
+    "status_list",
     "chart",
     "status",
     "text",
@@ -273,7 +293,10 @@ pub enum WidgetKind {
         lanes: Vec<StateLane>,
     },
     /// Error-budget consumption across operational windows.
-    SloBurnRate {
+    ///
+    /// Renamed from `slo_burn_rate` in schema version 2; old specs are
+    /// migrated by `from_v1_tag`.
+    RateBars {
         title: String,
         objective: f64,
         windows: Vec<BurnRateWindow>,
@@ -290,7 +313,10 @@ pub enum WidgetKind {
         entries: Vec<EventEntry>,
     },
     /// Compact health summary for nodes, agents, or DAG stages.
-    NodeSummary {
+    ///
+    /// Renamed from `node_summary` in schema version 2; old specs are
+    /// migrated by `from_v1_tag`.
+    StatusList {
         title: String,
         nodes: Vec<NodeSummaryItem>,
     },
@@ -796,10 +822,28 @@ impl WidgetSpec {
         if json.len() as u64 > MAX_SPEC_BYTES {
             return err(format!("widget spec must contain 1–{MAX_SPEC_BYTES} bytes"));
         }
-        let spec: WidgetSpec =
-            serde_json::from_slice(json).map_err(|e| Error(format!("invalid widget spec: {e}")))?;
-        spec.validate()?;
-        Ok(spec)
+        // Try v2 schema first. If parsing fails due to a renamed kind tag,
+        // attempt v1 → v2 migration and retry.
+        match serde_json::from_slice::<WidgetSpec>(json) {
+            Ok(spec) => {
+                spec.validate()?;
+                Ok(spec)
+            }
+            Err(first_error) => {
+                // Check if this is a known v1 kind rename.
+                if let Some(migrated) = migrate_v1_kind(json) {
+                    match serde_json::from_slice::<WidgetSpec>(&migrated) {
+                        Ok(spec) => {
+                            spec.validate()?;
+                            Ok(spec)
+                        }
+                        Err(_) => Err(Error(format!("invalid widget spec: {first_error}"))),
+                    }
+                } else {
+                    Err(Error(format!("invalid widget spec: {first_error}")))
+                }
+            }
+        }
     }
 
     pub fn from_file(path: &std::path::Path) -> Result<Self> {
@@ -997,7 +1041,7 @@ impl WidgetSpec {
                     }
                 }
             }
-            WidgetKind::SloBurnRate {
+            WidgetKind::RateBars {
                 title,
                 objective,
                 windows,
@@ -1054,7 +1098,7 @@ impl WidgetSpec {
                     "event log entry is too large",
                 )?;
             }
-            WidgetKind::NodeSummary { title, nodes } => {
+            WidgetKind::StatusList { title, nodes } => {
                 bounded_label(title, "node summary title")?;
                 check(nodes.len() <= 256, "node summary exceeds 256 nodes")?;
                 for node in nodes {
@@ -1317,13 +1361,13 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
                 2.0,
             )
         }
-        WidgetKind::StateTimeline { .. } | WidgetKind::SloBurnRate { .. } => {
+        WidgetKind::StateTimeline { .. } | WidgetKind::RateBars { .. } => {
             let lane = metrics.small * 2.2;
             SizeHint::new(240.0, lane * 2.0 + chrome, 420.0, lane * 4.0 + chrome, 3.0)
         }
         // Rows of text: a header and three rows, or the space is better spent
         // elsewhere.
-        WidgetKind::Table { .. } | WidgetKind::EventLog { .. } | WidgetKind::NodeSummary { .. } => {
+        WidgetKind::Table { .. } | WidgetKind::EventLog { .. } | WidgetKind::StatusList { .. } => {
             let row = metrics.small * 1.6;
             SizeHint::new(240.0, row * 4.0 + chrome, 420.0, row * 8.0 + chrome, 1.8)
         }
@@ -1579,7 +1623,7 @@ mod tests {
     #[test]
     fn spec_roundtrips_through_json() {
         let json = r#"{
-            "schema_version": 1,
+            "schema_version": 2,
             "id": "demo-ticker",
             "kind": "ticker",
             "entries": [
@@ -1745,7 +1789,7 @@ mod tests {
             r#"{"id":"rank","kind":"ranked_bar","title":"Tokens","bars":[{"label":"agent-a","value":42}]}"#,
             r#"{"id":"stack","kind":"stacked_bar","title":"Outcomes","series":["ok","error"],"bars":[{"label":"run","values":[9,1]}]}"#,
             r#"{"id":"states","kind":"state_timeline","title":"Health","lanes":[{"label":"api","segments":[{"start":0,"end":10,"state":"good"}]}]}"#,
-            r#"{"id":"burn","kind":"slo_burn_rate","title":"Budget","objective":99.9,"windows":[{"label":"5m","burn_rate":0.7}]}"#,
+            r#"{"id":"burn","kind":"rate_bars","title":"Budget","objective":99.9,"windows":[{"label":"5m","burn_rate":0.7}]}"#,
         ] {
             WidgetSpec::from_json(json.as_bytes())
                 .unwrap_or_else(|error| panic!("{json}: {error}"));
@@ -1777,7 +1821,22 @@ mod module_kind_tests {
         let inner = inner
             .strip_prefix('{')
             .expect("kind fixtures are JSON objects");
-        WidgetSpec::from_json(format!(r#"{{"schema_version":1,"id":"w",{inner}"#).as_bytes())
+        WidgetSpec::from_json(format!(r#"{{"schema_version":2,"id":"w",{inner}"#).as_bytes())
+    }
+
+    #[test]
+    fn a_v1_slo_burn_rate_kind_is_migrated_to_rate_bars() {
+        let json = br#"{"schema_version":2,"id":"budget","kind":"slo_burn_rate","title":"Budget","objective":99.9,"windows":[{"label":"5m","burn_rate":0.7}]}"#;
+        let spec = WidgetSpec::from_json(json).expect("migrated spec");
+        assert!(matches!(spec.kind, WidgetKind::RateBars { .. }));
+        assert_eq!(spec.schema_version, 2);
+    }
+
+    #[test]
+    fn a_v1_node_summary_kind_is_migrated_to_status_list() {
+        let json = br#"{"schema_version":2,"id":"health","kind":"node_summary","title":"Health","nodes":[]}"#;
+        let spec = WidgetSpec::from_json(json).expect("migrated spec");
+        assert!(matches!(spec.kind, WidgetKind::StatusList { .. }));
     }
 
     #[test]

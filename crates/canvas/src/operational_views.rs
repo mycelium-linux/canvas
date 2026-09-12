@@ -224,10 +224,10 @@ fn appetite(kind: &WidgetKind) -> f32 {
         | WidgetKind::RankedBar { .. }
         | WidgetKind::StackedBar { .. }
         | WidgetKind::StateTimeline { .. }
-        | WidgetKind::SloBurnRate { .. }
+        | WidgetKind::RateBars { .. }
         | WidgetKind::Table { .. }
         | WidgetKind::EventLog { .. }
-        | WidgetKind::NodeSummary { .. }
+        | WidgetKind::StatusList { .. }
         | WidgetKind::Chart { .. }
         | WidgetKind::Quant { .. }
         | WidgetKind::Module { .. } => 1.0,
@@ -554,10 +554,10 @@ fn widget_title(spec: &canvas_widgets::WidgetSpec) -> String {
         | WidgetKind::RankedBar { title, .. }
         | WidgetKind::StackedBar { title, .. }
         | WidgetKind::StateTimeline { title, .. }
-        | WidgetKind::SloBurnRate { title, .. }
+        | WidgetKind::RateBars { title, .. }
         | WidgetKind::Table { title, .. }
         | WidgetKind::EventLog { title, .. }
-        | WidgetKind::NodeSummary { title, .. } => title.clone(),
+        | WidgetKind::StatusList { title, .. } => title.clone(),
         _ => spec.id.clone(),
     }
 }

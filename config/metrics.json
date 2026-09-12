@@ -114,7 +114,7 @@
       "unavailable": "Bifrost exposes a provider price list, not spend"
     },
     "bifrost/slo": {
-      "kind": "slo_burn_rate",
+      "kind": "rate_bars",
       "query": "",
       "label": "Error budget",
       "unavailable": "No SLO or error-budget metric is recorded"

@@ -16,6 +16,6 @@
     "latency": {"rect":{"x":0.71,"y":0.21,"width":0.29,"height":0.44},"spec":{"id":"latency","kind":"heatmap","title":"Latency quantiles","rows":["TTFT","E2E"],"columns":["p50","p90","p99"],"values":[[0,0,0],[0,0,0]],"unit":"ms","data":{"state":"loading","source":"prometheus:bifrost/latency","window":"15m"}}},
     "fallbacks": {"rect":{"x":0.0,"y":0.46,"width":0.49,"height":0.54},"spec":{"id":"fallbacks","kind":"event_log","title":"Fallbacks and paid calls","entries":[],"data":{"state":"loading","source":"prometheus:bifrost/fallbacks","window":"1h"}}},
     "cost": {"rect":{"x":0.5,"y":0.46,"width":0.2,"height":0.24},"spec":{"id":"cost","kind":"stat","label":"Paid-call cost","value":0,"unit":"USD","data":{"state":"loading","source":"prometheus:bifrost/cost","window":"24h"}}},
-    "burn": {"rect":{"x":0.5,"y":0.71,"width":0.5,"height":0.29},"spec":{"id":"burn","kind":"slo_burn_rate","title":"Serving error budget","objective":99.9,"windows":[{"label":"5m","burn_rate":0},{"label":"1h","burn_rate":0},{"label":"6h","burn_rate":0}],"data":{"state":"loading","source":"prometheus:bifrost/slo","window":"6h"}}}
+    "burn": {"rect":{"x":0.5,"y":0.71,"width":0.5,"height":0.29},"spec":{"id":"burn","kind":"rate_bars","title":"Serving error budget","objective":99.9,"windows":[{"label":"5m","burn_rate":0},{"label":"1h","burn_rate":0},{"label":"6h","burn_rate":0}],"data":{"state":"loading","source":"prometheus:bifrost/slo","window":"6h"}}}
   }
 }

@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "demo-clock",
   "kind": "clock",
   "format": "%H:%M:%S"

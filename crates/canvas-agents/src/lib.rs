@@ -142,7 +142,7 @@ mod tests {
 
     fn rows(spec: &WidgetSpec) -> usize {
         match &spec.kind {
-            WidgetKind::NodeSummary { nodes, .. } => nodes.len(),
+            WidgetKind::StatusList { nodes, .. } => nodes.len(),
             other => panic!("expected a node summary, got {other:?}"),
         }
     }

@@ -215,7 +215,7 @@ pub enum WidgetKind {
     RankedBar,
     Heatmap,
     Histogram,
-    NodeSummary,
+    StatusList,
 }
 
 impl WidgetKind {
@@ -227,7 +227,7 @@ impl WidgetKind {
             Self::RankedBar => "ranked_bar",
             Self::Heatmap => "heatmap",
             Self::Histogram => "histogram",
-            Self::NodeSummary => "node_summary",
+            Self::StatusList => "status_list",
         }
     }
 
@@ -281,7 +281,7 @@ impl WidgetKind {
                 buckets: Vec::new(),
                 unit,
             },
-            Self::NodeSummary => WidgetBody::NodeSummary {
+            Self::StatusList => WidgetBody::StatusList {
                 title: text,
                 nodes: Vec::new(),
             },
@@ -1173,7 +1173,7 @@ fn singleton(fact: &MetricFact, options: &SurveyOptions) -> Result<Draft, Report
     // Up-ness first: it is a gauge by type, but summing it yields a number that
     // is identical whether one target is down or eleven are.
     if name == "up" || name.ends_with("_up") {
-        let mut draft = Draft::new(WidgetKind::NodeSummary, Rule::UpStatusList, name.to_owned())
+        let mut draft = Draft::new(WidgetKind::StatusList, Rule::UpStatusList, name.to_owned())
             .instead(&[WidgetKind::Stat, WidgetKind::Heatmap])
             .caveat(format!(
                 "sum({name}) is the common alternative and reads as a single number, which hides \
@@ -1737,7 +1737,7 @@ mod tests {
         for id in ["up/up", "bifrost/backend-up"] {
             let candidate = find(&survey, id);
             assert_eq!(candidate.rationale.rule, Rule::UpStatusList);
-            assert_eq!(candidate.kind(), "node_summary");
+            assert_eq!(candidate.kind(), "status_list");
             assert!(
                 !candidate.source.query.starts_with("sum("),
                 "{id} must not collapse to a number: {}",
@@ -2013,7 +2013,7 @@ mod tests {
             WidgetKind::RankedBar,
             WidgetKind::Heatmap,
             WidgetKind::Histogram,
-            WidgetKind::NodeSummary,
+            WidgetKind::StatusList,
         ] {
             assert!(
                 canvas_widgets::is_known_widget_kind(kind.as_str()),

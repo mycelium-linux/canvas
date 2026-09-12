@@ -324,8 +324,8 @@ pub fn placeholder(kind: &str, label: &str) -> Value {
         }
         "ranked_bar" => json!({"kind": "ranked_bar", "title": label, "bars": []}),
         "event_log" => json!({"kind": "event_log", "title": label, "entries": []}),
-        "slo_burn_rate" => {
-            json!({"kind": "slo_burn_rate", "title": label, "objective": 0.0, "windows": []})
+        "rate_bars" => {
+            json!({"kind": "rate_bars", "title": label, "objective": 0.0, "windows": []})
         }
         "table" => json!({"kind": "table", "title": label, "columns": [], "rows": []}),
         "state_timeline" => json!({"kind": "state_timeline", "title": label, "lanes": []}),
@@ -821,7 +821,7 @@ mod tests {
             "heatmap",
             "ranked_bar",
             "event_log",
-            "slo_burn_rate",
+            "rate_bars",
         ] {
             let mut s = spec(kind);
             s.kind = kind.into();

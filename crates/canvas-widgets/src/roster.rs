@@ -3,7 +3,7 @@
 //!
 //! There is deliberately no `AgentRoster` widget kind. A roster is a bounded list
 //! of entities each carrying a status and a line of detail, and
-//! [`WidgetKind::NodeSummary`] already is that shape — its own documentation says
+//! [`WidgetKind::StatusList`] already is that shape — its own documentation says
 //! "nodes, agents, or DAG stages". Adding a kind here would couple a widget to
 //! one data structure, which is exactly what the widget library is meant to
 //! avoid; instead the policy stays pure in `canvas-core` and the renderer stays
@@ -22,7 +22,7 @@
 
 use crate::{
     NodeSummaryItem, Provenance, StatusLevel, WidgetChrome, WidgetData, WidgetDataState, WidgetKind,
-    WidgetSpec,
+    WidgetSpec, WIDGET_SCHEMA_VERSION,
 };
 use canvas_core::working_set::{AgentState, Freshness, Roster, Slot};
 
@@ -32,9 +32,9 @@ use canvas_core::working_set::{AgentState, Freshness, Roster, Slot};
 /// way in a test as on a wall.
 pub fn node_summary(id: &str, roster: &Roster, provenance: Provenance, now_ms: u64) -> WidgetSpec {
     WidgetSpec {
-        schema_version: 1,
+        schema_version: WIDGET_SCHEMA_VERSION,
         id: id.to_string(),
-        kind: WidgetKind::NodeSummary {
+        kind: WidgetKind::StatusList {
             title: title(roster),
             nodes: roster.slots.iter().map(|slot| item(slot, now_ms)).collect(),
         },
@@ -171,14 +171,14 @@ mod tests {
 
     fn nodes(spec: &WidgetSpec) -> &[NodeSummaryItem] {
         match &spec.kind {
-            WidgetKind::NodeSummary { nodes, .. } => nodes,
+            WidgetKind::StatusList { nodes, .. } => nodes,
             other => panic!("expected a node summary, got {other:?}"),
         }
     }
 
     fn heading(spec: &WidgetSpec) -> &str {
         match &spec.kind {
-            WidgetKind::NodeSummary { title, .. } => title,
+            WidgetKind::StatusList { title, .. } => title,
             other => panic!("expected a node summary, got {other:?}"),
         }
     }

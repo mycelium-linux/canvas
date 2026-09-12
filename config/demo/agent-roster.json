@@ -11,7 +11,7 @@
         "spec": {
           "schema_version": 1,
           "id": "agents/roster",
-          "kind": "node_summary",
+          "kind": "status_list",
           "title": "Agents",
           "nodes": [],
           "data": {
