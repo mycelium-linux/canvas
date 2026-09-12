@@ -1731,7 +1731,7 @@ mod tests {
     #[test]
     fn schemas_include_native_document_and_patch_definitions() {
         let tools = tools_for(Role::Control);
-        assert_eq!(tools.len(), 23);
+        assert_eq!(tools.len(), 24);
         let tool = |name: &str| tools.iter().find(|tool| tool.name == name).unwrap();
         assert!(
             tool("canvas_apply_document").input_schema["$defs"]

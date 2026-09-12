@@ -8176,26 +8176,25 @@ mod tests {
 
     #[test]
     fn scene_parent_chain_resolves_node_hierarchy() {
-        use canvas_core::ThemeSelection;
-        let _ = ThemeSelection::coherence(canvas_core::ThemeMode::Dark, canvas_core::Accent::Brand);
+        
         // node_a (root) -> node_b -> node_c
         let nodes = vec![
             SceneNode {
                 id: "a".into(),
                 parent_id: None,
-                transform: Transform3::default(),
+                transform: ::canvas::Transform3::default(),
                 content: NodeContent::Group,
             },
             SceneNode {
                 id: "b".into(),
                 parent_id: Some("a".into()),
-                transform: Transform3::default(),
+                transform: ::canvas::Transform3::default(),
                 content: NodeContent::Group,
             },
             SceneNode {
                 id: "c".into(),
                 parent_id: Some("b".into()),
-                transform: Transform3::default(),
+                transform: ::canvas::Transform3::default(),
                 content: NodeContent::Text { text: "hi".into() },
             },
         ];
