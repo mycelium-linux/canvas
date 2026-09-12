@@ -230,6 +230,12 @@ struct OpenWidget {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct ListWidgets {
+    request_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct OpenOperationalView {
     request_id: String,
     #[serde(default)]
@@ -492,6 +498,10 @@ fn control_tools() -> Vec<Tool> {
             "canvas_open_widget",
             "Open a validated Canvas widget specification as a live Canvas surface. The widget renderer and schema are shared with Lua and native Canvas; omit expected_revision for fire-and-forget.",
         ),
+        tool::<ListWidgets>(
+            "canvas_list_widgets",
+            "List widget instances on the active Canvas workspace. Returns surface IDs and widget kind for each widget surface currently mounted.",
+        ),
         tool::<OpenOperationalView>(
             "canvas_open_view",
             "Open one exact named operational view as a deterministic layout of movable Canvas widgets. Existing workspace surfaces retain their state and can be recalled later. Repeating the same view is a no-op.",
@@ -691,6 +701,15 @@ fn parse(name: &str, args: Value) -> Result<ControlRequest, String> {
                     surface_id: args.surface_id,
                     patch: args.patch,
                 },
+            )
+        }
+        "canvas_list_widgets" => {
+            let args: ListWidgets = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            let _ = args.request_id;
+            (
+                "mcp-list-widgets".into(),
+                None,
+                Command::ReadDocument,
             )
         }
         _ => return Err("Unknown Canvas tool".into()),
@@ -1527,6 +1546,7 @@ mod role_tests {
         "canvas_apply_patch",
         "canvas_open_file",
         "canvas_open_widget",
+        "canvas_list_widgets",
         "canvas_open_view",
         "canvas_place_surface",
         "canvas_close_surface",

@@ -3355,7 +3355,28 @@ impl App {
             Command::OpenWidget {
                 surface_id,
                 spec_path,
-            } => match canvas_widgets::WidgetSpec::from_file(&spec_path) {
+            } => {
+                // Constrain widget specs to a sanctioned directory so an agent
+                // cannot open arbitrary file paths through the widget renderer.
+                let widget_dir = std::env::var("HOME")
+                    .map(|h| std::path::PathBuf::from(h).join(".canvas/widgets"))
+                    .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/.canvas/widgets"));
+                let canonical_spec = match std::fs::canonicalize(&spec_path) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        self.fail(pending, Failure::invalid(format!(
+                            "Cannot read widget spec at {spec_path:?}: {error}"
+                        )));
+                        return Task::none();
+                    }
+                };
+                if !canonical_spec.starts_with(&widget_dir) {
+                    self.fail(pending, Failure::invalid(format!(
+                        "Widget spec {spec_path:?} must live under {widget_dir:?}"
+                    )));
+                    return Task::none();
+                }
+                match canvas_widgets::WidgetSpec::from_file(&canonical_spec) {
                 Ok(spec) => {
                     let title = format!("Widget: {}", spec.id);
                     let snapshot = SurfaceSnapshot {
@@ -3477,7 +3498,8 @@ impl App {
                     self.fail(pending, Failure::invalid(error.0));
                     Task::none()
                 }
-            },
+            }
+            }
             Command::OpenOperationalView { view_id } => {
                 match ::canvas::operational_views::materialize(
                     &view_id,
