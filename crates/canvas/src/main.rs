@@ -94,8 +94,86 @@ const SNAP_LAYOUT_KEYS: &str = "Ctrl-Option-L";
 const FIT_LAYOUT_KEYS: &str = "Ctrl-Option-F";
 const JARVIS_TOGGLE_KEYS: &str = "Ctrl-Option-J";
 const JARVIS_TEXT_KEYS: &str = "Ctrl-Option-T";
+const JUMP_BACK_KEYS: &str = "Ctrl-O";
+const JUMP_FORWARD_KEYS: &str = "Ctrl-Shift-O";
 const SHORTCUT_HELP_KEYS: &str = "Ctrl-Option-?";
 const FOCUSED_HELP_KEYS: &str = "?";
+
+/// A position in the jump list: a project workspace and optionally an
+/// operational view within it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JumpEntry {
+    project_id: String,
+    view_id: Option<String>,
+}
+
+impl JumpEntry {
+    fn current(project_id: &str, view_id: Option<&str>) -> Self {
+        Self {
+            project_id: project_id.to_owned(),
+            view_id: view_id.map(str::to_owned),
+        }
+    }
+}
+
+/// A bounded navigation history (vim jump-list model). Jumps are recorded on
+/// project switch and operational view activation. The cursor points at the
+/// current entry; back moves it toward 0, forward toward the tail.
+struct JumpHistory {
+    entries: Vec<JumpEntry>,
+    cursor: usize,
+}
+
+impl JumpHistory {
+    const MAX_DEPTH: usize = 100;
+
+    fn new(initial: JumpEntry) -> Self {
+        Self {
+            entries: vec![initial],
+            cursor: 0,
+        }
+    }
+
+    /// Record a jump to `target`. Truncates any forward history first, as the
+    /// vim jump list does: a new jump invalidates the path you would have gone
+    /// forward to.
+    fn jump(&mut self, target: JumpEntry) {
+        let next = self.cursor + 1;
+        self.entries.truncate(next);
+        self.entries.push(target);
+        self.cursor = next;
+        if self.entries.len() > Self::MAX_DEPTH {
+            self.entries.drain(0..self.entries.len() - Self::MAX_DEPTH);
+            self.cursor = self.cursor.saturating_sub(self.entries.len() - Self::MAX_DEPTH);
+        }
+    }
+
+    fn can_go_back(&self) -> bool {
+        self.cursor > 0
+    }
+
+    fn can_go_forward(&self) -> bool {
+        self.cursor + 1 < self.entries.len()
+    }
+
+    fn back(&mut self) -> Option<&JumpEntry> {
+        if self.can_go_back() {
+            self.cursor -= 1;
+            self.entries.get(self.cursor)
+        } else {
+            None
+        }
+    }
+
+    fn forward(&mut self) -> Option<&JumpEntry> {
+        if self.can_go_forward() {
+            self.cursor += 1;
+            self.entries.get(self.cursor)
+        } else {
+            None
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct Pending {
@@ -326,6 +404,9 @@ struct App {
     /// The arrangement in effect before the last snap. `Some` means we are
     /// currently showing the saved layout and a second press restores this.
     free_layout: Option<Layout>,
+    jump_history: JumpHistory,
+    jump_back_hotkey: Option<GlobalHotkey>,
+    jump_forward_hotkey: Option<GlobalHotkey>,
     shortcuts_hotkey: Option<GlobalHotkey>,
     jarvis_hotkey: Option<GlobalHotkey>,
     jarvis_text_hotkey: Option<GlobalHotkey>,
@@ -529,12 +610,38 @@ impl App {
                 None
             }
         };
+        let jump_back_hotkey = match GlobalHotkey::register(HotkeySpec {
+            signature: *b"Cnvs",
+            id: 6,
+            key_code: 0x1F,                // kVK_ANSI_O
+            modifiers: (1 << 11) | (1 << 12), // optionKey | controlKey
+            label: JUMP_BACK_KEYS,
+        }) {
+            Ok(hotkey) => Some(hotkey),
+            Err(error) => {
+                shortcut_errors.push(error);
+                None
+            }
+        };
+        let jump_forward_hotkey = match GlobalHotkey::register(HotkeySpec {
+            signature: *b"Cnvs",
+            id: 7,
+            key_code: 0x1F, // kVK_ANSI_O
+            modifiers: (1 << 9) | (1 << 11) | (1 << 12), // shift | option | control
+            label: JUMP_FORWARD_KEYS,
+        }) {
+            Ok(hotkey) => Some(hotkey),
+            Err(error) => {
+                shortcut_errors.push(error);
+                None
+            }
+        };
         let mut app = Self {
             catalog,
             document: restored_document.unwrap_or_else(|| WorkspaceDocument {
                 schema_version: SCHEMA_VERSION,
                 id: "canvas-runtime".into(),
-                project_id,
+                project_id: project_id.clone(),
                 revision: 1,
                 theme: ThemeRef::Project,
                 background: ::canvas::Background::default(),
@@ -558,6 +665,9 @@ impl App {
             layout_policy: ::canvas::view::LayoutPolicy::default(),
             snapped_view: None,
             free_layout: None,
+            jump_history: JumpHistory::new(JumpEntry::current(&project_id.clone(), None)),
+            jump_back_hotkey,
+            jump_forward_hotkey,
             shortcuts_hotkey,
             jarvis_hotkey,
             jarvis_text_hotkey,
@@ -821,6 +931,67 @@ impl App {
         }
     }
 
+    /// Navigate to the previous entry in the jump list (Ctrl-O).
+    ///
+    /// Jumps are recorded on project switch and view activation. Going back
+    /// moves the cursor toward the oldest entry; going forward toward the
+    /// newest.
+    fn jump_back(&mut self) {
+        if !self.jump_history.can_go_back() {
+            self.status = "No earlier location in the jump list.".into();
+            return;
+        }
+        let entry = self.jump_history.back().expect("checked above").clone();
+        let view = entry.view_id.as_deref();
+        self.navigate_to(entry.project_id.as_str(), view);
+        self.status = format!(
+            "Jumped to '{}{}'.",
+            entry.project_id,
+            view.map(|v| format!(" / {v}")).unwrap_or_default()
+        );
+    }
+
+    fn jump_forward(&mut self) {
+        if !self.jump_history.can_go_forward() {
+            self.status = "No later location in the jump list.".into();
+            return;
+        }
+        let entry = self.jump_history.forward().expect("checked above").clone();
+        let view = entry.view_id.as_deref();
+        self.navigate_to(entry.project_id.as_str(), view);
+        self.status = format!(
+            "Jumped forward to '{}{}'.",
+            entry.project_id,
+            view.map(|v| format!(" / {v}")).unwrap_or_default()
+        );
+    }
+
+    /// Apply a jump target: switch project workspace and optionally open a view.
+    fn navigate_to(&mut self, project_id: &str, view_id: Option<&str>) {
+        self.start_transition();
+        if let Some(document) = self.workspaces.get(project_id).cloned() {
+            self.document = document;
+            self.active_project_workspace = Some(project_id.to_owned());
+        }
+        if let Some(view_id) = view_id {
+            if let Ok(opened) = ::canvas::operational_views::materialize(
+                view_id,
+                &self.document,
+                self.view_fit(),
+            ) {
+                self.snapped_view = Some(view_id.to_owned());
+                self.document = opened.document;
+                self.ensure_scene_decoded();
+            }
+        }
+        self.reset_background_animation();
+        self.bump();
+        self.emit_event(format!(
+            "jump_navigate {} {:?}",
+            project_id, view_id
+        ));
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick => {
@@ -846,6 +1017,14 @@ impl App {
                     .is_some_and(GlobalHotkey::poll_pressed);
                 let toggle_jarvis_text = self
                     .jarvis_text_hotkey
+                    .as_ref()
+                    .is_some_and(GlobalHotkey::poll_pressed);
+                let jump_back = self
+                    .jump_back_hotkey
+                    .as_ref()
+                    .is_some_and(GlobalHotkey::poll_pressed);
+                let jump_forward = self
+                    .jump_forward_hotkey
                     .as_ref()
                     .is_some_and(GlobalHotkey::poll_pressed);
                 if self.hud_visible && self.metrics_last.elapsed() >= METRICS_REFRESH {
@@ -892,6 +1071,12 @@ impl App {
                 }
                 if toggle_jarvis_text {
                     self.toggle_jarvis_text();
+                }
+                if jump_back {
+                    self.jump_back();
+                }
+                if jump_forward {
+                    self.jump_forward();
                 }
                 Task::batch(tasks)
             }
@@ -2843,6 +3028,7 @@ impl App {
                     self.start_transition();
                     self.document = document;
                     self.active_project_workspace = Some(name.clone());
+                    self.jump_history.jump(JumpEntry::current(&name, None));
                     self.ensure_scene_decoded();
                     self.reset_background_animation();
                     self.bump();
@@ -3164,6 +3350,10 @@ impl App {
                         // view, so it must not survive the switch.
                         self.snapped_view = Some(view_id.clone());
                         self.free_layout = None;
+                        self.jump_history.jump(JumpEntry::current(
+                            &self.document.project_id,
+                            Some(&view_id),
+                        ));
                         self.layout_policy = ::canvas::operational_views::load(&view_id)
                             .map(|view| view.layout_policy)
                             .unwrap_or_default();
@@ -5370,9 +5560,11 @@ fn shortcut_help<'a>(
          {FIT_LAYOUT_KEYS:<22} Fit layout to the displays Canvas is on\n\
          {CANVAS_TOGGLE_KEYS:<22} Toggle Canvas\n\
          {JARVIS_TOGGLE_KEYS:<22} Toggle JARVIS presence\n\
-         {JARVIS_TEXT_KEYS:<22} Text to JARVIS\n\
-         {FOCUSED_HELP_KEYS:<22} Toggle Help (Canvas focused)\n\
-         {SHORTCUT_HELP_KEYS:<22} Toggle Help globally"
+          {JARVIS_TEXT_KEYS:<22} Text to JARVIS\n\
+          {JUMP_BACK_KEYS:<22} Jump back (vim Ctrl-O)\n\
+          {JUMP_FORWARD_KEYS:<22} Jump forward\n\
+          {FOCUSED_HELP_KEYS:<22} Toggle Help (Canvas focused)\n\
+          {SHORTCUT_HELP_KEYS:<22} Toggle Help globally"
     ))
     .font(iced::Font::MONOSPACE)
     .size(15)
@@ -9256,6 +9448,40 @@ mod tests {
         assert!(!app.overlay_on_viewport(OverlayTarget::Rightmost, any_frame));
         assert!(app.overlay_on_viewport(OverlayTarget::All, any_frame));
         assert!(!app.overlay_on_viewport(OverlayTarget::Hidden, any_frame));
+    }
+
+    #[test]
+    fn jump_history_back_and_forward() {
+        let mut hist = JumpHistory::new(JumpEntry::current("a", None));
+        assert!(!hist.can_go_back());
+        assert!(!hist.can_go_forward());
+        hist.jump(JumpEntry::current("b", None));
+        assert!(hist.can_go_back());
+        assert!(!hist.can_go_forward());
+        assert_eq!(hist.back().unwrap().project_id, "a");
+        assert!(!hist.can_go_back());
+        assert!(hist.can_go_forward());
+        assert_eq!(hist.forward().unwrap().project_id, "b");
+    }
+
+    #[test]
+    fn jump_history_truncates_forward_on_new_jump() {
+        let mut hist = JumpHistory::new(JumpEntry::current("a", None));
+        hist.jump(JumpEntry::current("b", None));
+        hist.jump(JumpEntry::current("c", None));
+        hist.back();
+        // Now at "b"; a new jump should truncate "c"
+        hist.jump(JumpEntry::current("d", None));
+        assert!(!hist.can_go_forward(), "forward history must be truncated");
+        assert_eq!(hist.back().unwrap().project_id, "b");
+    }
+
+    #[test]
+    fn jump_history_records_view_id() {
+        let mut hist = JumpHistory::new(JumpEntry::current("dock", None));
+        hist.jump(JumpEntry::current("dock", Some("bifrost/runtime")));
+        let entry = hist.entries.last().unwrap();
+        assert_eq!(entry.view_id.as_deref(), Some("bifrost/runtime"));
     }
 
     #[test]
