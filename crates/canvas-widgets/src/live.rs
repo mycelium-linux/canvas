@@ -127,11 +127,17 @@ pub fn element<'a, Message: 'a>(
             state,
             history,
         } => {
+            let stale = matches!(spec.data.state, WidgetDataState::Stale);
             let accent = state.map_or(color(palette.primary), |state| status_color(state, palette));
+            let value_color = if stale {
+                with_alpha(color(palette.text), STALE_VALUE_ALPHA)
+            } else {
+                color(palette.text)
+            };
             let mut value_line = row![
                 text(format_metric(*value))
                     .size(metrics.hero)
-                    .color(color(palette.text)),
+                    .color(value_color),
                 text(unit.clone().unwrap_or_default())
                     .size(metrics.small)
                     .color(color(palette.text_muted)),
@@ -812,6 +818,10 @@ fn freshness(state: WidgetDataState, visual: &VisualTheme) -> Freshness {
 /// floor wins, and that is the right way round: staleness may take colour from
 /// an identity, but never the identity.
 const STALE_CHROMA: f32 = 0.35;
+
+/// Opacity applied to stale values in addition to the chroma drain, so staleness
+/// is visible at a glance from across a room, not just in the footer label.
+const STALE_VALUE_ALPHA: f32 = 0.55;
 
 /// Every role pulled toward grey at its own perceptual lightness.
 ///
@@ -2281,6 +2291,29 @@ mod tests {
             observed_label(WidgetDataState::Stale, None).as_deref(),
             Some("observed time unknown")
         );
+    }
+
+    #[test]
+    fn a_stale_stat_value_carries_an_opacity_mark_beyond_the_chroma_drain() {
+        // A stale stat must not just drain chroma — at a glance across a room
+        // the drain alone is too subtle. The value text is additionally alpha-
+        // faded so staleness is legible before anyone leans in to read the
+        // footer. Only the value text gets this; the chrome (label, unit,
+        // change) stays at full opacity for contrast.
+        assert!(
+            STALE_VALUE_ALPHA < 1.0,
+            "stale value alpha must reduce visibility"
+        );
+        for (name, palette) in palettes() {
+            let ready_text = color(palette.text);
+            let stale_text = with_alpha(color(palette.text), STALE_VALUE_ALPHA);
+            // The stale text must differ from the live text — not just in chroma
+            // (the drain handles that) but in alpha, so the value itself fades.
+            assert_ne!(
+                ready_text, stale_text,
+                "{name} stale value is not visually faded"
+            );
+        }
     }
 
     #[test]
