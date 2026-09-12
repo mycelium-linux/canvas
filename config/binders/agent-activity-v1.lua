@@ -49,10 +49,12 @@ end
 
 local state = "ready"
 if payload.action == "edit" or payload.action == "write" then
-  state = "ok"
+  state = "ready"
+elseif payload.action == "tool" then
+  state = "loading"
 elseif payload.success == false then
   state = "error"
-elseif payload.action == "read" or payload.action == "tool" then
+elseif payload.action == "read" then
   state = "loading"
 end
 
@@ -77,6 +79,6 @@ return {
     state = state,
     source = "OpenCode activity stream",
     detail = payload.tool or "agent active",
-    provenance = "agent/" .. (payload.project or "unknown"),
+    provenance = "live",
   },
 }
