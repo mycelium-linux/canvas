@@ -38,16 +38,44 @@ pub struct VisualSourceRef {
     pub kind: VisualSourceKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum SourcePosition {
     /// Exact immutable revision of a finite artifact or snapshot.
     Revision { revision: u64 },
     /// Follow a live source while recording the last sequence Canvas observed.
-    Live { observed_sequence: u64 },
+    Live {
+        observed_sequence: u64,
+        #[serde(default)]
+        last_observed_ms: u64,
+        #[serde(default)]
+        state: FreshnessState,
+    },
     /// Hold a live source at an exact replayable sequence.
     Sequence { sequence: u64 },
+}
+
+/// Health of a live source, surfaced visibly so stale data is never
+/// silently presented as current.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
+pub enum FreshnessState {
+    /// Source is current.
+    Fresh,
+    /// Source hasn't updated within its declared freshness window.
+    Stale { age_ms: u64 },
+    /// Source connection is lost. Last known-good is preserved.
+    Disconnected,
+    /// Source returned an error.
+    Error { message: String },
+}
+
+impl Default for FreshnessState {
+    fn default() -> Self {
+        FreshnessState::Stale { age_ms: 0 }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -373,7 +401,7 @@ impl SharedViewDocument {
         for (id, source) in &self.sources {
             check(identifier(id), "Invalid shared view source id")?;
             source.source.validate()?;
-            validate_source_position(source.source.kind, source.position)?;
+            validate_source_position(source.source.kind, source.position.clone())?;
         }
         self.viewport.validate()?;
         if let Some(attention) = &self.attention {
@@ -437,7 +465,7 @@ impl SharedViewDocument {
                         .sources
                         .get_mut(source_id)
                         .ok_or_else(|| Error(format!("Unknown shared view source: {source_id}")))?;
-                    source.position = *position;
+                    source.position = position.clone();
                     continue;
                 }
                 ViewOperation::SetViewport { viewport } => {
@@ -643,6 +671,8 @@ mod tests {
                     },
                     position: SourcePosition::Live {
                         observed_sequence: 901,
+                        last_observed_ms: 0,
+                        state: FreshnessState::Fresh,
                     },
                 },
             ),
@@ -657,6 +687,8 @@ mod tests {
                     },
                     position: SourcePosition::Live {
                         observed_sequence: 72,
+                        last_observed_ms: 0,
+                        state: FreshnessState::Fresh,
                     },
                 },
             ),
@@ -686,6 +718,8 @@ mod tests {
         view.viewport = ViewRect::default();
         view.sources.get_mut("image").unwrap().position = SourcePosition::Live {
             observed_sequence: 1,
+            last_observed_ms: 0,
+            state: FreshnessState::Fresh,
         };
         assert!(view.validate().unwrap_err().0.contains("Artifact source"));
     }
