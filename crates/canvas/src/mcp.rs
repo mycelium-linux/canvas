@@ -288,6 +288,19 @@ struct PatchSharedView {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct SetBackground {
+    request_id: String,
+    #[serde(default)]
+    expected_revision: Option<u64>,
+    project_id: String,
+    /// Shader id (e.g. "tidepool", "flame", "void").
+    shader_id: String,
+    #[serde(default)]
+    speed: Option<f32>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct ScreenshotParams {
     request_id: String,
     #[serde(default)]
@@ -486,6 +499,10 @@ fn control_tools() -> Vec<Tool> {
             "canvas_set_visibility",
             "Show or hide every native window in the shared Canvas presentation while preserving the workspace and selected displays.",
         ),
+        tool::<SetBackground>(
+            "canvas_set_background",
+            "Set the document background shader of a project's workspace. Returns OK when the shader is applied; the visible result updates within one frame. Use canvas_inspect to get the list of available shaders from the catalog.",
+        ),
         tool::<NavigateSurface>(
             "canvas_navigate",
             "Navigate an already-open paged surface to the next, previous, or exact zero-based page at the observed runtime revision.",
@@ -618,6 +635,20 @@ fn parse(name: &str, args: Value) -> Result<ControlRequest, String> {
                 args.expected_revision,
                 Command::SetVisibility {
                     visible: args.visible,
+                },
+            )
+        }
+        "canvas_set_background" => {
+            let args: SetBackground = serde_json::from_value(args).map_err(|e| e.to_string())?;
+            let shader_id = serde_json::from_str::<crate::BackgroundShader>(&format!("\"{}\"", args.shader_id))
+                .map_err(|_| format!("Unknown shader: {}", args.shader_id))?;
+            (
+                args.request_id,
+                args.expected_revision,
+                Command::SetBackgroundShader {
+                    project_id: args.project_id,
+                    shader_id,
+                    speed: args.speed.unwrap_or_default(),
                 },
             )
         }
@@ -1552,6 +1583,7 @@ mod role_tests {
         "canvas_close_surface",
         "canvas_display_target",
         "canvas_set_visibility",
+        "canvas_set_background",
     ];
 
     fn names(role: Role) -> Vec<String> {
@@ -1731,7 +1763,7 @@ mod tests {
     #[test]
     fn schemas_include_native_document_and_patch_definitions() {
         let tools = tools_for(Role::Control);
-        assert_eq!(tools.len(), 24);
+        assert_eq!(tools.len(), 25);
         let tool = |name: &str| tools.iter().find(|tool| tool.name == name).unwrap();
         assert!(
             tool("canvas_apply_document").input_schema["$defs"]
