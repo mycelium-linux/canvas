@@ -1,0 +1,23 @@
+# canvas-stream routing configuration
+# Lua binders influence this via Canvas control commands that write route updates
+
+[[routes]]
+source = "opencode"
+contract = "canvas.agent.activity.v1"
+dest = ["stream.sock", "sse"]
+
+[[routes]]
+source = "alfalfa"
+contract = "canvas.widget.snapshot.v1"
+dest = ["stream.sock", "sse"]
+
+[[routes]]
+source = "machine"
+contract = "canvas.widget.snapshot.v1"
+dest = ["stream.sock", "sse"]
+
+[[routes]]
+# Everything else → stream.sock only
+source = "*"
+contract = "*"
+dest = ["stream.sock"]
