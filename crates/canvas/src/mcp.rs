@@ -218,12 +218,9 @@ struct OpenFile {
     title: Option<String>,
 }
 
-/// Read a file through Canvas so the wall sees it first. Canvas opens the
-/// surface, then returns the content. This is the "retrieval is the attention
-/// signal" path — one typed MCP call replaces ad-hoc shell reads.
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct OpenFile {
+struct OpenWidget {
     request_id: String,
     #[serde(default)]
     expected_revision: Option<u64>,
@@ -238,6 +235,8 @@ struct ListWidgets {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct OpenOperationalView {
     request_id: String,
     #[serde(default)]
     expected_revision: Option<u64>,
