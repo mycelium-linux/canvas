@@ -7617,11 +7617,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         App::update,
         daemon_view,
     )
-    .subscription(|app| {
+        .subscription(|app| {
         let animated = app.visible_indicator_id.is_some()
             || app.presence_preview.is_some()
             || app.transition.is_some();
         let background_animated = app.document.background.is_animated();
+        // Background-only animation uses the configured background_max_fps, not
+        // a hardcoded 60 Hz: shaders like Star Nest and Smoke Rings are
+        // low-frequency motion where 20-24 fps is indistinguishable from 60.
+        let background_interval = Duration::from_secs_f64(1.0 / f64::from(
+            canvas_core::appearance::current().motion.background_max_fps.max(1),
+        ));
         // An open picker needs frames whatever the workspace background is doing.
         let cadence = if app.screensaver_settings.enabled
             || background_animated
@@ -7629,12 +7635,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             let screensaver = app.screensaver_clock.interval();
             if animated {
-                screensaver.min(Duration::from_millis(16))
+                screensaver.min(background_interval)
             } else {
                 screensaver
             }
         } else if animated {
-            Duration::from_millis(16)
+            background_interval
         } else {
             Duration::from_millis(canvas_core::appearance::current().motion.idle_tick_ms as u64)
         };
