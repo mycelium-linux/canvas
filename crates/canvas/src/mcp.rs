@@ -497,6 +497,39 @@ fn parse(name: &str, args: Value) -> Result<ControlRequest, String> {
     {
         return Err("Canvas MCP arguments exceed the control limit".into());
     }
+    // Extract signed actor context (if present) before destructuring tool arguments.
+    let actor = {
+        let actor_id = args.get("actor_id").and_then(|v| v.as_str());
+        let actor_sig = args.get("actor_sig").and_then(|v| v.as_str());
+        let actor_ts = args.get("actor_ts").and_then(|v| v.as_u64());
+        if actor_id.is_some() || actor_sig.is_some() || actor_ts.is_some() {
+            match crate::loopback::local_token() {
+                Ok(token) => {
+                    let id = actor_id.ok_or("actor_id missing actor identity")?;
+                    let sig = actor_sig.ok_or("actor_id requires actor_sig")?;
+                    let ts = actor_ts.ok_or("actor_id requires actor_ts")?;
+                    let message = format!("{id}:{ts}");
+                    use sha2::{Digest, Sha256};
+                    let mut hmac = Sha256::new();
+                    hmac.update(token.as_bytes());
+                    hmac.update(message.as_bytes());
+                    let expected = format!("{:x}", hmac.finalize());
+                    if !crate::loopback::token_matches(sig, &expected) {
+                        return Err("Invalid actor signature".into());
+                    }
+                    Some(control::ActorContext {
+                        id: id.to_string(),
+                        timestamp_ms: ts,
+                    })
+                }
+                Err(_) => {
+                    return Err("No Canvas MCP credential available to verify actor".into());
+                }
+            }
+        } else {
+            None
+        }
+    };
     let (request_id, expected_revision, command) = match name {
         "canvas_inspect" => {
             serde_json::from_value::<Inspect>(args).map_err(|e| e.to_string())?;
@@ -665,6 +698,7 @@ fn parse(name: &str, args: Value) -> Result<ControlRequest, String> {
         schema_version: control::CONTROL_VERSION,
         request_id,
         expected_revision,
+        actor,
         command,
     };
     request.validate()?;
@@ -890,6 +924,7 @@ impl Canvas {
             schema_version: control::CONTROL_VERSION,
             request_id: format!("artifact-{}", artifact),
             expected_revision: None,
+            actor: None,
             command: Command::OpenFile {
                 surface_id: surface_id.to_string(),
                 path: temp_path.to_string_lossy().to_string(),
@@ -923,6 +958,7 @@ impl Canvas {
                 schema_version: control::CONTROL_VERSION,
                 request_id: args.request_id.clone(),
                 expected_revision: None,
+                actor: None,
                 command: Command::ReadDocument,
             };
             inspect_request.validate()?;
@@ -971,6 +1007,7 @@ impl Canvas {
                 schema_version: control::CONTROL_VERSION,
                 request_id: args.request_id,
                 expected_revision: Some(inspect.revision),
+                actor: None,
                 command,
             };
             apply_request.validate()?;
@@ -1028,6 +1065,7 @@ impl Canvas {
             schema_version: control::CONTROL_VERSION,
             request_id: params.request_id.clone(),
             expected_revision: params.expected_revision,
+            actor: None,
             command: Command::Inspect,
         };
         if let Err(error) = validation.validate() {
@@ -1045,6 +1083,7 @@ impl Canvas {
                 schema_version: control::CONTROL_VERSION,
                 request_id: "mcp-capture-inspect".into(),
                 expected_revision: None,
+                actor: None,
                 command: Command::Inspect,
             };
             let send = self.send.clone();
@@ -1105,6 +1144,7 @@ impl Canvas {
             schema_version: control::CONTROL_VERSION,
             request_id: params.request_id.clone(),
             expected_revision: params.expected_revision,
+            actor: None,
             command: Command::Screenshot {
                 surface_id: params.surface_id.clone(),
                 region,
@@ -2032,5 +2072,27 @@ mod tests {
         assert_eq!(reply.revision, 9);
         client.cancel().await.unwrap();
         server.await.unwrap();
+    }
+
+    #[test]
+    fn actor_without_sig_rejects() {
+        let result = parse(
+            "canvas_inspect",
+            json!({"request_id":"t1","actor_id":"opencode:test"}),
+        );
+        // parse calls local_token() which fails in test env, so actor_id
+        // without a valid token is rejected
+        assert!(result.is_err(), "actor without sig should be rejected");
+    }
+
+    #[test]
+    fn parse_without_actor_succeeds() {
+        let result = parse(
+            "canvas_inspect",
+            json!({"request_id":"t2"}),
+        );
+        assert!(result.is_ok(), "request without actor should succeed");
+        let req = result.unwrap();
+        assert!(req.actor.is_none());
     }
 }

@@ -51,7 +51,18 @@ pub struct ControlRequest {
     pub request_id: String,
     #[serde(default)]
     pub expected_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<ActorContext>,
     pub command: Command,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActorContext {
+    /// Stable agent identifier, e.g. "opencode:canvas" or "alfalfa:sync".
+    pub id: String,
+    /// Milliseconds since the UNIX epoch at signing time (replay window).
+    pub timestamp_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1509,6 +1520,7 @@ pub mod text {
             schema_version: CONTROL_VERSION,
             request_id: format!("text-{}", std::process::id()),
             expected_revision,
+            actor: None,
             command: build_command(&tokens)?,
         };
         request.validate()?;
@@ -1756,6 +1768,7 @@ mod tests {
             schema_version: CONTROL_VERSION,
             request_id: "sync-projects".into(),
             expected_revision: Some(4),
+            actor: None,
             command: Command::WorkspaceSync { projects },
         };
         request(vec![project.clone()]).validate().unwrap();
@@ -1774,6 +1787,7 @@ mod tests {
             schema_version: CONTROL_VERSION,
             request_id: "move-1".into(),
             expected_revision: Some(4),
+            actor: None,
             command: Command::SetFrame {
                 frame: Rect {
                     x: 10,
@@ -1820,6 +1834,7 @@ mod tests {
             schema_version: CONTROL_VERSION,
             request_id: "indicator-1".into(),
             expected_revision: None,
+            actor: None,
             command: Command::UpsertIndicator {
                 indicator: StatusIndicator {
                     id: "assistant-status".into(),
@@ -1876,6 +1891,7 @@ mod tests {
             schema_version: CONTROL_VERSION,
             request_id: "mesh-1".into(),
             expected_revision: None,
+            actor: None,
             command: Command::SetMesh { mesh },
         };
         request.validate().unwrap();
@@ -1964,6 +1980,7 @@ mod tests {
             schema_version: CONTROL_VERSION,
             request_id: "presence-1".into(),
             expected_revision: None,
+            actor: None,
             command: Command::SetPresence {
                 presence: snapshot.clone(),
             },
@@ -2188,6 +2205,7 @@ mod tests {
             schema_version: CONTROL_VERSION,
             request_id: "overlay-policy".into(),
             expected_revision: Some(4),
+            actor: None,
             command: Command::SetOverlays { overlays },
         };
         request.validate().unwrap();
@@ -2206,6 +2224,7 @@ mod tests {
             schema_version: CONTROL_VERSION,
             request_id: "view-focus-region".into(),
             expected_revision: Some(8),
+            actor: None,
             command: Command::PatchView {
                 surface_id: "drawing".into(),
                 patch: SharedViewPatch {
