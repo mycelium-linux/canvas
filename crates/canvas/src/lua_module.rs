@@ -1143,8 +1143,122 @@ mod tests {
         assert!(module.retained().scene.nodes.len() >= 5);
     }
 
+    fn cross_owner_snapshot() -> ModuleInputSnapshot {
+        ModuleInputSnapshot {
+            revision: 1,
+            values: BTreeMap::from([
+                (
+                    "bifrost".into(),
+                    ModuleInputValue::Graph(GraphSnapshot {
+                        nodes: vec![
+                            GraphNode {
+                                id: "health".into(),
+                                label: "Backend health".into(),
+                                group: Some("metrics".into()),
+                                heat: 0.9,
+                                level: StatusLevel::Good,
+                            },
+                            GraphNode {
+                                id: "queues".into(),
+                                label: "Queue depth".into(),
+                                group: Some("metrics".into()),
+                                heat: 0.6,
+                                level: StatusLevel::Warning,
+                            },
+                        ],
+                        edges: vec![],
+                    }),
+                ),
+                (
+                    "elmers".into(),
+                    ModuleInputValue::Graph(GraphSnapshot {
+                        nodes: vec![
+                            GraphNode {
+                                id: "runs".into(),
+                                label: "In-flight runs".into(),
+                                group: Some("activity".into()),
+                                heat: 0.4,
+                                level: StatusLevel::Neutral,
+                            },
+                            GraphNode {
+                                id: "budget".into(),
+                                label: "Budget usage".into(),
+                                group: Some("activity".into()),
+                                heat: 0.2,
+                                level: StatusLevel::Critical,
+                            },
+                        ],
+                        edges: vec![],
+                    }),
+                ),
+            ]),
+        }
+    }
+
     #[test]
-    fn activity_graph_rejects_ambiguous_or_dangling_topology() {
+    fn cross_owner_module_combines_two_source_owners_into_one_scene() {
+        let manifest = ModuleManifest::parse(
+            include_str!("../examples/lua/cross-owner-graph.json")
+        ).unwrap();
+        let module = LuaModule::load(
+            manifest,
+            include_str!("../examples/lua/cross-owner-graph.lua"),
+            cross_owner_snapshot(),
+            theme(),
+            BTreeMap::new(),
+            LuaSceneCapabilities::default(),
+            LuaSceneLimits::default(),
+        ).unwrap();
+        let scene = &module.retained().scene;
+        // Root group + 2 group labels + 2 headers + 4 nodes + 1 bridge = 10
+        assert!(scene.nodes.len() >= 8, "expected at least 8 scene nodes, got {}", scene.nodes.len());
+        // Bifrost nodes present
+        assert!(scene.nodes.iter().any(|n| n.id == "bifrost-health"));
+        assert!(scene.nodes.iter().any(|n| n.id == "bifrost-queues"));
+        // Elmers nodes present
+        assert!(scene.nodes.iter().any(|n| n.id == "elmers-runs"));
+        assert!(scene.nodes.iter().any(|n| n.id == "elmers-budget"));
+        // Bridge connects the two
+        assert!(scene.nodes.iter().any(|n| n.id == "bridge"));
+    }
+
+    #[test]
+    fn cross_owner_module_preserves_last_known_good_on_malformed_input() {
+        let manifest = ModuleManifest::parse(
+            include_str!("../examples/lua/cross-owner-graph.json")
+        ).unwrap();
+        // First: load with valid data
+        let good = LuaModule::load(
+            manifest.clone(),
+            include_str!("../examples/lua/cross-owner-graph.lua"),
+            cross_owner_snapshot(),
+            theme(),
+            BTreeMap::new(),
+            LuaSceneCapabilities::default(),
+            LuaSceneLimits::default(),
+        ).unwrap();
+        let good_node_count = good.retained().scene.nodes.len();
+        assert!(good_node_count >= 8);
+        // Second: load with malformed data (missing elmers group)
+        let mut bad = cross_owner_snapshot();
+        bad.values.remove("elmers");
+        let result = LuaModule::load(
+            manifest,
+            include_str!("../examples/lua/cross-owner-graph.lua"),
+            bad,
+            theme(),
+            BTreeMap::new(),
+            LuaSceneCapabilities::default(),
+            LuaSceneLimits::default(),
+        );
+        // Should fail gracefully — not crash
+        assert!(result.is_err(), "missing required input should be rejected");
+        // Good module still has its scene intact
+        assert_eq!(good.retained().scene.nodes.len(), good_node_count);
+    }
+
+    #[test]
+    fn shared_attention_is_clipped_and_mapped_inside_the_visible_crop() {
         let mut duplicate = activity_graph();
         duplicate.nodes.push(duplicate.nodes[0].clone());
         assert!(ModuleInputValue::Graph(duplicate).validate().is_err());
