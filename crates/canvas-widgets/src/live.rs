@@ -9,13 +9,93 @@ use crate::{
     BurnRateWindow, ChartType, MeterStyle, StateLane, StatusLevel, StatusState, WidgetDataState,
     WidgetKind, WidgetSpec,
 };
+use std::cell::Cell;
+use std::hash::{Hash, Hasher};
+
 use canvas_core::{ThemePalette, VisualTheme};
 use iced::mouse;
-use iced::widget::canvas::{Geometry, Path};
+use iced::widget::canvas::{Cache, Geometry, Path};
 use iced::widget::{Canvas, canvas, column, container, row, space, text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 mod quant;
+
+/// Per-program cache state. Stores an iced `Cache` plus a data-derived key.
+///
+/// `key` is computed from the Program's data in `draw`. When it differs from
+/// the stored value, `cache.clear()` runs first so the tessellator re-runs
+/// only on actual data changes — not on every repaint.
+#[derive(Default)]
+pub struct CacheState {
+    cache: Cache,
+    key: Cell<u64>,
+}
+
+impl CacheState {
+    pub fn draw_cached<F>(&self, renderer: &Renderer, size: Size, key: u64, draw: F) -> Vec<Geometry>
+    where
+        F: FnOnce(&mut canvas::Frame),
+    {
+        if self.key.get() != key {
+            self.cache.clear();
+            self.key.set(key);
+        }
+        vec![self.cache.draw(renderer, size, draw)]
+    }
+}
+
+/// Builds a cache key by accumulating the bits of the data that changes.
+pub struct Key {
+    hash: u64,
+}
+
+impl Key {
+    pub fn new() -> Self {
+        Self { hash: 0 }
+    }
+    pub fn add_u64(mut self, v: u64) -> Self {
+        self.hash = self.hash.wrapping_mul(31).wrapping_add(v);
+        self
+    }
+    pub fn add_f32(self, v: f32) -> Self {
+        self.add_u64(v.to_bits() as u64)
+    }
+    pub fn add_f64(self, v: f64) -> Self {
+        self.add_u64(v.to_bits())
+    }
+    pub fn add_usize(self, v: usize) -> Self {
+        self.add_u64(v as u64)
+    }
+    pub fn add_color(self, c: iced::Color) -> Self {
+        self.add_u64(c.r.to_bits() as u64)
+            .add_u64(c.g.to_bits() as u64)
+            .add_u64(c.b.to_bits() as u64)
+            .add_u64(c.a.to_bits() as u64)
+    }
+    pub fn add_str(self, s: &str) -> Self {
+        self.add_u64(s.len() as u64).add_u64(hash_str(s))
+    }
+    pub fn build(self) -> u64 {
+        self.hash
+    }
+}
+
+impl Default for Key {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn hash_str(s: &str) -> u64 {
+    s.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64))
+}
+
+/// Hash any `Hash`-implementing data. For floats and colors, use `Key` instead.
+pub fn hash_data<D: Hash>(data: D) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    data.hash(&mut hasher);
+    hasher.finish()
+}
 
 /// Deterministic mock pricing derived from the symbol — replaced by the live
 /// data source once wired. Kept identical to the Lua module behavior so
@@ -1241,16 +1321,23 @@ struct HeatmapProgram {
 }
 
 impl<Message> canvas::Program<Message> for HeatmapProgram {
-    type State = ();
+    type State = CacheState;
     fn draw(
         &self,
-        _state: &(),
+        state: &Self::State,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let val_sum: u64 = self.values.iter().flatten().map(|v| v.to_bits()).sum();
+        let key = Key::new()
+            .add_usize(self.columns.len())
+            .add_usize(self.rows.len())
+            .add_usize(self.values.iter().flatten().count())
+            .add_u64(val_sum)
+            .build();
+        state.draw_cached(renderer, bounds.size(), key, |frame| {
         let label_width = (bounds.width * 0.18).clamp(42.0, 110.0);
         let top = 18.0;
         let cell_w = ((bounds.width - label_width) / self.columns.len() as f32).max(1.0);
@@ -1291,8 +1378,8 @@ impl<Message> canvas::Program<Message> for HeatmapProgram {
                     fill,
                 );
             }
-        }
-        vec![frame.into_geometry()]
+         }
+        })
     }
 }
 
@@ -1306,16 +1393,22 @@ struct RankedBarProgram {
 }
 
 impl<Message> canvas::Program<Message> for RankedBarProgram {
-    type State = ();
+    type State = CacheState;
     fn draw(
         &self,
-        _state: &(),
+        state: &Self::State,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let bar_sum: f32 = self.bars.iter().map(|b| b.1).sum();
+        let key = Key::new()
+            .add_usize(self.bars.len())
+            .add_usize(self.palette.len())
+            .add_f32(bar_sum)
+            .build();
+        state.draw_cached(renderer, bounds.size(), key, |frame| {
         let mut bars = self.bars.clone();
         bars.sort_by(|a, b| b.1.total_cmp(&a.1));
         let max = bars
@@ -1344,8 +1437,8 @@ impl<Message> canvas::Program<Message> for RankedBarProgram {
                 // discards meaning the payload went to the trouble of carrying.
                 state.unwrap_or(self.palette[index % self.palette.len()]),
             );
-        }
-        vec![frame.into_geometry()]
+         }
+        })
     }
 }
 
@@ -1356,16 +1449,22 @@ struct StackedBarProgram {
     label_size: f32,
 }
 impl<Message> canvas::Program<Message> for StackedBarProgram {
-    type State = ();
+    type State = CacheState;
     fn draw(
         &self,
-        _state: &(),
+        state: &Self::State,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let val_sum: f64 = self.bars.iter().flat_map(|b| &b.1).sum();
+        let key = Key::new()
+            .add_usize(self.bars.len())
+            .add_usize(self.colors.len())
+            .add_f64(val_sum)
+            .build();
+        state.draw_cached(renderer, bounds.size(), key, |frame| {
         let max = self
             .bars
             .iter()
@@ -1396,7 +1495,7 @@ impl<Message> canvas::Program<Message> for StackedBarProgram {
                 x += width;
             }
         }
-        vec![frame.into_geometry()]
+        })
     }
 }
 
@@ -1407,16 +1506,22 @@ struct StateTimelineProgram {
     label_size: f32,
 }
 impl<Message> canvas::Program<Message> for StateTimelineProgram {
-    type State = ();
+    type State = CacheState;
     fn draw(
         &self,
-        _state: &(),
+        state: &Self::State,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let seg_sum: f64 = self.lanes.iter().flat_map(|l| l.segments.iter()).map(|s| s.start + s.end).sum();
+        let key = Key::new()
+            .add_usize(self.lanes.len())
+            .add_usize(self.lanes.iter().map(|l| l.segments.len()).sum())
+            .add_f64(seg_sum)
+            .build();
+        state.draw_cached(renderer, bounds.size(), key, |frame| {
         let min = self
             .lanes
             .iter()
@@ -1453,8 +1558,8 @@ impl<Message> canvas::Program<Message> for StateTimelineProgram {
                     status_color(segment.state, &self.palette),
                 );
             }
-        }
-        vec![frame.into_geometry()]
+         }
+        })
     }
 }
 
@@ -1468,16 +1573,21 @@ struct BurnRateProgram {
     label_size: f32,
 }
 impl<Message> canvas::Program<Message> for BurnRateProgram {
-    type State = ();
+    type State = CacheState;
     fn draw(
         &self,
-        _state: &(),
+        state: &Self::State,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let rate_sum: f64 = self.windows.iter().map(|w| w.burn_rate).sum();
+        let key = Key::new()
+            .add_usize(self.windows.len())
+            .add_f64(rate_sum)
+            .build();
+        state.draw_cached(renderer, bounds.size(), key, |frame| {
         let max = self
             .windows
             .iter()
@@ -1512,8 +1622,8 @@ impl<Message> canvas::Program<Message> for BurnRateProgram {
                 &rect((bounds.width - label_w) * (window.burn_rate / max) as f32),
                 fill,
             );
-        }
-        vec![frame.into_geometry()]
+         }
+        })
     }
 }
 
@@ -1666,10 +1776,10 @@ struct SparklineProgram {
 }
 
 impl<Message> canvas::Program<Message> for SparklineProgram {
-    type State = ();
+    type State = CacheState;
     fn draw(
         &self,
-        _state: &(),
+        state: &Self::State,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
@@ -1678,7 +1788,12 @@ impl<Message> canvas::Program<Message> for SparklineProgram {
         if self.values.len() < 2 {
             return Vec::new();
         }
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let val_sum: f32 = self.values.iter().sum();
+        let key = Key::new()
+            .add_usize(self.values.len())
+            .add_f32(val_sum)
+            .build();
+        state.draw_cached(renderer, bounds.size(), key, |frame| {
         let series: Vec<(f32, f32)> = self
             .values
             .iter()
@@ -1691,8 +1806,8 @@ impl<Message> canvas::Program<Message> for SparklineProgram {
             .iter()
             .map(|value| range.project(*value, area))
             .collect();
-        draw_series_line(&mut frame, &points, bounds.height, self.color, AREA_ALPHA);
-        vec![frame.into_geometry()]
+        draw_series_line(frame, &points, bounds.height, self.color, AREA_ALPHA);
+        })
     }
 }
 
@@ -1704,16 +1819,17 @@ struct GaugeProgram {
 }
 
 impl<Message> canvas::Program<Message> for GaugeProgram {
-    type State = ();
+    type State = CacheState;
     fn draw(
         &self,
-        _state: &(),
+        state: &Self::State,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let key = Key::new().add_f32(self.value).build();
+        state.draw_cached(renderer, bounds.size(), key, |frame| {
         frame.fill(
             &Path::rounded_rectangle(Point::ORIGIN, bounds.size(), self.radius.into()),
             self.track,
@@ -1729,7 +1845,7 @@ impl<Message> canvas::Program<Message> for GaugeProgram {
             ),
             self.fill,
         );
-        vec![frame.into_geometry()]
+        })
     }
 }
 
@@ -1740,10 +1856,10 @@ struct HistogramProgram {
 }
 
 impl<Message> canvas::Program<Message> for HistogramProgram {
-    type State = ();
+    type State = CacheState;
     fn draw(
         &self,
-        _state: &(),
+        state: &Self::State,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
@@ -1752,7 +1868,12 @@ impl<Message> canvas::Program<Message> for HistogramProgram {
         if self.values.is_empty() {
             return Vec::new();
         }
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let val_sum: f32 = self.values.iter().sum();
+        let key = Key::new()
+            .add_usize(self.values.len())
+            .add_f32(val_sum)
+            .build();
+        state.draw_cached(renderer, bounds.size(), key, |frame| {
         let max = self.values.iter().copied().fold(0.0, f32::max).max(1e-6);
         for row in 1..4 {
             let y = bounds.height * row as f32 / 4.0;
@@ -1774,7 +1895,7 @@ impl<Message> canvas::Program<Message> for HistogramProgram {
                 self.color,
             );
         }
-        vec![frame.into_geometry()]
+        })
     }
 }
 
@@ -1785,10 +1906,10 @@ struct TimeSeriesProgram {
 }
 
 impl<Message> canvas::Program<Message> for TimeSeriesProgram {
-    type State = ();
+    type State = CacheState;
     fn draw(
         &self,
-        _state: &(),
+        state: &Self::State,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
@@ -1797,7 +1918,13 @@ impl<Message> canvas::Program<Message> for TimeSeriesProgram {
         if self.series.iter().flatten().count() < 2 {
             return Vec::new();
         }
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let pts: usize = self.series.iter().flatten().count();
+        let val: f32 = self.series.iter().flatten().map(|(_, y)| *y).sum();
+        let key = Key::new()
+            .add_usize(pts)
+            .add_f32(val)
+            .build();
+        state.draw_cached(renderer, bounds.size(), key, |frame| {
         // One range over every series: two series on their own scales share an
         // axis that means nothing.
         let range = PlotRange::over(self.series.iter().flatten());
@@ -1820,14 +1947,14 @@ impl<Message> canvas::Program<Message> for TimeSeriesProgram {
                 .map(|value| range.project(*value, area))
                 .collect();
             draw_series_line(
-                &mut frame,
+                frame,
                 &points,
                 bounds.height,
                 self.colors[index % self.colors.len()],
                 area_alpha,
             );
         }
-        vec![frame.into_geometry()]
+        })
     }
 }
 
@@ -1894,11 +2021,11 @@ pub struct ChartProgram {
 }
 
 impl<Message> canvas::Program<Message> for ChartProgram {
-    type State = ();
+    type State = CacheState;
 
     fn draw(
         &self,
-        _state: &Self::State,
+        state: &Self::State,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
@@ -1907,7 +2034,14 @@ impl<Message> canvas::Program<Message> for ChartProgram {
         if self.data.is_empty() {
             return Vec::new();
         }
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let pts: usize = self.data.len();
+        let val: f32 = self.data.iter().map(|(_, y)| *y).sum();
+        let key = Key::new()
+            .add_usize(pts)
+            .add_f32(val)
+            .add_usize(self.chart_type as usize)
+            .build();
+        state.draw_cached(renderer, bounds.size(), key, |frame| {
         let margin = 40.0f32;
         let stroke = canvas::Stroke::default().with_width(1.0).with_color(Color {
             a: 0.15,
@@ -1974,9 +2108,6 @@ impl<Message> canvas::Program<Message> for ChartProgram {
                     );
                 }
             }
-            // The same line the widgets draw, for the same reasons: one path,
-            // round joins, an area that falls to the axis, a head on the newest
-            // point. A marker on every point competes with the shape.
             ChartType::Line => {
                 let points: Vec<Point> = self
                     .data
@@ -1984,7 +2115,7 @@ impl<Message> canvas::Program<Message> for ChartProgram {
                     .map(|(x, y)| Point::new(sx(*x), sy(*y)))
                     .collect();
                 draw_series_line(
-                    &mut frame,
+                    frame,
                     &points,
                     bounds.height - margin,
                     self.line_color,
@@ -2000,8 +2131,7 @@ impl<Message> canvas::Program<Message> for ChartProgram {
                 }
             }
         }
-
-        vec![frame.into_geometry()]
+        })
     }
 }
 
@@ -2320,5 +2450,24 @@ mod tests {
             let point = range.project(*value, area);
             assert!((point.y - (area.y + area.height / 2.0)).abs() < 0.001);
         }
+    }
+
+    #[test]
+    fn cache_state_clears_on_key_change() {
+        let key_a = Key::new().add_f32(1.0).build();
+        let key_b = Key::new().add_f32(2.0).build();
+        assert_ne!(key_a, key_b);
+        assert_ne!(key_a, Key::new().add_f32(3.0).build());
+    }
+
+    #[test]
+    fn cache_state_key_for_f32_values() {
+        let a = Key::new().add_f32(3.5).add_usize(10).build();
+        let b = Key::new().add_f32(3.5).add_usize(10).build();
+        assert_eq!(a, b);
+        let c = Key::new().add_f32(3.6).add_usize(10).build();
+        let d = Key::new().add_f32(3.5).add_usize(11).build();
+        assert_ne!(a, c);
+        assert_ne!(a, d);
     }
 }

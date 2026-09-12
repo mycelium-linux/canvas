@@ -5774,24 +5774,38 @@ struct AttentionProgram {
 }
 
 impl<Message> canvas::Program<Message> for AttentionProgram {
-    type State = ();
+    type State = canvas_widgets::live::CacheState;
 
     fn draw(
         &self,
-        _state: &Self::State,
+        state: &Self::State,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let key = canvas_widgets::live::Key::new()
+            .add_f32(self.viewport.x)
+            .add_f32(self.viewport.y)
+            .add_f32(self.viewport.width)
+            .add_f32(self.viewport.height)
+            .add_f32(self.attention.x)
+            .add_f32(self.attention.y)
+            .add_f32(self.attention.width)
+            .add_f32(self.attention.height)
+            .add_u64(self.source_pixels[0] as u64)
+            .add_u64(self.source_pixels[1] as u64)
+            .add_color(self.color)
+            .add_str(self.label.as_deref().unwrap_or(""))
+            .build();
+        state.draw_cached(renderer, bounds.size(), key, |frame| {
         let Some(region) = attention_geometry(
             bounds.size(),
             self.source_pixels,
             self.viewport,
             self.attention,
         ) else {
-            return vec![frame.into_geometry()];
+            return;
         };
         let path = canvas::Path::rectangle(region.position(), region.size());
         frame.fill(
@@ -5810,7 +5824,7 @@ impl<Message> canvas::Program<Message> for AttentionProgram {
         );
         if let Some(label) = &self.label {
             chart_text(
-                &mut frame,
+                frame,
                 label,
                 Point::new(region.x + 5.0, (region.y - 18.0).max(4.0)),
                 12.0,
@@ -5818,7 +5832,7 @@ impl<Message> canvas::Program<Message> for AttentionProgram {
                 iced::alignment::Horizontal::Left,
             );
         }
-        vec![frame.into_geometry()]
+        })
     }
 }
 
@@ -5834,31 +5848,41 @@ struct ChartProgram {
 }
 
 impl<Message> canvas::Program<Message> for ChartProgram {
-    type State = ();
+    type State = canvas_widgets::live::CacheState;
 
     fn draw(
         &self,
-        _state: &Self::State,
+        state: &Self::State,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let total_points: usize = self.chart.series.iter().map(|s| s.points.len()).sum();
+        let val_sum: f32 = self.chart.series.iter().flat_map(|s| &s.points).map(|p| p.y).sum();
+        let key = canvas_widgets::live::Key::new()
+            .add_usize(total_points)
+            .add_f32(val_sum)
+            .add_usize(self.chart.kind as usize)
+            .add_str(&self.chart.title)
+            .add_f32(bounds.width)
+            .add_f32(bounds.height)
+            .build();
+        state.draw_cached(renderer, bounds.size(), key, |frame| {
         let Some((min_x, max_x, min_y, max_y)) = chart_extents(&self.chart) else {
             chart_text(
-                &mut frame,
+                frame,
                 "No chart data",
                 Point::new(20.0, 24.0),
                 self.metrics.body,
                 self.muted_color,
                 iced::alignment::Horizontal::Left,
             );
-            return vec![frame.into_geometry()];
+            return;
         };
 
         chart_text(
-            &mut frame,
+            frame,
             &self.chart.title,
             Point::new(18.0, 12.0),
             self.metrics.body,
@@ -5876,7 +5900,7 @@ impl<Message> canvas::Program<Message> for ChartProgram {
                 color,
             );
             chart_text(
-                &mut frame,
+                frame,
                 &item.label,
                 Point::new(item.x + 13.0, item.y),
                 self.metrics.micro,
@@ -5892,7 +5916,7 @@ impl<Message> canvas::Program<Message> for ChartProgram {
         let plot_width = right - left;
         let plot_height = bottom - top;
         if plot_width <= 1.0 || plot_height <= 1.0 {
-            return vec![frame.into_geometry()];
+            return;
         }
 
         let x_ticks = chart_ticks(min_x, max_x, if bounds.width < 420.0 { 3 } else { 5 });
@@ -5910,8 +5934,8 @@ impl<Message> canvas::Program<Message> for ChartProgram {
                 &canvas::Path::line(Point::new(left, y), Point::new(right, y)),
                 grid_stroke,
             );
-            chart_text(
-                &mut frame,
+             chart_text(
+                frame,
                 &format_chart_value(*tick),
                 Point::new(left - 7.0, y),
                 self.metrics.micro,
@@ -5926,7 +5950,7 @@ impl<Message> canvas::Program<Message> for ChartProgram {
                 grid_stroke,
             );
             chart_text(
-                &mut frame,
+                frame,
                 &format_chart_value(*tick),
                 Point::new(x, bottom + 7.0),
                 self.metrics.micro,
@@ -5937,7 +5961,7 @@ impl<Message> canvas::Program<Message> for ChartProgram {
 
         let y_label = axis_title(&self.chart.y_axis);
         chart_text(
-            &mut frame,
+            frame,
             &y_label,
             Point::new(12.0, top - 20.0),
             self.metrics.micro,
@@ -5946,7 +5970,7 @@ impl<Message> canvas::Program<Message> for ChartProgram {
         );
         let x_label = axis_title(&self.chart.x_axis);
         chart_text(
-            &mut frame,
+            frame,
             &x_label,
             Point::new((left + right) / 2.0, bounds.height - 15.0),
             self.metrics.micro,
@@ -5972,7 +5996,7 @@ impl<Message> canvas::Program<Message> for ChartProgram {
                         .map(|point| Point::new(sx(point.x), sy(point.y)))
                         .collect();
                     draw_chart_series_line(
-                        &mut frame,
+                        frame,
                         &points,
                         bottom,
                         series_color,
@@ -6045,7 +6069,7 @@ impl<Message> canvas::Program<Message> for ChartProgram {
                 },
             );
             chart_text(
-                &mut frame,
+                frame,
                 &value,
                 Point::new(tooltip_x + 9.0, tooltip_y + 5.0),
                 self.metrics.micro,
@@ -6053,8 +6077,7 @@ impl<Message> canvas::Program<Message> for ChartProgram {
                 iced::alignment::Horizontal::Left,
             );
         }
-
-        vec![frame.into_geometry()]
+        })
     }
 }
 
