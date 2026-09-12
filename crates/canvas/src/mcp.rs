@@ -140,6 +140,38 @@ struct ApplyDocument {
     document: WorkspaceDocument,
 }
 
+/// Extract and verify signed actor context from tool arguments.
+/// Returns Ok(Some(actor)) if actor fields are present and valid,
+/// Ok(None) if no actor fields are present, or Err if present but invalid.
+fn verify_actor_from_value(args: &Value) -> Result<Option<control::ActorContext>, String> {
+    let Some(id) = args.get("actor_id").and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
+    let sig = args
+        .get("actor_sig")
+        .and_then(|v| v.as_str())
+        .ok_or("actor_id requires actor_sig")?;
+    let ts = args
+        .get("actor_ts")
+        .and_then(|v| v.as_u64())
+        .ok_or("actor_id requires actor_ts")?;
+    let token = crate::loopback::local_token()
+        .map_err(|_| "No Canvas MCP credential available to verify actor")?;
+    use sha2::{Digest, Sha256};
+    let message = format!("{id}:{ts}");
+    let mut hmac = Sha256::new();
+    hmac.update(token.as_bytes());
+    hmac.update(message.as_bytes());
+    let expected = format!("{:x}", hmac.finalize());
+    if !crate::loopback::token_matches(sig, &expected) {
+        return Err("Invalid actor signature".into());
+    }
+    Ok(Some(control::ActorContext {
+        id: id.to_string(),
+        timestamp_ms: ts,
+    }))
+}
+
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ApplyPatch {
@@ -498,38 +530,7 @@ fn parse(name: &str, args: Value) -> Result<ControlRequest, String> {
         return Err("Canvas MCP arguments exceed the control limit".into());
     }
     // Extract signed actor context (if present) before destructuring tool arguments.
-    let actor = {
-        let actor_id = args.get("actor_id").and_then(|v| v.as_str());
-        let actor_sig = args.get("actor_sig").and_then(|v| v.as_str());
-        let actor_ts = args.get("actor_ts").and_then(|v| v.as_u64());
-        if actor_id.is_some() || actor_sig.is_some() || actor_ts.is_some() {
-            match crate::loopback::local_token() {
-                Ok(token) => {
-                    let id = actor_id.ok_or("actor_id missing actor identity")?;
-                    let sig = actor_sig.ok_or("actor_id requires actor_sig")?;
-                    let ts = actor_ts.ok_or("actor_id requires actor_ts")?;
-                    let message = format!("{id}:{ts}");
-                    use sha2::{Digest, Sha256};
-                    let mut hmac = Sha256::new();
-                    hmac.update(token.as_bytes());
-                    hmac.update(message.as_bytes());
-                    let expected = format!("{:x}", hmac.finalize());
-                    if !crate::loopback::token_matches(sig, &expected) {
-                        return Err("Invalid actor signature".into());
-                    }
-                    Some(control::ActorContext {
-                        id: id.to_string(),
-                        timestamp_ms: ts,
-                    })
-                }
-                Err(_) => {
-                    return Err("No Canvas MCP credential available to verify actor".into());
-                }
-            }
-        } else {
-            None
-        }
-    };
+    let actor = verify_actor_from_value(&args)?;
     let (request_id, expected_revision, command) = match name {
         "canvas_inspect" => {
             serde_json::from_value::<Inspect>(args).map_err(|e| e.to_string())?;
@@ -796,6 +797,10 @@ impl Canvas {
         args: Value,
         storage_url: &str,
     ) -> Result<CallToolResponse, ErrorData> {
+        // Verify signed actor context before performing any artifact operation.
+        let actor = verify_actor_from_value(&args).map_err(|e| {
+            ErrorData::invalid_params(e, None)
+        })?;
         let client = HttpClient::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
@@ -824,7 +829,7 @@ impl Canvas {
 
                 // Retrieval IS the attention signal: opening the artifact on
                 // Canvas happens by construction, not by a separate call.
-                let _ = self.open_artifact_as_surface(&args.artifact, &bytes, &content_type).await;
+                let _ = self.open_artifact_as_surface(&args.artifact, &bytes, &content_type, actor.as_ref()).await;
 
                 Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                     "{{\"digest\":\"{}\",\"content_type\":\"{}\",\"size\":{}}}",
@@ -913,18 +918,18 @@ impl Canvas {
         artifact: &str,
         bytes: &[u8],
         content_type: &str,
+        actor: Option<&control::ActorContext>,
     ) -> Result<(), String> {
         let _ = content_type; // Reserved for future MIME-based renderer selection
         let surface_id = if artifact.len() <= 64 { artifact } else { "fetched-artifact" };
         let title = format!("Artifact: {}", artifact);
         let temp_path = std::env::temp_dir().join(format!("canvas-artifact-{}.bin", artifact));
         std::fs::write(&temp_path, bytes).map_err(|e| e.to_string())?;
-
         let request = ControlRequest {
             schema_version: control::CONTROL_VERSION,
             request_id: format!("artifact-{}", artifact),
             expected_revision: None,
-            actor: None,
+            actor: actor.cloned(),
             command: Command::OpenFile {
                 surface_id: surface_id.to_string(),
                 path: temp_path.to_string_lossy().to_string(),
@@ -1668,7 +1673,7 @@ mod tests {
     #[test]
     fn schemas_include_native_document_and_patch_definitions() {
         let tools = tools_for(Role::Control);
-        assert_eq!(tools.len(), 19);
+        assert_eq!(tools.len(), 23);
         let tool = |name: &str| tools.iter().find(|tool| tool.name == name).unwrap();
         assert!(
             tool("canvas_apply_document").input_schema["$defs"]
@@ -2089,7 +2094,7 @@ mod tests {
     fn parse_without_actor_succeeds() {
         let result = parse(
             "canvas_inspect",
-            json!({"request_id":"t2"}),
+            json!({}),
         );
         assert!(result.is_ok(), "request without actor should succeed");
         let req = result.unwrap();
