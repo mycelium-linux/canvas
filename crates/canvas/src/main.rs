@@ -26,9 +26,11 @@ use ::canvas::view::{
 };
 use ::canvas::workspace_store::{self, WorkspaceStore};
 use ::canvas::{
-    AssetRef, Axis, Background, BackgroundFit, GradientStop, InputPort, Layout, NodeContent,
-    NormalizedRect, PatchOperation, Placement, SCHEMA_VERSION, Scene, SceneNode, Surface,
-    SurfaceChrome, SurfaceContent, SurfaceTitleMode, ThemeRef, WorkspaceDocument, WorkspacePatch,
+    AssetRef, Axis, Background, BackgroundFit, DataBinding, DataSource, GradientStop, InputPort,
+    InputTarget, Layout, NodeContent, NormalizedRect, PatchOperation, Placement,
+    SCHEMA_VERSION, Scene, SceneNode, Surface,
+    SurfaceChrome, SurfaceContent,
+    SurfaceTitleMode, ThemeRef, WorkspaceDocument, WorkspacePatch,
 };
 use base64::Engine as _;
 use canvas_core::display_watch::{DisplayWatch, WatchStatus};
@@ -2094,18 +2096,61 @@ impl App {
             })
         } else {
             let project_id = project.clone();
+            // First visit to this project: create a workspace with a default
+            // repo-status table surface so the user sees live data immediately.
             let document = WorkspaceDocument {
                 schema_version: SCHEMA_VERSION,
-                id: project_id.clone(),
-                project_id,
+                id: format!("{}-active", project_id),
+                project_id: project_id.clone(),
                 revision: 1,
                 theme: ThemeRef::Project,
                 background: Background::Theme,
                 chrome: SurfaceChrome::default(),
-                surfaces: Vec::new(),
-                layout: Layout::Empty,
-                bindings: Vec::new(),
-                focused_surface_id: None,
+    surfaces: vec![Surface {
+                    id: "repo-status".into(),
+                    title: format!("{}: Active Work", project_id),
+                    content: SurfaceContent::Widget {
+                        spec: canvas_widgets::WidgetSpec {
+                            schema_version: SCHEMA_VERSION,
+                            id: "repo-status".into(),
+                            kind: canvas_widgets::WidgetKind::Table {
+                                title: format!("{}: Active Work", project_id),
+                                columns: vec!["State".into(), "Project".into(), "Idle".into(), "Ready".into(), "Backlog".into()],
+                                rows: Vec::new(),
+                            },
+                            theme: None,
+                            refresh_ms: None,
+                            chrome: canvas_widgets::WidgetChrome::DragOnly,
+                            data: canvas_widgets::WidgetData::default(),
+                        },
+                    },
+                    inputs: vec![InputPort {
+                        id: "repos".into(),
+                        contract: "canvas.widget.snapshot.v1".into(),
+                    }],
+                }],
+                layout: Layout::Canvas {
+                    placements: vec![crate::Placement {
+                        surface_id: "repo-status".into(),
+                        bounds: crate::NormalizedRect { x: 0.02, y: 0.1, width: 0.96, height: 0.8 },
+                        layer: 0,
+                    }],
+                },
+                bindings: vec![DataBinding {
+                    id: "repo-feed".into(),
+                    source: DataSource {
+                        owner: "alfalfa".into(),
+                        stream: "repo-status".into(),
+                        contract: "canvas.widget.snapshot.v1".into(),
+                    },
+                    target: InputTarget {
+                        surface_id: "repo-status".into(),
+                        input_id: "repos".into(),
+                    },
+                    adapter: Some("lockout-v1".into()),
+                    delivery: DeliveryPolicy::default(),
+                }],
+                focused_surface_id: Some("repo-status".into()),
             };
             let (reply, _replies) = mpsc::sync_channel(1);
             self.execute(Pending {
@@ -3196,11 +3241,79 @@ impl App {
                     );
                     Task::none()
                 } else {
-                    self.fail(
+                    // Provision a new workspace with a repo-status table so the
+                    // user sees live data immediately instead of an empty screen.
+                    let project_id = name.clone();
+                    let document = WorkspaceDocument {
+                        schema_version: SCHEMA_VERSION,
+                        id: format!("{}-active", project_id),
+                        project_id: project_id.clone(),
+                        revision: 1,
+                        theme: ThemeRef::Project,
+                        background: Background::Theme,
+                        chrome: SurfaceChrome::default(),
+                        surfaces: vec![Surface {
+                            id: "repo-status".into(),
+                            title: format!("{}: Active Work", project_id),
+                            content: SurfaceContent::Widget {
+                                spec: canvas_widgets::WidgetSpec {
+                                    schema_version: SCHEMA_VERSION,
+                                    id: "repo-status".into(),
+                                    kind: canvas_widgets::WidgetKind::Table {
+                                        title: format!("{}: Active Work", project_id),
+                                        columns: vec!["State".into(), "Project".into(),
+                                            "Idle".into(), "Ready".into(), "Backlog".into()],
+                                        rows: Vec::new(),
+                                    },
+                                    theme: None,
+                                    refresh_ms: None,
+                                    chrome: canvas_widgets::WidgetChrome::DragOnly,
+                                    data: canvas_widgets::WidgetData::default(),
+                                },
+                            },
+                            inputs: vec![InputPort {
+                                id: "repos".into(),
+                                contract: "canvas.widget.snapshot.v1".into(),
+                            }],
+                        }],
+                        layout: Layout::Canvas {
+                            placements: vec![Placement {
+                                surface_id: "repo-status".into(),
+                                bounds: NormalizedRect { x: 0.02, y: 0.1, width: 0.96, height: 0.8 },
+                                layer: 0,
+                            }],
+                        },
+                        bindings: vec![DataBinding {
+                            id: "repo-feed".into(),
+                            source: DataSource {
+                                owner: "alfalfa".into(),
+                                stream: "repo-status".into(),
+                                contract: "canvas.widget.snapshot.v1".into(),
+                            },
+                            target: InputTarget {
+                                surface_id: "repo-status".into(),
+                                input_id: "repos".into(),
+                            },
+                            adapter: Some("lockout-v1".into()),
+                            delivery: DeliveryPolicy::default(),
+                        }],
+                        focused_surface_id: Some("repo-status".into()),
+                    };
+                    self.workspaces.projects.insert(project_id, document);
+                    self.workspaces.active_project_id = Some(name.clone());
+                    if let Err(error) =
+                        workspace_store::save(&self.workspace_store_path, &self.workspaces, &self.catalog)
+                    {
+                        self.fail(pending, Failure::platform(error.to_string()));
+                        return Task::none();
+                    }
+                    self.bump();
+                    self.status = format!("Provisioned workspace '{name}' with a repo-status table.");
+                    self.emit_event(format!("workspace_provisioned {name}"));
+                    self.answer(
                         pending,
-                        Failure {
-                            code: ErrorCode::InvalidRequest,
-                            message: format!("workspace '{name}' not found"),
+                        Outcome::Ok {
+                            receipt: Receipt::WorkspaceSwitched { name },
                         },
                     );
                     Task::none()
