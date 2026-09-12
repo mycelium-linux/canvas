@@ -37,7 +37,7 @@ def send_table(repos):
         "owner": "alfalfa",
         "stream": "repo-status",
         "contract": CONTRACT,
-        "sequence": int(time.time() * 1000000) % 1000000,
+        "sequence": int(time.time() * 1000),  # Monotonic: milliseconds since epoch
         "emitted_at_ms": int(time.time() * 1000),
         "payload": {
             "limit": 100,
