@@ -406,7 +406,7 @@ impl App {
     ) -> Result<Self, String> {
         let base_catalog = Catalog::bundled().expect("bundled project catalog must remain valid");
         let workspaces = workspace_store::load(&workspace_store_path, &base_catalog)
-            .map_err(|error| error.to_string())?;
+            .unwrap_or_else(|_| workspace_store::WorkspaceStore::default());
         let mut catalog = workspaces
             .effective_catalog(&base_catalog)
             .map_err(|error| error.to_string())?;
