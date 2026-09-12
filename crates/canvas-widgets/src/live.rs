@@ -97,30 +97,6 @@ pub fn hash_data<D: Hash>(data: D) -> u64 {
     hasher.finish()
 }
 
-/// Deterministic mock pricing derived from the symbol — replaced by the live
-/// data source once wired. Kept identical to the Lua module behavior so
-/// surfaces look the same across backends.
-pub fn mock_price(symbol: &str) -> (f64, f64) {
-    let hash = symbol
-        .bytes()
-        .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
-    let price = (hash % 50_000) as f64 / 100.0 + 50.0;
-    let change = (hash.wrapping_mul(7) % 2_000) as f64 / 100.0 - 10.0;
-    (price, change)
-}
-
-pub fn ticker_text(symbols: &[String]) -> String {
-    symbols
-        .iter()
-        .map(|symbol| {
-            let (price, change) = mock_price(symbol);
-            let sign = if change >= 0.0 { "+" } else { "‒" };
-            format!("{symbol} ${price:.2} ({sign} {:.1}%)", change.abs())
-        })
-        .collect::<Vec<_>>()
-        .join("  ")
-}
-
 /// Render any widget spec using the same semantic theme contract.
 pub fn element<'a, Message: 'a>(
     spec: &'a WidgetSpec,
@@ -273,25 +249,28 @@ pub fn element<'a, Message: 'a>(
                 visual,
             )
         }
-        WidgetKind::Ticker { symbols } => {
-            let quotes = symbols
+        WidgetKind::Ticker { entries } => {
+            let quotes = entries
                 .iter()
-                .map(|symbol| {
-                    let (price, change) = mock_price(symbol);
+                .map(|entry| {
+                    let state_color = entry.state.as_ref().map_or(color(palette.text), |status| {
+                        match status {
+                            StatusLevel::Good => color(palette.success),
+                            StatusLevel::Warning => color(palette.warning),
+                            StatusLevel::Critical => color(palette.danger),
+                            StatusLevel::Neutral => color(palette.text),
+                        }
+                    });
                     column![
-                        text(symbol)
+                        text(&entry.label)
                             .size(metrics.small)
                             .color(color(palette.text_muted)),
-                        text(format!("${price:.2}"))
+                        text(format!("{:.2}", entry.value))
                             .size(metrics.large)
                             .color(color(palette.text)),
-                        text(format!("{change:+.1}%")).size(metrics.small).color(
-                            if change >= 0.0 {
-                                color(palette.success)
-                            } else {
-                                color(palette.danger)
-                            }
-                        ),
+                        text(entry.state.as_ref().map(|s| format!("{s:?}")).unwrap_or_default())
+                            .size(metrics.small)
+                            .color(state_color),
                     ]
                     .spacing(metrics.space_1)
                     .into()
@@ -2138,13 +2117,6 @@ impl<Message> canvas::Program<Message> for ChartProgram {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ticker_matches_lua_module_output() {
-        let text = ticker_text(&["AAPL".into()]);
-        assert!(text.contains("AAPL $"));
-        assert!(text.contains('%'));
-    }
 
     #[test]
     fn clock_formats_hours_minutes_seconds() {

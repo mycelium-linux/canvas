@@ -214,9 +214,9 @@ pub enum WidgetKind {
         #[serde(default = "default_clock_format")]
         format: String,
     },
-    /// Quote ticker. Symbols are uppercase tickers; prices derive from the
-    /// live data source when wired, deterministic mock otherwise.
-    Ticker { symbols: Vec<String> },
+    /// Quote ticker. Entries carry explicit label, value, and optional status —
+    /// resolved by a data stream or declared input, never invented by the widget.
+    Ticker { entries: Vec<BarValue> },
     /// Radial or linear gauge, 0..100.
     Gauge {
         value: f32,
@@ -310,12 +310,10 @@ pub enum WidgetKind {
     /// filesystem to choose what code runs.
     ///
     /// `inputs` are *declared* values. A module kind receives its data and cannot
-    /// go looking for any — which is the opposite of what [`WidgetKind::Clock`] and
-    /// [`WidgetKind::Ticker`] do today, reading the host clock and inventing prices
-    /// from a hash. Those two are the subject of dock-cov.5 and are not the model
-    /// to follow here: if every externally-defined kind could reach for a clock or
-    /// a number, that boundary becomes unenforceable exactly as the vocabulary
-    /// starts growing.
+    /// go looking for any — which is the opposite of what [`WidgetKind::Clock`]
+    /// does today, reading the host clock. Clock is the documented exception
+    /// (intrinsic rather than sourced); a module that wants live quotes must
+    /// receive them through a declared input contract.
     Module {
         module: String,
         #[serde(default)]
@@ -867,12 +865,15 @@ impl WidgetSpec {
                     )?;
                 }
             }
-            WidgetKind::Ticker { symbols } => {
-                check(!symbols.is_empty(), "ticker requires at least one symbol")?;
-                check(
-                    symbols.iter().all(|s| !s.is_empty() && s.len() <= 12),
-                    "ticker symbols must be 1-12 characters",
-                )?;
+            WidgetKind::Ticker { entries } => {
+                check(!entries.is_empty(), "ticker requires at least one entry")?;
+                for entry in entries {
+                    bounded_label(&entry.label, "ticker entry label")?;
+                    check(
+                        entry.value.is_finite() && entry.value >= 0.0,
+                        "ticker entry value must be finite and non-negative",
+                    )?;
+                }
             }
             WidgetKind::Gauge { value, .. } => check(
                 value.is_finite() && (0.0..=100.0).contains(value),
@@ -1419,7 +1420,11 @@ mod tests {
                 entries: Vec::new(),
             },
             WidgetKind::Ticker {
-                symbols: vec!["A".into()],
+                entries: vec![BarValue {
+                    label: "A".into(),
+                    value: 1.0,
+                    state: None,
+                }],
             },
             WidgetKind::Status { state: None },
             WidgetKind::Text { text: "x".into() },
@@ -1568,7 +1573,10 @@ mod tests {
             "schema_version": 1,
             "id": "demo-ticker",
             "kind": "ticker",
-            "symbols": ["AAPL", "GOOG"],
+            "entries": [
+                {"label": "AAPL", "value": 187.50, "state": "good"},
+                {"label": "GOOG", "value": 152.30, "state": "good"}
+            ],
             "refresh_ms": 30000
         }"#;
         let spec = WidgetSpec::from_json(json.as_bytes()).expect("valid spec");
@@ -1576,7 +1584,18 @@ mod tests {
         assert_eq!(
             spec.kind,
             WidgetKind::Ticker {
-                symbols: vec!["AAPL".into(), "GOOG".into()]
+                entries: vec![
+                    BarValue {
+                        label: "AAPL".into(),
+                        value: 187.50,
+                        state: Some(StatusLevel::Good),
+                    },
+                    BarValue {
+                        label: "GOOG".into(),
+                        value: 152.30,
+                        state: Some(StatusLevel::Good),
+                    },
+                ]
             }
         );
         let re = serde_json::to_string(&spec).expect("serialize");
@@ -1776,7 +1795,7 @@ mod module_kind_tests {
     fn the_seven_built_in_kinds_still_parse_unchanged() {
         for json in [
             r#"{"kind":"clock","format":"%H:%M"}"#,
-            r#"{"kind":"ticker","symbols":["AAPL"]}"#,
+            r#"{"kind":"ticker","entries":[{"label":"AAPL","value":187.50}]}"#,
             r#"{"kind":"gauge","value":50.0}"#,
             r#"{"kind":"meter","value":0.5}"#,
             r#"{"kind":"chart","chart_type":"bar","source":"data.csv"}"#,

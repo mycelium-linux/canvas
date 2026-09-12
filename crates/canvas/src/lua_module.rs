@@ -544,33 +544,6 @@ fn install_widget_api(lua: &Lua, read_theme: bool, theme: ModuleThemeTokens) -> 
 
     widget
         .set(
-            "stock_prices",
-            lua.create_function(|lua, symbols: Vec<String>| {
-                let mut result = String::new();
-                for symbol in symbols {
-                    let hash = symbol
-                        .bytes()
-                        .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
-                    let price = (hash % 50000) as f64 / 100.0 + 50.0;
-                    let change = (hash.wrapping_mul(7) % 2000) as f64 / 100.0 - 10.0;
-                    let sign = if change >= 0.0 { "+" } else { "‒" };
-                    result.push_str(&format!(
-                        "{} ${:.2} ({} {:.1}%)  ",
-                        symbol,
-                        price,
-                        sign,
-                        change.abs()
-                    ));
-                }
-                let text = result.trim_end().to_string();
-                widget_set_text(lua, &text)
-            })
-            .map_err(lua_error)?,
-        )
-        .map_err(lua_error)?;
-
-    widget
-        .set(
             "time",
             lua.create_function(|lua, ()| {
                 let now = std::time::SystemTime::now()

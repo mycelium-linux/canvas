@@ -2,5 +2,15 @@
   "schema_version": 1,
   "id": "demo-ticker",
   "kind": "ticker",
-  "symbols": ["AAPL", "NVDA", "TSLA", "BTC"]
+  "entries": [
+    {"label": "AAPL", "value": 187.50, "state": "good"},
+    {"label": "NVDA", "value": 134.25, "state": "good"},
+    {"label": "TSLA", "value": 248.10, "state": "warning"},
+    {"label": "BTC",  "value": 67234.50, "state": "good"}
+  ],
+  "data": {
+    "state": "ready",
+    "provenance": "demo",
+    "source": "demonstration values"
+  }
 }
