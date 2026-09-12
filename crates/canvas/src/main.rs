@@ -422,6 +422,7 @@ struct App {
     background_picker: Option<::canvas::background_picker::BackgroundPicker>,
     theme_picker: Option<::canvas::theme_picker::ThemePicker>,
     project_picker: Option<::canvas::project_picker::ProjectPicker>,
+    project_switcher: Option<::canvas::project_switcher::ProjectSwitcher>,
     jarvis_visible: bool,
     hud_visible: bool,
     scale_factor: f64,
@@ -707,6 +708,7 @@ impl App {
             background_picker: None,
             theme_picker: None,
             project_picker: None,
+            project_switcher: None,
             jarvis_visible: true,
             hud_visible: false,
             scale_factor: 1.0,
@@ -1307,6 +1309,26 @@ impl App {
                         Action::Ignored => {}
                     }
                 }
+                if let Some(switcher) = self.project_switcher.as_mut() {
+                    use ::canvas::project_switcher::Action as SwitchAction;
+                    match switcher.handle(&kbd_event, &self.catalog) {
+                        SwitchAction::Consumed => {
+                            self.bump();
+                            return Task::none();
+                        }
+                        SwitchAction::Apply(project) => {
+                            self.project_switcher = None;
+                            return self.switch_project(project);
+                        }
+                        SwitchAction::Cancel => {
+                            self.project_switcher = None;
+                            self.status = "Kept the current project.".into();
+                            self.bump();
+                            return Task::none();
+                        }
+                        SwitchAction::Ignored => {}
+                    }
+                }
                 if background_picker_requested(&kbd_event) {
                     return self.toggle_background_picker();
                 }
@@ -1315,6 +1337,9 @@ impl App {
                 }
                 if project_picker_requested(&kbd_event) {
                     return self.toggle_project_picker();
+                }
+                if switcher_requested(&kbd_event) {
+                    return self.toggle_project_switcher();
                 }
                 if diagnostics_toggle_requested(&kbd_event) {
                     self.hud_visible = !self.hud_visible;
@@ -2228,6 +2253,19 @@ impl App {
         } else {
             Task::none()
         }
+    }
+
+    fn toggle_project_switcher(&mut self) -> Task<Message> {
+        self.project_switcher = self.project_switcher.take().or(Some(Default::default()));
+        let visible = self.project_switcher.is_some();
+        self.status = if visible {
+            "Switch project: type to filter, arrows to navigate, Enter to switch.".into()
+        } else {
+            "Kept the current project.".into()
+        };
+        self.bump();
+        self.emit_event(format!("project_switcher {}", if visible { "shown" } else { "hidden" }));
+        Task::none()
     }
 
     fn toggle_project_picker(&mut self) -> Task<Message> {
@@ -3798,7 +3836,7 @@ impl App {
             Background::Shader { shader_id, speed } if *speed > 0.0 => Some((*shader_id, *speed)),
             _ => None,
         };
-        let picker_open = self.background_picker.is_some();
+        let picker_open = self.background_picker.is_some() || self.project_switcher.is_some();
         if (!self.screensaver_settings.enabled && document_shader.is_none() && !picker_open)
             || !self.screensaver_clock.record_if_due(now)
         {
@@ -5235,6 +5273,9 @@ impl App {
         if let Some(picker) = self.theme_picker.as_ref() {
             layers.push(picker.view::<Message>(&|index| Message::ThemePickerSelect(index)));
         }
+        if let Some(picker) = self.project_switcher.as_ref() {
+            layers.push(picker.view(&self.catalog, &self.document.project_id));
+        }
         if let Some(picker) = self.project_picker.as_ref() {
             layers.push(picker.view(&self.catalog, &self.document.project_id));
         }
@@ -5887,6 +5928,23 @@ fn project_picker_requested(event: &iced::keyboard::Event) -> bool {
             repeat: false,
             ..
         } if character == "p" && modifiers.control() && !modifiers.alt() && !modifiers.logo()
+    )
+}
+
+fn switcher_requested(event: &iced::keyboard::Event) -> bool {
+    use iced::keyboard::{Event, Key};
+    matches!(
+        event,
+        Event::KeyPressed {
+            key: Key::Character(character),
+            modifiers,
+            repeat: false,
+            ..
+        } if character == "p"
+            && modifiers.control()
+            && modifiers.shift()
+            && !modifiers.alt()
+            && !modifiers.logo()
     )
 }
 

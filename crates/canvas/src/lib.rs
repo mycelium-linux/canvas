@@ -26,6 +26,7 @@ pub mod mcp;
 pub mod media;
 pub mod operational_views;
 pub mod project_picker;
+pub mod project_switcher;
 pub mod reconcile;
 pub mod runtime_config;
 pub mod screensaver;
