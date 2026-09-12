@@ -569,7 +569,7 @@ impl App {
             theme_picker: None,
             project_picker: None,
             jarvis_visible: true,
-            hud_visible: true,
+            hud_visible: false,
             scale_factor: 1.0,
             receiver,
             _socket: socket,

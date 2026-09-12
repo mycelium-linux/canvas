@@ -794,7 +794,7 @@ impl Default for OverlaySettings {
             presence_rail: OverlayTarget::Leftmost,
             presence_preview: OverlayTarget::Leftmost,
             presence_orb: OverlayTarget::Hidden,
-            system_hud: OverlayTarget::Rightmost,
+            system_hud: OverlayTarget::Hidden,
             fpl_mark: OverlayTarget::Leftmost,
             shortcut_help: OverlayTarget::Rightmost,
         }
