@@ -738,7 +738,11 @@ struct Canvas {
     /// URL of the fpl-storage blob store (localhost:8799 by default). When
     /// absent, artifact tools return a clear "no broker connected" error so
     /// callers know the surface is defined but not served.
-    storage_url: Option<String>,
+     storage_url: Option<String>,
+    /// URL of the local asset resolver process (localhost:8798 by default).
+    /// When present, canvas_get_artifact asks the resolver to fetch and
+    /// content-address bytes rather than hitting fpl-storage directly.
+    asset_resolver: Option<String>,
     /// URL of the Alfalfa index (localhost:8787 by default). When present,
     /// search_artifacts queries the live index instead of the bundled catalog.
     alfalfa_url: Option<String>,
@@ -768,6 +772,15 @@ impl Default for Canvas {
                         None
                     } else {
                         Some("http://127.0.0.1:8787".to_string())
+                    }
+                }),
+            asset_resolver: std::env::var("FPL_ASSET_RESOLVER")
+                .ok()
+                .or_else(|| {
+                    if std::env::var("FPL_NO_ASSET_RESOLVER").is_ok() {
+                        None
+                    } else {
+                        Some("http://127.0.0.1:8798".to_string())
                     }
                 }),
         }
@@ -805,27 +818,52 @@ impl Canvas {
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("HTTP client: {e}"), None))?;
+        let asset_resolver = &self.asset_resolver;
 
         match tool_name {
             "canvas_get_artifact" => {
                 let args: GetArtifact = serde_json::from_value(args)
                     .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?;
-                let url = format!("{}/blob/{}", storage_url, args.artifact);
-                let response = client.get(&url).send().await
-                    .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("storage fetch failed: {e}"), None))?;
-                let status = response.status().as_u16();
-                if status == 404 {
-                    return Ok(CallToolResult::error(vec![ContentBlock::text(
-                        format!("artifact not found in storage: {}", args.artifact)
-                    )])
-                    .into());
-                }
-                let content_type = response.headers().get("content-type")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("application/octet-stream")
-                    .to_string();
-                let bytes = response.bytes().await
-                    .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("read body: {e}"), None::<serde_json::Value>))?;
+                // Prefer the local asset resolver (content-addressed store with
+                // credentials); fall back to direct storage fetch when offline.
+                let (bytes, content_type) = if let Some(resolver) = asset_resolver {
+                    let url = format!("{}/resolve/{}", resolver, args.artifact);
+                    let response = client.get(&url).send().await
+                        .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("resolver fetch failed: {e}"), None))?;
+                    if response.status() == 404 {
+                        return Ok(CallToolResult::error(vec![ContentBlock::text(
+                            format!("artifact not found: {}", args.artifact)
+                        )])
+                        .into());
+                    }
+                    let info: serde_json::Value = response.json().await
+                        .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("resolver decode: {e}"), None))?;
+                    let path = info.get("path").and_then(|v| v.as_str())
+                        .ok_or_else(|| ErrorData::invalid_request("resolver returned no path", None))?;
+                    let ct = info.get("media_type").and_then(|v| v.as_str())
+                        .unwrap_or("application/octet-stream").to_string();
+                    (std::fs::read(path)
+                        .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("read resolved asset: {e}"), None))?,
+                     ct)
+                } else {
+                    let url = format!("{}/blob/{}", storage_url, args.artifact);
+                    let response = client.get(&url).send().await
+                        .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("storage fetch failed: {e}"), None))?;
+                    let status = response.status().as_u16();
+                    if status == 404 {
+                        return Ok(CallToolResult::error(vec![ContentBlock::text(
+                            format!("artifact not found in storage: {}", args.artifact)
+                        )])
+                        .into());
+                    }
+                    let content_type = response.headers().get("content-type")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("application/octet-stream")
+                        .to_string();
+                    let bytes = response.bytes().await
+                        .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("read body: {e}"), None::<serde_json::Value>))?;
+                    (bytes.to_vec(), content_type)
+                };
 
                 // Retrieval IS the attention signal: opening the artifact on
                 // Canvas happens by construction, not by a separate call.
