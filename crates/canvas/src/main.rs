@@ -2,7 +2,7 @@
 use ::canvas::DeliveryPolicy;
 use ::canvas::chart::{ChartDocument, ChartKind};
 use ::canvas::control::{
-    CONTROL_VERSION, CaptureChromeSnapshot, Command, ContentKind, ControlReply, ControlRequest,
+    CONTROL_VERSION, Command, ContentKind, ControlReply, ControlRequest,
     ErrorCode, MAX_ACTIVE_INDICATORS, MAX_CONTROL_MESSAGE, MeshSnapshot, MountedViewSnapshot,
     Navigation, Outcome, OverlaySettings, OverlayTarget, PresencePreview, PresenceSnapshot,
     ProjectWorkspaceSnapshot, Receipt, RuntimeSnapshot, ScreensaverSettings, ScreensaverSnapshot,
@@ -284,6 +284,11 @@ enum Message {
     WallpaperFinished {
         pending: Box<Pending>,
         result: Result<canvas_core::desktop::WallpaperReceipt, Failure>,
+    },
+    ScreenshotCaptured {
+        pending: Box<Pending>,
+        region: Option<Rect>,
+        screenshot: iced::window::Screenshot,
     },
     LinkOpened(String),
     TerminalInput(iced::keyboard::Event),
@@ -1528,6 +1533,75 @@ impl App {
                         );
                     }
                     Err(failure) => self.fail(pending, failure),
+                }
+                Task::none()
+            }
+            Message::ScreenshotCaptured {
+                pending,
+                region,
+                screenshot: captured,
+            } => {
+                let pending = *pending;
+                let cropped = if let Some(region) = region {
+                    let sf = captured.scale_factor;
+                    let crop_region = Rectangle::<u32> {
+                        x: (region.x as f32 * sf) as u32,
+                        y: (region.y as f32 * sf) as u32,
+                        width: (region.width as f32 * sf) as u32,
+                        height: (region.height as f32 * sf) as u32,
+                    };
+                    match captured.crop(crop_region) {
+                        Ok(cropped) => cropped,
+                        Err(_) => captured.clone(),
+                    }
+                } else {
+                    captured.clone()
+                };
+                let width = cropped.size.width;
+                let height = cropped.size.height;
+                let img = image::RgbaImage::from_raw(width, height, cropped.rgba.to_vec());
+                let result = if let Some(img) = img {
+                    let path = std::env::temp_dir().join(format!(
+                        "canvas-screenshot-{}-{}.png",
+                        std::process::id(),
+                        pending.request.request_id
+                    ));
+                    let file = std::fs::File::create(&path);
+                    if let Ok(mut file) = file {
+                        let write_result = img.write_to(&mut file, image::ImageFormat::Png);
+                        if write_result.is_ok() {
+                            let digest = hash_file(&path)
+                                .unwrap_or_else(|_| "error".to_string());
+                            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                            Ok((path, digest, width, height, size))
+                        } else {
+                            Err("PNG encode failed")
+                        }
+                    } else {
+                        Err("Could not create temp file")
+                    }
+                } else {
+                    Err("Screenshot has no RGBA data")
+                };
+                match result {
+                    Ok((path, sha256, width, height, _)) => {
+                        let _ = width;
+                        let _ = height;
+                        self.answer(
+                            pending,
+                            Outcome::Ok {
+                                receipt: Receipt::ScreenshotCaptured {
+                                    path,
+                                    sha256,
+                                    width,
+                                    height,
+                                },
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        self.fail(pending, Failure::platform(error.to_string()));
+                    }
                 }
                 Task::none()
             }
@@ -3593,6 +3667,26 @@ impl App {
                 }
                 Task::none()
             }
+            Command::Screenshot { surface_id, region } => {
+                let window_id = self.windows.keys().next().copied();
+                let Some(window_id) = window_id else {
+                    self.fail(pending, Failure::platform("no Canvas window to screenshot".to_string()));
+                    return Task::none();
+                };
+                let resolved_region = surface_id.as_ref().and_then(|id| {
+                    self.snapshot().surface_bounds.get(id).copied()
+                });
+                let capture_region = region.or(resolved_region);
+                let mut pending = Some(pending);
+                iced::window::screenshot(window_id).map(move |screenshot| {
+                    let pending = pending.take().expect("screenshot task runs once");
+                    Message::ScreenshotCaptured {
+                        pending: Box::new(pending),
+                        region: capture_region,
+                        screenshot,
+                    }
+                })
+            }
         }
     }
 
@@ -3783,14 +3877,6 @@ impl App {
                     })
                 })
                 .collect(),
-            capture_chrome: Some({
-                let palette = self.presented_palette();
-                CaptureChromeSnapshot {
-                    danger: palette.danger,
-                    warning: palette.warning,
-                    success: palette.success,
-                }
-            }),
             active_indicators: self.indicators.values().cloned().collect(),
             mesh: self.mesh.clone(),
             presence: assemble_presence(self.presence.as_ref(), now_unix_ms()),

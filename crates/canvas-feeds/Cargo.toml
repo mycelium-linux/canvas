@@ -1,0 +1,20 @@
+[package]
+name = "canvas-feeds"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reusable producers that surface public endpoints (Hacker News, Reddit, RSS) as Canvas widget snapshots"
+
+[dependencies]
+canvas-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+[lib]
+name = "canvas_feeds"
+path = "src/lib.rs"
+
+[[bin]]
+name = "canvas-feeds"
+path = "src/main.rs"

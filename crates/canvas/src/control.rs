@@ -176,6 +176,11 @@ pub enum Command {
         file: PathBuf,
         chart_type: String,
     },
+    Screenshot {
+        surface_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        region: Option<Rect>,
+    },
 }
 
 /// Public project metadata resolved by an authenticated catalog owner.
@@ -683,6 +688,12 @@ pub enum Receipt {
     BackgroundShaderSet {
         visible: VisibleBackground,
     },
+    ScreenshotCaptured {
+        path: PathBuf,
+        sha256: String,
+        width: u32,
+        height: u32,
+    },
 }
 
 /// What a person is actually looking at once a mutation has landed.
@@ -732,7 +743,6 @@ pub struct RuntimeSnapshot {
     #[serde(default)]
     pub views: Vec<MountedViewSnapshot>,
     #[serde(default)]
-    pub capture_chrome: Option<CaptureChromeSnapshot>,
     pub active_indicators: Vec<StatusIndicator>,
     #[serde(default)]
     pub mesh: Option<MeshSnapshot>,
@@ -775,14 +785,6 @@ impl RuntimeSnapshot {
             ..self.clone()
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CaptureChromeSnapshot {
-    pub danger: [u8; 3],
-    pub warning: [u8; 3],
-    pub success: [u8; 3],
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1047,6 +1049,7 @@ impl ControlRequest {
             | Command::Shutdown
             | Command::ScreensaverShader { .. }
             | Command::OpenDataViz { .. }
+            | Command::Screenshot { .. }
             | Command::SetBackground { .. }
             | Command::ClearBackground
             | Command::OpenStream { .. }
@@ -1688,6 +1691,9 @@ pub mod text {
                     },
                     Receipt::BackgroundShaderSet { visible } => {
                         format!("background {}", format_visible_background(visible))
+                    }
+                    Receipt::ScreenshotCaptured { path, sha256, width, height } => {
+                        format!("screenshot path={} sha256={sha256} {}x{}", path.display(), width, height)
                     }
                 };
                 format!("OK rev={} {}", reply.revision, detail)
@@ -2459,7 +2465,6 @@ mod tests {
             surfaces: vec![],
             surface_bounds: Default::default(),
             views: vec![],
-            capture_chrome: None,
             active_indicators: vec![],
             mesh: None,
             presence: Some(PresenceSnapshot {

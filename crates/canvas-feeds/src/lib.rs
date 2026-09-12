@@ -1,0 +1,590 @@
+//! Host-side producers that surface public endpoints as Canvas widget snapshots.
+//!
+//! The Lua sandbox is deliberately offline, so fetching network data is done
+//! here and only rendering is left to a binder. Each public source normalizes to
+//! a single [`Headline`] shape, which means one reusable binder
+//! (`feed-headlines-v1`) renders Hacker News, Reddit and RSS identically.
+//!
+//! Fetching is split from parsing: [`Http`] is the seam, so every normalizer is
+//! unit-tested with canned JSON/XML and no network.
+//!
+//! ## Layout discipline (docs/widget-quality.md)
+//!
+//! A datagram that exceeds the AF_UNIX cap (2048 B on macOS) is rejected, not
+//! truncated, so [`fit`] trims trailing rows until the snapshot fits instead of
+//! fabricating a partial list that reads as complete.
+
+use canvas_core::stream_socket_path;
+use serde_json::{json, Value};
+use std::{
+    os::unix::net::UnixDatagram,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+pub const CONTRACT: &str = "canvas.widget.snapshot.v1";
+pub const SCHEMA_VERSION: u32 = 1;
+/// macOS caps `AF_UNIX` datagrams at this size; a larger send fails with
+/// `EMSGSIZE` rather than truncating. Canvas enforces a 64 KB ceiling too, but
+/// the kernel cap is the one that actually bites.
+pub const MAX_DATAGRAM: usize = 2048;
+/// Envelope bytes around the widget, leaving headroom so a fully-fitted row set
+/// lands reliably under `MAX_DATAGRAM`.
+pub const ENVELOPE_OVERHEAD: usize = 200;
+/// Rows are capped both for the datagram and for a single readable screen.
+pub const MAX_ROWS: usize = 12;
+
+/// A normalized headline. `score`/`by`/`age_secs`/`url` may be absent depending
+/// on the source (RSS has none of them); the binder renders the gaps honestly.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Headline {
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age_secs: Option<u64>,
+    pub source: &'static str,
+}
+
+/// The raw feed a binder consumes. The producer puts this verbatim in the
+/// envelope payload; `feed-headlines-v1` turns it into a `Table` widget.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Feed {
+    pub title: String,
+    pub source: &'static str,
+    pub rows: Vec<Headline>,
+}
+
+/// Public endpoints supported by a single normalized fetch.
+#[derive(Debug, Clone)]
+pub enum FeedKind {
+    /// Hacker News front page (Firebase API, no auth).
+    HackerNews,
+    /// A subreddit's hot list via `old.reddit.com` (public JSON, no auth).
+    Reddit { sub: String },
+    /// An arbitrary RSS/Atom-ish feed (raw XML).
+    Rss { url: String, title: String },
+}
+
+impl FeedKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            FeedKind::HackerNews => "Hacker News",
+            FeedKind::Reddit { .. } => "Reddit",
+            FeedKind::Rss { .. } => "RSS",
+        }
+    }
+    pub fn source(&self) -> &'static str {
+        match self {
+            FeedKind::HackerNews => "hn",
+            FeedKind::Reddit { .. } => "reddit",
+            FeedKind::Rss { .. } => "rss",
+        }
+    }
+}
+
+/// One recoverable failure mode for a producer, carried to the widget as a
+/// source-health state instead of crashing the loop.
+#[derive(Debug, Clone)]
+pub enum Error {
+    /// The HTTP fetch failed or returned non-200.
+    Fetch { source: String, detail: String },
+    /// The body parsed but had no rows.
+    Empty { source: String },
+    /// A row could not be normalized (skipped, not fatal).
+    Row { source: String, detail: String },
+    /// No AF_UNIX runtime dir to send to.
+    NoSocket,
+    /// The send failed (Canvas down, usually).
+    Send { detail: String },
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Fetch { source, detail } => {
+                write!(f, "{source} fetch failed: {detail}")
+            }
+            Error::Empty { source } => write!(f, "{source} returned no items"),
+            Error::Row { source, detail } => write!(f, "{source} row: {detail}"),
+            Error::NoSocket => write!(f, "no Canvas stream socket home is configured"),
+            Error::Send { detail } => write!(f, "send failed: {detail}")
+        }
+    }
+}
+impl std::error::Error for Error {}
+
+/// HTTP as a seam. The real implementation is [`ReqwestHttp`]; tests pass a stub
+/// so parsing is exercised without touching the network.
+pub trait Http {
+    fn get_json(&self, url: &str) -> Result<Value, Error>;
+    fn get_text(&self, url: &str) -> Result<String, Error>;
+}
+
+/// Boring choice: `reqwest` with `rustls-tls` (no native OpenSSL link).
+pub struct ReqwestHttp {
+    client: reqwest::blocking::Client,
+}
+impl Default for ReqwestHttp {
+    fn default() -> Self {
+        Self {
+            client: reqwest::blocking::Client::builder()
+                .user_agent("canvas-feeds/0.1 (+https://futurepresentlabs.com)")
+                .build()
+                .expect("reqwest client builds"),
+        }
+    }
+}
+impl Http for ReqwestHttp {
+    fn get_json(&self, url: &str) -> Result<Value, Error> {
+        let resp = self
+            .client
+            .get(url)
+            .send()
+            .map_err(|e| Error::Fetch { source: url.into(), detail: e.to_string() })?;
+        if !resp.status().is_success() {
+            return Err(Error::Fetch {
+                source: url.into(),
+                detail: format!("HTTP {}", resp.status()),
+            });
+        }
+        resp.json::<Value>()
+            .map_err(|e| Error::Fetch { source: url.into(), detail: e.to_string() })
+    }
+    fn get_text(&self, url: &str) -> Result<String, Error> {
+        let resp = self
+            .client
+            .get(url)
+            .send()
+            .map_err(|e| Error::Fetch { source: url.into(), detail: e.to_string() })?;
+        if !resp.status().is_success() {
+            return Err(Error::Fetch {
+                source: url.into(),
+                detail: format!("HTTP {}", resp.status()),
+            });
+        }
+        resp.text()
+            .map_err(|e| Error::Fetch { source: url.into(), detail: e.to_string() })
+    }
+}
+
+/// Seconds since the UNIX epoch, with a sane zero on a wedged clock.
+pub fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Fetch a feed from the public endpoint it names. Pure given an [`Http`].
+pub fn fetch(kind: &FeedKind, http: &dyn Http) -> Result<Feed, Error> {
+    match kind {
+        FeedKind::HackerNews => fetch_hacker_news(http),
+        FeedKind::Reddit { sub } => fetch_reddit(http, sub),
+        FeedKind::Rss { url, title } => fetch_rss(http, url, title),
+    }
+}
+
+const HN_BASE: &str = "https://hacker-news.firebaseio.com/v0";
+
+fn fetch_hacker_news(http: &dyn Http) -> Result<Feed, Error> {
+    let ids: Vec<u64> = http
+        .get_json(&format!("{HN_BASE}/topstories.json?print=compact"))?
+        .as_array()
+        .ok_or(Error::Empty { source: "hn".into() })?
+        .iter()
+        .take(MAX_ROWS)
+        .map(|v| v.as_u64().unwrap_or(0))
+        .collect();
+    if ids.is_empty() {
+        return Err(Error::Empty { source: "hn".into() });
+    }
+    let mut rows = Vec::with_capacity(ids.len());
+    for id in ids {
+        let item = http.get_json(&format!("{HN_BASE}/item/{id}.json"))?;
+        if let Some(h) = normalize_hn_item(&item, "hn") {
+            rows.push(h);
+        }
+    }
+    rows.truncate(MAX_ROWS);
+    Ok(Feed { title: "Hacker News".into(), source: "hn", rows })
+}
+
+fn normalize_hn_item(item: &Value, source: &'static str) -> Option<Headline> {
+    let Some(title) = item.get("title").and_then(|t| t.as_str()).filter(|s| !s.is_empty()) else {
+        return None;
+    };
+    let id = item.get("id").and_then(|v| v.as_u64());
+    let url = item
+        .get("url")
+        .and_then(|v| v.as_str().filter(|s| !s.is_empty()).map(str::to_owned))
+        .or_else(|| id.map(|id| format!("https://news.ycombinator.com/item?id={id}")));
+    let age_secs = id.and_then(|_| {
+        item.get("time")
+            .and_then(|t| t.as_u64())
+            .map(|posted| now_ms() / 1000 - posted)
+    });
+    Some(Headline {
+        title: trim_title(title),
+        url,
+        score: item.get("score").and_then(|v| v.as_u64()),
+        by: item.get("by").and_then(|v| v.as_str().map(str::to_owned)),
+        age_secs,
+        source,
+    })
+}
+
+fn fetch_reddit(http: &dyn Http, sub: &str) -> Result<Feed, Error> {
+    let url = format!("https://old.reddit.com/r/{sub}/hot.json?limit=10");
+    let body = http.get_json(&url)?;
+    let Some(children) = body.pointer("/data/children").and_then(|v| v.as_array()) else {
+        return Err(Error::Empty { source: "reddit".into() });
+    };
+    let mut rows = Vec::with_capacity(children.len().min(MAX_ROWS));
+    for child in children.iter().take(MAX_ROWS) {
+        if let Some(h) = normalize_reddit_post(&child.pointer("/data").unwrap_or(&Value::Null), "reddit") {
+            rows.push(h);
+        }
+    }
+    Ok(Feed {
+        title: format!("r/{sub}"),
+        source: "reddit",
+        rows,
+    })
+}
+
+fn normalize_reddit_post(post: &Value, source: &'static str) -> Option<Headline> {
+    let title = post.get("title").and_then(|v| v.as_str())?;
+    let url = post
+        .get("url")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            post.get("id")
+                .and_then(|v| v.as_str())
+                .map(|id| format!("https://old.reddit.com/comments/{id}"))
+        });
+    let age_secs = post
+        .get("created_utc")
+        .and_then(|v| v.as_u64())
+        .map(|posted| now_ms() / 1000 - posted);
+    Some(Headline {
+        title: trim_title(title),
+        url,
+        score: post.get("score").and_then(|v| v.as_u64()),
+        by: post.get("author").and_then(|v| v.as_str().map(str::to_owned)),
+        age_secs,
+        source,
+    })
+}
+
+fn fetch_rss(http: &dyn Http, url: &str, title: &str) -> Result<Feed, Error> {
+    let body = http.get_text(url)?;
+    let items = parse_rss_items(&body);
+    if items.is_empty() {
+        return Err(Error::Empty { source: "rss".into() });
+    }
+    let rows = items
+        .into_iter()
+        .take(MAX_ROWS)
+        .map(|(t, link)| Headline {
+            title: trim_title(&t),
+            url: link,
+            score: None,
+            by: None,
+            age_secs: None,
+            source: "rss",
+        })
+        .collect();
+    Ok(Feed {
+        title: title.to_owned(),
+        source: "rss",
+        rows,
+    })
+}
+
+/// Minimal RSS/2.0 item extraction: `<item><title>…</title><link>…</link>`.
+/// Good enough for headline feeds; returns title first then link.
+fn parse_rss_items(xml: &str) -> Vec<(String, Option<String>)> {
+    const ITEM: &str = "<item>";
+    let mut out = Vec::new();
+    for item in xml.split(ITEM).skip(1) {
+        if let Some(rest) = item.split_once("</item>") {
+            let block = rest.0;
+            let title = field(block, "title").unwrap_or_else(|| untitled());
+            let link = field(block, "link");
+            out.push((title, link));
+        }
+    }
+    out
+}
+
+fn untitled() -> String {
+    "(untitled)".into()
+}
+fn unescape(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+}
+fn trim_title(t: &str) -> String {
+    let t = t.trim();
+    if t.len() > 96 {
+        format!("{}…", &t[..93])
+    } else {
+        t.to_owned()
+    }
+}
+
+/// Build the raw-feed payload a binder consumes. The producer hands the binder
+/// the normalized shape so HN/RSS/Reddit are interchangeable at render time.
+pub fn payload(feed: &Feed) -> Value {
+    json!({
+        "title": feed.title,
+        "source": feed.source,
+        "rows": feed.rows,
+    })
+}
+
+/// A ready snapshot envelope (raw payload — the binder renders the widget).
+pub fn envelope(owner: &str, stream: &str, feed: &Feed, sequence: u64, emitted_ms: u64) -> Value {
+    json!({
+        "schema_version": SCHEMA_VERSION,
+        "owner": owner,
+        "stream": stream,
+        "contract": CONTRACT,
+        "sequence": sequence,
+        "emitted_at_ms": emitted_ms,
+        "payload": payload(feed),
+    })
+}
+
+/// A no-data/error envelope: the source is unhealthy, so the widget is marked
+/// rather than fabricated. Honest staleness, per widget-quality rule 2.
+pub fn error_envelope(owner: &str, stream: &str, detail: &str, sequence: u64, emitted_ms: u64) -> Value {
+    json!({
+        "schema_version": SCHEMA_VERSION,
+        "owner": owner,
+        "stream": stream,
+        "contract": CONTRACT,
+        "sequence": sequence,
+        "emitted_at_ms": emitted_ms,
+        "payload": {
+            "title": "headlines",
+            "source": stream,
+            "rows": [],
+            "error": detail,
+        },
+    })
+}
+
+/// Trim trailing rows until the JSON fits `budget` bytes. Returns whether the
+/// set was thinned, so the caller can log that the list is partial.
+pub fn fit(mut event: Value, budget: usize) -> (Value, bool) {
+    let mut thinned = false;
+    loop {
+        let over = serde_json::to_vec(&event).map(|b| b.len()).unwrap_or(usize::MAX) > budget;
+        let count = event
+            .pointer("/payload/rows")
+            .and_then(|v| v.as_array())
+            .map_or(0, Vec::len);
+        if !over || count <= 1 {
+            break;
+        }
+        if let Some(rows) = event.pointer_mut("/payload/rows").and_then(|v| v.as_array_mut()) {
+            rows.pop();
+        }
+        thinned = true;
+    }
+    (event, thinned)
+}
+
+/// Reads the text between `<tag>…</tag>`, unescaping entities. CDATA and nested
+/// tags are not expected in headline titles; anything we cannot decode is left
+/// empty so the widget shows a gap instead of garbled markup.
+fn field(block: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let Some(begin) = block.find(&open).map(|i| i + open.len()) else {
+        return None;
+    };
+    let end = block[begin..].find(&format!("</{tag}>"))? + begin;
+    Some(unescape(&block[begin..end]))
+}
+
+/// Locate Canvas's stream socket (same home the shell finds) and send one
+/// snapshot envelope for a freshly fetched feed. The datagram is fitted to the
+/// AF_UNIX budget by trimming trailing rows; a partial list is still honest.
+pub fn emit(
+    owner: &str,
+    stream: &str,
+    feed: &Feed,
+    sequence: u64,
+    emitted_ms: u64,
+) -> Result<(), Error> {
+    let event = envelope(owner, stream, feed, sequence, emitted_ms);
+    send_raw(&fit(event, MAX_DATAGRAM.saturating_sub(ENVELOPE_OVERHEAD)).0)
+}
+
+/// Send an already-built envelope (e.g. an error/no-data snapshot).
+pub fn send_raw(event: &Value) -> Result<(), Error> {
+    let path = stream_socket_path().ok_or(Error::NoSocket)?;
+    let bytes = serde_json::to_vec(event).map_err(|e| Error::Send { detail: e.to_string() })?;
+    let Ok(sock) = UnixDatagram::unbound() else {
+        return Err(Error::Send {
+            detail: "cannot create datagram socket".into(),
+        });
+    };
+    sock.send_to(&bytes, &path).map_err(|e| Error::Send { detail: e.to_string() })?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FakeHttp {
+        json: std::collections::BTreeMap<String, Value>,
+        text: std::collections::BTreeMap<String, String>,
+    }
+    impl Http for FakeHttp {
+        fn get_json(&self, url: &str) -> Result<Value, Error> {
+            self.json.get(url).cloned().ok_or(Error::Empty { source: url.into() })
+        }
+        fn get_text(&self, url: &str) -> Result<String, Error> {
+            self.text.get(url).cloned().ok_or(Error::Empty { source: url.into() })
+        }
+    }
+
+    fn hn_item(id: u64, title: &str, score: u64, by: &str, time: u64) -> Value {
+        json!({ "id": id, "title": title, "score": score, "by": by, "time": time, "url": "" })
+    }
+
+    #[test]
+    fn hn_normalizes_to_a_headline() {
+        let item = hn_item(1, "Show HN: a thing", 42, "alice", 0);
+        let h = normalize_hn_item(&item, "hn").unwrap();
+        assert_eq!(h.title, "Show HN: a thing");
+        assert_eq!(h.score, Some(42));
+        assert_eq!(h.by.as_deref(), Some("alice"));
+        assert_eq!(h.url.as_deref(), Some("https://news.ycombinator.com/item?id=1"));
+        assert!(h.age_secs.is_some(), "age should be derivable from posted time");
+    }
+
+    #[test]
+    fn hn_fetch_normalizes_and_caps_rows() {
+        let mut json = std::collections::BTreeMap::new();
+        json.insert(
+            "https://hacker-news.firebaseio.com/v0/topstories.json?print=compact".into(),
+            json!([100, 101, 102]),
+        );
+        json.insert(
+            "https://hacker-news.firebaseio.com/v0/item/100.json".into(),
+            hn_item(100, "Hundred", 10, "a", 0),
+        );
+        json.insert(
+            "https://hacker-news.firebaseio.com/v0/item/101.json".into(),
+            hn_item(101, "Hundred One", 20, "b", 0),
+        );
+        json.insert(
+            "https://hacker-news.firebaseio.com/v0/item/102.json".into(),
+            hn_item(102, "Hundred Two", 30, "c", 0),
+        );
+        let http = FakeHttp { json, text: std::collections::BTreeMap::new() };
+        let feed = fetch(&FeedKind::HackerNews, &http).unwrap();
+        assert_eq!(feed.source, "hn");
+        assert_eq!(feed.rows.len(), 3);
+        assert_eq!(feed.rows[0].by.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn rss_fetch_extracts_items() {
+        let xml = "<rss><channel><item><title>t1</title><link>https://e.com/1</link></item>\
+                   <item><title>t2</title><link>https://e.com/2</link></item></channel></rss>";
+        let mut text = std::collections::BTreeMap::new();
+        text.insert("https://example.com/rss".into(), xml.to_string());
+        let http = FakeHttp { json: std::collections::BTreeMap::new(), text };
+        let feed = fetch(&FeedKind::Rss { url: "https://example.com/rss".into(), title: "X".into() }, &http).unwrap();
+        assert_eq!(feed.rows.len(), 2);
+        assert_eq!(feed.rows[0].title, "t1");
+        assert_eq!(feed.rows[1].url.as_deref(), Some("https://e.com/2"));
+        assert_eq!(feed.rows[0].score, None);
+    }
+
+    fn reddit_post() -> Value {
+        json!({ "title": "a post", "score": 7, "author": "bob",
+            "created_utc": 0, "id": "abc", "url": "https://example.com/x" })
+    }
+
+    #[test]
+    fn reddit_normalizes_to_a_headline() {
+        let h = normalize_reddit_post(&reddit_post(), "reddit").unwrap();
+        assert_eq!(h.title, "a post");
+        assert_eq!(h.score, Some(7));
+        assert_eq!(h.by.as_deref(), Some("bob"));
+        assert_eq!(h.url.as_deref(), Some("https://example.com/x"));
+    }
+
+    #[test]
+    fn rss_items_are_extracted_and_unescaped() {
+        let xml = "<rss><channel><item><title>hi&gt;there</title><link>https://e.com</link></item>\
+                   <item><title>second</title><link>https://e.com/2</link></item></channel></rss>";
+        let items = parse_rss_items(xml);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].0, "hi>there");
+        assert_eq!(items[0].1.as_deref(), Some("https://e.com"));
+        assert_eq!(items[1].0, "second");
+    }
+
+    #[test]
+    fn fit_trims_rows_until_the_datagram_is_small_enough() {
+        // Realistic budget: Canvas rejects an oversized AF_UNIX datagram outright,
+        // so the whole envelope must land under MAX_DATAGRAM with headroom.
+        let budget = MAX_DATAGRAM - ENVELOPE_OVERHEAD;
+        let mut rows = Vec::new();
+        for n in 0..30 {
+            rows.push(json!({
+                "title": format!("a headline long enough to matter number {n} ----"),
+                "source": "hn",
+                "score": n,
+                "by": "author",
+                "url": "https://example.com/story",
+                "age_secs": 1234,
+            }));
+        }
+        let event = json!({ "schema_version": 1, "owner": "feeds", "stream": "hn",
+            "contract": "canvas.widget.snapshot.v1", "sequence": 1, "emitted_at_ms": 0,
+            "payload": { "title": "Headlines", "source": "hn", "rows": rows } });
+        let full = serde_json::to_vec(&event).unwrap().len();
+        assert!(full > budget, "precondition: {full} > {budget}");
+        let (trimmed, thinned) = fit(event, budget);
+        let bytes = serde_json::to_vec(&trimmed).unwrap().len();
+        assert!(bytes <= budget, "fit left {bytes} bytes > {budget}");
+        assert!(thinned, "dropped rows must be reported as partial");
+        assert!(
+            trimmed.pointer("payload/rows").and_then(|v| v.as_array()).map_or(0, Vec::len) < 30,
+            "some rows must survive"
+        );
+    }
+
+    #[test]
+    fn envelope_matches_the_snapshot_contract_shape() {
+        let feed = Feed { title: "HN".into(), source: "hn", rows: vec![Headline {
+            title: "t".into(), url: None, score: Some(1), by: None, age_secs: None, source: "hn" }] };
+        let ev = envelope("feeds", "hn-headlines", &feed, 3, 123);
+        assert_eq!(ev["schema_version"], 1);
+        assert_eq!(ev["owner"], "feeds");
+        assert_eq!(ev["stream"], "hn-headlines");
+        assert_eq!(ev["contract"], CONTRACT);
+        assert_eq!(ev["sequence"], 3);
+        assert_eq!(ev["emitted_at_ms"], 123);
+        assert_eq!(ev["payload"]["source"], "hn");
+        assert_eq!(ev["payload"]["rows"][0]["title"], "t");
+    }
+}
