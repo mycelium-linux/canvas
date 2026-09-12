@@ -491,6 +491,18 @@ impl PresenceSnapshot {
         }
         Ok(())
     }
+
+    /// Strip the full occupant roster (names, IDs, face data) so external callers
+    /// see only whether the zone is occupied, never who is in it.
+    pub fn redact(&self) -> Self {
+        PresenceSnapshot {
+            zone: self.zone.clone(),
+            observed_at_unix_ms: self.observed_at_unix_ms,
+            expires_after_ms: self.expires_after_ms,
+            occupied: self.occupied,
+            occupants: Vec::new(),
+        }
+    }
 }
 
 impl PresencePreview {
@@ -750,6 +762,19 @@ pub struct RuntimeSnapshot {
     pub overlays: OverlaySettings,
     #[serde(default = "default_true")]
     pub visible: bool,
+}
+
+impl RuntimeSnapshot {
+    /// Redact the presence roster before sending to external callers. The full
+    /// occupant list (names, IDs, face data) is only meaningful on the wall
+    /// display itself; every MCP/HTTP client sees "occupied" without identities.
+    pub fn redact_presence(&self) -> RuntimeSnapshot {
+        let presence = self.presence.as_ref().map(|p| p.redact());
+        RuntimeSnapshot {
+            presence,
+            ..self.clone()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2368,5 +2393,99 @@ mod tests {
             },
         };
         assert_eq!(format_reply(&err), "ERR conflict stale");
+    }
+
+    #[test]
+    fn presence_redaction_strips_occupant_names_and_ids() {
+        let avery = PresenceOccupant {
+            id: "avery@fpl.dev".into(),
+            display_name: "Avery".into(),
+            presence: PresenceSignal {
+                state: PresenceSignalState::Unavailable,
+                confidence: None,
+                age_ms: 0,
+            },
+            face: PresenceSignal {
+                state: PresenceSignalState::Unavailable,
+                confidence: None,
+                age_ms: 0,
+            },
+            voice: PresenceSignal {
+                state: PresenceSignalState::Unavailable,
+                confidence: None,
+                age_ms: 0,
+            },
+        };
+        let snapshot = PresenceSnapshot {
+            zone: "bedroom".into(),
+            observed_at_unix_ms: 1000,
+            expires_after_ms: 5000,
+            occupied: true,
+            occupants: vec![avery],
+        };
+        let redacted = snapshot.redact();
+        assert!(redacted.occupants.is_empty(), "redacted snapshot has no occupants");
+        assert!(redacted.occupied, "occupied flag survives redaction");
+        assert_eq!(redacted.zone, "bedroom");
+    }
+
+    #[test]
+    fn runtime_snapshot_redact_presence_clears_roster() {
+        let occupant = PresenceOccupant {
+            id: "avery@fpl.dev".into(),
+            display_name: "Avery".into(),
+            presence: PresenceSignal {
+                state: PresenceSignalState::Unavailable,
+                confidence: None,
+                age_ms: 0,
+            },
+            face: PresenceSignal {
+                state: PresenceSignalState::Unavailable,
+                confidence: None,
+                age_ms: 0,
+            },
+            voice: PresenceSignal {
+                state: PresenceSignalState::Unavailable,
+                confidence: None,
+                age_ms: 0,
+            },
+        };
+        let snapshot = RuntimeSnapshot {
+            workspace_id: "ws".into(),
+            project_id: "proj".into(),
+            revision: 1,
+            frame: Rect { x: 0, y: 0, width: 0, height: 0 },
+            focused_surface_id: None,
+            surfaces: vec![],
+            surface_bounds: Default::default(),
+            views: vec![],
+            capture_chrome: None,
+            active_indicators: vec![],
+            mesh: None,
+            presence: Some(PresenceSnapshot {
+                zone: "bedroom".into(),
+                observed_at_unix_ms: 1000,
+                expires_after_ms: 5000,
+                occupied: true,
+                occupants: vec![occupant],
+            }),
+            presence_preview_active: false,
+            screensaver: ScreensaverSnapshot::default(),
+            workspaces: vec![],
+            workspace_summaries: vec![],
+            minimized_surface_ids: vec![],
+            maximized_surface_ids: vec![],
+            events: vec![],
+            display_frames: vec![],
+            displays: vec![],
+            selected_display_ids: vec![],
+            overlays: OverlaySettings::default(),
+            visible: true,
+        };
+        let redacted = snapshot.redact_presence();
+        let redacted_presence = redacted.presence.expect("presence must survive redaction");
+        assert!(redacted_presence.occupants.is_empty(), "no occupant names leak to callers");
+        // Sanity: the original is untouched
+        assert_eq!(snapshot.presence.as_ref().unwrap().occupants.len(), 1);
     }
 }

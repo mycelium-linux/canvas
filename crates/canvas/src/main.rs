@@ -5240,7 +5240,7 @@ impl App {
                 .by_ref()
                 .map(|frame| frame.x)
                 .min()
-                .is_none_or(|x| viewport.x == x),
+                .is_some_and(|x| viewport.x == x),
             OverlayTarget::Center => {
                 let frames = selected.collect::<Vec<_>>();
                 if frames.is_empty() {
@@ -5273,7 +5273,7 @@ impl App {
             OverlayTarget::Rightmost => selected
                 .map(|frame| frame.x)
                 .max()
-                .is_none_or(|x| viewport.x == x),
+                .is_some_and(|x| viewport.x == x),
         }
     }
 }

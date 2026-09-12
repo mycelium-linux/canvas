@@ -1384,7 +1384,15 @@ impl ServerHandler for Canvas {
         .await
         .map_err(|_| ErrorData::internal_error("Canvas control worker failed", None))?;
         let result = match result {
-            Ok(reply) => {
+            Ok(mut reply) => {
+                // Redact presence roster: external callers see only "occupied",
+                // never names or IDs.
+                if let Outcome::Ok { receipt } = &mut reply.outcome
+                    && let Receipt::Snapshot { snapshot }
+                    | Receipt::DocumentSnapshot { snapshot, .. } = receipt
+                {
+                    *snapshot = snapshot.redact_presence();
+                }
                 let is_error = matches!(reply.outcome, Outcome::Error { .. });
                 let content = vec![ContentBlock::text(serde_json::to_string(&reply).map_err(
                     |_| ErrorData::internal_error("Canvas receipt encoding failed", None),
