@@ -3299,7 +3299,7 @@ impl App {
                         }],
                         focused_surface_id: Some("repo-status".into()),
                     };
-                    self.workspaces.projects.insert(project_id, document);
+                    self.workspaces.projects.insert(project_id.clone(), document.clone());
                     self.workspaces.active_project_id = Some(name.clone());
                     if let Err(error) =
                         workspace_store::save(&self.workspace_store_path, &self.workspaces, &self.catalog)
@@ -3307,9 +3307,14 @@ impl App {
                         self.fail(pending, Failure::platform(error.to_string()));
                         return Task::none();
                     }
+                    self.start_transition();
+                    self.document = document;
+                    self.active_project_workspace = Some(name.clone());
+                    self.ensure_scene_decoded();
                     self.bump();
                     self.status = format!("Provisioned workspace '{name}' with a repo-status table.");
                     self.emit_event(format!("workspace_provisioned {name}"));
+                    Self::merge_alfalfa_projects(&mut self.catalog);
                     self.answer(
                         pending,
                         Outcome::Ok {
