@@ -2294,6 +2294,56 @@ mod tests {
     }
 
     #[test]
+    fn the_gamut_map_holds_hue_while_clip_shifts_it() {
+        // A deliberately out-of-gamut Oklch: high chroma at a hue near blue, the
+        // worst case for channel-clipping (the doc comment cites ~14° shift here).
+        let extreme = Oklch {
+            l: 0.70,
+            c: 0.40,
+            h: 280.0,
+        };
+        // Confirm the starting point is actually out of gamut, so the test is
+        // exercising the search rather than a no-op.
+        assert!(
+            !in_srgb_gamut(oklch_to_linear(extreme)),
+            "test color must be out of sRGB gamut"
+        );
+
+        let mapped = from_oklch(extreme);
+        let mapped_oklch = to_oklch(mapped);
+        let hue_diff = angular_diff(mapped_oklch.h, extreme.h);
+        assert!(
+            hue_diff < 1.0,
+            "gamut map held hue drift (target ~0, got {hue_diff:.2}°)"
+        );
+        assert!(
+            mapped_oklch.c < extreme.c,
+            "gamut map must reduce chroma (was {}, now {})",
+            extreme.c,
+            mapped_oklch.c
+        );
+
+        // Naive channel clip: clamp each linear channel to [0,1] and encode.
+        let linear = oklch_to_linear(extreme);
+        let clipped_color = Color::from_rgb(
+            srgb_encode(linear[0].clamp(0.0, 1.0)),
+            srgb_encode(linear[1].clamp(0.0, 1.0)),
+            srgb_encode(linear[2].clamp(0.0, 1.0)),
+        );
+        let clipped_oklch = to_oklch(clipped_color);
+        let clip_hue_diff = angular_diff(clipped_oklch.h, extreme.h);
+        assert!(
+            clip_hue_diff > 5.0,
+            "naive clip must shift hue measurably (got {clip_hue_diff:.2}°, expected >5°)"
+        );
+    }
+
+    fn angular_diff(a: f32, b: f32) -> f32 {
+        let diff = (a - b).rem_euclid(360.0);
+        diff.min(360.0 - diff)
+    }
+
+    #[test]
     fn a_stale_stat_value_carries_an_opacity_mark_beyond_the_chroma_drain() {
         // A stale stat must not just drain chroma — at a glance across a room
         // the drain alone is too subtle. The value text is additionally alpha-
