@@ -4653,30 +4653,55 @@ impl App {
             }
             ContentSource::Scene { scene } => {
                 let palette = self.project_palette();
-                let text_nodes: Vec<&SceneNode> = scene
+                // Only text nodes are renderable in 2D; Mesh/Camera/Light/I Group
+                // nodes contribute transforms and are skipped for drawing but
+                // influence child text nodes through the scene graph.
+                let text_nodes: Vec<usize> = scene
                     .nodes
                     .iter()
-                    .filter(|n| matches!(n.content, NodeContent::Text { .. }))
+                    .enumerate()
+                    .filter(|(_, n)| matches!(n.content, NodeContent::Text { .. }))
+                    .map(|(index, _)| index)
                     .collect();
-                let children: Vec<Element<'_, Message>> = text_nodes
+                // Sort text nodes by Z (depth) so farther nodes are drawn first,
+                // letting closer nodes appear on top.
+                let mut sorted = text_nodes;
+                sorted.sort_by(|a, b| {
+                    let za = scene.nodes[*a].transform.translation[2];
+                    let zb = scene.nodes[*b].transform.translation[2];
+                    za.total_cmp(&zb)
+                });
+                let children: Vec<Element<'_, Message>> = sorted
                     .iter()
-                    .map(|n| {
-                        let NodeContent::Text { text: label } = &n.content else {
+                    .map(|&index| {
+                        let node = &scene.nodes[index];
+                        let NodeContent::Text { text: label } = &node.content else {
                             return container(text("")).into();
                         };
-                        let [x, y] = scene_node_position(n.transform.translation, viewport);
-                        let font_size =
-                            (n.transform.scale[0] * n.transform.scale[1] * 24.0).max(10.0);
-                        container(text(label).size(font_size).color(color(palette.text)))
-                            .width(Length::Shrink)
-                            .height(Length::Shrink)
-                            .padding(iced::Padding {
-                                top: y,
-                                right: 0.0,
-                                bottom: 0.0,
-                                left: x,
-                            })
-                            .into()
+                        let parents = scene_parent_chain(index, &scene.nodes);
+                        let (translation, _rotation, scale) =
+                            scene_node_effective(index, &scene.nodes, &parents);
+                        let [pos_x, pos_y] = scene_node_position(translation, viewport);
+                        let z_scale = scene_node_scale(translation[2]);
+                        let font_size = (scale[0] * scale[1] * 24.0 * z_scale).max(10.0);
+                        // Rotation is noted but not applied in 2D text rendering;
+                        // full 3D mesh rendering with vertex shaders is a future
+                        // backend task (dock-cov.44). Z-based scale and depth
+                        // ordering provide the visible 3D structure.
+                        container(
+                            text(label)
+                                .size(font_size)
+                                .color(color(palette.text)),
+                        )
+                        .width(Length::Shrink)
+                        .height(Length::Shrink)
+                        .padding(iced::Padding {
+                            top: pos_y,
+                            right: 0.0,
+                            bottom: 0.0,
+                            left: pos_x,
+                        })
+                        .into()
                     })
                     .collect();
                 container(stack(children))
@@ -6907,6 +6932,80 @@ fn scene_node_position(translation: [f32; 3], viewport: LogicalSize) -> [f32; 2]
     ]
 }
 
+/// Z-based scale factor: nodes at higher Z (closer to the camera) appear
+/// larger, giving a basic perspective effect on what is otherwise a 2D
+/// projection. Range: 0.5× at Z=-4 (far) to 2× at Z=+4 (near).
+fn scene_node_scale(translation_z: f32) -> f32 {
+    let clamped = translation_z.clamp(-4.0, 4.0);
+    0.5 + ((clamped + 4.0) / 8.0) * 1.5
+}
+
+/// Extract the 2D rotation angle (radians) from a quaternion.
+/// Only the Z-axis component is meaningful for flat 2D text rendering;
+/// other rotations are noted but not applied.
+#[allow(dead_code, unused_variables)]
+fn scene_node_rotation(rotation: [f32; 4]) -> f32 {
+    let [x, y, z, w] = rotation;
+    let norm = (x * x + y * y + z * z + w * w).sqrt().max(f32::EPSILON);
+    let (x, y, z, w) = (x / norm, y / norm, z / norm, w / norm);
+    // Rotation around Z: angle = 2 * atan2(z, w)
+    2.0 * z.atan2(w)
+}
+
+/// Build an effective transform for a node by accumulating parent transforms.
+fn scene_node_effective(
+    node_index: usize,
+    nodes: &[SceneNode],
+    parents: &[usize],
+) -> ([f32; 3], [f32; 4], [f32; 3]) {
+    let node = &nodes[node_index];
+    let mut translation = node.transform.translation;
+    let mut rotation = node.transform.rotation;
+    let mut scale = node.transform.scale;
+    // Apply parent transforms in order: root → … → parent → self
+    for &parent_idx in parents {
+        let parent = &nodes[parent_idx];
+        // Accumulate translation
+        translation[0] += parent.transform.translation[0];
+        translation[1] += parent.transform.translation[1];
+        translation[2] += parent.transform.translation[2];
+        // Combine scales (component-wise)
+        scale[0] *= parent.transform.scale[0];
+        scale[1] *= parent.transform.scale[1];
+        scale[2] *= parent.transform.scale[2];
+        // Quaternion multiplication: parent_rot * self_rot
+        let (px, py, pz, pw) = (parent.transform.rotation[0], parent.transform.rotation[1],
+                                parent.transform.rotation[2], parent.transform.rotation[3]);
+        let (rx, ry, rz, rw) = (rotation[0], rotation[1], rotation[2], rotation[3]);
+        rotation[0] = pw * rx + px * rw + py * rz - pz * ry;
+        rotation[1] = pw * ry - px * rz + py * rw + pz * rx;
+        rotation[2] = pw * rz + px * ry - py * rx + pz * rw;
+        rotation[3] = pw * rw - px * rx - py * ry - pz * rz;
+    }
+    let norm = (rotation[0] * rotation[0] + rotation[1] * rotation[1] +
+                rotation[2] * rotation[2] + rotation[3] * rotation[3]).sqrt().max(f32::EPSILON);
+    rotation[0] /= norm; rotation[1] /= norm;
+    rotation[2] /= norm; rotation[3] /= norm;
+    (translation, rotation, scale)
+}
+
+/// Build the parent chain for a node (root first).
+fn scene_parent_chain(node_index: usize, nodes: &[SceneNode]) -> Vec<usize> {
+    let mut chain = Vec::new();
+    let mut current = node_index;
+    while let Some(parent_id) = nodes[current].parent_id.as_ref() {
+        let parent_idx = nodes.iter().position(|n| &n.id == parent_id);
+        match parent_idx {
+            Some(idx) => {
+                chain.insert(0, idx);
+                current = idx;
+            }
+            None => break,
+        }
+    }
+    chain
+}
+
 fn apply_plan_diagnostics(
     snapshot: &mut SurfaceSnapshot,
     plan: &MediaPlan,
@@ -8007,6 +8106,31 @@ mod tests {
     }
 
     #[test]
+    fn scene_node_scale_responds_to_z_depth() {
+        // Z at range extremes
+        assert!((scene_node_scale(-4.0) - 0.5).abs() < 0.01);
+        assert!((scene_node_scale(4.0) - 2.0).abs() < 0.01);
+        // Z in the middle is 1.25
+        assert!((scene_node_scale(0.0) - 1.25).abs() < 0.01);
+        // Values outside the range are clamped
+        assert_eq!(scene_node_scale(-100.0), scene_node_scale(-4.0));
+        assert_eq!(scene_node_scale(100.0), scene_node_scale(4.0));
+    }
+
+    #[test]
+    fn scene_node_rotation_extracts_z_angle() {
+        use std::f32::consts::PI;
+        // No rotation: identity quaternion [0,0,0,1]
+        assert!(scene_node_rotation([0.0, 0.0, 0.0, 1.0]).abs() < 0.001);
+        // 90 degrees around Z: quaternion [0, 0, sin(45°), cos(45°)]
+        let angle = PI / 2.0;
+        let half = angle / 2.0;
+        let quat = [0.0, 0.0, half.sin(), half.cos()];
+        let extracted = scene_node_rotation(quat);
+        assert!((extracted - angle).abs() < 0.001, "expected {angle}, got {extracted}");
+    }
+
+    #[test]
     fn shared_view_crop_maps_normalized_source_coordinates_to_pixels() {
         let crop = view_crop_pixels(
             ViewRect {
@@ -8026,6 +8150,35 @@ mod tests {
                 height: 600,
             }
         );
+    }
+
+    #[test]
+    fn scene_parent_chain_resolves_node_hierarchy() {
+        use canvas_core::ThemeSelection;
+        let _ = ThemeSelection::coherence(canvas_core::ThemeMode::Dark, canvas_core::Accent::Brand);
+        // node_a (root) -> node_b -> node_c
+        let nodes = vec![
+            SceneNode {
+                id: "a".into(),
+                parent_id: None,
+                transform: Transform3::default(),
+                content: NodeContent::Group,
+            },
+            SceneNode {
+                id: "b".into(),
+                parent_id: Some("a".into()),
+                transform: Transform3::default(),
+                content: NodeContent::Group,
+            },
+            SceneNode {
+                id: "c".into(),
+                parent_id: Some("b".into()),
+                transform: Transform3::default(),
+                content: NodeContent::Text { text: "hi".into() },
+            },
+        ];
+        let chain = scene_parent_chain(2, &nodes);
+        assert_eq!(chain, vec![0, 1]); // root first, then parent
     }
 
     #[test]
