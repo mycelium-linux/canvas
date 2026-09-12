@@ -1,75 +1,63 @@
 #!/usr/bin/env python3
 """canvas-stream: protocol gateway between event sources and Canvas.
 
-Accepts events over HTTP (POST), WebSocket, stdin, and file-watch, then
-forwards them as UDP datagrams to Canvas's stream.sock. Also mirrors events
-back over SSE for cloud agents monitoring the wall.
-
-Config: config/stream-router.toml (hot-reloaded on change).
-Lua binder influence: Lua binders return routing hints in their output,
-which Canvas writes to the config via control command. The sidecar watches
-the config file and applies changes without restart.
-
-Usage:
-  canvas-stream                    # read events from stdin → stream.sock
-  canvas-stream --http PORT        # also listen on HTTP PORT
-  canvas-stream --config FILE      # custom config (default: config/stream-router.toml)
-  canvas-stream --sse PORT         # also serve SSE on PORT
+Forwards events from stdin/HTTP/WebSocket to Canvas's stream.sock (UDP DGRAM).
+Also mirrors events to connected SSE clients. Config is hot-reloaded.
 """
-import argparse, asyncio, json, os, socket, sys, time, hashlib
+import argparse, json, os, socket, sys, time, threading
 from pathlib import Path
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 
 CONTRACT_V1 = "canvas.stream.event.v1"
 MAX_DATAGRAM = 64 * 1024
+DEFAULT_SOCKET = os.path.join(
+    os.environ.get("HOME", ""), "Library/Application Support/Dock/canvas/stream.sock"
+)
 
 class StreamRouter:
     def __init__(self, config_path, socket_path, debug=False):
         self.config_path = Path(config_path)
         self.socket_path = socket_path
         self.debug = debug
-        self.routes = []  # list of (source, contract, destinations)
-        self.subscribers = []  # SSE/WebSocket clients
+        self.routes = []
+        self.sse_clients = []
+        self.sse_lock = threading.Lock()
         self.load_config()
-        self.last_config_mtime = self.config_path.stat().st_mtime if self.config_path.exists() else 0
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.config_mtime = self.config_path.stat().st_mtime if self.config_path.exists() else 0
         self.udp_sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
 
     def load_config(self):
-        """Load routing config. Lua binders influence routing through Canvas
-        writing route updates to this config file."""
         if self.config_path.exists():
-            import tomllib if sys.version_info >= (3, 11) else None
             try:
-                if sys.version_info >= (3, 11):
-                    with open(self.config_path, "rb") as f:
-                        import tomllib; data = tomllib.load(f)
-                else:
-                    # Fallback: simple JSON or TOML parsing
-                    with open(self.config_path) as f:
-                        data = json.load(f)
+                with open(self.config_path) as f:
+                    if self.config_path.suffix in (".json",):
+                        import tomllib if sys.version_info >= (3, 11) else None
+                        if sys.version_info >= (3, 11):
+                            with open(self.config_path, "rb") as bf:
+                                data = tomllib.load(bf)
+                        else:
+                            # Simple fallback: treat as JSON
+                            data = json.loads(f.read())
+                    else:
+                        data = json.loads(f.read())
                 self.routes = data.get("routes", [])
             except Exception:
                 self.routes = []
-        # Default: route everything to stream.sock
         if not self.routes:
             self.routes = [{"source": "*", "contract": "*", "dest": ["stream.sock"]}]
 
-    def reload_if_changed(self):
-        if not self.config_path.exists():
-            return
-        mtime = self.config_path.stat().st_mtime
-        if mtime != self.last_config_mtime:
-            self.last_config_mtime = mtime
-            self.load_config()
-            if self.debug:
-                print(f"config reloaded: {len(self.routes)} routes", file=sys.stderr)
+    def check_reload(self):
+        if self.config_path.exists():
+            mtime = self.config_path.stat().st_mtime
+            if mtime != self.config_mtime:
+                self.config_mtime = mtime
+                self.load_config()
+                if self.debug:
+                    print(f"config reloaded: {len(self.routes)} routes", file=sys.stderr)
 
-    def should_route(self, event):
-        """Check if an event matches any routing rule.
-        Lua binders influence this via the config file — they can
-        register routes through Canvas control commands that update
-        config/stream-router.toml."""
-        self.reload_if_changed()
+    def route(self, event):
+        self.check_reload()
         source = event.get("source", "")
         contract = event.get("contract", "")
         for route in self.routes:
@@ -78,9 +66,8 @@ class StreamRouter:
                 return route.get("dest", ["stream.sock"])
         return ["stream.sock"]
 
-    def send_to_canvas(self, event):
-        """Forward event as UDP datagram to Canvas stream.sock."""
-        dests = self.should_route(event)
+    def forward(self, event):
+        dests = self.route(event)
         payload = json.dumps(event, separators=(",", ":")).encode()
         if len(payload) > MAX_DATAGRAM:
             payload = payload[:MAX_DATAGRAM]
@@ -91,41 +78,89 @@ class StreamRouter:
                 except Exception:
                     pass
             elif dest == "sse":
-                for tx in self.subscribers:
-                    try:
-                        tx.send(event)
-                    except:
-                        pass
+                with self.sse_lock:
+                    dead = []
+                    for q in self.sse_clients:
+                        try:
+                            q.put(payload)
+                        except Exception:
+                            dead.append(q)
+                    for q in dead:
+                        self.sse_clients.remove(q)
         if self.debug:
-            print(f"→ {event.get('source')}:{event.get('contract')} routes={dests}", file=sys.stderr)
+            print(f"→ {event.get('source')}:{event.get('contract')} dest={dests}", file=sys.stderr)
 
-async def handle_http_post(State(state): AppState, Json(event): Json<serde_json::Value>) -> impl IntoResponse {
-    # Normalize to StreamEvent
-    se = StreamEvent {
-        schema_version: event.get("schema_version", 1).as_u64().unwrap_or(1) as u32,
-        source: event.get("source", "http").as_str().unwrap_or("http").to_string(),
-        stream: event.get("stream", "http").as_str().unwrap_or("http").to_string(),
-        contract: event.get("contract", CONTRACT_V1).as_str().unwrap_or(CONTRACT_V1).to_string(),
-        sequence: event.get("sequence", 0).as_u64().unwrap_or(0),
-        emitted_at_ms: event.get("emitted_at_ms", int(time.time()*1000)).as_u64().unwrap_or(0) as u64,
-        payload: event,
-    }
-    state.send_to_canvas(&se)
-    "ok"
-}
+router = None
 
-async fn sse_handler(State(state)) -> Sse<impl Stream<Item = Result<sse::Event, axum::Error>>> {
-    let mut rx = state.broadcast.subscribe();
-    let stream = async_stream::stream! {
-        while let Ok(event) = rx.recv().await {
-            let data = serde_json::to_string(&event).unwrap();
-            yield Ok(sse::Event::Data(sse::Data::new(data)));
-        }
-    };
-    sse::keep_alive().stream(stream)
-}
+class SSEHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/stream':
+            import queue
+            q = queue.Queue()
+            with router.sse_lock:
+                router.sse_clients.append(q)
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.send_header('Cache-Control', 'no-cache')
+            self.send_header('Connection', 'keep-alive')
+            self.end_headers()
+            try:
+                while True:
+                    try:
+                        data = q.get(timeout=30)
+                        self.wfile.write(f"data: {data.decode()}\n\n".encode())
+                        self.wfile.flush()
+                    except queue.Empty:
+                        break
+            except Exception:
+                pass
+            finally:
+                with router.sse_lock:
+                    if q in router.sse_clients:
+                        router.sse_clients.remove(q)
+        elif self.path == '/healthz':
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+        else:
+            self.send_response(404)
+            self.end_headers()
 
-#[tokio::main]
-async fn main() {
-    ...
-}
+    def log_message(self, format, *args):
+        pass
+
+class SSEServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--socket", default=DEFAULT_SOCKET)
+    ap.add_argument("--config", default="config/stream-router.json")
+    ap.add_argument("--http", type=int, default=0, help="HTTP port (0 = disabled)")
+    ap.add_argument("--debug", action="store_true")
+    args = ap.parse_args()
+
+    global router
+    router = StreamRouter(args.config, args.socket, args.debug)
+
+    # Start HTTP/SSE server if requested
+    if args.http:
+        server = SSEServer(("127.0.0.1", args.http), SSEHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        print(f"canvas-stream: SSE on http://127.0.0.1:{args.http}/stream", file=sys.stderr)
+
+    # Read events from stdin
+    print(f"canvas-stream: forwarding to {args.socket}", file=sys.stderr)
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            if line.startswith("{"):
+                event = json.loads(line)
+                router.forward(event)
+        except json.JSONDecodeError:
+            pass
+
+if __name__ == "__main__":
+    main()

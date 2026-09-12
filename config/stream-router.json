@@ -1,0 +1,6 @@
+{"routes":[
+  {"source":"opencode","contract":"canvas.agent.activity.v1","dest":["stream.sock","sse"]},
+  {"source":"alfalfa","contract":"canvas.widget.snapshot.v1","dest":["stream.sock","sse"]},
+  {"source":"machine","contract":"canvas.widget.snapshot.v1","dest":["stream.sock","sse"]},
+  {"source":"*","contract":"*","dest":["stream.sock"]}
+]}
