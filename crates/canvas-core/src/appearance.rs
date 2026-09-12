@@ -97,6 +97,12 @@ pub struct Motion {
     pub transition_ms: u64,
     /// Frame ceiling for animated backgrounds.
     pub background_max_fps: u16,
+    /// Idle tick interval in milliseconds. When nothing is animating, Canvas
+    /// still polls for input and data-driven updates at this cadence. The
+    /// default matches the prior hardcoded 30 FPS (33 ms). A music-display wall
+    /// that only needs a progress bar update can raise this to 1000 (1 FPS) to
+    /// cut CPU and GPU wakeups by 30×. Zero is clamped to the floor.
+    pub idle_tick_ms: u16,
 }
 
 impl Default for Motion {
@@ -104,6 +110,7 @@ impl Default for Motion {
         Self {
             transition_ms: 280,
             background_max_fps: 60,
+            idle_tick_ms: 33,
         }
     }
 }
@@ -114,6 +121,7 @@ impl Motion {
         Self {
             transition_ms: 0,
             background_max_fps: 0,
+            idle_tick_ms: 33,
         }
     }
 
@@ -126,6 +134,7 @@ impl Motion {
             // A transition longer than a couple of seconds reads as a fault.
             transition_ms: self.transition_ms.min(2_000),
             background_max_fps: self.background_max_fps.min(240),
+            idle_tick_ms: self.idle_tick_ms.clamp(16, 5_000),
         }
     }
 }
@@ -393,6 +402,7 @@ impl Appearance {
         motion: Motion {
             transition_ms: 280,
             background_max_fps: 60,
+            idle_tick_ms: 33,
         },
         limits: Limits {
             table_rows: 8,

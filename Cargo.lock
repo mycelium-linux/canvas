@@ -430,6 +430,7 @@ dependencies = [
  "serde_json",
  "subtle",
  "tokio",
+ "url",
  "wayland-client",
  "wayland-protocols-wlr",
 ]

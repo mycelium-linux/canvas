@@ -372,6 +372,7 @@ fn await_window(project: &str, app_id: &str) -> Result<Value, String> {
 }
 
 /// Human opening a session view does not submit a prompt; callers serialize navigation.
+#[cfg(feature = "opencode")]
 pub fn open_session(project: &str, tmux_name: &str, directory: &str) -> Result<Value, String> {
     unit(project)?;
     if !Path::new(directory).is_absolute() || !Path::new(directory).is_dir() {
@@ -430,7 +431,10 @@ fn capture(project: &str) -> Result<Value, String> {
     )
 }
 fn browser(project: &str) -> Result<Value, String> {
+    #[cfg(feature = "opencode")]
     let directory = crate::opencode::directory(project)?;
+    #[cfg(not(feature = "opencode"))]
+    let directory = home()?.join(format!(".local/state/dock/{project}"));
     let nested = directory.join("examples/workspace/index.html");
     let fixture = if nested.is_file() {
         nested
@@ -476,8 +480,8 @@ fn browser(project: &str) -> Result<Value, String> {
     )?;
     await_window(project, &app_id)
 }
-fn pairing_url(raw: &str) -> Result<reqwest::Url, String> {
-    let url = reqwest::Url::parse(raw).map_err(|_| "invalid pairing URL")?;
+fn pairing_url(raw: &str) -> Result<url::Url, String> {
+    let url = url::Url::parse(raw).map_err(|_| "invalid pairing URL")?;
     let query: Vec<_> = url.query_pairs().collect();
     if url.scheme() != "https"
         || url.host_str() != Some("sso.fpl.dev")
@@ -507,11 +511,11 @@ fn browser_url(project: &str, raw: &str) -> Result<Value, String> {
 
 /// Human-facing application links use the same persistent project browser as
 /// enrollment. The pairing command retains its narrower public-ID contract.
-fn web_url(raw: &str) -> Result<reqwest::Url, String> {
+fn web_url(raw: &str) -> Result<url::Url, String> {
     if raw.len() > 16 * 1024 || raw.chars().any(char::is_control) {
         return Err("invalid desktop web URL".into());
     }
-    let url = reqwest::Url::parse(raw).map_err(|_| "invalid desktop web URL")?;
+    let url = url::Url::parse(raw).map_err(|_| "invalid desktop web URL")?;
     if url.scheme() != "https"
         || url.host_str().is_none()
         || !url.username().is_empty()
@@ -522,7 +526,7 @@ fn web_url(raw: &str) -> Result<reqwest::Url, String> {
     Ok(url)
 }
 
-fn open_web_url(project: &str, url: &reqwest::Url) -> Result<Value, String> {
+fn open_web_url(project: &str, url: &url::Url) -> Result<Value, String> {
     unit(project)?;
     let profile = home()?.join(format!(".local/state/dock/web/{project}"));
     fs::create_dir_all(&profile).map_err(|e| e.to_string())?;
@@ -760,7 +764,11 @@ pub fn execute(args: &[String]) -> Result<Value, String> {
         }
         "desktop-control" if args.len()==3 => {
             if args[2]=="human" {
-                control::takeover(project, || crate::opencode::abort(project))
+                #[cfg(feature = "opencode")]
+                let abort = || crate::opencode::abort(project);
+                #[cfg(not(feature = "opencode"))]
+                let abort = || Ok(json!({"note":"OpenCode integration not compiled in; no session to abort"}));
+                control::takeover(project, abort)
             } else { Ok(json!({"ownership":control::set(project,&args[2])?})) }
 
         }

@@ -1,7 +1,14 @@
 [package]
 name = "canvas-linux"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["desktop", "mcp", "opencode"]
+desktop = []
+mcp = ["dep:rmcp", "dep:axum", "dep:tokio", "dep:subtle"]
+opencode = ["dep:reqwest"]
 
 [dependencies]
 canvas-core = { path = "../canvas-core" }
@@ -12,8 +19,12 @@ wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 
 serde = { version = "1", features = ["derive"] }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
-axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "signal"] }
-rmcp = { version = "3.2", default-features = false, features = ["server", "transport-streamable-http-server"] }
-subtle = "2.6"
+# `url` is a standalone URL parser (259 KB). `reqwest` is only pulled in when
+# the OpenCode session integration is enabled; the desktop URL validation below
+# does not need reqwest's HTTP stack at all.
+url = "2.5"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"], optional = true }
+axum = { version = "0.8", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "signal"], optional = true }
+rmcp = { version = "3.2", default-features = false, features = ["server", "transport-streamable-http-server"], optional = true }
+subtle = { version = "2.6", optional = true }

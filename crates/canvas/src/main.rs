@@ -848,7 +848,7 @@ impl App {
                     .jarvis_text_hotkey
                     .as_ref()
                     .is_some_and(GlobalHotkey::poll_pressed);
-                if self.metrics_last.elapsed() >= METRICS_REFRESH {
+                if self.hud_visible && self.metrics_last.elapsed() >= METRICS_REFRESH {
                     self.refresh_metrics();
                 }
                 self.tick_transition();
@@ -7388,10 +7388,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(appearance) => {
             if appearance != canvas_core::appearance::Appearance::DEFAULT {
                 eprintln!(
-                    "Canvas appearance: scale {:.2}, panel opacity {:.2}, transition {}ms",
+                    "Canvas appearance: scale {:.2}, panel opacity {:.2}, transition {}ms, idle tick {}ms",
                     appearance.density.scale,
                     appearance.panels.opacity,
-                    appearance.motion.transition_ms
+                    appearance.motion.transition_ms,
+                    appearance.motion.idle_tick_ms
                 );
             }
         }
@@ -7443,7 +7444,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else if animated {
             Duration::from_millis(16)
         } else {
-            Duration::from_millis(33)
+            Duration::from_millis(canvas_core::appearance::current().motion.idle_tick_ms as u64)
         };
         Subscription::batch([
             iced::time::every(cadence).map(|_| Message::Tick),

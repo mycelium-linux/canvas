@@ -8,7 +8,9 @@ use std::{
 mod control;
 mod desktop;
 mod hypr;
+#[cfg(feature = "mcp")]
 mod mcp;
+#[cfg(feature = "opencode")]
 mod opencode;
 
 fn unit(project: &str) -> Result<String, String> {
@@ -69,22 +71,28 @@ fn execute(args: &[String]) -> Result<Value, String> {
         return Err("canvas-linux requires Linux with a systemd user session".into());
     }
     let action = args.first().map(String::as_str).unwrap_or("capabilities");
-    if action == "mcp-ready" && args.len() == 2 {
-        return mcp::ready(&args[1]);
-    }
-    if action == "mcp-serve" {
-        if args.len() != 3 {
-            return Err("usage: canvas-linux mcp-serve PROJECT PORT".into());
+    #[cfg(feature = "mcp")]
+    {
+        if action == "mcp-ready" && args.len() == 2 {
+            return mcp::ready(&args[1]);
         }
-        let port = args[2].parse::<u16>().map_err(|_| "invalid MCP port")?;
-        mcp::serve(&args[1], port)?;
-        return Ok(json!({"stopped": true}));
+        if action == "mcp-serve" {
+            if args.len() != 3 {
+                return Err("usage: canvas-linux mcp-serve PROJECT PORT".into());
+            }
+            let port = args[2].parse::<u16>().map_err(|_| "invalid MCP port")?;
+            mcp::serve(&args[1], port)?;
+            return Ok(json!({"stopped": true}));
+        }
     }
     if action.starts_with("desktop-") {
         return desktop::execute(args);
     }
-    if action.starts_with("session-") {
-        return opencode::execute(args);
+    #[cfg(feature = "opencode")]
+    {
+        if action.starts_with("session-") {
+            return opencode::execute(args);
+        }
     }
     if action.starts_with("hypr-") {
         return hypr::execute(args);
@@ -149,15 +157,31 @@ fn execute(args: &[String]) -> Result<Value, String> {
         let sunshine = command("systemctl", &["--user", "is-active", "sunshine"]);
         let hyprland = hypr::execute(&["hypr-status".into()]).is_ok();
         let desktop = desktop::execute(&["desktop-status".into(), "dock".into()]).is_ok();
-        return Ok(
-            json!({"platform":"linux", "systemd_user_available":systemd.is_ok(),
+        let mut result = json!({
+            "platform":"linux", "systemd_user_available":systemd.is_ok(),
             "systemd_error":systemd.err(), "project_process_control":"systemd user units; freeze/thaw require cgroup v2",
             "desktop_window_control":hyprland, "desktop_window_control_scope":"registered Dock Hyprland instance only",
             "computer_use":desktop, "computer_use_scope":"registered independent Sway desktop; agent input requires backend ownership",
-            "interactive_sessions":"OpenCode session-ensure/status/prompt/abort/resume/attach; provider availability checked by session-status",
             "sunshine_running":sunshine.is_ok(),
-            "pause_scope":"only processes launched in this project's unit; not the desktop or external sessions"}),
-        );
+            "pause_scope":"only processes launched in this project's unit; not the desktop or external sessions"
+        });
+        #[cfg(feature = "opencode")]
+        {
+            result["interactive_sessions"] = json!("OpenCode session-ensure/status/prompt/abort/resume/attach; provider availability checked by session-status");
+        }
+        #[cfg(not(feature = "opencode"))]
+        {
+            result["interactive_sessions"] = json!(null);
+        }
+        #[cfg(feature = "mcp")]
+        {
+            result["mcp_server"] = json!("enabled; canvas-linux mcp-serve PROJECT PORT; canvas-linux mcp-ready PROJECT");
+        }
+        #[cfg(not(feature = "mcp"))]
+        {
+            result["mcp_server"] = json!(null);
+        }
+        return Ok(result);
     }
     let project = args.get(1).ok_or("usage: canvas-linux capabilities | run PROJECT DIRECTORY -- PROGRAM [ARG...] | status/pause/resume/logs PROJECT")?;
     let name = unit(project)?;
