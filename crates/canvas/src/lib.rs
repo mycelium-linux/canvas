@@ -91,6 +91,7 @@ pub const KNOWN_CONTRACTS: &[&str] = &[
     "canvas.sse.v1",
     "canvas.quant.candle.v1",
     "canvas.image.rgba.v1",
+    "canvas.agent.attention.v1",
     "jarvis.presence.v1",
 ];
 
