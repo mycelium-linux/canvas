@@ -199,6 +199,86 @@ pub struct SharedViewPatch {
     pub operations: Vec<ViewOperation>,
 }
 
+/// A proposal from Alfalfa to Canvas for an executive view.
+///
+/// Alfalfa sends this to recommend a view for a project. Canvas validates it
+/// against the recommendation contract, checks provenance, and either applies
+/// it as a new SharedViewDocument or updates an existing one. The proposal is
+/// revision-checked: a stale recommendation is rejected before rendering.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
+pub struct ViewRecommendation {
+    pub schema_version: u32,
+    pub project_id: String,
+    pub view_id: String,
+    /// Monotonic revision that Canvas must have seen less than this value to
+    /// accept the recommendation. Prevents a slow network from regressing a
+    /// view that has already advanced.
+    pub expected_base_revision: Option<u64>,
+    pub rationale: String,
+    pub audience: AudiencePolicy,
+    pub sources: Vec<RecommendationSource>,
+    pub widgets: BTreeMap<String, PlacedWidget>,
+    pub refresh: RefreshPolicy,
+    pub evidence_revision: u64,
+    pub provenance: ProvenanceReceipt,
+}
+
+/// Whether a view is intended for public walls, specific agents, or a
+/// private screen. Carries the auth scope that must be satisfied to render.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "scope", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
+pub enum AudiencePolicy {
+    /// Visible to every authenticated viewer on the wall.
+    Public,
+    /// Visible only to callers with the named scope (e.g. "agent:cortex").
+    Scoped { value: String },
+    /// Visible only to the proposing agent, identified by actor id.
+    Private { actor_id: String },
+}
+
+/// One data source in a recommendation, with the connector/query identity
+/// that Canvas resolves at the trusted host boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
+pub struct RecommendationSource {
+    pub id: String,
+    pub owner: String,
+    pub contract: String,
+    /// Stable connector/query identifier (e.g. "prometheus-elmers/loop").
+    /// Canvas resolves this to transport+credentials at the host boundary;
+    /// the recommendation never carries URLs or secrets.
+    pub connector: String,
+    pub refresh_seconds: u32,
+    pub freshness_seconds: u32,
+}
+
+/// Refresh and staleness policy for a recommended view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
+pub struct RefreshPolicy {
+    /// How often the view polls its sources.
+    pub interval_seconds: u32,
+    /// After this many seconds without an update, the view marks itself stale.
+    pub stale_after_seconds: u32,
+}
+
+/// Receipt proving the recommendation was produced by a trusted source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
+pub struct ProvenanceReceipt {
+    pub proposed_by: String,
+    pub proposed_at_ms: u64,
+    /// SHA-256 of the recommendation body (excluding this field), verified by
+    /// the proposer's key. Proves the content has not been tampered with.
+    pub digest: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
@@ -803,5 +883,58 @@ mod placed_widget_tests {
             serde_json::from_str::<SharedViewDocument>(&json).expect("deserialize"),
             view
         );
+    }
+
+    #[test]
+    fn view_recommendation_round_trips() {
+        let rec = ViewRecommendation {
+            schema_version: 1,
+            project_id: "alfalfa".into(),
+            view_id: "alfalfa/executive".into(),
+            expected_base_revision: Some(5),
+            rationale: "Live view of Alfalfa CI pipeline health".into(),
+            audience: AudiencePolicy::Scoped { value: "agent:alfalfa".into() },
+            sources: vec![RecommendationSource {
+                id: "pipeline".into(),
+                owner: "alfalfa".into(),
+                contract: "canvas.prometheus.v1".into(),
+                connector: "prometheus-alfalfa/pipeline".into(),
+                refresh_seconds: 30,
+                freshness_seconds: 120,
+            }],
+            widgets: BTreeMap::new(),
+            refresh: RefreshPolicy {
+                interval_seconds: 30,
+                stale_after_seconds: 120,
+            },
+            evidence_revision: 1,
+            provenance: ProvenanceReceipt {
+                proposed_by: "alfalfa-cli".into(),
+                proposed_at_ms: 1710000000000,
+                digest: "a".repeat(64),
+            },
+        };
+        let json = serde_json::to_string(&rec).unwrap();
+        let parsed: ViewRecommendation = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, rec);
+    }
+
+    #[test]
+    fn unknown_fields_in_recommendation_are_rejected() {
+        let json = r#"{
+            "schema_version": 1,
+            "project_id": "test",
+            "view_id": "test/view",
+            "expected_base_revision": null,
+            "rationale": "test",
+            "audience": {"scope": "public"},
+            "sources": [],
+            "widgets": {},
+            "refresh": {"interval_seconds": 10, "stale_after_seconds": 30},
+            "evidence_revision": 1,
+            "provenance": {"proposed_by": "test", "proposed_at_ms": 1, "digest": "x"},
+            "sneaky_field": "should be rejected"
+        }"#;
+        assert!(serde_json::from_str::<ViewRecommendation>(json).is_err());
     }
 }
