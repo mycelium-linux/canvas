@@ -4351,6 +4351,10 @@ impl App {
                 .into()
             }
             ContentSource::Widget { spec } => {
+                // Module widgets are resolved by the Lua host (lua_module.rs)
+                // before reaching the static renderer. If a raw Module spec
+                // arrives here, it means the host hasn't bound it yet — show
+                // a labeled panel rather than an empty blank.
                 let visual = self.presented_visual_theme();
                 canvas_widgets::live::element(spec, &visual)
             }
