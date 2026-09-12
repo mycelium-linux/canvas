@@ -3058,6 +3058,13 @@ impl App {
                 self.presence_received = Some(Instant::now());
                 if !was_occupied && self.presence.as_ref().is_some_and(|p| p.occupied) {
                     self.screensaver_settings.enabled = false;
+                    // Wake the displays on arrival: make Canvas visible if it was hidden.
+                    if !self.canvas_visible {
+                        let wake = self.set_canvas_visible(true);
+                        self.bump();
+                        self.emit_event("presence_arrival_wake".to_string());
+                        return wake;
+                    }
                     self.bump();
                     self.emit_event("presence_present".to_string());
                     self.status = "Presence detected — privacy screensaver cleared.".into();
@@ -3068,6 +3075,13 @@ impl App {
                         self.screensaver_piece_elapsed = Duration::ZERO;
                         self.screensaver_elapsed = Duration::ZERO;
                         self.screensaver_last_frame = Some(Instant::now());
+                    }
+                    // Sleep the displays on departure: hide Canvas if occupied.
+                    if self.canvas_visible {
+                        let sleep = self.set_canvas_visible(false);
+                        self.bump();
+                        self.emit_event("presence_departure_sleep".to_string());
+                        return sleep;
                     }
                     self.bump();
                     self.emit_event("presence_away".to_string());
