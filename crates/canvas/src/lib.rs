@@ -81,6 +81,24 @@ fn contract(value: &str) -> bool {
         })
 }
 
+/// Declared set of valid stream contracts. Envelope senders and workspace
+/// bindings must use one of these names; adding a contract is a data change
+/// to this list, not a rebuild of the validation logic.
+pub const KNOWN_CONTRACTS: &[&str] = &[
+    "canvas.widget.snapshot.v1",
+    "canvas.briefing.beat.v1",
+    "canvas.prometheus.v1",
+    "canvas.sse.v1",
+    "canvas.quant.candle.v1",
+    "canvas.image.rgba.v1",
+    "jarvis.presence.v1",
+];
+
+/// Check a contract name against both format rules and the declared registry.
+pub fn validate_contract(value: &str) -> bool {
+    contract(value) && KNOWN_CONTRACTS.contains(&value)
+}
+
 fn visible(value: &str) -> bool {
     !value.trim().is_empty()
         && value.len() <= 16_384

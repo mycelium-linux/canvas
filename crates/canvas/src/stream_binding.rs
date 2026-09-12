@@ -192,6 +192,7 @@ impl StreamEnvelope {
                 return Err(Error(format!("invalid stream {name}")));
             }
         }
+<<<<<<< /var/folders/hv/c73jtdq15nn09_hxm80x_zy80000gn/T/tmp.vxq7fUmcFM.o
         if self.contract.is_empty() || self.contract.len() > 128 {
             return Err(Error("invalid stream contract".into()));
         }
@@ -201,6 +202,9 @@ impl StreamEnvelope {
                 self.contract
             )));
         }
+=======
+        validate_contract(&self.contract)?;
+>>>>>>> /var/folders/hv/c73jtdq15nn09_hxm80x_zy80000gn/T/tmp.vxq7fUmcFM.t
         Ok(())
     }
 
@@ -504,6 +508,23 @@ fn lua_error(error: mlua::Error) -> Error {
 /// beat into a `BriefingBeat` with workspace patches and optional TTS text.
 pub const BRIEFING_CONTRACT: &str = "canvas.briefing.beat.v1";
 
+/// Forward to the library crate's declared registry so the known set lives
+/// in exactly one place (crate::KNOWN_CONTRACTS). Adding a contract means
+/// editing that list; validation logic does not need a rebuild.
+pub fn validate_contract(c: &str) -> Result<()> {
+    if !crate::validate_contract(c) {
+        return Err(if c.is_empty() || c.len() > 128 {
+            Error(format!("stream contract must be 1-128 bytes; received {c:?}"))
+        } else {
+            Error(format!(
+                "undeclared stream contract: {c}. Known: {}",
+                crate::KNOWN_CONTRACTS.join(", ")
+            ))
+        });
+    }
+    Ok(())
+}
+
 /// Run a briefing Lua binder against one beat event.
 ///
 /// The binder source is sandboxed identically to widget adapters (TABLE,
@@ -603,7 +624,7 @@ mod tests {
             schema_version: STREAM_SCHEMA_VERSION,
             owner: "demo".into(),
             stream: "esu6".into(),
-            contract: "market.ohlcv.raw.v1".into(),
+            contract: "canvas.widget.snapshot.v1".into(),
             project_id: None,
             sequence: time as u64,
             emitted_at_ms: now_ms(),
@@ -826,6 +847,7 @@ mod tests {
     }
 
     #[test]
+<<<<<<< /var/folders/hv/c73jtdq15nn09_hxm80x_zy80000gn/T/tmp.vxq7fUmcFM.o
     fn an_undeclared_contract_is_refused_at_ingress() {
         let mut ev = event(1, 100.0);
         ev.contract = "fabricated.stream.v1".into();
@@ -848,6 +870,18 @@ mod tests {
             "canvas.widget.snapshot.v1 must be declared"
         );
         ev.validate().unwrap();
+=======
+    fn undeclared_contract_is_rejected_at_ingress() {
+        let mut ev = event(1, 100.0);
+        ev.contract = "evil.breach.v1".into();
+        assert!(ev.validate().is_err(), "unknown contract should be rejected");
+        let err = ev.validate().unwrap_err().to_string();
+        assert!(err.contains("undeclared"), "error should name the contract: {err}");
+
+        // Known contracts pass
+        ev.contract = "canvas.widget.snapshot.v1".into();
+        assert!(ev.validate().is_ok(), "known contract should be accepted");
+>>>>>>> /var/folders/hv/c73jtdq15nn09_hxm80x_zy80000gn/T/tmp.vxq7fUmcFM.t
     }
 
     #[test]
