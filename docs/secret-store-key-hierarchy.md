@@ -108,6 +108,40 @@ Three distinct operations, each safe to retry:
 6. **AES-256-GCM**: Authenticated encryption. The GCM tag catches tampering
    even if an attacker modifies encrypted blobs.
 
+## Metadata Encryption Boundary (dock-ybc.12.2)
+
+> LastPass 2022: vault URLs were not encrypted, so attackers knew who banked
+> where and could phish precisely during brute-force. The cipher was fine;
+> the metadata boundary was the vulnerability.
+
+Every field is classified: **E** (encrypted at rest) or **P** (plaintext,
+safe to expose).
+
+| Field | Classification | Rationale |
+|---|---|---|
+| Secret content (passwords, tokens, keys, notes) | **E** | The actual secret. Always encrypted. |
+| Item title/label | **E** | Reveals the service name (bank, email). Encrypt. |
+| URL | **E** | Reveals browsing patterns. Encrypt (LastPass lesson). |
+| Username/account | **E** | Often the email address — PII. Encrypt. |
+| TOTP secret | **E** | Effectively a password. Encrypt. |
+| Creation/modified timestamps | **P** | Needed for sync; not sensitive. |
+| Item ID (UUID) | **P** | Needed for lookup; reveals nothing. |
+| Item type (password, TOTP, note, key) | **E** | Knowing "has TOTP" leaks MFA adoption. |
+| Sharing scope (personal/team/project) | **P** | Required for routing; not sensitive. |
+| Member list (team scope) | **P** | Needed for access control; members consent to visibility. |
+| Owner identity | **P** | Derived from OIDC session; already known to fpl-auth. |
+| Expiration/TTL | **P** | Needed for cleanup. |
+
+**Server-visible set**: item ID, sharing scope, member list, owner identity,
+creation/modified timestamps, expiration. Everything else is encrypted
+client-side before storage. The server can route, sync, and grant access —
+but cannot enumerate which services a user uses, which accounts they hold,
+or what their passwords look like.
+
+This classification is immutable: once adopted, fields cannot be migrated
+between E and P without re-encrypting or decrypting all data (the one-way
+door from Tenet 4).
+
 ## Depends on / Blocks
 
 - Depends on: nothing (this is the foundation).
