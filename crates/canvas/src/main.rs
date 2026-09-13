@@ -2191,7 +2191,9 @@ impl App {
             use std::io::Read;
             let _ = stream.read_to_string(&mut response);
             let body = response.split("\r\n\r\n").nth(1).unwrap_or("");
+            let mut found_projects = false;
             if let Ok(projects) = serde_json::from_str::<Vec<serde_json::Value>>(body) {
+                found_projects = true;
                 for project in projects {
                     let proj = project.get("project")
                         .and_then(|p| p.as_object())
@@ -2211,10 +2213,40 @@ impl App {
                         catalog.projects.push(canvas_core::Project {
                             id, name, theme, resources: Vec::new(),
                         });
+                    }
+                }
             }
-        }
-    }
-
+            // Fallback: if /api/v1/projects returned empty, derive projects from
+            // /api/v1/repos. Each repo's id is a project id in Alfalfa's model.
+            if !found_projects {
+                let repos_request = format!(
+                    "GET /api/v1/repos HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                    addr
+                );
+                if stream.write_all(repos_request.as_bytes()).is_err() {
+                    return;
+                }
+                let mut repos_response = String::new();
+                let _ = stream.read_to_string(&mut repos_response);
+                let repos_body = repos_response.split("\r\n\r\n").nth(1).unwrap_or("");
+                if let Ok(repos) = serde_json::from_str::<Vec<serde_json::Value>>(repos_body) {
+                    for repo in repos {
+                        let id = repo.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        if id.is_empty() { continue; }
+                        if catalog.projects.iter().any(|p| p.id == id) { continue; }
+                        let theme = canvas_core::ThemeSelection::Coherence {
+                            mode: canvas_core::ThemeMode::Dark,
+                            accent: canvas_core::Accent::Brand,
+                        };
+                        catalog.projects.push(canvas_core::Project {
+                            id: id.clone(),
+                            name: id.clone(),
+                            theme,
+                            resources: Vec::new(),
+                        });
+                    }
+                }
+            }
         }
     }
 
