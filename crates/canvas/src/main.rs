@@ -8123,11 +8123,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else if animated {
             background_interval
         } else {
-<<<<<<< /var/folders/hv/c73jtdq15nn09_hxm80x_zy80000gn/T/tmp.7pGqBMMzWP.o
             Duration::from_millis(canvas_core::appearance::current().motion.idle_tick_ms as u64)
-=======
-            Duration::from_secs(2)
->>>>>>> /var/folders/hv/c73jtdq15nn09_hxm80x_zy80000gn/T/tmp.7pGqBMMzWP.t
         };
         Subscription::batch([
             iced::time::every(cadence).map(|_| Message::Tick),

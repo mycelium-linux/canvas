@@ -542,27 +542,6 @@ fn install_module_context(
 fn install_widget_api(lua: &Lua, read_theme: bool, theme: ModuleThemeTokens) -> Result<()> {
     let widget = lua.create_table().map_err(lua_error)?;
 
-<<<<<<< /var/folders/hv/c73jtdq15nn09_hxm80x_zy80000gn/T/tmp.epYSGm3jPI.o
-    widget
-        .set(
-            "time",
-            lua.create_function(|lua, ()| {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let h = (now % 86400) / 3600;
-                let m = (now % 3600) / 60;
-                let s = now % 60;
-                let text = format!("{:02}:{:02}:{:02}", h, m, s);
-                widget_set_text(lua, &text)
-            })
-            .map_err(lua_error)?,
-        )
-        .map_err(lua_error)?;
-
-=======
->>>>>>> /var/folders/hv/c73jtdq15nn09_hxm80x_zy80000gn/T/tmp.epYSGm3jPI.t
     if read_theme {
         let theme_tokens = theme;
         widget

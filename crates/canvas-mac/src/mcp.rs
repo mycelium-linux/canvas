@@ -381,6 +381,7 @@ fn canvas_snapshot() -> Result<RuntimeSnapshot, String> {
         schema_version: CANVAS_CONTROL_VERSION,
         request_id: "dock-workspaces-inspect".into(),
         expected_revision: None,
+        actor: None,
         command: CanvasCommand::Inspect,
     })?;
     match reply.outcome {
@@ -402,6 +403,7 @@ fn sync_canvas_projects_from_specs(projects: Vec<ProjectWorkspaceSpec>) -> Resul
         schema_version: CANVAS_CONTROL_VERSION,
         request_id: "dock-workspaces-sync".into(),
         expected_revision: Some(revision),
+        actor: None,
         command: CanvasCommand::WorkspaceSync { projects },
     })?;
     match reply.outcome {
@@ -482,6 +484,7 @@ fn switch_canvas_workspace(source: &Value, project: &str) -> Result<Value, Strin
         schema_version: CANVAS_CONTROL_VERSION,
         request_id: "dock-workspace-switch".into(),
         expected_revision: Some(revision),
+        actor: None,
         command: CanvasCommand::WorkspaceSwitch {
             name: project.into(),
         },
