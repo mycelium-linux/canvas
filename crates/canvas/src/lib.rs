@@ -3,7 +3,7 @@
 //! This crate owns durable presentation intent. Renderers own decoded assets,
 //! frame state, GPU allocations, windows, and other reconstructible state.
 
-use canvas_core::{Catalog, ResourceKind, ThemeSelection};
+use canvas_core::{Catalog, ResourceKind, ThemeSelection, is_declared_contract};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, fmt};
 
@@ -1017,6 +1017,13 @@ impl WorkspaceDocument {
                     && contract(&binding.source.contract),
                 "Invalid data source",
             )?;
+            check(
+                is_declared_contract(&binding.source.contract),
+                format!(
+                    "Data binding source contract {} is not declared in canvas_core::DECLARED_CONTRACTS",
+                    binding.source.contract
+                ),
+            )?;
             if let Some(adapter) = &binding.adapter {
                 check(identifier(adapter), "Invalid data adapter id")?;
             }
@@ -1579,14 +1586,18 @@ mod tests {
                 .contains("unknown surface")
         );
 
-        let mut document = document();
-        document.bindings[0].source.contract = "jarvis.attention.v2".into();
+        let mut doc = document();
+        doc.bindings[0].source.contract = "canvas.widget.snapshot.v1".into();
         assert!(
-            document
-                .validate(&catalog)
-                .unwrap_err()
-                .to_string()
-                .contains("contracts differ")
+            doc.validate(&catalog).unwrap_err().to_string().contains("contracts differ")
+        );
+
+        // An undeclared contract is rejected at ingress, naming the contract.
+        let mut undeclared = document();
+        undeclared.bindings[0].source.contract = "jarvis.attention.v2".into();
+        assert!(
+            undeclared.validate(&catalog).unwrap_err().to_string().contains("not declared"),
+            "undeclared contract should fail the registry check"
         );
     }
 

@@ -22,6 +22,11 @@ pub const MAX_STREAM_MESSAGE: usize = 64 * 1024;
 const MAX_PENDING_EVENTS: usize = 512;
 pub const MAX_ADAPTER_BYTES: usize = 32 * 1024;
 
+/// Re-exported from canvas-core so stream_binding callers can validate
+/// without a separate import. See DECLARED_CONTRACTS and is_declared_contract
+/// in canvas-core for the canonical registry.
+pub use canvas_core::{DECLARED_CONTRACTS, is_declared_contract};
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StreamEnvelope {
@@ -57,6 +62,12 @@ impl StreamEnvelope {
         }
         if self.contract.is_empty() || self.contract.len() > 128 {
             return Err(Error("invalid stream contract".into()));
+        }
+        if !is_declared_contract(&self.contract) {
+            return Err(Error(format!(
+                "undeclared stream contract: {}; add it to DECLARED_CONTRACTS in stream_binding.rs",
+                self.contract
+            )));
         }
         Ok(())
     }
@@ -679,6 +690,31 @@ mod tests {
     fn event_without_project_id_is_unscoped() {
         let ev = event(1, 100.0);
         assert!(ev.project_id.is_none(), "legacy events have no project scope");
+        ev.validate().unwrap();
+    }
+
+    #[test]
+    fn an_undeclared_contract_is_refused_at_ingress() {
+        let mut ev = event(1, 100.0);
+        ev.contract = "fabricated.stream.v1".into();
+        assert!(
+            ev.validate().is_err(),
+            "an undeclared contract must be rejected at ingress"
+        );
+        let error = ev.validate().unwrap_err().to_string();
+        assert!(
+            error.contains("undeclared stream contract"),
+            "error must name the contract: {error}"
+        );
+    }
+
+    #[test]
+    fn a_declared_contract_passes_validation() {
+        let ev = event(1, 100.0);
+        assert!(
+            is_declared_contract(&ev.contract),
+            "canvas.widget.snapshot.v1 must be declared"
+        );
         ev.validate().unwrap();
     }
 }

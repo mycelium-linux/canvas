@@ -19,6 +19,32 @@ pub mod boot_budget;
 pub mod manifest_query;
 pub mod working_set;
 
+/// The set of stream contracts Canvas recognises for ingress.
+///
+/// Declaring these in one place — rather than having every producer,
+/// binder and test invent its own string literal — lets ingress
+/// validation reject events that carry an unknown contract, and lets
+/// binding validation fail early when a binding's source contract does
+/// not match what the widget can consume.
+///
+/// Adding a contract is a data change to this constant, not a rebuild of
+/// validation logic: [`is_declared_contract`] checks membership here.
+pub const DECLARED_CONTRACTS: &[&str] = &[
+    "canvas.widget.snapshot.v1",
+    "canvas.briefing.beat.v1",
+    "canvas.agent.activity.v1",
+    "canvas.music.nowplaying.v1",
+    "market.ohlcv.raw.v1",
+    "panopticon.map.v1",
+    "map.v1",
+];
+
+/// Whether a contract name is declared in the registry. Used by both
+/// StreamEnvelope validation (ingress) and DataBinding validation (apply time).
+pub fn is_declared_contract(contract: &str) -> bool {
+    DECLARED_CONTRACTS.contains(&contract)
+}
+
 #[derive(Debug)]
 pub struct Error(pub String);
 impl fmt::Display for Error {
