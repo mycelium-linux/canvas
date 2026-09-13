@@ -6,7 +6,8 @@
 
 use crate::{
     Background, Error, Layout, SCHEMA_VERSION, SurfaceChrome, ThemeRef, WorkspaceDocument,
-    control::{MAX_PROJECT_WORKSPACES, ProjectWorkspaceSpec},
+    control::{MAX_PROJECT_WORKSPACES, OverlaySettings, ProjectWorkspaceSpec},
+    display::DisplayTarget,
 };
 use canvas_core::{Catalog, Project};
 use serde::{Deserialize, Serialize};
@@ -17,7 +18,7 @@ use std::io::{self, BufWriter, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-pub const STORE_SCHEMA_VERSION: u32 = 1;
+pub const STORE_SCHEMA_VERSION: u32 = 2;
 const MAX_STORE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// How many projects back "go back" can reach.
@@ -45,6 +46,65 @@ pub struct WorkspaceStore {
     /// is to survive the restart that loses the human's own memory of the order.
     #[serde(default)]
     pub recent_project_ids: Vec<String>,
+    /// Saved display and overlay policy, restored across restarts.
+    ///
+    /// Absent in v1 stores; defaults are applied when None.
+    #[serde(default)]
+    pub display_policy: Option<DisplayPolicy>,
+}
+
+/// A durable, validated display policy. Canvas restores this after restart
+/// so the wall does not need to be reconfigured every morning.
+///
+/// `DisplayTarget::Exact` carries display IDs resolved from live topology
+/// at load time — a monitor plugged into a different port still resolves to
+/// the same name, and an unplugged one is rejected. Role targets
+/// (`All`, `Ordinals`) are topology-relative and resolve on each start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayPolicy {
+    #[serde(default)]
+    pub target: DisplayTarget,
+    #[serde(default)]
+    pub overlays: OverlaySettings,
+}
+
+impl Default for DisplayPolicy {
+    fn default() -> Self {
+        Self {
+            target: DisplayTarget::All,
+            overlays: OverlaySettings::default(),
+        }
+    }
+}
+
+impl DisplayPolicy {
+    /// Validate against live display inventory, resolving role targets and
+    /// rejecting Exact targets that name absent displays.
+    pub fn validate(&self, display_ids: &[String]) -> Result<(), Error> {
+        match &self.target {
+            DisplayTarget::Exact { display_ids: ids } => {
+                for id in ids {
+                    if !display_ids.contains(id) {
+                        return Err(Error(format!(
+                            "Display policy references unknown display: {id}"
+                        )));
+                    }
+                }
+            }
+            DisplayTarget::All => {}
+            DisplayTarget::Ordinals { ordinals } => {
+                for ordinal in ordinals {
+                    if *ordinal > display_ids.len() {
+                        return Err(Error(format!(
+                            "Display policy ordinals {ordinal} exceed available displays"
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for WorkspaceStore {
@@ -55,6 +115,7 @@ impl Default for WorkspaceStore {
             projects: BTreeMap::new(),
             active_project_id: None,
             recent_project_ids: Vec::new(),
+            display_policy: None,
         }
     }
 }
@@ -250,6 +311,16 @@ impl WorkspaceStore {
 
     pub fn project_ids(&self) -> impl Iterator<Item = &str> {
         self.projects.keys().map(String::as_str)
+    }
+
+    /// The saved display policy, or the default if none was persisted.
+    pub fn display_policy(&self) -> DisplayPolicy {
+        self.display_policy.clone().unwrap_or_default()
+    }
+
+    /// Set and persist the display policy.
+    pub fn set_display_policy(&mut self, policy: DisplayPolicy) {
+        self.display_policy = Some(policy);
     }
 }
 
@@ -648,5 +719,58 @@ mod history_tests {
         let store: WorkspaceStore = serde_json::from_value(json).expect("older store");
         assert!(store.recent_project_ids.is_empty());
         assert_eq!(store.previous_project_id(), None);
+    }
+
+    #[test]
+    fn a_v1_store_without_display_policy_loads_with_defaults() {
+        // `display_policy` is serde(default), so a v1 store without the field
+        // loads as None, and display_policy() returns the default.
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "projects": {},
+            "active_project_id": null,
+        });
+        let store: WorkspaceStore = serde_json::from_value(json).expect("v1 store");
+        assert_eq!(store.display_policy(), DisplayPolicy::default());
+    }
+
+    #[test]
+    fn display_policy_rejects_unknown_display_ids() {
+        let policy = DisplayPolicy {
+            target: DisplayTarget::Exact {
+                display_ids: vec!["missing-display".into()],
+            },
+            ..Default::default()
+        };
+        let available = vec!["display-1".to_string()];
+        assert!(policy.validate(&available).is_err());
+    }
+
+    #[test]
+    fn display_policy_accepts_known_display_ids() {
+        let policy = DisplayPolicy {
+            target: DisplayTarget::Exact {
+                display_ids: vec!["display-1".to_string()],
+            },
+            ..Default::default()
+        };
+        let available = vec!["display-1".to_string()];
+        assert!(policy.validate(&available).is_ok());
+    }
+
+    #[test]
+    fn display_policy_round_trips_through_json() {
+        let policy = DisplayPolicy {
+            target: DisplayTarget::Ordinals {
+                ordinals: vec![1],
+            },
+            overlays: OverlaySettings {
+                presence_rail: crate::control::OverlayTarget::Rightmost,
+                ..Default::default()
+            },
+        };
+        let json = serde_json::to_value(&policy).expect("serialize");
+        let restored: DisplayPolicy = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(restored, policy);
     }
 }

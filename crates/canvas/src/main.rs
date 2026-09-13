@@ -503,6 +503,11 @@ impl App {
         let active_project_workspace = restored_document
             .as_ref()
             .map(|document| document.project_id.clone());
+        // Restore the saved display policy (display target + overlay anchors).
+        // Validated against live topology; invalid entries fall back to defaults.
+        let saved_policy = workspaces.display_policy();
+        let saved_target = saved_policy.target.clone();
+        let saved_overlays = saved_policy.overlays.clone();
         let mut shortcut_errors = Vec::new();
         // One owner of the display inventory: the watch takes the first one and
         // every settled one after it, so nothing else enumerates and drifts.
@@ -515,15 +520,34 @@ impl App {
         }
         let displays = display_watch.displays().to_vec();
         let display_frames = displays.iter().map(|display| display.frame).collect();
-        let desktop_frame = DisplayTopology::new(displays.clone())
-            .and_then(|topology| topology.resolve(&DisplayTarget::All))
-            .map(|resolved| resolved.frame)
-            .unwrap_or(frame);
-        let selected_display_ids = displays
-            .iter()
-            .find(|display| display.frame == frame)
-            .map(|display| vec![display.id.clone()])
-            .unwrap_or_default();
+        let display_ids: Vec<String> = displays.iter().map(|d| d.id.clone()).collect();
+        let desktop_frame = match DisplayTopology::new(displays.clone())
+            .and_then(|topology| topology.resolve(&saved_target))
+        {
+            Ok(resolved) => {
+                if let Err(error) = saved_policy.validate(&display_ids) {
+                    shortcut_errors.push(format!("Display policy rejected: {error}"));
+                }
+                resolved.frame
+            }
+            Err(error) => {
+                shortcut_errors.push(format!("Display target unresolved: {error}"));
+                DisplayTopology::new(displays.clone())
+                    .and_then(|topology| topology.resolve(&DisplayTarget::All))
+                    .map(|resolved| resolved.frame)
+                    .unwrap_or(frame)
+            }
+        };
+        let selected_display_ids = match DisplayTopology::new(displays.clone())
+            .and_then(|topology| topology.resolve(&saved_target))
+        {
+            Ok(resolved) => resolved.display_ids,
+            Err(_) => displays
+                .iter()
+                .find(|display| display.frame == frame)
+                .map(|display| vec![display.id.clone()])
+                .unwrap_or_default(),
+        };
         #[cfg(feature = "lua-scenes")]
         let (stream_inbox, stream_socket) = if cfg!(test) {
             (::canvas::stream_binding::StreamInbox::default(), None)
@@ -658,7 +682,7 @@ impl App {
             display_watch,
             selected_display_ids,
             canvas_visible: true,
-            overlays: OverlaySettings::default(),
+            overlays: saved_overlays,
             visibility_hotkey,
             snap_hotkey,
             fit_hotkey,
@@ -1686,6 +1710,12 @@ impl App {
             .filter_map(|id| topology.get(id).map(|display| display.frame))
             .collect::<Vec<_>>();
         self.selected_display_ids = resolved.display_ids.clone();
+        // Persist the resolved display policy so it survives restart.
+        self.workspaces.set_display_policy(workspace_store::DisplayPolicy {
+            target: target.clone(),
+            overlays: self.overlays.clone(),
+        });
+        let _ = workspace_store::save(&self.workspace_store_path, &self.workspaces, &self.catalog);
         // A reflow view fills whatever Canvas now occupies; a fixed one keeps
         // its geometry on the whole desktop and lets displays reveal parts of
         // it. Without this the frame stays the full desktop and selecting one

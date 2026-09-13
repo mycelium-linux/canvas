@@ -19,10 +19,11 @@ pub struct DisplayInfo {
     pub primary: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum DisplayTarget {
+    #[default]
     All,
     Exact {
         display_ids: Vec<String>,
