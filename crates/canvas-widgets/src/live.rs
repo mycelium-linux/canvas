@@ -1391,8 +1391,13 @@ impl<Message> canvas::Program<Message> for HeatmapProgram {
         state.draw_cached(renderer, bounds.size(), key, |frame| {
             let label_width = (bounds.width * 0.18).clamp(42.0, 110.0);
             let top = 18.0;
+            // A color scale lives at the bottom so a cell's colour reads back
+            // to a value — a heatmap with no ramp is a picture, not a reading.
+            let scale_h: f32 = 20.0;
+            let scale_gap: f32 = 4.0;
+            let plot_bottom = (bounds.height - top - scale_h - scale_gap).max(top);
             let cell_w = ((bounds.width - label_width) / self.columns.len() as f32).max(1.0);
-            let cell_h = ((bounds.height - top) / self.rows.len() as f32).max(1.0);
+            let cell_h = ((plot_bottom - top) / self.rows.len() as f32).max(1.0);
             let (min, max) = self
                 .values
                 .iter()
@@ -1420,7 +1425,7 @@ impl<Message> canvas::Program<Message> for HeatmapProgram {
                 });
                 for (column, value) in values.iter().enumerate() {
                     let t = ((*value - min) / (max - min).max(f64::EPSILON)) as f32;
-                    let fill = lerp_color(self.low, self.high, t);
+                    let fill = lerp_oklch(self.low, self.high, t);
                     frame.fill(
                         &Path::rectangle(
                             Point::new(label_width + column as f32 * cell_w + 1.0, y + 1.0),
@@ -1429,6 +1434,39 @@ impl<Message> canvas::Program<Message> for HeatmapProgram {
                         fill,
                     );
                 }
+            }
+            // Color scale: a perceptual ramp (same lerp as the cells, so the
+            // strip is an honest map) with min/mid/max labels.
+            let strip_x = label_width;
+            let strip_y = bounds.height - scale_h;
+            let strip_w = (bounds.width - label_width).max(1.0);
+            let strip_h: f32 = 14.0;
+            let stops = 16usize;
+            let step = strip_w / stops as f32;
+            for index in 0..stops {
+                let t = index as f32 / (stops - 1) as f32;
+                let color = lerp_oklch(self.low, self.high, t);
+                frame.fill(
+                    &Path::rectangle(
+                        Point::new(strip_x + index as f32 * step, strip_y + (scale_h - strip_h) / 2.0),
+                        Size::new(step, strip_h),
+                    ),
+                    color,
+                );
+            }
+            let mid = (min + max) / 2.0;
+            let label_y = strip_y + scale_h + 2.0;
+            for (value, justify) in [(min, 0.0f32), (mid, 0.5), (max, 1.0)] {
+                let text = short_value(value);
+                let width = text.chars().count() as f32 * 4.5;
+                let x = strip_x + justify * strip_w - width * justify;
+                frame.fill_text(canvas::Text {
+                    content: text,
+                    position: Point::new(x, label_y),
+                    color: self.label,
+                    size: iced::Pixels(self.label_size),
+                    ..Default::default()
+                });
             }
         })
     }
@@ -1684,14 +1722,36 @@ impl<Message> canvas::Program<Message> for BurnRateProgram {
     }
 }
 
-fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+/// Interpolate in OKLCH so the ramp is perceptually uniform — a color scale
+/// drawn from this must read back the same gradient the cells use. Hue takes
+/// the shortest arc across 0/360 so a ramp that crosses the red seam does not
+/// sweep the whole color wheel.
+fn lerp_oklch(a: Color, b: Color, t: f32) -> Color {
     let t = t.clamp(0.0, 1.0);
-    Color::from_rgba(
-        a.r + (b.r - a.r) * t,
-        a.g + (b.g - a.g) * t,
-        a.b + (b.b - a.b) * t,
-        a.a + (b.a - a.a) * t,
-    )
+    let a = to_oklch(a);
+    let b = to_oklch(b);
+    let hue = |lo: f32, hi: f32| {
+        let d = (hi - lo).rem_euclid(360.0);
+        let d = if d > 180.0 { d - 360.0 } else { d };
+        (lo + d * t).rem_euclid(360.0)
+    };
+    from_oklch(Oklch {
+        l: a.l + (b.l - a.l) * t,
+        c: a.c + (b.c - a.c) * t,
+        h: hue(a.h, b.h),
+    })
+}
+
+/// Compact label for the ends of a color scale, so min/mid/max stay readable
+/// on a narrow strip across the wall.
+fn short_value(value: f64) -> String {
+    if value.abs() >= 1_000.0 {
+        format!("{:.1e}", value)
+    } else if value == value.trunc() {
+        format!("{}", value as i64)
+    } else {
+        format!("{:.1}", value)
+    }
 }
 
 /// The value window a plot maps onto its bounds, so a mapping is stated once
@@ -2237,6 +2297,33 @@ mod tests {
         assert_eq!(parts.hour, tm.tm_hour as u64);
         assert_eq!(parts.minute, tm.tm_min as u64);
         assert_eq!(parts.second, tm.tm_sec as u64);
+    }
+
+    #[test]
+    fn oklch_ramp_endpoints_and_mid_stay_in_range() {
+        // A honest scale maps the endpoints back to the declared low/high, so a
+        // viewer can read a value from a cell colour: lerp at 0 and 1 must
+        // return the inputs, and the midpoint must sit between them.
+        let low = Color::from_rgb(0.2, 0.2, 0.8);
+        let high = Color::from_rgb(0.9, 0.1, 0.1);
+        let mid = lerp_oklch(low, high, 0.5);
+        let near = |a: Color, b: Color| {
+            (a.r - b.r).abs() < 1e-4
+                && (a.g - b.g).abs() < 1e-4
+                && (a.b - b.b).abs() < 1e-4
+                && (a.a - b.a).abs() < 1e-4
+        };
+        assert!(near(lerp_oklch(low, high, 0.0), low));
+        assert!(near(lerp_oklch(low, high, 1.0), high));
+        assert!(mid.r > low.r.min(high.r) && mid.r < low.r.max(high.r));
+    }
+
+    #[test]
+    fn short_value_formats_integers_without_trailing_dot() {
+        assert_eq!(short_value(0.0), "0");
+        assert_eq!(short_value(-7.0), "-7");
+        assert_eq!(short_value(12.5), "12.5");
+        assert_eq!(short_value(1000.0), "1.0e3");
     }
 
     #[test]
