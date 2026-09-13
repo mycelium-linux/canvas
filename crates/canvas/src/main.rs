@@ -2678,7 +2678,13 @@ impl App {
                 task
             }
             Command::SetOverlays { overlays } => {
-                self.overlays = overlays;
+                self.overlays = overlays.clone();
+                // Persist the updated overlay policy alongside the display target.
+                self.workspaces.set_display_policy(workspace_store::DisplayPolicy {
+                    target: self.workspaces.display_policy().target,
+                    overlays,
+                });
+                let _ = workspace_store::save(&self.workspace_store_path, &self.workspaces, &self.catalog);
                 self.bump();
                 self.status = "Updated Canvas overlay placement.".into();
                 self.answer(
