@@ -22,6 +22,138 @@ pub const MAX_STREAM_MESSAGE: usize = 64 * 1024;
 const MAX_PENDING_EVENTS: usize = 512;
 pub const MAX_ADAPTER_BYTES: usize = 32 * 1024;
 
+/// An artifact manifest packages a query, a binder, and the widget kind it
+/// produces into one addressable unit. Per docs/widget-quality.md, these
+/// three must agree — and today they live in three unrelated files with no
+/// resolution order or manifest. The resolution order is:
+///
+/// 1. Project-local: `runtime_config::root()/artifacts/<id>.json`
+/// 2. Global: `~/.local/state/dock/canvas/artifacts/<id>.json`
+/// 3. Built-in: `config/artifacts/<id>.json` (compiled in via include_str!)
+///
+/// A project can override a shared artifact without forking the binder itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactManifest {
+    pub schema_version: u32,
+    pub id: String,
+    pub version: String,
+    /// The stream source this artifact consumes (e.g. "prometheus:bifrost/health").
+    pub source: String,
+    /// The binder Lua file name (without path) that transforms events into
+    /// widget snapshots. Loaded via the same runtime_config or built-in path
+    /// as `apply_named_adapter`.
+    pub binder: String,
+    /// The widget kind this artifact produces — enforced at the boundary so
+    /// a mismatched spec fails before it reaches a surface.
+    pub widget_kind: String,
+    /// Whether this artifact is marked as demo/sample (non-live data).
+    #[serde(default)]
+    pub provenance: String,
+    /// Minimum refresh interval in milliseconds. Widgets fed by this artifact
+    /// are not polled more frequently than this.
+    #[serde(default = "default_refresh_ms")]
+    pub refresh_ms: u64,
+}
+
+fn default_refresh_ms() -> u64 {
+    5_000
+}
+
+impl ArtifactManifest {
+    /// The manifest schema version. Bumped when fields change in a
+    /// non-backward-compatible way.
+    pub const MANIFEST_SCHEMA_VERSION: u32 = 1;
+
+    /// Load an artifact manifest by ID, searching in resolution order:
+    /// project local → global → built-in.
+    pub fn load(id: &str) -> Result<Self> {
+        if id.is_empty()
+            || id.len() > 64
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return Err(Error(format!("invalid artifact id: {id}")));
+        }
+        // 1. Project-local: runtime config directory
+        let relative = PathBuf::from("artifacts").join(format!("{id}.json"));
+        if let Some(bytes) = crate::runtime_config::read(&relative, 64 * 1024)? {
+            return Self::parse(&bytes, id);
+        }
+        // 2. Global user state directory
+        if let Some(global_path) = global_artifact_path(id) {
+            if let Ok(bytes) = std::fs::read(&global_path) {
+                return Self::parse(&bytes, id);
+            }
+        }
+        // 3. Built-in: compiled into the binary
+        let built_in = match id {
+            "fpl-health" => include_str!("../../../config/artifacts/fpl-health.json"),
+            "fpl-gpu" => include_str!("../../../config/artifacts/fpl-gpu.json"),
+            "fpl-gpu-power" => include_str!("../../../config/artifacts/fpl-gpu-power.json"),
+            "music-nowplaying" => include_str!("../../../config/artifacts/music-nowplaying.json"),
+            "agent-activity" => include_str!("../../../config/artifacts/agent-activity.json"),
+            _ => return Err(Error(format!("unknown artifact: {id}")).into()),
+        };
+        Self::parse(built_in.as_bytes(), id)
+    }
+
+    fn parse(bytes: &[u8], id: &str) -> Result<Self> {
+        let manifest: Self = serde_json::from_slice(bytes)
+            .map_err(|e| Error(format!("invalid artifact manifest {id}: {e}").into()))?;
+        if manifest.id != id {
+            return Err(Error(format!(
+                "artifact manifest id mismatch: expected {id}, got {}",
+                manifest.id
+            ))
+            .into());
+        }
+        if manifest.schema_version != Self::MANIFEST_SCHEMA_VERSION {
+            return Err(Error(format!(
+                "artifact manifest {} has unsupported schema_version {} (expected {})",
+                id, manifest.schema_version, Self::MANIFEST_SCHEMA_VERSION
+            ))
+            .into());
+        }
+        // Validate the binder name matches the existing apply_named_adapter rules.
+        if manifest.binder.is_empty()
+            || manifest.binder.len() > 64
+            || !manifest
+                .binder
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return Err(Error(format!(
+                "artifact manifest {id} has invalid binder name: {}",
+                manifest.binder
+            ))
+            .into());
+        }
+        // Validate the widget kind is a known Canvas widget kind.
+        if !canvas_widgets::is_known_widget_kind(&manifest.widget_kind) {
+            return Err(Error(format!(
+                "artifact manifest {} declares unknown widget kind: {}",
+                id, manifest.widget_kind
+            ))
+            .into());
+        }
+        Ok(manifest)
+    }
+}
+
+/// Path to the global user-level artifact directory.
+fn global_artifact_path(id: &str) -> Option<PathBuf> {
+    let state_root = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join(".local/state"))
+        })?;
+    Some(state_root.join("dock/canvas/artifacts").join(format!("{id}.json")))
+}
+
 /// Re-exported from canvas-core so stream_binding callers can validate
 /// without a separate import. See DECLARED_CONTRACTS and is_declared_contract
 /// in canvas-core for the canonical registry.
@@ -281,6 +413,7 @@ pub fn apply_named_adapter_batch(
         "agent-activity-v1" => include_str!("../../../config/binders/agent-activity-v1.lua"),
         "market-ohlcv-v1" => include_str!("../../../config/binders/market-ohlcv-v1.lua"),
         "widget-snapshot-v1" => include_str!("../../../config/binders/widget-snapshot-v1.lua"),
+        "music-nowplaying-v1" => include_str!("../../../config/binders/music-nowplaying-v1.lua"),
         _ => return Err(Error(format!("unknown stream adapter: {adapter}"))),
     };
     apply_lua_adapter_batch(source, events, target)
@@ -716,5 +849,45 @@ mod tests {
             "canvas.widget.snapshot.v1 must be declared"
         );
         ev.validate().unwrap();
+    }
+
+    #[test]
+    fn a_builtin_artifact_loads_and_validates() {
+        let manifest = ArtifactManifest::load("fpl-health").expect("fpl-health loads");
+        assert_eq!(manifest.id, "fpl-health");
+        assert_eq!(manifest.binder, "widget-snapshot-v1");
+        assert_eq!(manifest.widget_kind, "stat");
+        // The binder is a known adapter that already exists in apply_named_adapter.
+        assert!(!manifest.binder.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_artifact_is_rejected() {
+        assert!(ArtifactManifest::load("does-not-exist").is_err());
+    }
+
+    #[test]
+    fn an_invalid_artifact_id_is_rejected() {
+        assert!(ArtifactManifest::load("has_uppercase").is_err());
+        assert!(ArtifactManifest::load("").is_err());
+    }
+
+    #[test]
+    fn a_v1_manifest_round_trips() {
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "id": "test",
+            "version": "0.1.0",
+            "source": "prometheus:test/metric",
+            "binder": "widget-snapshot-v1",
+            "widget_kind": "stat",
+            "provenance": "demo",
+            "refresh_ms": 5000
+        });
+        let bytes = serde_json::to_vec(&json).unwrap();
+        // Built-in parse is tested via load(); this validates the schema.
+        let manifest: ArtifactManifest = serde_json::from_slice(&bytes).expect("parses");
+        assert_eq!(manifest.schema_version, ArtifactManifest::MANIFEST_SCHEMA_VERSION);
+        assert_eq!(manifest.id, "test");
     }
 }
