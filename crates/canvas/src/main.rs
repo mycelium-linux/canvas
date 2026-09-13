@@ -4536,15 +4536,24 @@ impl App {
                 .into()
             }
             ContentSource::Stream { url } => {
+                // No decoder is wired for video/streams yet (see docs/widget-quality.md
+                // rule 3: a surface must not claim a connection it cannot make).
+                // A hollow "Connecting to stream..." is worse than a label — it
+                // reads as in-progress when the capability does not exist.
                 let palette = self.project_palette();
                 container(
                     iced::widget::Column::<Message>::new()
                         .push(
-                            text("Connecting to stream...")
+                            text("Stream playback is not yet available")
                                 .size(20)
                                 .color(color(palette.text)),
                         )
-                        .push(text(url.clone()).size(12).color(color(palette.text_muted))),
+                        .push(text(url.clone()).size(12).color(color(palette.text_muted)))
+                        .push(
+                            text("Video and continuous streams arrive via the native surface path,\nwhich is still under construction.")
+                                .size(12)
+                                .color(color(palette.text_muted)),
+                        ),
                 )
                 .width(Length::Fill)
                 .height(Length::Fill)
