@@ -1,7 +1,7 @@
 //! OpenCode owns inference and conversation persistence. Dock calls its supported API.
 use crate::{command, unit};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     env, fs,
     io::Read,

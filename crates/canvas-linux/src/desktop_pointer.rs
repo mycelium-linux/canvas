@@ -5,8 +5,8 @@ use std::{
     time::{Duration, Instant},
 };
 use wayland_client::{
-    protocol::{wl_callback, wl_output, wl_pointer, wl_registry, wl_seat},
     Connection, Dispatch, Proxy, QueueHandle,
+    protocol::{wl_callback, wl_output, wl_pointer, wl_registry, wl_seat},
 };
 use wayland_protocols_wlr::virtual_pointer::v1::client::{
     zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1,
@@ -57,10 +57,10 @@ impl Dispatch<wl_output::WlOutput, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_output::Event::Name { name } = event {
-            if let Some(entry) = state.outputs.iter_mut().find(|entry| entry.0 == *output) {
-                entry.1 = name;
-            }
+        if let wl_output::Event::Name { name } = event
+            && let Some(entry) = state.outputs.iter_mut().find(|entry| entry.0 == *output)
+        {
+            entry.1 = name;
         }
     }
 }

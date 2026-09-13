@@ -25,8 +25,9 @@ use std::path::PathBuf;
 /// at runtime without a rebuild.
 pub fn load_briefing(name: &str) -> Result<Vec<u8>, String> {
     let relative = PathBuf::from("briefings").join(format!("{name}.lua"));
-    if let Some(bytes) = crate::runtime_config::read(&relative, stream_binding::MAX_ADAPTER_BYTES as u64)
-    .map_err(|error| error.to_string())?
+    if let Some(bytes) =
+        crate::runtime_config::read(&relative, stream_binding::MAX_ADAPTER_BYTES as u64)
+            .map_err(|error| error.to_string())?
     {
         return Ok(bytes);
     }
@@ -54,8 +55,7 @@ pub fn render_beat(event: &StreamEnvelope) -> Result<BriefingBeat, String> {
     let source = load_briefing(name)?;
     let source_str = std::str::from_utf8(&source)
         .map_err(|error| format!("Canvas briefing is not UTF-8: {error}"))?;
-    stream_binding::apply_briefing_binder(source_str, event)
-        .map_err(|error| error.to_string())
+    stream_binding::apply_briefing_binder(source_str, event).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -89,7 +89,10 @@ mod tests {
                 panic!("beat {beat} failed: {e}");
             });
             assert_eq!(result.beat, beat);
-            assert!(!result.patches.is_empty(), "beat {beat} should have patches");
+            assert!(
+                !result.patches.is_empty(),
+                "beat {beat} should have patches"
+            );
         }
     }
 
@@ -126,9 +129,7 @@ mod tests {
         let bytes = load_briefing("intro-v1").unwrap();
         assert!(!bytes.is_empty(), "built-in briefing must not be empty");
         assert!(
-            std::str::from_utf8(&bytes)
-                .unwrap()
-                .contains("narrate"),
+            std::str::from_utf8(&bytes).unwrap().contains("narrate"),
             "briefing must contain narrate field"
         );
     }

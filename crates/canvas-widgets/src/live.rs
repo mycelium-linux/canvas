@@ -32,7 +32,13 @@ pub struct CacheState {
 }
 
 impl CacheState {
-    pub fn draw_cached<F>(&self, renderer: &Renderer, size: Size, key: u64, draw: F) -> Vec<Geometry>
+    pub fn draw_cached<F>(
+        &self,
+        renderer: &Renderer,
+        size: Size,
+        key: u64,
+        draw: F,
+    ) -> Vec<Geometry>
     where
         F: FnOnce(&mut canvas::Frame),
     {
@@ -87,7 +93,8 @@ impl Default for Key {
 }
 
 fn hash_str(s: &str) -> u64 {
-    s.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64))
+    s.bytes()
+        .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64))
 }
 
 /// Hash any `Hash`-implementing data. For floats and colors, use `Key` instead.
@@ -233,12 +240,21 @@ pub fn element<'a, Message: 'a>(
                 .into(),
             visual,
         ),
-        WidgetKind::Launcher { items, pinned: _, orientation: _ } => {
+        WidgetKind::Launcher {
+            items,
+            pinned: _,
+            orientation: _,
+        } => {
             let tile_color = color(palette.surface);
             let label_color = color(palette.text);
             let alert_color = color(palette.danger);
             let tiles: Vec<Element<'_, Message>> = if items.is_empty() {
-                vec![text("No projects").size(metrics.body).color(label_color).into()]
+                vec![
+                    text("No projects")
+                        .size(metrics.body)
+                        .color(label_color)
+                        .into(),
+                ]
             } else {
                 items
                     .iter()
@@ -257,13 +273,8 @@ pub fn element<'a, Message: 'a>(
                                 .height(Length::Fixed(8.0))
                         };
                         container(
-                            row![
-                                dot,
-                                text(&item.label)
-                                    .size(metrics.body)
-                                    .color(label_color),
-                            ]
-                            .spacing(metrics.space_1)
+                            row![dot, text(&item.label).size(metrics.body).color(label_color),]
+                                .spacing(metrics.space_1),
                         )
                         .padding(4)
                         .style(move |_| container::Style {
@@ -274,11 +285,7 @@ pub fn element<'a, Message: 'a>(
                     })
                     .collect()
             };
-            panel(
-                spec,
-                row(tiles).spacing(metrics.space_2).into(),
-                visual,
-            )
+            panel(spec, row(tiles).spacing(metrics.space_2).into(), visual)
         }
         WidgetKind::Text { text: body } => panel(
             spec,
@@ -306,14 +313,16 @@ pub fn element<'a, Message: 'a>(
             let quotes = entries
                 .iter()
                 .map(|entry| {
-                    let state_color = entry.state.as_ref().map_or(color(palette.text), |status| {
-                        match status {
-                            StatusLevel::Good => color(palette.success),
-                            StatusLevel::Warning => color(palette.warning),
-                            StatusLevel::Critical => color(palette.danger),
-                            StatusLevel::Neutral => color(palette.text),
-                        }
-                    });
+                    let state_color =
+                        entry
+                            .state
+                            .as_ref()
+                            .map_or(color(palette.text), |status| match status {
+                                StatusLevel::Good => color(palette.success),
+                                StatusLevel::Warning => color(palette.warning),
+                                StatusLevel::Critical => color(palette.danger),
+                                StatusLevel::Neutral => color(palette.text),
+                            });
                     column![
                         text(&entry.label)
                             .size(metrics.small)
@@ -321,9 +330,15 @@ pub fn element<'a, Message: 'a>(
                         text(format!("{:.2}", entry.value))
                             .size(metrics.large)
                             .color(color(palette.text)),
-                        text(entry.state.as_ref().map(|s| format!("{s:?}")).unwrap_or_default())
-                            .size(metrics.small)
-                            .color(state_color),
+                        text(
+                            entry
+                                .state
+                                .as_ref()
+                                .map(|s| format!("{s:?}"))
+                                .unwrap_or_default()
+                        )
+                        .size(metrics.small)
+                        .color(state_color),
                     ]
                     .spacing(metrics.space_1)
                     .into()
@@ -1374,47 +1389,47 @@ impl<Message> canvas::Program<Message> for HeatmapProgram {
             .add_u64(val_sum)
             .build();
         state.draw_cached(renderer, bounds.size(), key, |frame| {
-        let label_width = (bounds.width * 0.18).clamp(42.0, 110.0);
-        let top = 18.0;
-        let cell_w = ((bounds.width - label_width) / self.columns.len() as f32).max(1.0);
-        let cell_h = ((bounds.height - top) / self.rows.len() as f32).max(1.0);
-        let (min, max) = self
-            .values
-            .iter()
-            .flatten()
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), value| {
-                (lo.min(*value), hi.max(*value))
-            });
-        for (column, name) in self.columns.iter().enumerate() {
-            frame.fill_text(canvas::Text {
-                content: name.clone(),
-                position: Point::new(label_width + column as f32 * cell_w + 3.0, 10.0),
-                color: self.label,
-                size: iced::Pixels(self.label_size),
-                ..Default::default()
-            });
-        }
-        for (row, (name, values)) in self.rows.iter().zip(&self.values).enumerate() {
-            let y = top + row as f32 * cell_h;
-            frame.fill_text(canvas::Text {
-                content: name.clone(),
-                position: Point::new(0.0, y + cell_h * 0.65),
-                color: self.label,
-                size: iced::Pixels(self.label_size),
-                ..Default::default()
-            });
-            for (column, value) in values.iter().enumerate() {
-                let t = ((*value - min) / (max - min).max(f64::EPSILON)) as f32;
-                let fill = lerp_color(self.low, self.high, t);
-                frame.fill(
-                    &Path::rectangle(
-                        Point::new(label_width + column as f32 * cell_w + 1.0, y + 1.0),
-                        Size::new((cell_w - 2.0).max(1.0), (cell_h - 2.0).max(1.0)),
-                    ),
-                    fill,
-                );
+            let label_width = (bounds.width * 0.18).clamp(42.0, 110.0);
+            let top = 18.0;
+            let cell_w = ((bounds.width - label_width) / self.columns.len() as f32).max(1.0);
+            let cell_h = ((bounds.height - top) / self.rows.len() as f32).max(1.0);
+            let (min, max) = self
+                .values
+                .iter()
+                .flatten()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), value| {
+                    (lo.min(*value), hi.max(*value))
+                });
+            for (column, name) in self.columns.iter().enumerate() {
+                frame.fill_text(canvas::Text {
+                    content: name.clone(),
+                    position: Point::new(label_width + column as f32 * cell_w + 3.0, 10.0),
+                    color: self.label,
+                    size: iced::Pixels(self.label_size),
+                    ..Default::default()
+                });
             }
-         }
+            for (row, (name, values)) in self.rows.iter().zip(&self.values).enumerate() {
+                let y = top + row as f32 * cell_h;
+                frame.fill_text(canvas::Text {
+                    content: name.clone(),
+                    position: Point::new(0.0, y + cell_h * 0.65),
+                    color: self.label,
+                    size: iced::Pixels(self.label_size),
+                    ..Default::default()
+                });
+                for (column, value) in values.iter().enumerate() {
+                    let t = ((*value - min) / (max - min).max(f64::EPSILON)) as f32;
+                    let fill = lerp_color(self.low, self.high, t);
+                    frame.fill(
+                        &Path::rectangle(
+                            Point::new(label_width + column as f32 * cell_w + 1.0, y + 1.0),
+                            Size::new((cell_w - 2.0).max(1.0), (cell_h - 2.0).max(1.0)),
+                        ),
+                        fill,
+                    );
+                }
+            }
         })
     }
 }
@@ -1445,35 +1460,35 @@ impl<Message> canvas::Program<Message> for RankedBarProgram {
             .add_f32(bar_sum)
             .build();
         state.draw_cached(renderer, bounds.size(), key, |frame| {
-        let mut bars = self.bars.clone();
-        bars.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let max = bars
-            .iter()
-            .map(|bar| bar.1)
-            .fold(0.0, f32::max)
-            .max(f32::EPSILON);
-        let row_h = bounds.height / bars.len() as f32;
-        let label_w = (bounds.width * 0.24).clamp(52.0, 140.0);
-        for (index, (name, value, state)) in bars.iter().enumerate() {
-            let y = index as f32 * row_h;
-            frame.fill_text(canvas::Text {
-                content: name.clone(),
-                position: Point::new(0.0, y + row_h * 0.65),
-                color: self.label,
-                size: iced::Pixels(self.label_size),
-                ..Default::default()
-            });
-            frame.fill(
-                &Path::rectangle(
-                    Point::new(label_w, y + row_h * 0.2),
-                    Size::new((bounds.width - label_w) * *value / max, row_h * 0.55),
-                ),
-                // A bar that declares a status is coloured by it. Ranking is
-                // already conveyed by position, so spending colour on rank too
-                // discards meaning the payload went to the trouble of carrying.
-                state.unwrap_or(self.palette[index % self.palette.len()]),
-            );
-         }
+            let mut bars = self.bars.clone();
+            bars.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let max = bars
+                .iter()
+                .map(|bar| bar.1)
+                .fold(0.0, f32::max)
+                .max(f32::EPSILON);
+            let row_h = bounds.height / bars.len() as f32;
+            let label_w = (bounds.width * 0.24).clamp(52.0, 140.0);
+            for (index, (name, value, state)) in bars.iter().enumerate() {
+                let y = index as f32 * row_h;
+                frame.fill_text(canvas::Text {
+                    content: name.clone(),
+                    position: Point::new(0.0, y + row_h * 0.65),
+                    color: self.label,
+                    size: iced::Pixels(self.label_size),
+                    ..Default::default()
+                });
+                frame.fill(
+                    &Path::rectangle(
+                        Point::new(label_w, y + row_h * 0.2),
+                        Size::new((bounds.width - label_w) * *value / max, row_h * 0.55),
+                    ),
+                    // A bar that declares a status is coloured by it. Ranking is
+                    // already conveyed by position, so spending colour on rank too
+                    // discards meaning the payload went to the trouble of carrying.
+                    state.unwrap_or(self.palette[index % self.palette.len()]),
+                );
+            }
         })
     }
 }
@@ -1501,36 +1516,36 @@ impl<Message> canvas::Program<Message> for StackedBarProgram {
             .add_f64(val_sum)
             .build();
         state.draw_cached(renderer, bounds.size(), key, |frame| {
-        let max = self
-            .bars
-            .iter()
-            .map(|(_, values)| values.iter().sum::<f64>())
-            .fold(0.0, f64::max)
-            .max(f64::EPSILON);
-        let row_h = bounds.height / self.bars.len() as f32;
-        let label_w = (bounds.width * 0.22).clamp(48.0, 130.0);
-        for (row, (name, values)) in self.bars.iter().enumerate() {
-            let y = row as f32 * row_h;
-            frame.fill_text(canvas::Text {
-                content: name.clone(),
-                position: Point::new(0.0, y + row_h * 0.65),
-                color: self.label,
-                size: iced::Pixels(self.label_size),
-                ..Default::default()
-            });
-            let mut x = label_w;
-            for (index, value) in values.iter().enumerate() {
-                let width = (bounds.width - label_w) * (*value / max) as f32;
-                frame.fill(
-                    &Path::rectangle(
-                        Point::new(x, y + row_h * 0.2),
-                        Size::new(width, row_h * 0.55),
-                    ),
-                    self.colors[index % self.colors.len()],
-                );
-                x += width;
+            let max = self
+                .bars
+                .iter()
+                .map(|(_, values)| values.iter().sum::<f64>())
+                .fold(0.0, f64::max)
+                .max(f64::EPSILON);
+            let row_h = bounds.height / self.bars.len() as f32;
+            let label_w = (bounds.width * 0.22).clamp(48.0, 130.0);
+            for (row, (name, values)) in self.bars.iter().enumerate() {
+                let y = row as f32 * row_h;
+                frame.fill_text(canvas::Text {
+                    content: name.clone(),
+                    position: Point::new(0.0, y + row_h * 0.65),
+                    color: self.label,
+                    size: iced::Pixels(self.label_size),
+                    ..Default::default()
+                });
+                let mut x = label_w;
+                for (index, value) in values.iter().enumerate() {
+                    let width = (bounds.width - label_w) * (*value / max) as f32;
+                    frame.fill(
+                        &Path::rectangle(
+                            Point::new(x, y + row_h * 0.2),
+                            Size::new(width, row_h * 0.55),
+                        ),
+                        self.colors[index % self.colors.len()],
+                    );
+                    x += width;
+                }
             }
-        }
         })
     }
 }
@@ -1551,50 +1566,56 @@ impl<Message> canvas::Program<Message> for StateTimelineProgram {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let seg_sum: f64 = self.lanes.iter().flat_map(|l| l.segments.iter()).map(|s| s.start + s.end).sum();
+        let seg_sum: f64 = self
+            .lanes
+            .iter()
+            .flat_map(|l| l.segments.iter())
+            .map(|s| s.start + s.end)
+            .sum();
         let key = Key::new()
             .add_usize(self.lanes.len())
             .add_usize(self.lanes.iter().map(|l| l.segments.len()).sum())
             .add_f64(seg_sum)
             .build();
         state.draw_cached(renderer, bounds.size(), key, |frame| {
-        let min = self
-            .lanes
-            .iter()
-            .flat_map(|lane| &lane.segments)
-            .map(|segment| segment.start)
-            .fold(f64::INFINITY, f64::min);
-        let max = self
-            .lanes
-            .iter()
-            .flat_map(|lane| &lane.segments)
-            .map(|segment| segment.end)
-            .fold(f64::NEG_INFINITY, f64::max);
-        let span = (max - min).max(f64::EPSILON);
-        let label_w = (bounds.width * 0.2).clamp(48.0, 130.0);
-        let row_h = bounds.height / self.lanes.len() as f32;
-        for (row, lane) in self.lanes.iter().enumerate() {
-            let y = row as f32 * row_h;
-            frame.fill_text(canvas::Text {
-                content: lane.label.clone(),
-                position: Point::new(0.0, y + row_h * 0.65),
-                color: self.label,
-                size: iced::Pixels(self.label_size),
-                ..Default::default()
-            });
-            for segment in &lane.segments {
-                let x = label_w + ((segment.start - min) / span) as f32 * (bounds.width - label_w);
-                let width =
-                    ((segment.end - segment.start) / span) as f32 * (bounds.width - label_w);
-                frame.fill(
-                    &Path::rectangle(
-                        Point::new(x, y + row_h * 0.18),
-                        Size::new(width.max(1.0), row_h * 0.62),
-                    ),
-                    status_color(segment.state, &self.palette),
-                );
+            let min = self
+                .lanes
+                .iter()
+                .flat_map(|lane| &lane.segments)
+                .map(|segment| segment.start)
+                .fold(f64::INFINITY, f64::min);
+            let max = self
+                .lanes
+                .iter()
+                .flat_map(|lane| &lane.segments)
+                .map(|segment| segment.end)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let span = (max - min).max(f64::EPSILON);
+            let label_w = (bounds.width * 0.2).clamp(48.0, 130.0);
+            let row_h = bounds.height / self.lanes.len() as f32;
+            for (row, lane) in self.lanes.iter().enumerate() {
+                let y = row as f32 * row_h;
+                frame.fill_text(canvas::Text {
+                    content: lane.label.clone(),
+                    position: Point::new(0.0, y + row_h * 0.65),
+                    color: self.label,
+                    size: iced::Pixels(self.label_size),
+                    ..Default::default()
+                });
+                for segment in &lane.segments {
+                    let x =
+                        label_w + ((segment.start - min) / span) as f32 * (bounds.width - label_w);
+                    let width =
+                        ((segment.end - segment.start) / span) as f32 * (bounds.width - label_w);
+                    frame.fill(
+                        &Path::rectangle(
+                            Point::new(x, y + row_h * 0.18),
+                            Size::new(width.max(1.0), row_h * 0.62),
+                        ),
+                        status_color(segment.state, &self.palette),
+                    );
+                }
             }
-         }
         })
     }
 }
@@ -1624,41 +1645,41 @@ impl<Message> canvas::Program<Message> for BurnRateProgram {
             .add_f64(rate_sum)
             .build();
         state.draw_cached(renderer, bounds.size(), key, |frame| {
-        let max = self
-            .windows
-            .iter()
-            .map(|window| window.burn_rate)
-            .fold(1.0, f64::max);
-        let row_h = bounds.height / self.windows.len() as f32;
-        let label_w = (bounds.width * 0.2).clamp(44.0, 110.0);
-        for (row, window) in self.windows.iter().enumerate() {
-            let y = row as f32 * row_h;
-            frame.fill_text(canvas::Text {
-                content: format!("{}  {:.2}×", window.label, window.burn_rate),
-                position: Point::new(0.0, y + row_h * 0.65),
-                color: self.label,
-                size: iced::Pixels(self.label_size),
-                ..Default::default()
-            });
-            let rect = |width| {
-                Path::rectangle(
-                    Point::new(label_w, y + row_h * 0.25),
-                    Size::new(width, row_h * 0.5),
-                )
-            };
-            frame.fill(&rect(bounds.width - label_w), self.track);
-            let fill = if window.burn_rate <= 1.0 {
-                self.good
-            } else if window.burn_rate <= 2.0 {
-                self.warning
-            } else {
-                self.danger
-            };
-            frame.fill(
-                &rect((bounds.width - label_w) * (window.burn_rate / max) as f32),
-                fill,
-            );
-         }
+            let max = self
+                .windows
+                .iter()
+                .map(|window| window.burn_rate)
+                .fold(1.0, f64::max);
+            let row_h = bounds.height / self.windows.len() as f32;
+            let label_w = (bounds.width * 0.2).clamp(44.0, 110.0);
+            for (row, window) in self.windows.iter().enumerate() {
+                let y = row as f32 * row_h;
+                frame.fill_text(canvas::Text {
+                    content: format!("{}  {:.2}×", window.label, window.burn_rate),
+                    position: Point::new(0.0, y + row_h * 0.65),
+                    color: self.label,
+                    size: iced::Pixels(self.label_size),
+                    ..Default::default()
+                });
+                let rect = |width| {
+                    Path::rectangle(
+                        Point::new(label_w, y + row_h * 0.25),
+                        Size::new(width, row_h * 0.5),
+                    )
+                };
+                frame.fill(&rect(bounds.width - label_w), self.track);
+                let fill = if window.burn_rate <= 1.0 {
+                    self.good
+                } else if window.burn_rate <= 2.0 {
+                    self.warning
+                } else {
+                    self.danger
+                };
+                frame.fill(
+                    &rect((bounds.width - label_w) * (window.burn_rate / max) as f32),
+                    fill,
+                );
+            }
         })
     }
 }
@@ -1830,19 +1851,19 @@ impl<Message> canvas::Program<Message> for SparklineProgram {
             .add_f32(val_sum)
             .build();
         state.draw_cached(renderer, bounds.size(), key, |frame| {
-        let series: Vec<(f32, f32)> = self
-            .values
-            .iter()
-            .enumerate()
-            .map(|(index, value)| (index as f32, *value))
-            .collect();
-        let range = PlotRange::over(&series);
-        let area = plot_area(bounds.size());
-        let points: Vec<Point> = series
-            .iter()
-            .map(|value| range.project(*value, area))
-            .collect();
-        draw_series_line(frame, &points, bounds.height, self.color, AREA_ALPHA);
+            let series: Vec<(f32, f32)> = self
+                .values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| (index as f32, *value))
+                .collect();
+            let range = PlotRange::over(&series);
+            let area = plot_area(bounds.size());
+            let points: Vec<Point> = series
+                .iter()
+                .map(|value| range.project(*value, area))
+                .collect();
+            draw_series_line(frame, &points, bounds.height, self.color, AREA_ALPHA);
         })
     }
 }
@@ -1866,21 +1887,21 @@ impl<Message> canvas::Program<Message> for GaugeProgram {
     ) -> Vec<Geometry> {
         let key = Key::new().add_f32(self.value).build();
         state.draw_cached(renderer, bounds.size(), key, |frame| {
-        frame.fill(
-            &Path::rounded_rectangle(Point::ORIGIN, bounds.size(), self.radius.into()),
-            self.track,
-        );
-        frame.fill(
-            &Path::rounded_rectangle(
-                Point::ORIGIN,
-                Size::new(
-                    bounds.width * (self.value / 100.0).clamp(0.0, 1.0),
-                    bounds.height,
+            frame.fill(
+                &Path::rounded_rectangle(Point::ORIGIN, bounds.size(), self.radius.into()),
+                self.track,
+            );
+            frame.fill(
+                &Path::rounded_rectangle(
+                    Point::ORIGIN,
+                    Size::new(
+                        bounds.width * (self.value / 100.0).clamp(0.0, 1.0),
+                        bounds.height,
+                    ),
+                    self.radius.into(),
                 ),
-                self.radius.into(),
-            ),
-            self.fill,
-        );
+                self.fill,
+            );
         })
     }
 }
@@ -1910,27 +1931,27 @@ impl<Message> canvas::Program<Message> for HistogramProgram {
             .add_f32(val_sum)
             .build();
         state.draw_cached(renderer, bounds.size(), key, |frame| {
-        let max = self.values.iter().copied().fold(0.0, f32::max).max(1e-6);
-        for row in 1..4 {
-            let y = bounds.height * row as f32 / 4.0;
-            frame.stroke(
-                &Path::line(Point::new(0.0, y), Point::new(bounds.width, y)),
-                canvas::Stroke::default()
-                    .with_width(1.0)
-                    .with_color(self.grid),
-            );
-        }
-        let width = bounds.width / self.values.len() as f32;
-        for (index, value) in self.values.iter().enumerate() {
-            let height = value / max * bounds.height;
-            frame.fill(
-                &Path::rectangle(
-                    Point::new(index as f32 * width + 1.0, bounds.height - height),
-                    Size::new((width - 2.0).max(1.0), height),
-                ),
-                self.color,
-            );
-        }
+            let max = self.values.iter().copied().fold(0.0, f32::max).max(1e-6);
+            for row in 1..4 {
+                let y = bounds.height * row as f32 / 4.0;
+                frame.stroke(
+                    &Path::line(Point::new(0.0, y), Point::new(bounds.width, y)),
+                    canvas::Stroke::default()
+                        .with_width(1.0)
+                        .with_color(self.grid),
+                );
+            }
+            let width = bounds.width / self.values.len() as f32;
+            for (index, value) in self.values.iter().enumerate() {
+                let height = value / max * bounds.height;
+                frame.fill(
+                    &Path::rectangle(
+                        Point::new(index as f32 * width + 1.0, bounds.height - height),
+                        Size::new((width - 2.0).max(1.0), height),
+                    ),
+                    self.color,
+                );
+            }
         })
     }
 }
@@ -1956,40 +1977,37 @@ impl<Message> canvas::Program<Message> for TimeSeriesProgram {
         }
         let pts: usize = self.series.iter().flatten().count();
         let val: f32 = self.series.iter().flatten().map(|(_, y)| *y).sum();
-        let key = Key::new()
-            .add_usize(pts)
-            .add_f32(val)
-            .build();
+        let key = Key::new().add_usize(pts).add_f32(val).build();
         state.draw_cached(renderer, bounds.size(), key, |frame| {
-        // One range over every series: two series on their own scales share an
-        // axis that means nothing.
-        let range = PlotRange::over(self.series.iter().flatten());
-        let area = plot_area(bounds.size());
-        for row in 0..=4 {
-            let y = bounds.height * row as f32 / 4.0;
-            frame.stroke(
-                &Path::line(Point::new(0.0, y), Point::new(bounds.width, y)),
-                canvas::Stroke::default()
-                    .with_width(1.0)
-                    .with_color(self.grid),
-            );
-        }
-        // The fills stack, so each is worth a share of the budget rather than
-        // all of it.
-        let area_alpha = AREA_ALPHA / self.series.len().max(1) as f32;
-        for (index, series) in self.series.iter().enumerate() {
-            let points: Vec<Point> = series
-                .iter()
-                .map(|value| range.project(*value, area))
-                .collect();
-            draw_series_line(
-                frame,
-                &points,
-                bounds.height,
-                self.colors[index % self.colors.len()],
-                area_alpha,
-            );
-        }
+            // One range over every series: two series on their own scales share an
+            // axis that means nothing.
+            let range = PlotRange::over(self.series.iter().flatten());
+            let area = plot_area(bounds.size());
+            for row in 0..=4 {
+                let y = bounds.height * row as f32 / 4.0;
+                frame.stroke(
+                    &Path::line(Point::new(0.0, y), Point::new(bounds.width, y)),
+                    canvas::Stroke::default()
+                        .with_width(1.0)
+                        .with_color(self.grid),
+                );
+            }
+            // The fills stack, so each is worth a share of the budget rather than
+            // all of it.
+            let area_alpha = AREA_ALPHA / self.series.len().max(1) as f32;
+            for (index, series) in self.series.iter().enumerate() {
+                let points: Vec<Point> = series
+                    .iter()
+                    .map(|value| range.project(*value, area))
+                    .collect();
+                draw_series_line(
+                    frame,
+                    &points,
+                    bounds.height,
+                    self.colors[index % self.colors.len()],
+                    area_alpha,
+                );
+            }
         })
     }
 }
@@ -2078,95 +2096,96 @@ impl<Message> canvas::Program<Message> for ChartProgram {
             .add_usize(self.chart_type as usize)
             .build();
         state.draw_cached(renderer, bounds.size(), key, |frame| {
-        let margin = 40.0f32;
-        let stroke = canvas::Stroke::default().with_width(1.0).with_color(Color {
-            a: 0.15,
-            ..self.axis_color
-        });
+            let margin = 40.0f32;
+            let stroke = canvas::Stroke::default().with_width(1.0).with_color(Color {
+                a: 0.15,
+                ..self.axis_color
+            });
 
-        let min_x = self
-            .data
-            .iter()
-            .map(|(x, _)| *x)
-            .fold(f32::INFINITY, f32::min);
-        let max_x = self
-            .data
-            .iter()
-            .map(|(x, _)| *x)
-            .fold(f32::NEG_INFINITY, f32::max);
-        let min_y = self
-            .data
-            .iter()
-            .map(|(_, y)| *y)
-            .fold(f32::INFINITY, f32::min);
-        let max_y = self
-            .data
-            .iter()
-            .map(|(_, y)| *y)
-            .fold(f32::NEG_INFINITY, f32::max);
+            let min_x = self
+                .data
+                .iter()
+                .map(|(x, _)| *x)
+                .fold(f32::INFINITY, f32::min);
+            let max_x = self
+                .data
+                .iter()
+                .map(|(x, _)| *x)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let min_y = self
+                .data
+                .iter()
+                .map(|(_, y)| *y)
+                .fold(f32::INFINITY, f32::min);
+            let max_y = self
+                .data
+                .iter()
+                .map(|(_, y)| *y)
+                .fold(f32::NEG_INFINITY, f32::max);
 
-        let plot_w = bounds.width - 2.0 * margin;
-        let plot_h = bounds.height - 2.0 * margin;
+            let plot_w = bounds.width - 2.0 * margin;
+            let plot_h = bounds.height - 2.0 * margin;
 
-        let sx = |x: f32| margin + (x - min_x) / (max_x - min_x).max(1e-6) * plot_w;
-        let sy = |y: f32| bounds.height - margin - (y - min_y) / (max_y - min_y).max(1e-6) * plot_h;
+            let sx = |x: f32| margin + (x - min_x) / (max_x - min_x).max(1e-6) * plot_w;
+            let sy =
+                |y: f32| bounds.height - margin - (y - min_y) / (max_y - min_y).max(1e-6) * plot_h;
 
-        if plot_w > 0.0 && plot_h > 0.0 {
-            frame.stroke(
-                &Path::line(
-                    Point::new(margin, bounds.height - margin),
-                    Point::new(bounds.width - margin, bounds.height - margin),
-                ),
-                stroke,
-            );
-            frame.stroke(
-                &Path::line(
-                    Point::new(margin, margin),
-                    Point::new(margin, bounds.height - margin),
-                ),
-                stroke,
-            );
-        }
-
-        match self.chart_type {
-            ChartType::Bar => {
-                let n = self.data.len() as f32;
-                let bar_w = plot_w / (n + 1.0);
-                for (i, (_, y)) in self.data.iter().enumerate() {
-                    let cx = margin + bar_w * (i as f32 + 0.5);
-                    let bh = (*y - min_y) / (max_y - min_y).max(1e-6) * plot_h;
-                    frame.fill(
-                        &Path::rectangle(
-                            Point::new(cx - bar_w * 0.4, bounds.height - margin - bh),
-                            Size::new(bar_w * 0.8, bh.max(1.0)),
-                        ),
-                        self.bar_color,
-                    );
-                }
-            }
-            ChartType::Line => {
-                let points: Vec<Point> = self
-                    .data
-                    .iter()
-                    .map(|(x, y)| Point::new(sx(*x), sy(*y)))
-                    .collect();
-                draw_series_line(
-                    frame,
-                    &points,
-                    bounds.height - margin,
-                    self.line_color,
-                    AREA_ALPHA,
+            if plot_w > 0.0 && plot_h > 0.0 {
+                frame.stroke(
+                    &Path::line(
+                        Point::new(margin, bounds.height - margin),
+                        Point::new(bounds.width - margin, bounds.height - margin),
+                    ),
+                    stroke,
+                );
+                frame.stroke(
+                    &Path::line(
+                        Point::new(margin, margin),
+                        Point::new(margin, bounds.height - margin),
+                    ),
+                    stroke,
                 );
             }
-            ChartType::Scatter => {
-                for (x, y) in &self.data {
-                    frame.fill(
-                        &Path::circle(Point::new(sx(*x), sy(*y)), 3.0),
-                        self.point_color,
+
+            match self.chart_type {
+                ChartType::Bar => {
+                    let n = self.data.len() as f32;
+                    let bar_w = plot_w / (n + 1.0);
+                    for (i, (_, y)) in self.data.iter().enumerate() {
+                        let cx = margin + bar_w * (i as f32 + 0.5);
+                        let bh = (*y - min_y) / (max_y - min_y).max(1e-6) * plot_h;
+                        frame.fill(
+                            &Path::rectangle(
+                                Point::new(cx - bar_w * 0.4, bounds.height - margin - bh),
+                                Size::new(bar_w * 0.8, bh.max(1.0)),
+                            ),
+                            self.bar_color,
+                        );
+                    }
+                }
+                ChartType::Line => {
+                    let points: Vec<Point> = self
+                        .data
+                        .iter()
+                        .map(|(x, y)| Point::new(sx(*x), sy(*y)))
+                        .collect();
+                    draw_series_line(
+                        frame,
+                        &points,
+                        bounds.height - margin,
+                        self.line_color,
+                        AREA_ALPHA,
                     );
                 }
+                ChartType::Scatter => {
+                    for (x, y) in &self.data {
+                        frame.fill(
+                            &Path::circle(Point::new(sx(*x), sy(*y)), 3.0),
+                            self.point_color,
+                        );
+                    }
+                }
             }
-        }
         })
     }
 }
@@ -2397,10 +2416,12 @@ mod tests {
         // faded so staleness is legible before anyone leans in to read the
         // footer. Only the value text gets this; the chrome (label, unit,
         // change) stays at full opacity for contrast.
-        assert!(
-            STALE_VALUE_ALPHA < 1.0,
-            "stale value alpha must reduce visibility"
-        );
+        const {
+            assert!(
+                STALE_VALUE_ALPHA < 1.0,
+                "stale value alpha must reduce visibility"
+            )
+        };
         for (name, palette) in palettes() {
             let ready_text = color(palette.text);
             let stale_text = with_alpha(color(palette.text), STALE_VALUE_ALPHA);

@@ -170,16 +170,24 @@ impl BackgroundPicker {
 
         let speed = self.speed();
         let (heading_text, detail_text) = if self.is_theme() {
-            ("Background — Theme".to_string(), "Coherence palette".to_string())
+            (
+                "Background — Theme".to_string(),
+                "Coherence palette".to_string(),
+            )
         } else {
             (
-                format!("Background — {}", screensaver::SHADERS[(self.index - 1) % SHADERS.len()].name),
-                if speed == 0.0 { "frozen".to_string() } else { format!("{speed:.2}×") },
+                format!(
+                    "Background — {}",
+                    screensaver::SHADERS[(self.index - 1) % SHADERS.len()].name
+                ),
+                if speed == 0.0 {
+                    "frozen".to_string()
+                } else {
+                    format!("{speed:.2}×")
+                },
             )
         };
-        let heading = text(heading_text)
-            .size(16)
-            .color(text_color);
+        let heading = text(heading_text).size(16).color(text_color);
         let detail = text(format!(
             "{}   ·   {}   ·   ←→↑↓ choose   − / + speed   Enter apply   Esc cancel",
             screensaver::attribution(self.index),
@@ -242,22 +250,26 @@ impl BackgroundPicker {
         } else {
             container(screensaver::view::<Message>(shader_index, tile_elapsed))
         }
-            .width(Length::Fixed(TILE_WIDTH))
-            .height(Length::Fixed(TILE_HEIGHT))
-            .style(move |_| container::Style {
-                border: iced::Border {
-                    color: if chosen { accent } else { Color::TRANSPARENT },
-                    width: if chosen { 2.0 } else { 0.0 },
-                    radius: 6.0.into(),
-                },
-                ..Default::default()
-            });
+        .width(Length::Fixed(TILE_WIDTH))
+        .height(Length::Fixed(TILE_HEIGHT))
+        .style(move |_| container::Style {
+            border: iced::Border {
+                color: if chosen { accent } else { Color::TRANSPARENT },
+                width: if chosen { 2.0 } else { 0.0 },
+                radius: 6.0.into(),
+            },
+            ..Default::default()
+        });
         mouse_area(
             column![
                 preview,
-                text(if is_theme { "Theme" } else { SHADERS[shader_index].name })
-                    .size(12)
-                    .color(if chosen { text_color } else { muted })
+                text(if is_theme {
+                    "Theme"
+                } else {
+                    SHADERS[shader_index].name
+                })
+                .size(12)
+                .color(if chosen { text_color } else { muted })
             ]
             .spacing(4),
         )
@@ -401,7 +413,10 @@ mod tests {
             // both of which are valid non-stranding positions.
             picker.handle(&named(iced::keyboard::key::Named::ArrowUp));
             // Up again returns to the starting shader.
-            assert!(!picker.is_theme(), "up from ArrowDown should not stay on Theme");
+            assert!(
+                !picker.is_theme(),
+                "up from ArrowDown should not stay on Theme"
+            );
             assert_eq!(picker.selected(), shader.id, "down then up returns");
         }
     }

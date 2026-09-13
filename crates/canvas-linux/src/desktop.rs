@@ -4,7 +4,7 @@ use crate::{command, control, unit};
 mod pointer;
 use base64::Engine;
 use canvas_core::desktop::{Wallpaper, WallpaperBackend, WallpaperReceipt, WallpaperRequest};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -389,7 +389,14 @@ pub fn open_session(project: &str, tmux_name: &str, directory: &str) -> Result<V
     if !config.is_file() {
         return Err("foot project theme missing".into());
     }
-    let cmd=format!("foot --app-id={} --title={} --config={} --working-directory={} tmux -L dock-opencode attach-session -t {}",quote(&app_id),quote(&format!("Dock {project} OpenCode")),quote(config.to_str().ok_or("config path not UTF8")?),quote(directory),quote(tmux_name));
+    let cmd = format!(
+        "foot --app-id={} --title={} --config={} --working-directory={} tmux -L dock-opencode attach-session -t {}",
+        quote(&app_id),
+        quote(&format!("Dock {project} OpenCode")),
+        quote(config.to_str().ok_or("config path not UTF8")?),
+        quote(directory),
+        quote(tmux_name)
+    );
     sway(
         "command",
         Some(&format!(
@@ -588,10 +595,10 @@ fn open_web_url(project: &str, url: &url::Url) -> Result<Value, String> {
         .spawn()
         .map_err(|e| format!("Firefox launch failed: {e}"))?;
     let mut result = await_window(project, &app_id)?;
-    if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-        if !status.success() {
-            return Err(format!("Firefox navigation process failed: {status}"));
-        }
+    if let Some(status) = child.try_wait().map_err(|e| e.to_string())?
+        && !status.success()
+    {
+        return Err(format!("Firefox navigation process failed: {status}"));
     }
     result["profile"] = json!(profile);
     result["navigation_requested"] = json!(true);
@@ -817,10 +824,12 @@ mod tests {
         assert_eq!(plan.commands[2], "client.focused #fff #000 #000 #fff #fff");
         assert_eq!(plan.commands[3], "gaps inner current set 8");
         assert_eq!(plan.wallpaper, Wallpaper::Solid { rgb: [24, 25, 28] });
-        assert!(!plan
-            .commands
-            .iter()
-            .any(|command| command.contains("output *")));
+        assert!(
+            !plan
+                .commands
+                .iter()
+                .any(|command| command.contains("output *"))
+        );
         assert!(recall_commands("studio", "exec rm -rf /;").is_err());
     }
     #[test]
@@ -910,7 +919,9 @@ mod tests {
     fn keyboard_modifiers_are_balanced() {
         assert_eq!(
             key_args("CTRL+SHIFT+l").unwrap(),
-            vec!["-M", "ctrl", "-M", "shift", "-k", "l", "-m", "shift", "-m", "ctrl"]
+            vec![
+                "-M", "ctrl", "-M", "shift", "-k", "l", "-m", "shift", "-m", "ctrl"
+            ]
         );
         assert!(key_args("ctrl+l;exec").is_err());
     }

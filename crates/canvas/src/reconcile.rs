@@ -480,7 +480,7 @@ mod tests {
                     },
                     inputs: vec![InputPort {
                         id: "status".into(),
-                        contract: "text/plain".into(),
+                        contract: "canvas.agent.attention.v1".into(),
                     }],
                 },
             ],
@@ -513,7 +513,7 @@ mod tests {
                 source: DataSource {
                     owner: "opencode".into(),
                     stream: "status".into(),
-                    contract: "text/plain".into(),
+                    contract: "canvas.agent.attention.v1".into(),
                 },
                 target: InputTarget {
                     surface_id: "shell".into(),

@@ -1,5 +1,5 @@
 //! Cooperative backend ownership. Same-user direct OS access remains authoritative.
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     fs,
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},

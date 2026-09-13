@@ -237,7 +237,8 @@ impl WorkingSet {
                 let attention = self.known.get(agent)?;
                 Some(Slot {
                     index: *index,
-                    freshness: if now_ms.saturating_sub(attention.observed_at_ms) >= STALE_AFTER_MS {
+                    freshness: if now_ms.saturating_sub(attention.observed_at_ms) >= STALE_AFTER_MS
+                    {
                         Freshness::Stale
                     } else {
                         Freshness::Fresh
@@ -470,7 +471,10 @@ mod tests {
     fn the_wall_says_how_many_agents_it_is_not_showing() {
         let mut set = WorkingSet::new(3);
         for n in 0..30 {
-            set.observe(report(&format!("agent-{n:02}"), AgentState::Working, 0, 1), 0);
+            set.observe(
+                report(&format!("agent-{n:02}"), AgentState::Working, 0, 1),
+                0,
+            );
         }
         let wall = set.roster(0);
         assert_eq!(wall.slots.len(), 3);
@@ -487,7 +491,10 @@ mod tests {
         set.observe(report("a", AgentState::Working, 0, 1), 0);
         set.observe(report("waiting", AgentState::Idle, 0, 1), 0);
         // `a` goes away entirely; the slot must not sit empty.
-        set.observe(report("waiting", AgentState::Idle, EVICT_AFTER_MS, 2), EVICT_AFTER_MS);
+        set.observe(
+            report("waiting", AgentState::Idle, EVICT_AFTER_MS, 2),
+            EVICT_AFTER_MS,
+        );
         let wall = set.roster(EVICT_AFTER_MS);
         assert_eq!(wall.slots.len(), 1);
         assert_eq!(wall.slots[0].attention.agent, "waiting");

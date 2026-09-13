@@ -21,8 +21,8 @@
 //!   were last seen, so the colour never shouts about something unverified.
 
 use crate::{
-    NodeSummaryItem, Provenance, StatusLevel, WidgetChrome, WidgetData, WidgetDataState, WidgetKind,
-    WidgetSpec, WIDGET_SCHEMA_VERSION,
+    NodeSummaryItem, Provenance, StatusLevel, WIDGET_SCHEMA_VERSION, WidgetChrome, WidgetData,
+    WidgetDataState, WidgetKind, WidgetSpec,
 };
 use canvas_core::working_set::{AgentState, Freshness, Roster, Slot};
 

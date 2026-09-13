@@ -8,15 +8,15 @@ use std::{
 };
 
 pub use coherence_tokens;
+pub mod appearance;
+pub mod boot_budget;
 pub mod desktop;
 pub mod desktop_theme;
 pub mod display_watch;
 pub mod global_hotkey;
 pub mod layout;
-pub mod theme_file;
-pub mod appearance;
-pub mod boot_budget;
 pub mod manifest_query;
+pub mod theme_file;
 pub mod working_set;
 
 /// The set of stream contracts Canvas recognises for ingress.
@@ -30,13 +30,19 @@ pub mod working_set;
 /// Adding a contract is a data change to this constant, not a rebuild of
 /// validation logic: [`is_declared_contract`] checks membership here.
 pub const DECLARED_CONTRACTS: &[&str] = &[
-    "canvas.widget.snapshot.v1",
-    "canvas.briefing.beat.v1",
     "canvas.agent.activity.v1",
+    "canvas.agent.attention.v1",
+    "canvas.briefing.beat.v1",
+    "canvas.image.rgba.v1",
     "canvas.music.nowplaying.v1",
+    "canvas.prometheus.v1",
+    "canvas.quant.candle.v1",
+    "canvas.sse.v1",
+    "canvas.widget.snapshot.v1",
+    "jarvis.presence.v1",
+    "map.v1",
     "market.ohlcv.raw.v1",
     "panopticon.map.v1",
-    "map.v1",
 ];
 
 /// Whether a contract name is declared in the registry. Used by both
@@ -861,7 +867,10 @@ mod metrics_scale_tests {
         // maximum.
         assert_eq!(ThemeMetrics::scaled(f32::NAN), ThemeMetrics::shared());
         assert_eq!(ThemeMetrics::scaled(f32::INFINITY), ThemeMetrics::shared());
-        assert_eq!(ThemeMetrics::scaled(f32::NEG_INFINITY), ThemeMetrics::shared());
+        assert_eq!(
+            ThemeMetrics::scaled(f32::NEG_INFINITY),
+            ThemeMetrics::shared()
+        );
         // A finite but absurd factor clamps rather than falling back, because it
         // is a real request, just an unreasonable one.
         assert_eq!(ThemeMetrics::scaled(99.0), ThemeMetrics::scaled(4.0));

@@ -200,15 +200,26 @@ fn fuzzy_score(query: &str, project: &Project) -> Option<u32> {
     // Only activates for single-word theme queries to avoid false positives.
     let theme_desc = match project.theme {
         canvas_core::ThemeSelection::Coherence { mode, accent } => {
-            format!("{} {}",
-                match mode { canvas_core::ThemeMode::Dark => "dark", canvas_core::ThemeMode::Light => "light" },
-                match accent { canvas_core::Accent::Brand => "brand", canvas_core::Accent::Info => "info", canvas_core::Accent::Success => "success" }
+            format!(
+                "{} {}",
+                match mode {
+                    canvas_core::ThemeMode::Dark => "dark",
+                    canvas_core::ThemeMode::Light => "light",
+                },
+                match accent {
+                    canvas_core::Accent::Brand => "brand",
+                    canvas_core::Accent::Info => "info",
+                    canvas_core::Accent::Success => "success",
+                }
             )
         }
         _ => "theme".into(),
     };
     // If query is a known theme keyword, match against theme description only.
-    if matches!(query.as_str(), "dark" | "light" | "brand" | "info" | "success" | "theme") {
+    if matches!(
+        query.as_str(),
+        "dark" | "light" | "brand" | "info" | "success" | "theme"
+    ) {
         if theme_desc.starts_with(&query) || theme_desc.contains(&query) {
             return Some(10);
         }

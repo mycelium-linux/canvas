@@ -81,10 +81,7 @@ fn write_under(root: &Path, relative: &Path, bytes: &[u8]) -> Result<PathBuf> {
         Ok(()) => Ok(path),
         Err(error) => {
             let _ = std::fs::remove_file(&temporary);
-            Err(Error(format!(
-                "cannot replace {}: {error}",
-                path.display()
-            )))
+            Err(Error(format!("cannot replace {}: {error}", path.display())))
         }
     }
 }
@@ -178,7 +175,8 @@ mod tests {
     #[test]
     fn writing_creates_missing_directories() {
         let root = scratch("mkdir");
-        let written = write_under(&root, Path::new("views/nested/deep.json"), b"{}").expect("write");
+        let written =
+            write_under(&root, Path::new("views/nested/deep.json"), b"{}").expect("write");
         assert!(written.exists());
         let _ = std::fs::remove_dir_all(&root);
     }

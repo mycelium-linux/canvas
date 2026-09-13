@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     env,
     path::Path,
@@ -167,7 +167,9 @@ fn execute(args: &[String]) -> Result<Value, String> {
         });
         #[cfg(feature = "opencode")]
         {
-            result["interactive_sessions"] = json!("OpenCode session-ensure/status/prompt/abort/resume/attach; provider availability checked by session-status");
+            result["interactive_sessions"] = json!(
+                "OpenCode session-ensure/status/prompt/abort/resume/attach; provider availability checked by session-status"
+            );
         }
         #[cfg(not(feature = "opencode"))]
         {
@@ -175,7 +177,9 @@ fn execute(args: &[String]) -> Result<Value, String> {
         }
         #[cfg(feature = "mcp")]
         {
-            result["mcp_server"] = json!("enabled; canvas-linux mcp-serve PROJECT PORT; canvas-linux mcp-ready PROJECT");
+            result["mcp_server"] = json!(
+                "enabled; canvas-linux mcp-serve PROJECT PORT; canvas-linux mcp-ready PROJECT"
+            );
         }
         #[cfg(not(feature = "mcp"))]
         {

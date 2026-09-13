@@ -1704,8 +1704,18 @@ pub mod text {
                     Receipt::BackgroundShaderSet { visible } => {
                         format!("background {}", format_visible_background(visible))
                     }
-                    Receipt::ScreenshotCaptured { path, sha256, width, height } => {
-                        format!("screenshot path={} sha256={sha256} {}x{}", path.display(), width, height)
+                    Receipt::ScreenshotCaptured {
+                        path,
+                        sha256,
+                        width,
+                        height,
+                    } => {
+                        format!(
+                            "screenshot path={} sha256={sha256} {}x{}",
+                            path.display(),
+                            width,
+                            height
+                        )
                     }
                 };
                 format!("OK rev={} {}", reply.revision, detail)
@@ -2212,10 +2222,10 @@ mod tests {
         let json = serde_json::to_string(&request).unwrap();
         let decoded: ControlRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, request);
-            assert_eq!(
-                serde_json::to_value(overlays).unwrap()["shortcut_help"],
-                "rightmost"
-            );
+        assert_eq!(
+            serde_json::to_value(overlays).unwrap()["shortcut_help"],
+            "rightmost"
+        );
     }
 
     #[test]
@@ -2449,7 +2459,10 @@ mod tests {
             occupants: vec![avery],
         };
         let redacted = snapshot.redact();
-        assert!(redacted.occupants.is_empty(), "redacted snapshot has no occupants");
+        assert!(
+            redacted.occupants.is_empty(),
+            "redacted snapshot has no occupants"
+        );
         assert!(redacted.occupied, "occupied flag survives redaction");
         assert_eq!(redacted.zone, "bedroom");
     }
@@ -2479,7 +2492,12 @@ mod tests {
             workspace_id: "ws".into(),
             project_id: "proj".into(),
             revision: 1,
-            frame: Rect { x: 0, y: 0, width: 0, height: 0 },
+            frame: Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
             focused_surface_id: None,
             surfaces: vec![],
             surface_bounds: Default::default(),
@@ -2508,7 +2526,10 @@ mod tests {
         };
         let redacted = snapshot.redact_presence();
         let redacted_presence = redacted.presence.expect("presence must survive redaction");
-        assert!(redacted_presence.occupants.is_empty(), "no occupant names leak to callers");
+        assert!(
+            redacted_presence.occupants.is_empty(),
+            "no occupant names leak to callers"
+        );
         // Sanity: the original is untouched
         assert_eq!(snapshot.presence.as_ref().unwrap().occupants.len(), 1);
     }

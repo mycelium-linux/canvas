@@ -258,7 +258,12 @@ impl Ramp {
             // generate colours outside the ramp it is meant to bound.
             chroma_max: clamp(self.chroma_max, chroma_min, 0.4, default.chroma_max),
             lightness_min,
-            lightness_max: clamp(self.lightness_max, lightness_min, 0.99, default.lightness_max),
+            lightness_max: clamp(
+                self.lightness_max,
+                lightness_min,
+                0.99,
+                default.lightness_max,
+            ),
             lightness_step: clamp(self.lightness_step, 0.01, 0.5, default.lightness_step),
             // Zero would let a series be drawn in the hue that means "error",
             // so the guard has a floor even when someone turns it down.
@@ -470,12 +475,18 @@ mod tests {
         // change was a behaviour change and should be deliberate.
         assert_eq!(a.panels.opacity, 0.92, "canvas-core lib.rs panel_opacity");
         assert_eq!(a.panels.muted_factor, 0.3, "live.rs:261 opacity * 0.3");
-        assert_eq!(a.motion.transition_ms, 280, "transition.rs TRANSITION_DURATION");
+        assert_eq!(
+            a.motion.transition_ms, 280,
+            "transition.rs TRANSITION_DURATION"
+        );
         assert_eq!(a.limits.table_rows, 8, "live.rs:518 take(8)");
         assert_eq!(a.limits.event_lines, 7, "live.rs:554 take(7)");
         assert_eq!(a.limits.summary_nodes, 8, "live.rs:595 take(8)");
         assert_eq!(a.limits.series_colors, 6, "live.rs SERIES_COLORS");
-        assert_eq!(a.limits.visible_occupants, 4, "presence.rs MAX_VISIBLE_OCCUPANTS");
+        assert_eq!(
+            a.limits.visible_occupants, 4,
+            "presence.rs MAX_VISIBLE_OCCUPANTS"
+        );
         assert_eq!(a.series.line_width, 2.0, "live.rs LINE_WIDTH");
         assert_eq!(a.series.area_alpha, 0.22, "live.rs AREA_ALPHA");
         assert_eq!(a.series.head_radius(), 3.2, "live.rs HEAD_RADIUS");
@@ -529,7 +540,10 @@ mod tests {
     #[test]
     fn no_value_can_make_a_panel_invisible() {
         let a = Appearance::parse(r#"{"panels":{"opacity":0.0}}"#).unwrap();
-        assert!(a.panels.opacity >= 0.25, "an invisible panel is a lost widget");
+        assert!(
+            a.panels.opacity >= 0.25,
+            "an invisible panel is a lost widget"
+        );
     }
 
     #[test]
@@ -567,10 +581,8 @@ mod tests {
 
     #[test]
     fn eviction_can_never_precede_going_stale() {
-        let a = Appearance::parse(
-            r#"{"roster":{"stale_after_ms":60000,"evict_after_ms":1000}}"#,
-        )
-        .unwrap();
+        let a = Appearance::parse(r#"{"roster":{"stale_after_ms":60000,"evict_after_ms":1000}}"#)
+            .unwrap();
         assert!(
             a.roster.evict_after_ms >= a.roster.stale_after_ms,
             "a surface would vanish without ever being shown as stale"

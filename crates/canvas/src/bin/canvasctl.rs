@@ -182,7 +182,7 @@ fn handle_titles(tokens: &[String]) -> Result<(), String> {
         schema_version: CONTROL_VERSION,
         request_id: format!("titles-{}", id()),
         expected_revision: Some(state.runtime_revision),
-            actor: None,
+        actor: None,
         command: Command::ApplyPatch { patch },
     };
     let reply = send_with_retry(&request)?;
@@ -218,7 +218,7 @@ fn handle_spacing(tokens: &[String]) -> Result<(), String> {
         schema_version: CONTROL_VERSION,
         request_id: format!("spacing-{}", id()),
         expected_revision: Some(state.runtime_revision),
-            actor: None,
+        actor: None,
         command: Command::ApplyPatch { patch },
     };
     let reply = send_with_retry(&request)?;
@@ -335,7 +335,7 @@ fn handle_tile(tokens: &[String]) -> Result<(), String> {
         schema_version: control::CONTROL_VERSION,
         request_id: format!("tile-{}", id()),
         expected_revision: Some(rt_rev),
-            actor: None,
+        actor: None,
         command: Command::ApplyPatch { patch },
     };
     let reply = send_with_retry(&request)?;
@@ -369,7 +369,7 @@ fn handle_window_control(tokens: &[String]) -> Result<(), String> {
         schema_version: control::CONTROL_VERSION,
         request_id: format!("winctl-{}", id()),
         expected_revision: Some(state.runtime_revision),
-            actor: None,
+        actor: None,
         command: Command::ApplyPatch { patch },
     };
     let reply = send_with_retry(&request)?;
@@ -453,7 +453,7 @@ fn handle_workspace(tokens: &[String]) -> Result<(), String> {
                 schema_version: CONTROL_VERSION,
                 request_id: format!("ws-list-{}", id()),
                 expected_revision: None,
-            actor: None,
+                actor: None,
                 command: Command::Inspect,
             };
             let reply = control::send(&req)?;
@@ -483,7 +483,7 @@ fn read_document_state() -> Result<DocumentState, String> {
         schema_version: control::CONTROL_VERSION,
         request_id: format!("state-{}", id()),
         expected_revision: None,
-            actor: None,
+        actor: None,
         command: Command::ReadDocument,
     };
     let reply = control::send(&req)?;
@@ -536,7 +536,7 @@ fn get_runtime_revision() -> Result<u64, String> {
         schema_version: CONTROL_VERSION,
         request_id: format!("rev-{}", id()),
         expected_revision: None,
-            actor: None,
+        actor: None,
         command: Command::Inspect,
     };
     let reply = control::send(&req)?;
@@ -548,7 +548,7 @@ fn get_document_and_runtime_revisions() -> Result<(u64, u64), String> {
         schema_version: CONTROL_VERSION,
         request_id: format!("doc-rev-{}", id()),
         expected_revision: None,
-            actor: None,
+        actor: None,
         command: Command::ReadDocument,
     };
     let reply = control::send(&req)?;
@@ -582,7 +582,7 @@ fn send_mutation(command: Command) -> Result<(), String> {
         schema_version: CONTROL_VERSION,
         request_id: format!("mut-{}", id()),
         expected_revision: Some(rev),
-            actor: None,
+        actor: None,
         command,
     };
     let reply = send_with_retry(&request)?;
@@ -595,7 +595,7 @@ fn send_single(expected_revision: u64, command: Command) -> Result<(), String> {
         schema_version: CONTROL_VERSION,
         request_id: format!("mut-{}", id()),
         expected_revision: Some(expected_revision),
-            actor: None,
+        actor: None,
         command,
     };
     let reply = control::send(&request)?;

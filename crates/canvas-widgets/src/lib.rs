@@ -47,7 +47,10 @@ fn migrate_v1_kind(json: &[u8]) -> Option<Vec<u8>> {
     };
     let mut migrated = value;
     if let Some(obj) = migrated.as_object_mut() {
-        obj.insert("kind".to_string(), serde_json::Value::String(new_kind.to_string()));
+        obj.insert(
+            "kind".to_string(),
+            serde_json::Value::String(new_kind.to_string()),
+        );
         serde_json::to_vec(&migrated).ok()
     } else {
         None
@@ -443,18 +446,39 @@ pub struct BriefingBeat {
 #[serde(tag = "op", rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum PatchOp {
-    UpsertSurface { surface: BriefingSurface },
-    RemoveSurface { surface_id: String },
-    SetLayout { layout: serde_json::Value },
-    SetTheme { theme: serde_json::Value },
-    SetBackground { background: serde_json::Value },
-    SetChrome { chrome: serde_json::Value },
-    SetFocus { surface_id: Option<String> },
-    UpsertBinding { binding: serde_json::Value },
-    RemoveBinding { binding_id: String },
+    UpsertSurface {
+        surface: BriefingSurface,
+    },
+    RemoveSurface {
+        surface_id: String,
+    },
+    SetLayout {
+        layout: serde_json::Value,
+    },
+    SetTheme {
+        theme: serde_json::Value,
+    },
+    SetBackground {
+        background: serde_json::Value,
+    },
+    SetChrome {
+        chrome: serde_json::Value,
+    },
+    SetFocus {
+        surface_id: Option<String>,
+    },
+    UpsertBinding {
+        binding: serde_json::Value,
+    },
+    RemoveBinding {
+        binding_id: String,
+    },
     /// Hide a mesh node (e.g. Conky) for the duration of the briefing.
     /// Restored by post_actions with SetMesh or by the mesh returning.
-    SetMeshNode { node_id: String, hidden: bool },
+    SetMeshNode {
+        node_id: String,
+        hidden: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -499,7 +523,9 @@ impl BriefingBeat {
                         "surface id must be 1-64 chars",
                     )?;
                 }
-                PatchOp::SetFocus { surface_id: Some(id) } => {
+                PatchOp::SetFocus {
+                    surface_id: Some(id),
+                } => {
                     check(
                         !id.is_empty() && id.len() <= 64,
                         "surface id must be 1-64 chars",
@@ -512,7 +538,10 @@ impl BriefingBeat {
                     )?;
                 }
                 PatchOp::SetMeshNode { node_id, .. } => {
-                    check(!node_id.is_empty() && node_id.len() <= 64, "mesh node id must be 1-64 chars")?;
+                    check(
+                        !node_id.is_empty() && node_id.len() <= 64,
+                        "mesh node id must be 1-64 chars",
+                    )?;
                 }
                 _ => {}
             }
@@ -1183,34 +1212,37 @@ impl WidgetSpec {
                 // ones it declares, is the host's to answer: this crate does not
                 // own module manifests. Everything checkable without one is
                 // checked here so a malformed spec never reaches a renderer.
-                }
-                WidgetKind::Launcher { items, .. } => {
+            }
+            WidgetKind::Launcher { items, .. } => {
+                check(
+                    items.len() <= MAX_LAUNCHER_ITEMS,
+                    "launcher has too many items",
+                )?;
+                let mut seen_ids = std::collections::BTreeSet::new();
+                for item in items {
                     check(
-                        items.len() <= MAX_LAUNCHER_ITEMS,
-                        "launcher has too many items",
+                        !item.project_id.is_empty()
+                            && item.project_id.len() <= 64
+                            && item
+                                .project_id
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+                        "launcher item project_id must be a valid identifier",
                     )?;
-                    let mut seen_ids = std::collections::BTreeSet::new();
-                    for item in items {
-                        check(
-                            !item.project_id.is_empty()
-                                && item.project_id.len() <= 64
-                                && item.project_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
-                            "launcher item project_id must be a valid identifier",
-                        )?;
-                        check(
-                            seen_ids.insert(item.project_id.as_str()),
-                            "launcher has duplicate project_id",
-                        )?;
-                        check(
-                            !item.label.is_empty() && item.label.len() <= 64,
-                            "launcher item label must be 1-64 characters",
-                        )?;
-                    }
+                    check(
+                        seen_ids.insert(item.project_id.as_str()),
+                        "launcher has duplicate project_id",
+                    )?;
+                    check(
+                        !item.label.is_empty() && item.label.len() <= 64,
+                        "launcher item label must be 1-64 characters",
+                    )?;
                 }
             }
-            Ok(())
         }
+        Ok(())
     }
+}
 
 impl WidgetInput {
     pub fn validate(&self) -> Result<()> {
@@ -1454,9 +1486,7 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
         WidgetKind::Chart { .. } | WidgetKind::Quant { .. } | WidgetKind::Module { .. } => {
             SizeHint::new(220.0, 140.0, 420.0, 260.0, 1.6)
         }
-        WidgetKind::Launcher { .. } => {
-            SizeHint::new(220.0, 40.0, 600.0, 60.0, 1.0)
-        }
+        WidgetKind::Launcher { .. } => SizeHint::new(220.0, 40.0, 600.0, 60.0, 1.0),
     }
 }
 

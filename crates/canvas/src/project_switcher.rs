@@ -30,7 +30,9 @@ impl ProjectSwitcher {
     }
 
     pub fn selected(&self, catalog: &Catalog) -> Option<String> {
-        self.matches(catalog).get(self.selected).map(|p| p.id.clone())
+        self.matches(catalog)
+            .get(self.selected)
+            .map(|p| p.id.clone())
     }
 
     fn matches<'a>(&self, catalog: &'a Catalog) -> Vec<&'a Project> {
@@ -41,10 +43,7 @@ impl ProjectSwitcher {
             catalog
                 .projects
                 .iter()
-                .filter(|p| {
-                    p.name.to_lowercase().contains(&query)
-                        || p.id.contains(&query)
-                })
+                .filter(|p| p.name.to_lowercase().contains(&query) || p.id.contains(&query))
                 .take(MAX_CARDS)
                 .collect()
         }
@@ -56,7 +55,12 @@ impl ProjectSwitcher {
             Event::KeyPressed {
                 key: Key::Character(c),
                 ..
-            } if c.chars().next().map(|c| c.is_alphanumeric()).unwrap_or(false) => {
+            } if c
+                .chars()
+                .next()
+                .map(|c| c.is_alphanumeric())
+                .unwrap_or(false) =>
+            {
                 self.query.push(c.chars().next().unwrap());
                 self.selected = 0;
                 Action::Consumed
@@ -108,7 +112,11 @@ impl ProjectSwitcher {
         }
     }
 
-    pub fn view<'a, Message: 'a>(&self, catalog: &'a Catalog, current: &str) -> Element<'a, Message> {
+    pub fn view<'a, Message: 'a>(
+        &self,
+        catalog: &'a Catalog,
+        current: &str,
+    ) -> Element<'a, Message> {
         let matches = self.matches(catalog);
         let cards: Vec<Element<'_, Message>> = matches
             .iter()
@@ -147,11 +155,10 @@ impl ProjectSwitcher {
                     });
                 let card = column![
                     preview,
-                    row![
-                        text(&project.name).size(14).color(label_color),
-                        status_dot,
-                    ],
-                    text(&project.id).size(10).color(Color::from_rgba(150.0, 150.0, 150.0, 0.8)),
+                    row![text(&project.name).size(14).color(label_color), status_dot,],
+                    text(&project.id)
+                        .size(10)
+                        .color(Color::from_rgba(150.0, 150.0, 150.0, 0.8)),
                 ]
                 .spacing(4);
                 container(card)
@@ -175,16 +182,17 @@ impl ProjectSwitcher {
             self.query.clone()
         };
         let query_box = text(query_str)
-        .size(14)
-        .color(Color::from_rgba(200.0, 200.0, 200.0, 1.0));
+            .size(14)
+            .color(Color::from_rgba(200.0, 200.0, 200.0, 1.0));
 
         let bar = row![query_box].padding(8);
-        let bar_bg = container(bar)
-            .width(Length::Fill)
-            .style(move |_| iced::widget::container::Style {
-                background: Some(Color::from_rgba(20.0, 20.0, 25.0, 0.9).into()),
-                ..Default::default()
-            });
+        let bar_bg =
+            container(bar)
+                .width(Length::Fill)
+                .style(move |_| iced::widget::container::Style {
+                    background: Some(Color::from_rgba(20.0, 20.0, 25.0, 0.9).into()),
+                    ..Default::default()
+                });
 
         let cards_row = row(cards).spacing(12).padding(16);
         let content = column![bar_bg, cards_row];

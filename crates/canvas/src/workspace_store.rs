@@ -761,9 +761,7 @@ mod history_tests {
     #[test]
     fn display_policy_round_trips_through_json() {
         let policy = DisplayPolicy {
-            target: DisplayTarget::Ordinals {
-                ordinals: vec![1],
-            },
+            target: DisplayTarget::Ordinals { ordinals: vec![1] },
             overlays: OverlaySettings {
                 presence_rail: crate::control::OverlayTarget::Rightmost,
                 ..Default::default()

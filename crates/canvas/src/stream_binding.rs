@@ -511,10 +511,7 @@ pub const BRIEFING_CONTRACT: &str = "canvas.briefing.beat.v1";
 /// STRING, MATH only; 4 MB memory; 50 000 instruction budget; no io/debug/os).
 /// It receives the beat event and returns a [`BriefingBeat`] containing
 /// workspace patches and optional narration text.
-pub fn apply_briefing_binder(
-    source: &str,
-    event: &StreamEnvelope,
-) -> Result<BriefingBeat> {
+pub fn apply_briefing_binder(source: &str, event: &StreamEnvelope) -> Result<BriefingBeat> {
     if source.is_empty() || source.len() > MAX_ADAPTER_BYTES {
         return Err(Error("Lua briefing must contain 1-32768 bytes".into()));
     }
@@ -539,8 +536,18 @@ pub fn apply_briefing_binder(
     });
     let globals = lua.globals();
     for name in [
-        "collectgarbage", "debug", "dofile", "getfenv", "io", "load",
-        "loadfile", "loadstring", "os", "package", "require", "setfenv",
+        "collectgarbage",
+        "debug",
+        "dofile",
+        "getfenv",
+        "io",
+        "load",
+        "loadfile",
+        "loadstring",
+        "os",
+        "package",
+        "require",
+        "setfenv",
     ] {
         globals.raw_set(name, mlua::Value::Nil).map_err(lua_error)?;
     }
@@ -557,11 +564,12 @@ pub fn apply_briefing_binder(
         .call(lua.to_value(event).map_err(lua_error)?)
         .map_err(lua_error)?;
 
-    let beat: BriefingBeat = lua
-        .from_value(value)
-        .map_err(|error| Error(format!("Canvas briefing output is not a valid beat: {error}")))?;
-    beat.validate()
-        .map_err(|error| Error(error.0))?;
+    let beat: BriefingBeat = lua.from_value(value).map_err(|error| {
+        Error(format!(
+            "Canvas briefing output is not a valid beat: {error}"
+        ))
+    })?;
+    beat.validate().map_err(|error| Error(error.0))?;
     Ok(beat)
 }
 
@@ -822,7 +830,10 @@ mod tests {
     #[test]
     fn event_without_project_id_is_unscoped() {
         let ev = event(1, 100.0);
-        assert!(ev.project_id.is_none(), "legacy events have no project scope");
+        assert!(
+            ev.project_id.is_none(),
+            "legacy events have no project scope"
+        );
         ev.validate().unwrap();
     }
 

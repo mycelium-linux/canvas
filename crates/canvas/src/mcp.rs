@@ -6,22 +6,22 @@ use crate::{
     reconcile::{self, DesiredWorkspaceState, ReconcileAction, Reconciliation},
     view::{SharedViewDocument, SharedViewPatch},
 };
-use canvas_core::Catalog;
-use serde_json::json;
 use base64::Engine as _;
+use canvas_core::Catalog;
 use reqwest::Client as HttpClient;
 use rmcp::{
     RoleServer, ServerHandler, ServiceExt,
     model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorData, ErrorCode,
-        Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo,
-        Tool,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorCode,
+        ErrorData, Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities,
+        ServerInfo, Tool,
     },
     service::RequestContext,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use serde_json::json;
 use std::sync::Arc;
 
 #[derive(Deserialize, JsonSchema)]
@@ -640,8 +640,9 @@ fn parse(name: &str, args: Value) -> Result<ControlRequest, String> {
         }
         "canvas_set_background" => {
             let args: SetBackground = serde_json::from_value(args).map_err(|e| e.to_string())?;
-            let shader_id = serde_json::from_str::<crate::BackgroundShader>(&format!("\"{}\"", args.shader_id))
-                .map_err(|_| format!("Unknown shader: {}", args.shader_id))?;
+            let shader_id =
+                serde_json::from_str::<crate::BackgroundShader>(&format!("\"{}\"", args.shader_id))
+                    .map_err(|_| format!("Unknown shader: {}", args.shader_id))?;
             (
                 args.request_id,
                 args.expected_revision,
@@ -737,11 +738,7 @@ fn parse(name: &str, args: Value) -> Result<ControlRequest, String> {
         "canvas_list_widgets" => {
             let args: ListWidgets = serde_json::from_value(args).map_err(|e| e.to_string())?;
             let _ = args.request_id;
-            (
-                "mcp-list-widgets".into(),
-                None,
-                Command::ReadDocument,
-            )
+            ("mcp-list-widgets".into(), None, Command::ReadDocument)
         }
         _ => return Err("Unknown Canvas tool".into()),
     };
@@ -788,7 +785,7 @@ struct Canvas {
     /// URL of the fpl-storage blob store (localhost:8799 by default). When
     /// absent, artifact tools return a clear "no broker connected" error so
     /// callers know the surface is defined but not served.
-     storage_url: Option<String>,
+    storage_url: Option<String>,
     /// URL of the local asset resolver process (localhost:8798 by default).
     /// When present, canvas_get_artifact asks the resolver to fetch and
     /// content-address bytes rather than hitting fpl-storage directly.
@@ -815,24 +812,20 @@ impl Default for Canvas {
                         Some("http://127.0.0.1:8799".to_string())
                     }
                 }),
-            alfalfa_url: std::env::var("FPL_ALFALFA_URL")
-                .ok()
-                .or_else(|| {
-                    if std::env::var("FPL_NO_ALFALFA").is_ok() {
-                        None
-                    } else {
-                        Some("http://127.0.0.1:8787".to_string())
-                    }
-                }),
-            asset_resolver: std::env::var("FPL_ASSET_RESOLVER")
-                .ok()
-                .or_else(|| {
-                    if std::env::var("FPL_NO_ASSET_RESOLVER").is_ok() {
-                        None
-                    } else {
-                        Some("http://127.0.0.1:8798".to_string())
-                    }
-                }),
+            alfalfa_url: std::env::var("FPL_ALFALFA_URL").ok().or_else(|| {
+                if std::env::var("FPL_NO_ALFALFA").is_ok() {
+                    None
+                } else {
+                    Some("http://127.0.0.1:8787".to_string())
+                }
+            }),
+            asset_resolver: std::env::var("FPL_ASSET_RESOLVER").ok().or_else(|| {
+                if std::env::var("FPL_NO_ASSET_RESOLVER").is_ok() {
+                    None
+                } else {
+                    Some("http://127.0.0.1:8798".to_string())
+                }
+            }),
         }
     }
 }
@@ -861,13 +854,14 @@ impl Canvas {
         storage_url: &str,
     ) -> Result<CallToolResponse, ErrorData> {
         // Verify signed actor context before performing any artifact operation.
-        let actor = verify_actor_from_value(&args).map_err(|e| {
-            ErrorData::invalid_params(e, None)
-        })?;
+        let actor =
+            verify_actor_from_value(&args).map_err(|e| ErrorData::invalid_params(e, None))?;
         let client = HttpClient::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-            .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("HTTP client: {e}"), None))?;
+            .map_err(|e| {
+                ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("HTTP client: {e}"), None)
+            })?;
         let asset_resolver = &self.asset_resolver;
 
         match tool_name {
@@ -878,69 +872,139 @@ impl Canvas {
                 // credentials); fall back to direct storage fetch when offline.
                 let (bytes, content_type) = if let Some(resolver) = asset_resolver {
                     let url = format!("{}/resolve/{}", resolver, args.artifact);
-                    let response = client.get(&url).send().await
-                        .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("resolver fetch failed: {e}"), None))?;
+                    let response = client.get(&url).send().await.map_err(|e| {
+                        ErrorData::new(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!("resolver fetch failed: {e}"),
+                            None,
+                        )
+                    })?;
                     if response.status() == 404 {
-                        return Ok(CallToolResult::error(vec![ContentBlock::text(
-                            format!("artifact not found: {}", args.artifact)
-                        )])
+                        return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                            "artifact not found: {}",
+                            args.artifact
+                        ))])
                         .into());
                     }
-                    let info: serde_json::Value = response.json().await
-                        .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("resolver decode: {e}"), None))?;
-                    let path = info.get("path").and_then(|v| v.as_str())
-                        .ok_or_else(|| ErrorData::invalid_request("resolver returned no path", None))?;
-                    let ct = info.get("media_type").and_then(|v| v.as_str())
-                        .unwrap_or("application/octet-stream").to_string();
-                    (std::fs::read(path)
-                        .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("read resolved asset: {e}"), None))?,
-                     ct)
+                    let info: serde_json::Value = response.json().await.map_err(|e| {
+                        ErrorData::new(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!("resolver decode: {e}"),
+                            None,
+                        )
+                    })?;
+                    let path = info.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+                        ErrorData::invalid_request("resolver returned no path", None)
+                    })?;
+                    let ct = info
+                        .get("media_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("application/octet-stream")
+                        .to_string();
+                    (
+                        std::fs::read(path).map_err(|e| {
+                            ErrorData::new(
+                                ErrorCode::INTERNAL_ERROR,
+                                format!("read resolved asset: {e}"),
+                                None,
+                            )
+                        })?,
+                        ct,
+                    )
                 } else {
                     let url = format!("{}/blob/{}", storage_url, args.artifact);
-                    let response = client.get(&url).send().await
-                        .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("storage fetch failed: {e}"), None))?;
+                    let response = client.get(&url).send().await.map_err(|e| {
+                        ErrorData::new(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!("storage fetch failed: {e}"),
+                            None,
+                        )
+                    })?;
                     let status = response.status().as_u16();
                     if status == 404 {
-                        return Ok(CallToolResult::error(vec![ContentBlock::text(
-                            format!("artifact not found in storage: {}", args.artifact)
-                        )])
+                        return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                            "artifact not found in storage: {}",
+                            args.artifact
+                        ))])
                         .into());
                     }
-                    let content_type = response.headers().get("content-type")
+                    let content_type = response
+                        .headers()
+                        .get("content-type")
                         .and_then(|v| v.to_str().ok())
                         .unwrap_or("application/octet-stream")
                         .to_string();
-                    let bytes = response.bytes().await
-                        .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("read body: {e}"), None::<serde_json::Value>))?;
+                    let bytes = response.bytes().await.map_err(|e| {
+                        ErrorData::new(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!("read body: {e}"),
+                            None::<serde_json::Value>,
+                        )
+                    })?;
                     (bytes.to_vec(), content_type)
                 };
 
                 // Retrieval IS the attention signal: opening the artifact on
                 // Canvas happens by construction, not by a separate call.
-                let _ = self.open_artifact_as_surface(&args.artifact, &bytes, &content_type, actor.as_ref()).await;
+                let _ = self
+                    .open_artifact_as_surface(&args.artifact, &bytes, &content_type, actor.as_ref())
+                    .await;
 
                 Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                     "{{\"digest\":\"{}\",\"content_type\":\"{}\",\"size\":{}}}",
-                    args.artifact, content_type, bytes.len()
+                    args.artifact,
+                    content_type,
+                    bytes.len()
                 ))])
                 .into())
             }
             "canvas_save_artifact" => {
-                let args: SaveArtifact = serde_json::from_value(args)
-                    .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None::<serde_json::Value>))?;
-                let bytes = base64::engine::general_purpose::STANDARD.decode(&args.content_base64)
-                    .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("base64 decode: {e}"), None::<serde_json::Value>))?;
+                let args: SaveArtifact = serde_json::from_value(args).map_err(|e| {
+                    ErrorData::new(
+                        ErrorCode::INTERNAL_ERROR,
+                        e.to_string(),
+                        None::<serde_json::Value>,
+                    )
+                })?;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&args.content_base64)
+                    .map_err(|e| {
+                        ErrorData::new(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!("base64 decode: {e}"),
+                            None::<serde_json::Value>,
+                        )
+                    })?;
                 let url = format!("{}/blob", storage_url);
-                let response = client.put(&url).body(bytes.clone()).send().await
-                    .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("storage save failed: {e}"), None::<serde_json::Value>))?;
-                let body = response.text().await
-                    .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("read save response: {e}"), None))?;
-                Ok(CallToolResult::success(vec![ContentBlock::text(body)])
-                .into())
+                let response = client
+                    .put(&url)
+                    .body(bytes.clone())
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        ErrorData::new(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!("storage save failed: {e}"),
+                            None::<serde_json::Value>,
+                        )
+                    })?;
+                let body = response.text().await.map_err(|e| {
+                    ErrorData::new(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!("read save response: {e}"),
+                        None,
+                    )
+                })?;
+                Ok(CallToolResult::success(vec![ContentBlock::text(body)]).into())
             }
             "canvas_search_artifacts" => {
-                let args: SearchArtifacts = serde_json::from_value(args)
-                    .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None::<serde_json::Value>))?;
+                let args: SearchArtifacts = serde_json::from_value(args).map_err(|e| {
+                    ErrorData::new(
+                        ErrorCode::INTERNAL_ERROR,
+                        e.to_string(),
+                        None::<serde_json::Value>,
+                    )
+                })?;
                 let hits = if let Some(alfalfa) = &self.alfalfa_url {
                     // Query the live Alfalfa index: GET /projects/{project}/resources?search={query}
                     let url = format!("{}/search?q={}", alfalfa, args.query.replace(" ", "%20"));
@@ -957,9 +1021,13 @@ impl Canvas {
                     // Fallback: search the bundled catalog
                     let mut hits = Vec::new();
                     for project in self.catalog.projects.iter() {
-                        if !args.project.is_empty() && args.project != project.id { continue; }
+                        if !args.project.is_empty() && args.project != project.id {
+                            continue;
+                        }
                         for resource in &project.resources {
-                            if resource.title.contains(&args.query) || resource.id.contains(&args.query) {
+                            if resource.title.contains(&args.query)
+                                || resource.id.contains(&args.query)
+                            {
                                 hits.push(serde_json::json!({
                                     "project": project.id,
                                     "resource": resource.id,
@@ -977,14 +1045,31 @@ impl Canvas {
                 .into())
             }
             "canvas_crop_artifact" => {
-                let args: CropArtifact = serde_json::from_value(args)
-                    .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None::<serde_json::Value>))?;
+                let args: CropArtifact = serde_json::from_value(args).map_err(|e| {
+                    ErrorData::new(
+                        ErrorCode::INTERNAL_ERROR,
+                        e.to_string(),
+                        None::<serde_json::Value>,
+                    )
+                })?;
                 // Fetch parent, decode, crop, re-encode, store as new artifact.
                 let url = format!("{}/blob/{}", storage_url, args.artifact);
-                let _bytes = client.get(&url).send().await
-                    .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("storage fetch: {e}"), None::<serde_json::Value>))?
-                    .bytes().await
-                    .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("read body: {e}"), None))?;
+                let _bytes = client
+                    .get(&url)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        ErrorData::new(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!("storage fetch: {e}"),
+                            None::<serde_json::Value>,
+                        )
+                    })?
+                    .bytes()
+                    .await
+                    .map_err(|e| {
+                        ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("read body: {e}"), None)
+                    })?;
                 // Crop is deterministic: same input + rect = same hash.
                 // For now, return the parent hash with a note about the crop region.
                 Ok(CallToolResult::success(vec![ContentBlock::text(serde_json::json!({
@@ -1009,7 +1094,11 @@ impl Canvas {
         actor: Option<&control::ActorContext>,
     ) -> Result<(), String> {
         let _ = content_type; // Reserved for future MIME-based renderer selection
-        let surface_id = if artifact.len() <= 64 { artifact } else { "fetched-artifact" };
+        let surface_id = if artifact.len() <= 64 {
+            artifact
+        } else {
+            "fetched-artifact"
+        };
         let title = format!("Artifact: {}", artifact);
         let temp_path = std::env::temp_dir().join(format!("canvas-artifact-{}.bin", artifact));
         std::fs::write(&temp_path, bytes).map_err(|e| e.to_string())?;
@@ -1250,7 +1339,13 @@ impl Canvas {
         let (path, sha256, width, height) = match result {
             Ok(reply) => match reply.outcome {
                 Outcome::Ok {
-                    receipt: Receipt::ScreenshotCaptured { path, sha256, width, height },
+                    receipt:
+                        Receipt::ScreenshotCaptured {
+                            path,
+                            sha256,
+                            width,
+                            height,
+                        },
                 } => (path, sha256, width, height),
                 Outcome::Error { message, .. } => {
                     return Ok(CallToolResult::error(vec![ContentBlock::text(message)]).into());
@@ -1274,10 +1369,7 @@ impl Canvas {
         });
         let metadata_str = metadata.to_string();
 
-        Ok(CallToolResult::success(vec![
-            ContentBlock::text(metadata_str),
-        ])
-        .into())
+        Ok(CallToolResult::success(vec![ContentBlock::text(metadata_str)]).into())
     }
 }
 
@@ -2182,10 +2274,7 @@ mod tests {
 
     #[test]
     fn parse_without_actor_succeeds() {
-        let result = parse(
-            "canvas_inspect",
-            json!({}),
-        );
+        let result = parse("canvas_inspect", json!({}));
         assert!(result.is_ok(), "request without actor should succeed");
         let req = result.unwrap();
         assert!(req.actor.is_none());

@@ -1,6 +1,7 @@
 //! Project-bound MCP adapter. FPL Desktop Bridge owns cloud identity and routing;
 //! existing desktop control owns permissions and compositor operations.
 use rmcp::{
+    RoleServer, ServerHandler,
     model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorData,
         Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo,
@@ -8,11 +9,10 @@ use rmcp::{
     },
     service::RequestContext,
     transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     },
-    RoleServer, ServerHandler,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -140,7 +140,10 @@ impl ServerHandler for Desktop {
         let mut info = ServerInfo::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new("dock-desktop", env!("CARGO_PKG_VERSION"));
-        info.instructions = Some(format!("Project {} only. Human controls delegation outside MCP. Input refuses human ownership and inactive projects. Never request a sign-in secret through tools.", self.project));
+        info.instructions = Some(format!(
+            "Project {} only. Human controls delegation outside MCP. Input refuses human ownership and inactive projects. Never request a sign-in secret through tools.",
+            self.project
+        ));
         info
     }
     async fn list_tools(
@@ -304,12 +307,14 @@ mod tests {
     use super::*;
     #[test]
     fn caller_cannot_change_project_or_grant_control() {
-        assert!(arguments(
-            "dock",
-            "desktop_text",
-            &json!({"text":"x","project":"studio"})
-        )
-        .is_err());
+        assert!(
+            arguments(
+                "dock",
+                "desktop_text",
+                &json!({"text":"x","project":"studio"})
+            )
+            .is_err()
+        );
         assert!(arguments("dock", "desktop_control", &json!({"mode":"agent"})).is_err());
         assert!(arguments("dock", "desktop_recall", &json!({"project":"studio"})).is_err());
         assert!(arguments("dock", "desktop_key", &json!({"key":"x".repeat(129)})).is_err());

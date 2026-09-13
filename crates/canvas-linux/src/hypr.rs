@@ -1,6 +1,6 @@
 //! Narrow commands for Dock's explicitly registered Hyprland instance.
 use crate::{command, unit};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{env, fs, path::PathBuf};
 
 fn root_runtime() -> Result<PathBuf, String> {

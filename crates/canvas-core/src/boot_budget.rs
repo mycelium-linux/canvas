@@ -266,7 +266,9 @@ mod tests {
 
     #[test]
     fn a_start_inside_every_ceiling_passes() {
-        let report = good_boot().report(&budget(Start::Warm), 900).expect("report");
+        let report = good_boot()
+            .report(&budget(Start::Warm), 900)
+            .expect("report");
         assert!(report.met(), "{}", report.summary());
         assert_eq!(report.total_ms, 900);
         assert!(report.breaches.is_empty());
@@ -284,7 +286,9 @@ mod tests {
         assert!(!report.met());
         assert_eq!(report.breaches, vec!["displays"]);
         assert!(
-            report.summary().contains("displays 700ms over its 200ms ceiling"),
+            report
+                .summary()
+                .contains("displays 700ms over its 200ms ceiling"),
             "{}",
             report.summary()
         );
@@ -310,7 +314,9 @@ mod tests {
         assert!(!report.met());
         assert_eq!(report.unfinished.as_deref(), Some("workspace"));
         assert!(
-            report.summary().starts_with("boot did not finish: stopped in workspace"),
+            report
+                .summary()
+                .starts_with("boot did not finish: stopped in workspace"),
             "{}",
             report.summary()
         );
@@ -338,7 +344,9 @@ mod tests {
     #[test]
     fn a_cold_start_is_not_judged_against_a_warm_budget() {
         let cold = Trace::begin(Start::Cold, 0);
-        let error = cold.report(&budget(Start::Warm), 100).expect_err("must refuse");
+        let error = cold
+            .report(&budget(Start::Warm), 100)
+            .expect_err("must refuse");
         assert!(error.contains("Cold"), "{error}");
         assert!(
             cold.report(&budget(Start::Cold), 100).is_ok(),

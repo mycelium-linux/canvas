@@ -927,7 +927,9 @@ mod placed_widget_tests {
             view_id: "alfalfa/executive".into(),
             expected_base_revision: Some(5),
             rationale: "Live view of Alfalfa CI pipeline health".into(),
-            audience: AudiencePolicy::Scoped { value: "agent:alfalfa".into() },
+            audience: AudiencePolicy::Scoped {
+                value: "agent:alfalfa".into(),
+            },
             sources: vec![RecommendationSource {
                 id: "pipeline".into(),
                 owner: "alfalfa".into(),

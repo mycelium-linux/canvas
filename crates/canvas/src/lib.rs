@@ -9,6 +9,7 @@ use std::{collections::BTreeSet, fmt};
 
 pub mod backend;
 pub mod background_picker;
+pub mod briefing;
 pub mod chart;
 pub mod control;
 pub mod display;
@@ -32,7 +33,6 @@ pub mod runtime_config;
 pub mod screensaver;
 #[cfg(feature = "lua-scenes")]
 pub mod stream_binding;
-pub mod briefing;
 pub mod theme_picker;
 pub mod view;
 pub mod workspace_store;
@@ -79,25 +79,6 @@ fn contract(value: &str) -> bool {
         && value.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'.' | b'/')
         })
-}
-
-/// Declared set of valid stream contracts. Envelope senders and workspace
-/// bindings must use one of these names; adding a contract is a data change
-/// to this list, not a rebuild of the validation logic.
-pub const KNOWN_CONTRACTS: &[&str] = &[
-    "canvas.widget.snapshot.v1",
-    "canvas.briefing.beat.v1",
-    "canvas.prometheus.v1",
-    "canvas.sse.v1",
-    "canvas.quant.candle.v1",
-    "canvas.image.rgba.v1",
-    "canvas.agent.attention.v1",
-    "jarvis.presence.v1",
-];
-
-/// Check a contract name against both format rules and the declared registry.
-pub fn validate_contract(value: &str) -> bool {
-    contract(value) && KNOWN_CONTRACTS.contains(&value)
 }
 
 fn visible(value: &str) -> bool {
@@ -1299,7 +1280,7 @@ mod forward_compatibility_tests {
 
     #[test]
     fn a_known_widget_kind_with_a_bad_field_is_an_error_not_a_placeholder() {
-         // Proven the hard way: `rate_bars` exists in this build, so a wrong
+        // Proven the hard way: `rate_bars` exists in this build, so a wrong
         // field inside it is a mistake and must not be swallowed as "newer".
         let raw = json!({"kind": "widget", "spec": {
             "schema_version": 2, "id": "burn", "kind": "rate_bars", "budget": 0.5
@@ -1609,14 +1590,21 @@ mod tests {
         let mut doc = document();
         doc.bindings[0].source.contract = "canvas.widget.snapshot.v1".into();
         assert!(
-            doc.validate(&catalog).unwrap_err().to_string().contains("contracts differ")
+            doc.validate(&catalog)
+                .unwrap_err()
+                .to_string()
+                .contains("contracts differ")
         );
 
         // An undeclared contract is rejected at ingress, naming the contract.
         let mut undeclared = document();
         undeclared.bindings[0].source.contract = "jarvis.attention.v2".into();
         assert!(
-            undeclared.validate(&catalog).unwrap_err().to_string().contains("not declared"),
+            undeclared
+                .validate(&catalog)
+                .unwrap_err()
+                .to_string()
+                .contains("not declared"),
             "undeclared contract should fail the registry check"
         );
     }

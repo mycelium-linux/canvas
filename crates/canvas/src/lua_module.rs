@@ -1154,9 +1154,8 @@ mod tests {
 
     #[test]
     fn cross_owner_module_combines_two_source_owners_into_one_scene() {
-        let manifest = ModuleManifest::parse(
-            include_str!("../examples/lua/cross-owner-graph.json")
-        ).unwrap();
+        let manifest =
+            ModuleManifest::parse(include_str!("../examples/lua/cross-owner-graph.json")).unwrap();
         let module = LuaModule::load(
             manifest,
             include_str!("../examples/lua/cross-owner-graph.lua"),
@@ -1165,10 +1164,15 @@ mod tests {
             BTreeMap::new(),
             LuaSceneCapabilities::default(),
             LuaSceneLimits::default(),
-        ).unwrap();
+        )
+        .unwrap();
         let scene = &module.retained().scene;
         // Root group + 2 group labels + 2 headers + 4 nodes + 1 bridge = 10
-        assert!(scene.nodes.len() >= 8, "expected at least 8 scene nodes, got {}", scene.nodes.len());
+        assert!(
+            scene.nodes.len() >= 8,
+            "expected at least 8 scene nodes, got {}",
+            scene.nodes.len()
+        );
         // Bifrost nodes present
         assert!(scene.nodes.iter().any(|n| n.id == "bifrost-health"));
         assert!(scene.nodes.iter().any(|n| n.id == "bifrost-queues"));
@@ -1181,9 +1185,8 @@ mod tests {
 
     #[test]
     fn cross_owner_module_preserves_last_known_good_on_malformed_input() {
-        let manifest = ModuleManifest::parse(
-            include_str!("../examples/lua/cross-owner-graph.json")
-        ).unwrap();
+        let manifest =
+            ModuleManifest::parse(include_str!("../examples/lua/cross-owner-graph.json")).unwrap();
         // First: load with valid data
         let good = LuaModule::load(
             manifest.clone(),
@@ -1193,7 +1196,8 @@ mod tests {
             BTreeMap::new(),
             LuaSceneCapabilities::default(),
             LuaSceneLimits::default(),
-        ).unwrap();
+        )
+        .unwrap();
         let good_node_count = good.retained().scene.nodes.len();
         assert!(good_node_count >= 8);
         // Second: load with malformed data (missing elmers group)

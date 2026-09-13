@@ -320,7 +320,10 @@ mod tests {
     #[test]
     fn bare_pdf_finds_pdfs_not_things_named_pdf() {
         let results = run(&parse("pdf"), &corpus(), 10);
-        assert_eq!(names(&results), vec!["thermal-report.pdf", "packing-slip.pdf"]);
+        assert_eq!(
+            names(&results),
+            vec!["thermal-report.pdf", "packing-slip.pdf"]
+        );
         assert!(
             !names(&results).contains(&"pdf-tooling-notes.md".to_string()),
             "typing pdf means show me PDFs"
@@ -355,7 +358,10 @@ mod tests {
     #[test]
     fn img_matches_the_type_and_png_matches_the_subtype() {
         assert_eq!(run(&parse("img"), &corpus(), 10).matched, 2);
-        assert_eq!(names(&run(&parse("png"), &corpus(), 10)), vec!["wiring-diagram.png"]);
+        assert_eq!(
+            names(&run(&parse("png"), &corpus(), 10)),
+            vec!["wiring-diagram.png"]
+        );
         assert_eq!(names(&run(&parse("svg"), &corpus(), 10)), vec!["logo.svg"]);
     }
 
@@ -395,7 +401,11 @@ mod tests {
     #[test]
     fn an_empty_query_lists_recent_artifacts_rather_than_nothing() {
         let results = run(&parse(""), &corpus(), 3);
-        assert_eq!(results.hits.len(), 3, "a blank palette should still be useful");
+        assert_eq!(
+            results.hits.len(),
+            3,
+            "a blank palette should still be useful"
+        );
         assert_eq!(
             names(&results),
             vec!["logo.svg", "pdf-tooling-notes.md", "widget-quality.md"],

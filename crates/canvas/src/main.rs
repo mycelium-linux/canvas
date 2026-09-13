@@ -2,9 +2,9 @@
 use ::canvas::DeliveryPolicy;
 use ::canvas::chart::{ChartDocument, ChartKind};
 use ::canvas::control::{
-    CONTROL_VERSION, Command, ContentKind, ControlReply, ControlRequest,
-    ErrorCode, MAX_ACTIVE_INDICATORS, MAX_CONTROL_MESSAGE, MeshSnapshot, MountedViewSnapshot,
-    Navigation, Outcome, OverlaySettings, OverlayTarget, PresencePreview, PresenceSnapshot,
+    CONTROL_VERSION, Command, ContentKind, ControlReply, ControlRequest, ErrorCode,
+    MAX_ACTIVE_INDICATORS, MAX_CONTROL_MESSAGE, MeshSnapshot, MountedViewSnapshot, Navigation,
+    Outcome, OverlaySettings, OverlayTarget, PresencePreview, PresenceSnapshot,
     ProjectWorkspaceSnapshot, Receipt, RuntimeSnapshot, ScreensaverSettings, ScreensaverSnapshot,
     StatusIndicator, SurfaceSnapshot, VisibleBackground,
 };
@@ -27,10 +27,9 @@ use ::canvas::view::{
 use ::canvas::workspace_store::{self, WorkspaceStore};
 use ::canvas::{
     AssetRef, Axis, Background, BackgroundFit, DataBinding, DataSource, GradientStop, InputPort,
-    InputTarget, Layout, NodeContent, NormalizedRect, PatchOperation, Placement,
-    SCHEMA_VERSION, Scene, SceneNode, Surface,
-    SurfaceChrome, SurfaceContent,
-    SurfaceTitleMode, ThemeRef, WorkspaceDocument, WorkspacePatch,
+    InputTarget, Layout, NodeContent, NormalizedRect, PatchOperation, Placement, SCHEMA_VERSION,
+    Scene, SceneNode, Surface, SurfaceChrome, SurfaceContent, SurfaceTitleMode, ThemeRef,
+    WorkspaceDocument, WorkspacePatch,
 };
 use base64::Engine as _;
 use canvas_core::display_watch::{DisplayWatch, WatchStatus};
@@ -146,7 +145,9 @@ impl JumpHistory {
         self.cursor = next;
         if self.entries.len() > Self::MAX_DEPTH {
             self.entries.drain(0..self.entries.len() - Self::MAX_DEPTH);
-            self.cursor = self.cursor.saturating_sub(self.entries.len() - Self::MAX_DEPTH);
+            self.cursor = self
+                .cursor
+                .saturating_sub(self.entries.len() - Self::MAX_DEPTH);
         }
     }
 
@@ -515,7 +516,7 @@ impl App {
         // Validated against live topology; invalid entries fall back to defaults.
         let saved_policy = workspaces.display_policy();
         let saved_target = saved_policy.target.clone();
-        let saved_overlays = saved_policy.overlays.clone();
+        let saved_overlays = saved_policy.overlays;
         let mut shortcut_errors = Vec::new();
         // One owner of the display inventory: the watch takes the first one and
         // every settled one after it, so nothing else enumerates and drifts.
@@ -632,7 +633,7 @@ impl App {
         let jarvis_text_hotkey = match GlobalHotkey::register(HotkeySpec {
             signature: *b"Cnvs",
             id: 4,
-            key_code: 0x13,           // kVK_ANSI_T
+            key_code: 0x13,                              // kVK_ANSI_T
             modifiers: (1 << 9) | (1 << 11) | (1 << 12), // shift | option | control
             label: JARVIS_TEXT_KEYS,
         }) {
@@ -645,7 +646,7 @@ impl App {
         let jump_back_hotkey = match GlobalHotkey::register(HotkeySpec {
             signature: *b"Cnvs",
             id: 6,
-            key_code: 0x1F,                // kVK_ANSI_O
+            key_code: 0x1F,                   // kVK_ANSI_O
             modifiers: (1 << 11) | (1 << 12), // optionKey | controlKey
             label: JUMP_BACK_KEYS,
         }) {
@@ -658,7 +659,7 @@ impl App {
         let jump_forward_hotkey = match GlobalHotkey::register(HotkeySpec {
             signature: *b"Cnvs",
             id: 7,
-            key_code: 0x1F, // kVK_ANSI_O
+            key_code: 0x1F,                              // kVK_ANSI_O
             modifiers: (1 << 9) | (1 << 11) | (1 << 12), // shift | option | control
             label: JUMP_FORWARD_KEYS,
         }) {
@@ -1006,23 +1007,17 @@ impl App {
             self.document = document;
             self.active_project_workspace = Some(project_id.to_owned());
         }
-        if let Some(view_id) = view_id {
-            if let Ok(opened) = ::canvas::operational_views::materialize(
-                view_id,
-                &self.document,
-                self.view_fit(),
-            ) {
-                self.snapped_view = Some(view_id.to_owned());
-                self.document = opened.document;
-                self.ensure_scene_decoded();
-            }
+        if let Some(view_id) = view_id
+            && let Ok(opened) =
+                ::canvas::operational_views::materialize(view_id, &self.document, self.view_fit())
+        {
+            self.snapped_view = Some(view_id.to_owned());
+            self.document = opened.document;
+            self.ensure_scene_decoded();
         }
         self.reset_background_animation();
         self.bump();
-        self.emit_event(format!(
-            "jump_navigate {} {:?}",
-            project_id, view_id
-        ));
+        self.emit_event(format!("jump_navigate {} {:?}", project_id, view_id));
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -1597,8 +1592,7 @@ impl App {
                     if let Ok(mut file) = file {
                         let write_result = img.write_to(&mut file, image::ImageFormat::Png);
                         if write_result.is_ok() {
-                            let digest = hash_file(&path)
-                                .unwrap_or_else(|_| "error".to_string());
+                            let digest = hash_file(&path).unwrap_or_else(|_| "error".to_string());
                             let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                             Ok((path, digest, width, height, size))
                         } else {
@@ -1812,10 +1806,11 @@ impl App {
             .collect::<Vec<_>>();
         self.selected_display_ids = resolved.display_ids.clone();
         // Persist the resolved display policy so it survives restart.
-        self.workspaces.set_display_policy(workspace_store::DisplayPolicy {
-            target: target.clone(),
-            overlays: self.overlays.clone(),
-        });
+        self.workspaces
+            .set_display_policy(workspace_store::DisplayPolicy {
+                target: target.clone(),
+                overlays: self.overlays,
+            });
         let _ = workspace_store::save(&self.workspace_store_path, &self.workspaces, &self.catalog);
         // A reflow view fills whatever Canvas now occupies; a fixed one keeps
         // its geometry on the whole desktop and lets displays reveal parts of
@@ -2089,7 +2084,7 @@ impl App {
                     schema_version: CONTROL_VERSION,
                     request_id: "key-workspace".into(),
                     expected_revision: Some(self.runtime_revision),
-            actor: None,
+                    actor: None,
                     command: Command::WorkspaceSwitch { name: project },
                 },
                 reply,
@@ -2106,7 +2101,7 @@ impl App {
                 theme: ThemeRef::Project,
                 background: Background::Theme,
                 chrome: SurfaceChrome::default(),
-    surfaces: vec![Surface {
+                surfaces: vec![Surface {
                     id: "repo-status".into(),
                     title: format!("{}: Active Work", project_id),
                     content: SurfaceContent::Widget {
@@ -2115,7 +2110,13 @@ impl App {
                             id: "repo-status".into(),
                             kind: canvas_widgets::WidgetKind::Table {
                                 title: format!("{}: Active Work", project_id),
-                                columns: vec!["State".into(), "Project".into(), "Idle".into(), "Ready".into(), "Backlog".into()],
+                                columns: vec![
+                                    "State".into(),
+                                    "Project".into(),
+                                    "Idle".into(),
+                                    "Ready".into(),
+                                    "Backlog".into(),
+                                ],
                                 rows: Vec::new(),
                             },
                             theme: None,
@@ -2132,7 +2133,12 @@ impl App {
                 layout: Layout::Canvas {
                     placements: vec![crate::Placement {
                         surface_id: "repo-status".into(),
-                        bounds: crate::NormalizedRect { x: 0.02, y: 0.1, width: 0.96, height: 0.8 },
+                        bounds: crate::NormalizedRect {
+                            x: 0.02,
+                            y: 0.1,
+                            width: 0.96,
+                            height: 0.8,
+                        },
                         layer: 0,
                     }],
                 },
@@ -2158,7 +2164,7 @@ impl App {
                     schema_version: CONTROL_VERSION,
                     request_id: "key-workspace-new".into(),
                     expected_revision: None,
-            actor: None,
+                    actor: None,
                     command: Command::ApplyDocument { document },
                 },
                 reply,
@@ -2195,23 +2201,34 @@ impl App {
             if let Ok(projects) = serde_json::from_str::<Vec<serde_json::Value>>(body) {
                 found_projects = true;
                 for project in projects {
-                    let proj = project.get("project")
-                        .and_then(|p| p.as_object())
-                        .map(|p| {
-                            (
-                                p.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                p.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                            )
-                        });
+                    let proj = project.get("project").and_then(|p| p.as_object()).map(|p| {
+                        (
+                            p.get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            p.get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        )
+                    });
                     if let Some((id, name)) = proj {
-                        if id.is_empty() { continue; }
-                        if catalog.projects.iter().any(|p| p.id == id) { continue; }
+                        if id.is_empty() {
+                            continue;
+                        }
+                        if catalog.projects.iter().any(|p| p.id == id) {
+                            continue;
+                        }
                         let theme = canvas_core::ThemeSelection::Coherence {
                             mode: canvas_core::ThemeMode::Dark,
                             accent: canvas_core::Accent::Brand,
                         };
                         catalog.projects.push(canvas_core::Project {
-                            id, name, theme, resources: Vec::new(),
+                            id,
+                            name,
+                            theme,
+                            resources: Vec::new(),
                         });
                     }
                 }
@@ -2231,9 +2248,17 @@ impl App {
                 let repos_body = repos_response.split("\r\n\r\n").nth(1).unwrap_or("");
                 if let Ok(repos) = serde_json::from_str::<Vec<serde_json::Value>>(repos_body) {
                     for repo in repos {
-                        let id = repo.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        if id.is_empty() { continue; }
-                        if catalog.projects.iter().any(|p| p.id == id) { continue; }
+                        let id = repo
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if id.is_empty() {
+                            continue;
+                        }
+                        if catalog.projects.iter().any(|p| p.id == id) {
+                            continue;
+                        }
                         let theme = canvas_core::ThemeSelection::Coherence {
                             mode: canvas_core::ThemeMode::Dark,
                             accent: canvas_core::Accent::Brand,
@@ -2341,7 +2366,10 @@ impl App {
             "Kept the current project.".into()
         };
         self.bump();
-        self.emit_event(format!("project_switcher {}", if visible { "shown" } else { "hidden" }));
+        self.emit_event(format!(
+            "project_switcher {}",
+            if visible { "shown" } else { "hidden" }
+        ));
         Task::none()
     }
 
@@ -3307,8 +3335,13 @@ impl App {
                                     id: "repo-status".into(),
                                     kind: canvas_widgets::WidgetKind::Table {
                                         title: format!("{}: Active Work", project_id),
-                                        columns: vec!["State".into(), "Project".into(),
-                                            "Idle".into(), "Ready".into(), "Backlog".into()],
+                                        columns: vec![
+                                            "State".into(),
+                                            "Project".into(),
+                                            "Idle".into(),
+                                            "Ready".into(),
+                                            "Backlog".into(),
+                                        ],
                                         rows: Vec::new(),
                                     },
                                     theme: None,
@@ -3325,7 +3358,12 @@ impl App {
                         layout: Layout::Canvas {
                             placements: vec![Placement {
                                 surface_id: "repo-status".into(),
-                                bounds: NormalizedRect { x: 0.02, y: 0.1, width: 0.96, height: 0.8 },
+                                bounds: NormalizedRect {
+                                    x: 0.02,
+                                    y: 0.1,
+                                    width: 0.96,
+                                    height: 0.8,
+                                },
                                 layer: 0,
                             }],
                         },
@@ -3345,11 +3383,15 @@ impl App {
                         }],
                         focused_surface_id: Some("repo-status".into()),
                     };
-                    self.workspaces.projects.insert(project_id.clone(), document.clone());
+                    self.workspaces
+                        .projects
+                        .insert(project_id.clone(), document.clone());
                     self.workspaces.active_project_id = Some(name.clone());
-                    if let Err(error) =
-                        workspace_store::save(&self.workspace_store_path, &self.workspaces, &self.catalog)
-                    {
+                    if let Err(error) = workspace_store::save(
+                        &self.workspace_store_path,
+                        &self.workspaces,
+                        &self.catalog,
+                    ) {
                         self.fail(pending, Failure::platform(error.to_string()));
                         return Task::none();
                     }
@@ -3358,7 +3400,8 @@ impl App {
                     self.active_project_workspace = Some(name.clone());
                     self.ensure_scene_decoded();
                     self.bump();
-                    self.status = format!("Provisioned workspace '{name}' with a repo-status table.");
+                    self.status =
+                        format!("Provisioned workspace '{name}' with a repo-status table.");
                     self.emit_event(format!("workspace_provisioned {name}"));
                     Self::merge_alfalfa_projects(&mut self.catalog);
                     self.answer(
@@ -3528,141 +3571,147 @@ impl App {
                 let canonical_spec = match std::fs::canonicalize(&spec_path) {
                     Ok(path) => path,
                     Err(error) => {
-                        self.fail(pending, Failure::invalid(format!(
-                            "Cannot read widget spec at {spec_path:?}: {error}"
-                        )));
+                        self.fail(
+                            pending,
+                            Failure::invalid(format!(
+                                "Cannot read widget spec at {spec_path:?}: {error}"
+                            )),
+                        );
                         return Task::none();
                     }
                 };
                 if !canonical_spec.starts_with(&widget_dir) {
-                    self.fail(pending, Failure::invalid(format!(
-                        "Widget spec {spec_path:?} must live under {widget_dir:?}"
-                    )));
+                    self.fail(
+                        pending,
+                        Failure::invalid(format!(
+                            "Widget spec {spec_path:?} must live under {widget_dir:?}"
+                        )),
+                    );
                     return Task::none();
                 }
                 match canvas_widgets::WidgetSpec::from_file(&canonical_spec) {
-                Ok(spec) => {
-                    let title = format!("Widget: {}", spec.id);
-                    let snapshot = SurfaceSnapshot {
-                        id: surface_id.clone(),
-                        title: title.clone(),
-                        content: ContentKind::Widget,
-                        asset_sha256: None,
-                        page_index: None,
-                        page_count: None,
-                        source_pixels: None,
-                        rendered_pixels: None,
-                        display_logical: None,
-                        scale_factor: None,
-                    };
-                    let runtime = RuntimeSurface {
-                        snapshot: snapshot.clone(),
-                        source: ContentSource::Widget { spec: spec.clone() },
-                        handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
-                        source_pixels: [1, 1],
-                        media_plan: MediaPlan {
-                            viewport_logical: LogicalSize {
-                                width: 1920.0,
-                                height: 1080.0,
-                            },
-                            source_dimensions: SourceDimensions::RasterPixels(PixelSize {
-                                width: 1,
-                                height: 1,
-                            }),
-                            target_px: PixelSize {
-                                width: 1,
-                                height: 1,
-                            },
-                            display_logical: LogicalSize {
-                                width: 1920.0,
-                                height: 1080.0,
-                            },
-                            scale_factor: 1.0,
-                            cache_key: MediaCacheKey {
-                                source_id: format!("widget:{surface_id}"),
-                                variant: MediaVariant::Raster,
-                                pixel_size: PixelSize {
+                    Ok(spec) => {
+                        let title = format!("Widget: {}", spec.id);
+                        let snapshot = SurfaceSnapshot {
+                            id: surface_id.clone(),
+                            title: title.clone(),
+                            content: ContentKind::Widget,
+                            asset_sha256: None,
+                            page_index: None,
+                            page_count: None,
+                            source_pixels: None,
+                            rendered_pixels: None,
+                            display_logical: None,
+                            scale_factor: None,
+                        };
+                        let runtime = RuntimeSurface {
+                            snapshot: snapshot.clone(),
+                            source: ContentSource::Widget { spec: spec.clone() },
+                            handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
+                            source_pixels: [1, 1],
+                            media_plan: MediaPlan {
+                                viewport_logical: LogicalSize {
+                                    width: 1920.0,
+                                    height: 1080.0,
+                                },
+                                source_dimensions: SourceDimensions::RasterPixels(PixelSize {
+                                    width: 1,
+                                    height: 1,
+                                }),
+                                target_px: PixelSize {
                                     width: 1,
                                     height: 1,
                                 },
+                                display_logical: LogicalSize {
+                                    width: 1920.0,
+                                    height: 1080.0,
+                                },
+                                scale_factor: 1.0,
+                                cache_key: MediaCacheKey {
+                                    source_id: format!("widget:{surface_id}"),
+                                    variant: MediaVariant::Raster,
+                                    pixel_size: PixelSize {
+                                        width: 1,
+                                        height: 1,
+                                    },
+                                },
                             },
-                        },
-                        upload_pixels: [1, 1],
-                    };
-                    self.decoded.insert(surface_id.clone(), runtime);
-                    self.start_transition();
-                    if let Some(surface) = self
-                        .document
-                        .surfaces
-                        .iter_mut()
-                        .find(|surface| surface.id == surface_id)
-                    {
-                        surface.title = title.clone();
-                        surface.content = SurfaceContent::Widget { spec: spec.clone() };
-                    } else {
-                        self.document.surfaces.push(Surface {
-                            id: surface_id.clone(),
-                            title,
-                            content: SurfaceContent::Widget { spec: spec.clone() },
-                            inputs: if matches!(
-                                &spec.kind,
-                                canvas_widgets::WidgetKind::Quant { .. }
-                            ) {
-                                vec![InputPort {
-                                    id: "candles".into(),
-                                    contract: "canvas.quant.candle.v1".into(),
-                                }]
-                            } else {
-                                Vec::new()
-                            },
-                        });
-                        let mut placements = match &self.document.layout {
-                            Layout::Canvas { placements } => placements.clone(),
-                            Layout::Surface { surface_id: sid } => {
-                                vec![Placement {
-                                    surface_id: sid.clone(),
+                            upload_pixels: [1, 1],
+                        };
+                        self.decoded.insert(surface_id.clone(), runtime);
+                        self.start_transition();
+                        if let Some(surface) = self
+                            .document
+                            .surfaces
+                            .iter_mut()
+                            .find(|surface| surface.id == surface_id)
+                        {
+                            surface.title = title.clone();
+                            surface.content = SurfaceContent::Widget { spec: spec.clone() };
+                        } else {
+                            self.document.surfaces.push(Surface {
+                                id: surface_id.clone(),
+                                title,
+                                content: SurfaceContent::Widget { spec: spec.clone() },
+                                inputs: if matches!(
+                                    &spec.kind,
+                                    canvas_widgets::WidgetKind::Quant { .. }
+                                ) {
+                                    vec![InputPort {
+                                        id: "candles".into(),
+                                        contract: "canvas.quant.candle.v1".into(),
+                                    }]
+                                } else {
+                                    Vec::new()
+                                },
+                            });
+                            let mut placements = match &self.document.layout {
+                                Layout::Canvas { placements } => placements.clone(),
+                                Layout::Surface { surface_id: sid } => {
+                                    vec![Placement {
+                                        surface_id: sid.clone(),
+                                        bounds: NormalizedRect {
+                                            x: 0.0,
+                                            y: 0.0,
+                                            width: 1.0,
+                                            height: 1.0,
+                                        },
+                                        layer: 0,
+                                    }]
+                                }
+                                _ => Vec::new(),
+                            };
+                            if !placements.iter().any(|p| p.surface_id == surface_id) {
+                                placements.push(Placement {
+                                    surface_id: surface_id.clone(),
                                     bounds: NormalizedRect {
                                         x: 0.0,
                                         y: 0.0,
                                         width: 1.0,
                                         height: 1.0,
                                     },
-                                    layer: 0,
-                                }]
+                                    layer: placements.len() as i32,
+                                });
                             }
-                            _ => Vec::new(),
-                        };
-                        if !placements.iter().any(|p| p.surface_id == surface_id) {
-                            placements.push(Placement {
-                                surface_id: surface_id.clone(),
-                                bounds: NormalizedRect {
-                                    x: 0.0,
-                                    y: 0.0,
-                                    width: 1.0,
-                                    height: 1.0,
-                                },
-                                layer: placements.len() as i32,
-                            });
+                            self.document.layout = Layout::Canvas { placements };
                         }
-                        self.document.layout = Layout::Canvas { placements };
+                        self.document.revision = self.document.revision.saturating_add(1);
+                        self.bump();
+                        self.emit_event(format!("widget_opened {surface_id}"));
+                        self.status = format!("Opened widget surface {surface_id}.");
+                        self.answer(
+                            pending,
+                            Outcome::Ok {
+                                receipt: Receipt::SurfaceOpened { surface: snapshot },
+                            },
+                        );
+                        Task::none()
                     }
-                    self.document.revision = self.document.revision.saturating_add(1);
-                    self.bump();
-                    self.emit_event(format!("widget_opened {surface_id}"));
-                    self.status = format!("Opened widget surface {surface_id}.");
-                    self.answer(
-                        pending,
-                        Outcome::Ok {
-                            receipt: Receipt::SurfaceOpened { surface: snapshot },
-                        },
-                    );
-                    Task::none()
+                    Err(error) => {
+                        self.fail(pending, Failure::invalid(error.0));
+                        Task::none()
+                    }
                 }
-                Err(error) => {
-                    self.fail(pending, Failure::invalid(error.0));
-                    Task::none()
-                }
-            }
             }
             Command::OpenOperationalView { view_id } => {
                 match ::canvas::operational_views::materialize(
@@ -3901,12 +3950,15 @@ impl App {
             Command::Screenshot { surface_id, region } => {
                 let window_id = self.windows.keys().next().copied();
                 let Some(window_id) = window_id else {
-                    self.fail(pending, Failure::platform("no Canvas window to screenshot".to_string()));
+                    self.fail(
+                        pending,
+                        Failure::platform("no Canvas window to screenshot".to_string()),
+                    );
                     return Task::none();
                 };
-                let resolved_region = surface_id.as_ref().and_then(|id| {
-                    self.snapshot().surface_bounds.get(id).copied()
-                });
+                let resolved_region = surface_id
+                    .as_ref()
+                    .and_then(|id| self.snapshot().surface_bounds.get(id).copied());
                 let capture_region = region.or(resolved_region);
                 let mut pending = Some(pending);
                 iced::window::screenshot(window_id).map(move |screenshot| {
@@ -4554,7 +4606,11 @@ impl App {
         self.bump();
         self.emit_event(format!(
             "jarvis_text {}",
-            if self.jarvis_text_visible { "shown" } else { "hidden" }
+            if self.jarvis_text_visible {
+                "shown"
+            } else {
+                "hidden"
+            }
         ));
     }
 
@@ -4568,22 +4624,26 @@ impl App {
         self.jarvis_text.clear();
         self.status = "Sending to JARVIS...".into();
         let home = std::env::var("HOME").unwrap_or_default();
-        let jarvis_root = std::path::PathBuf::from(&home)
-            .join("Documents/src/fpl/JARVIS");
+        let jarvis_root = std::path::PathBuf::from(&home).join("Documents/src/fpl/JARVIS");
         let jarvis_bin = jarvis_root.join("target/debug/jarvis");
         if jarvis_bin.exists() {
             match std::process::Command::new(&jarvis_bin)
                 .arg("text-turn")
                 .arg(&text)
                 .current_dir(&jarvis_root)
-                .env("JARVIS_VOICE_TRANSCRIPT_LOG_DIR",
-                     format!("{}/.jarvis/transcripts", home))
+                .env(
+                    "JARVIS_VOICE_TRANSCRIPT_LOG_DIR",
+                    format!("{}/.jarvis/transcripts", home),
+                )
                 .output()
             {
                 Ok(output) => {
                     let reply = String::from_utf8_lossy(&output.stdout).to_string();
                     self.jarvis_text_reply = Some(reply.trim().to_string());
-                    self.status = format!("JARVIS replied: {}", self.jarvis_text_reply.as_deref().unwrap_or(""));
+                    self.status = format!(
+                        "JARVIS replied: {}",
+                        self.jarvis_text_reply.as_deref().unwrap_or("")
+                    );
                 }
                 Err(_) => {
                     self.status = "JARVIS binary error".to_string();
@@ -4874,20 +4934,16 @@ impl App {
                         // full 3D mesh rendering with vertex shaders is a future
                         // backend task (dock-cov.44). Z-based scale and depth
                         // ordering provide the visible 3D structure.
-                        container(
-                            text(label)
-                                .size(font_size)
-                                .color(color(palette.text)),
-                        )
-                        .width(Length::Shrink)
-                        .height(Length::Shrink)
-                        .padding(iced::Padding {
-                            top: pos_y,
-                            right: 0.0,
-                            bottom: 0.0,
-                            left: pos_x,
-                        })
-                        .into()
+                        container(text(label).size(font_size).color(color(palette.text)))
+                            .width(Length::Shrink)
+                            .height(Length::Shrink)
+                            .padding(iced::Padding {
+                                top: pos_y,
+                                right: 0.0,
+                                bottom: 0.0,
+                                left: pos_x,
+                            })
+                            .into()
                     })
                     .collect();
                 container(stack(children))
@@ -5831,11 +5887,11 @@ impl App {
                 .map(|frame| frame.x)
                 .min()
                 .is_some_and(|x| viewport.x == x),
-             OverlayTarget::Center => {
-                 let frames = selected.collect::<Vec<_>>();
-                 if frames.is_empty() {
-                     false
-                 } else {
+            OverlayTarget::Center => {
+                let frames = selected.collect::<Vec<_>>();
+                if frames.is_empty() {
+                    false
+                } else {
                     let left = frames
                         .iter()
                         .map(|frame| frame.x)
@@ -6408,39 +6464,39 @@ impl<Message> canvas::Program<Message> for AttentionProgram {
             .add_str(self.label.as_deref().unwrap_or(""))
             .build();
         state.draw_cached(renderer, bounds.size(), key, |frame| {
-        let Some(region) = attention_geometry(
-            bounds.size(),
-            self.source_pixels,
-            self.viewport,
-            self.attention,
-        ) else {
-            return;
-        };
-        let path = canvas::Path::rectangle(region.position(), region.size());
-        frame.fill(
-            &path,
-            Color {
-                a: 0.08,
-                ..self.color
-            },
-        );
-        frame.stroke(
-            &path,
-            canvas::Stroke::default().with_width(2.0).with_color(Color {
-                a: 0.95,
-                ..self.color
-            }),
-        );
-        if let Some(label) = &self.label {
-            chart_text(
-                frame,
-                label,
-                Point::new(region.x + 5.0, (region.y - 18.0).max(4.0)),
-                12.0,
-                self.color,
-                iced::alignment::Horizontal::Left,
+            let Some(region) = attention_geometry(
+                bounds.size(),
+                self.source_pixels,
+                self.viewport,
+                self.attention,
+            ) else {
+                return;
+            };
+            let path = canvas::Path::rectangle(region.position(), region.size());
+            frame.fill(
+                &path,
+                Color {
+                    a: 0.08,
+                    ..self.color
+                },
             );
-        }
+            frame.stroke(
+                &path,
+                canvas::Stroke::default().with_width(2.0).with_color(Color {
+                    a: 0.95,
+                    ..self.color
+                }),
+            );
+            if let Some(label) = &self.label {
+                chart_text(
+                    frame,
+                    label,
+                    Point::new(region.x + 5.0, (region.y - 18.0).max(4.0)),
+                    12.0,
+                    self.color,
+                    iced::alignment::Horizontal::Left,
+                );
+            }
         })
     }
 }
@@ -6468,7 +6524,13 @@ impl<Message> canvas::Program<Message> for ChartProgram {
         cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let total_points: usize = self.chart.series.iter().map(|s| s.points.len()).sum();
-        let val_sum: f32 = self.chart.series.iter().flat_map(|s| &s.points).map(|p| p.y).sum();
+        let val_sum: f32 = self
+            .chart
+            .series
+            .iter()
+            .flat_map(|s| &s.points)
+            .map(|p| p.y)
+            .sum();
         let key = canvas_widgets::live::Key::new()
             .add_usize(total_points)
             .add_f32(val_sum)
@@ -6478,214 +6540,214 @@ impl<Message> canvas::Program<Message> for ChartProgram {
             .add_f32(bounds.height)
             .build();
         state.draw_cached(renderer, bounds.size(), key, |frame| {
-        let Some((min_x, max_x, min_y, max_y)) = chart_extents(&self.chart) else {
+            let Some((min_x, max_x, min_y, max_y)) = chart_extents(&self.chart) else {
+                chart_text(
+                    frame,
+                    "No chart data",
+                    Point::new(20.0, 24.0),
+                    self.metrics.body,
+                    self.muted_color,
+                    iced::alignment::Horizontal::Left,
+                );
+                return;
+            };
+
             chart_text(
                 frame,
-                "No chart data",
-                Point::new(20.0, 24.0),
+                &self.chart.title,
+                Point::new(18.0, 12.0),
                 self.metrics.body,
-                self.muted_color,
+                self.axis_color,
                 iced::alignment::Horizontal::Left,
             );
-            return;
-        };
-
-        chart_text(
-            frame,
-            &self.chart.title,
-            Point::new(18.0, 12.0),
-            self.metrics.body,
-            self.axis_color,
-            iced::alignment::Horizontal::Left,
-        );
-        let legend = legend_layout(
-            self.chart.series.iter().map(|series| series.name.as_str()),
-            bounds.width.max(1.0),
-        );
-        for (index, item) in legend.items.iter().enumerate() {
-            let color = self.series_colors[index % self.series_colors.len()];
-            frame.fill(
-                &canvas::Path::circle(Point::new(item.x + 4.0, item.y + 6.0), 3.5),
-                color,
+            let legend = legend_layout(
+                self.chart.series.iter().map(|series| series.name.as_str()),
+                bounds.width.max(1.0),
             );
+            for (index, item) in legend.items.iter().enumerate() {
+                let color = self.series_colors[index % self.series_colors.len()];
+                frame.fill(
+                    &canvas::Path::circle(Point::new(item.x + 4.0, item.y + 6.0), 3.5),
+                    color,
+                );
+                chart_text(
+                    frame,
+                    &item.label,
+                    Point::new(item.x + 13.0, item.y),
+                    self.metrics.micro,
+                    self.muted_color,
+                    iced::alignment::Horizontal::Left,
+                );
+            }
+
+            let left = if bounds.width < 360.0 { 44.0 } else { 58.0 };
+            let right = (bounds.width - 18.0).max(left + 1.0);
+            let top = (48.0 + legend.rows as f32 * 18.0).min(bounds.height * 0.45);
+            let bottom = (bounds.height - 36.0).max(top + 1.0);
+            let plot_width = right - left;
+            let plot_height = bottom - top;
+            if plot_width <= 1.0 || plot_height <= 1.0 {
+                return;
+            }
+
+            let x_ticks = chart_ticks(min_x, max_x, if bounds.width < 420.0 { 3 } else { 5 });
+            let y_ticks = chart_ticks(min_y, max_y, if bounds.height < 300.0 { 3 } else { 5 });
+            let sx = |x: f32| left + (x - min_x) / (max_x - min_x) * plot_width;
+            let sy = |y: f32| bottom - (y - min_y) / (max_y - min_y) * plot_height;
+            let grid_stroke = canvas::Stroke::default().with_width(1.0).with_color(Color {
+                a: 0.14,
+                ..self.axis_color
+            });
+
+            for tick in &y_ticks {
+                let y = sy(*tick);
+                frame.stroke(
+                    &canvas::Path::line(Point::new(left, y), Point::new(right, y)),
+                    grid_stroke,
+                );
+                chart_text(
+                    frame,
+                    &format_chart_value(*tick),
+                    Point::new(left - 7.0, y),
+                    self.metrics.micro,
+                    self.muted_color,
+                    iced::alignment::Horizontal::Right,
+                );
+            }
+            for tick in &x_ticks {
+                let x = sx(*tick);
+                frame.stroke(
+                    &canvas::Path::line(Point::new(x, top), Point::new(x, bottom)),
+                    grid_stroke,
+                );
+                chart_text(
+                    frame,
+                    &format_chart_value(*tick),
+                    Point::new(x, bottom + 7.0),
+                    self.metrics.micro,
+                    self.muted_color,
+                    iced::alignment::Horizontal::Center,
+                );
+            }
+
+            let y_label = axis_title(&self.chart.y_axis);
             chart_text(
                 frame,
-                &item.label,
-                Point::new(item.x + 13.0, item.y),
+                &y_label,
+                Point::new(12.0, top - 20.0),
                 self.metrics.micro,
                 self.muted_color,
                 iced::alignment::Horizontal::Left,
             );
-        }
-
-        let left = if bounds.width < 360.0 { 44.0 } else { 58.0 };
-        let right = (bounds.width - 18.0).max(left + 1.0);
-        let top = (48.0 + legend.rows as f32 * 18.0).min(bounds.height * 0.45);
-        let bottom = (bounds.height - 36.0).max(top + 1.0);
-        let plot_width = right - left;
-        let plot_height = bottom - top;
-        if plot_width <= 1.0 || plot_height <= 1.0 {
-            return;
-        }
-
-        let x_ticks = chart_ticks(min_x, max_x, if bounds.width < 420.0 { 3 } else { 5 });
-        let y_ticks = chart_ticks(min_y, max_y, if bounds.height < 300.0 { 3 } else { 5 });
-        let sx = |x: f32| left + (x - min_x) / (max_x - min_x) * plot_width;
-        let sy = |y: f32| bottom - (y - min_y) / (max_y - min_y) * plot_height;
-        let grid_stroke = canvas::Stroke::default().with_width(1.0).with_color(Color {
-            a: 0.14,
-            ..self.axis_color
-        });
-
-        for tick in &y_ticks {
-            let y = sy(*tick);
-            frame.stroke(
-                &canvas::Path::line(Point::new(left, y), Point::new(right, y)),
-                grid_stroke,
-            );
-             chart_text(
-                frame,
-                &format_chart_value(*tick),
-                Point::new(left - 7.0, y),
-                self.metrics.micro,
-                self.muted_color,
-                iced::alignment::Horizontal::Right,
-            );
-        }
-        for tick in &x_ticks {
-            let x = sx(*tick);
-            frame.stroke(
-                &canvas::Path::line(Point::new(x, top), Point::new(x, bottom)),
-                grid_stroke,
-            );
+            let x_label = axis_title(&self.chart.x_axis);
             chart_text(
                 frame,
-                &format_chart_value(*tick),
-                Point::new(x, bottom + 7.0),
+                &x_label,
+                Point::new((left + right) / 2.0, bounds.height - 15.0),
                 self.metrics.micro,
                 self.muted_color,
                 iced::alignment::Horizontal::Center,
             );
-        }
 
-        let y_label = axis_title(&self.chart.y_axis);
-        chart_text(
-            frame,
-            &y_label,
-            Point::new(12.0, top - 20.0),
-            self.metrics.micro,
-            self.muted_color,
-            iced::alignment::Horizontal::Left,
-        );
-        let x_label = axis_title(&self.chart.x_axis);
-        chart_text(
-            frame,
-            &x_label,
-            Point::new((left + right) / 2.0, bounds.height - 15.0),
-            self.metrics.micro,
-            self.muted_color,
-            iced::alignment::Horizontal::Center,
-        );
-
-        let total_points = self
-            .chart
-            .series
-            .iter()
-            .map(|series| series.points.len())
-            .sum::<usize>()
-            .max(1);
-        let bar_width = (plot_width / total_points as f32 * 0.72).clamp(2.0, 28.0);
-        for (series_index, series) in self.chart.series.iter().enumerate() {
-            let series_color = self.series_colors[series_index % self.series_colors.len()];
-            match self.chart.kind {
-                ChartKind::Line => {
-                    let points: Vec<Point> = series
-                        .points
-                        .iter()
-                        .map(|point| Point::new(sx(point.x), sy(point.y)))
-                        .collect();
-                    draw_chart_series_line(
-                        frame,
-                        &points,
-                        bottom,
-                        series_color,
-                        CHART_AREA_ALPHA / self.chart.series.len().max(1) as f32,
-                    );
-                }
-                ChartKind::Scatter => {
-                    for point in &series.points {
-                        frame.fill(
-                            &canvas::Path::circle(Point::new(sx(point.x), sy(point.y)), 3.4),
+            let total_points = self
+                .chart
+                .series
+                .iter()
+                .map(|series| series.points.len())
+                .sum::<usize>()
+                .max(1);
+            let bar_width = (plot_width / total_points as f32 * 0.72).clamp(2.0, 28.0);
+            for (series_index, series) in self.chart.series.iter().enumerate() {
+                let series_color = self.series_colors[series_index % self.series_colors.len()];
+                match self.chart.kind {
+                    ChartKind::Line => {
+                        let points: Vec<Point> = series
+                            .points
+                            .iter()
+                            .map(|point| Point::new(sx(point.x), sy(point.y)))
+                            .collect();
+                        draw_chart_series_line(
+                            frame,
+                            &points,
+                            bottom,
                             series_color,
+                            CHART_AREA_ALPHA / self.chart.series.len().max(1) as f32,
                         );
                     }
-                }
-                ChartKind::Bar => {
-                    let group_offset = (series_index as f32
-                        - (self.chart.series.len() - 1) as f32 / 2.0)
-                        * bar_width;
-                    for point in &series.points {
-                        let x = sx(point.x) + group_offset;
-                        let y = sy(point.y);
-                        let base = sy(min_y.max(0.0));
-                        frame.fill(
-                            &canvas::Path::rectangle(
-                                Point::new(x - bar_width * 0.42, y.min(base)),
-                                Size::new(bar_width * 0.84, (base - y).abs().max(1.0)),
-                            ),
-                            series_color,
-                        );
+                    ChartKind::Scatter => {
+                        for point in &series.points {
+                            frame.fill(
+                                &canvas::Path::circle(Point::new(sx(point.x), sy(point.y)), 3.4),
+                                series_color,
+                            );
+                        }
+                    }
+                    ChartKind::Bar => {
+                        let group_offset = (series_index as f32
+                            - (self.chart.series.len() - 1) as f32 / 2.0)
+                            * bar_width;
+                        for point in &series.points {
+                            let x = sx(point.x) + group_offset;
+                            let y = sy(point.y);
+                            let base = sy(min_y.max(0.0));
+                            frame.fill(
+                                &canvas::Path::rectangle(
+                                    Point::new(x - bar_width * 0.42, y.min(base)),
+                                    Size::new(bar_width * 0.84, (base - y).abs().max(1.0)),
+                                ),
+                                series_color,
+                            );
+                        }
                     }
                 }
             }
-        }
 
-        if let Some(cursor) = cursor.position_in(bounds)
-            && cursor.x >= left
-            && cursor.x <= right
-            && cursor.y >= top
-            && cursor.y <= bottom
-            && let Some((series_index, point, position)) =
-                nearest_chart_point(&self.chart, cursor, sx, sy, 20.0)
-        {
-            let series = &self.chart.series[series_index];
-            let series_color = self.series_colors[series_index % self.series_colors.len()];
-            frame.fill(&canvas::Path::circle(position, 5.0), self.surface_color);
-            frame.stroke(
-                &canvas::Path::circle(position, 5.0),
-                canvas::Stroke::default()
-                    .with_width(2.0)
-                    .with_color(series_color),
-            );
-            let value = format!(
-                "{}  {} · {}",
-                series.name,
-                format_axis_value(point.x, self.chart.x_axis.unit.as_deref()),
-                format_axis_value(point.y, self.chart.y_axis.unit.as_deref())
-            );
-            let tooltip_width = (value.chars().count() as f32 * 6.5 + 18.0).min(plot_width);
-            let tooltip_x = (position.x + 12.0).min(right - tooltip_width);
-            let tooltip_y = (position.y - 32.0).max(top + 4.0);
-            frame.fill(
-                &canvas::Path::rounded_rectangle(
-                    Point::new(tooltip_x, tooltip_y),
-                    Size::new(tooltip_width, 24.0),
-                    6.0.into(),
-                ),
-                Color {
-                    a: 0.94,
-                    ..self.surface_color
-                },
-            );
-            chart_text(
-                frame,
-                &value,
-                Point::new(tooltip_x + 9.0, tooltip_y + 5.0),
-                self.metrics.micro,
-                self.axis_color,
-                iced::alignment::Horizontal::Left,
-            );
-        }
+            if let Some(cursor) = cursor.position_in(bounds)
+                && cursor.x >= left
+                && cursor.x <= right
+                && cursor.y >= top
+                && cursor.y <= bottom
+                && let Some((series_index, point, position)) =
+                    nearest_chart_point(&self.chart, cursor, sx, sy, 20.0)
+            {
+                let series = &self.chart.series[series_index];
+                let series_color = self.series_colors[series_index % self.series_colors.len()];
+                frame.fill(&canvas::Path::circle(position, 5.0), self.surface_color);
+                frame.stroke(
+                    &canvas::Path::circle(position, 5.0),
+                    canvas::Stroke::default()
+                        .with_width(2.0)
+                        .with_color(series_color),
+                );
+                let value = format!(
+                    "{}  {} · {}",
+                    series.name,
+                    format_axis_value(point.x, self.chart.x_axis.unit.as_deref()),
+                    format_axis_value(point.y, self.chart.y_axis.unit.as_deref())
+                );
+                let tooltip_width = (value.chars().count() as f32 * 6.5 + 18.0).min(plot_width);
+                let tooltip_x = (position.x + 12.0).min(right - tooltip_width);
+                let tooltip_y = (position.y - 32.0).max(top + 4.0);
+                frame.fill(
+                    &canvas::Path::rounded_rectangle(
+                        Point::new(tooltip_x, tooltip_y),
+                        Size::new(tooltip_width, 24.0),
+                        6.0.into(),
+                    ),
+                    Color {
+                        a: 0.94,
+                        ..self.surface_color
+                    },
+                );
+                chart_text(
+                    frame,
+                    &value,
+                    Point::new(tooltip_x + 9.0, tooltip_y + 5.0),
+                    self.metrics.micro,
+                    self.axis_color,
+                    iced::alignment::Horizontal::Left,
+                );
+            }
         })
     }
 }
@@ -7160,18 +7222,28 @@ fn scene_node_effective(
         scale[1] *= parent.transform.scale[1];
         scale[2] *= parent.transform.scale[2];
         // Quaternion multiplication: parent_rot * self_rot
-        let (px, py, pz, pw) = (parent.transform.rotation[0], parent.transform.rotation[1],
-                                parent.transform.rotation[2], parent.transform.rotation[3]);
+        let (px, py, pz, pw) = (
+            parent.transform.rotation[0],
+            parent.transform.rotation[1],
+            parent.transform.rotation[2],
+            parent.transform.rotation[3],
+        );
         let (rx, ry, rz, rw) = (rotation[0], rotation[1], rotation[2], rotation[3]);
         rotation[0] = pw * rx + px * rw + py * rz - pz * ry;
         rotation[1] = pw * ry - px * rz + py * rw + pz * rx;
         rotation[2] = pw * rz + px * ry - py * rx + pz * rw;
         rotation[3] = pw * rw - px * rx - py * ry - pz * rz;
     }
-    let norm = (rotation[0] * rotation[0] + rotation[1] * rotation[1] +
-                rotation[2] * rotation[2] + rotation[3] * rotation[3]).sqrt().max(f32::EPSILON);
-    rotation[0] /= norm; rotation[1] /= norm;
-    rotation[2] /= norm; rotation[3] /= norm;
+    let norm = (rotation[0] * rotation[0]
+        + rotation[1] * rotation[1]
+        + rotation[2] * rotation[2]
+        + rotation[3] * rotation[3])
+        .sqrt()
+        .max(f32::EPSILON);
+    rotation[0] /= norm;
+    rotation[1] /= norm;
+    rotation[2] /= norm;
+    rotation[3] /= norm;
     (translation, rotation, scale)
 }
 
@@ -8098,7 +8170,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         App::update,
         daemon_view,
     )
-        .subscription(|app| {
+    .subscription(|app| {
         let animated = app.visible_indicator_id.is_some()
             || app.presence_preview.is_some()
             || app.transition.is_some();
@@ -8106,9 +8178,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Background-only animation uses the configured background_max_fps, not
         // a hardcoded 60 Hz: shaders like Star Nest and Smoke Rings are
         // low-frequency motion where 20-24 fps is indistinguishable from 60.
-        let background_interval = Duration::from_secs_f64(1.0 / f64::from(
-            canvas_core::appearance::current().motion.background_max_fps.max(1),
-        ));
+        let background_interval = Duration::from_secs_f64(
+            1.0 / f64::from(
+                canvas_core::appearance::current()
+                    .motion
+                    .background_max_fps
+                    .max(1),
+            ),
+        );
         // An open picker needs frames whatever the workspace background is doing.
         let cadence = if app.screensaver_settings.enabled
             || background_animated
@@ -8248,6 +8325,7 @@ mod tests {
         .unwrap();
         app.frame = INITIAL_FRAME;
         app.interaction = interaction_engine(INITIAL_FRAME);
+        app.hud_visible = true;
         app
     }
 
@@ -8258,7 +8336,7 @@ mod tests {
                 schema_version: CONTROL_VERSION,
                 request_id: request_id.into(),
                 expected_revision: None,
-            actor: None,
+                actor: None,
                 command,
             },
             reply,
@@ -8313,7 +8391,10 @@ mod tests {
         let half = angle / 2.0;
         let quat = [0.0, 0.0, half.sin(), half.cos()];
         let extracted = scene_node_rotation(quat);
-        assert!((extracted - angle).abs() < 0.001, "expected {angle}, got {extracted}");
+        assert!(
+            (extracted - angle).abs() < 0.001,
+            "expected {angle}, got {extracted}"
+        );
     }
 
     #[test]
@@ -8340,7 +8421,6 @@ mod tests {
 
     #[test]
     fn scene_parent_chain_resolves_node_hierarchy() {
-        
         // node_a (root) -> node_b -> node_c
         let nodes = vec![
             SceneNode {
@@ -8760,7 +8840,7 @@ mod tests {
                 schema_version: CONTROL_VERSION,
                 request_id: "stale-edit".into(),
                 expected_revision: Some(app.runtime_revision + 1),
-            actor: None,
+                actor: None,
                 command: Command::ApplyDocument {
                     document: document.clone(),
                 },

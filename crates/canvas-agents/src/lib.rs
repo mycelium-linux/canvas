@@ -22,7 +22,10 @@ const AGENTS: &[(&str, &str)] = &[
     ("judge-01", "verifying a finding against live.rs"),
     ("survey-01", "classifying bifrost metric metadata"),
     ("survey-02", "reading config/metrics.json"),
-    ("scribe-01", "drafting docs/servo-and-web-surfaces-decision.md"),
+    (
+        "scribe-01",
+        "drafting docs/servo-and-web-surfaces-decision.md",
+    ),
     ("spike-01", "building spikes/plotters-iced"),
     ("spike-02", "rasterising fixtures/css-probe.html"),
     ("archivist", "indexing wiki artifacts"),
@@ -71,7 +74,7 @@ impl Swarm {
             // Each agent reports on its own cadence, so some are always fresher
             // than others and one of them goes quiet for a long stretch.
             let cadence = 2 + index % 5;
-            if tick % cadence != 0 {
+            if !tick.is_multiple_of(cadence) {
                 continue;
             }
             if agent == &"scout-02" && (20..45).contains(&tick) {
