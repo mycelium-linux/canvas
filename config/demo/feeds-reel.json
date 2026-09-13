@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "id": "feeds-reel",
+  "project_id": "dock",
+  "revision": 1,
+  "theme": { "source": "project" },
+  "surfaces": [
+    {
+      "id": "hn",
+      "title": "Hacker News",
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "feed-hn",
+          "kind": "table",
+          "title": "Hacker News",
+          "columns": ["#", "story", "pts", "who", "age"],
+          "rows": [],
+          "data": {
+            "state": "loading",
+            "source": "feed:hn",
+            "detail": "start: canvas-feeds --feed hn",
+            "provenance": "live"
+          }
+        }
+      },
+      "inputs": [{ "id": "widget", "contract": "canvas.widget.snapshot.v1" }]
+    },
+    {
+      "id": "reddit",
+      "title": "r/programming",
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "feed-reddit",
+          "kind": "table",
+          "title": "r/programming",
+          "columns": ["#", "story", "pts", "who", "age"],
+          "rows": [],
+          "data": {
+            "state": "loading",
+            "source": "feed:reddit",
+            "detail": "start: canvas-feeds --feed reddit --sub programming",
+            "provenance": "live"
+          }
+        }
+      },
+      "inputs": [{ "id": "widget", "contract": "canvas.widget.snapshot.v1" }]
+    },
+    {
+      "id": "rss",
+      "title": "RSS",
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "feed-rss",
+          "kind": "table",
+          "title": "RSS",
+          "columns": ["#", "story", "pts", "who", "age"],
+          "rows": [],
+          "data": {
+            "state": "loading",
+            "source": "feed:rss",
+            "detail": "start: canvas-feeds --feed rss --url https://xkcd.com/rss.xml --title XKCD",
+            "provenance": "live"
+          }
+        }
+      },
+      "inputs": [{ "id": "widget", "contract": "canvas.widget.snapshot.v1" }]
+    }
+  ],
+  "layout": {
+    "kind": "canvas",
+    "placements": [
+      { "surface_id": "hn",     "bounds": { "x": 0.0, "y": 0.0,  "width": 1.0, "height": 0.34 }, "layer": 0 },
+      { "surface_id": "reddit", "bounds": { "x": 0.0, "y": 0.34, "width": 1.0, "height": 0.33 }, "layer": 0 },
+      { "surface_id": "rss",    "bounds": { "x": 0.0, "y": 0.67, "width": 1.0, "height": 0.33 }, "layer": 0 }
+    ]
+  },
+  "bindings": [
+    {
+      "id": "hn-bind",
+      "source": { "owner": "feeds", "stream": "hn-headlines", "contract": "canvas.widget.snapshot.v1" },
+      "target": { "surface_id": "hn", "input_id": "widget" },
+      "adapter": "feed-headlines-v1",
+      "delivery": { "mode": "latest" }
+    },
+    {
+      "id": "reddit-bind",
+      "source": { "owner": "feeds", "stream": "reddit-programming", "contract": "canvas.widget.snapshot.v1" },
+      "target": { "surface_id": "reddit", "input_id": "widget" },
+      "adapter": "feed-headlines-v1",
+      "delivery": { "mode": "latest" }
+    },
+    {
+      "id": "rss-bind",
+      "source": { "owner": "feeds", "stream": "rss-headlines", "contract": "canvas.widget.snapshot.v1" },
+      "target": { "surface_id": "rss", "input_id": "widget" },
+      "adapter": "feed-headlines-v1",
+      "delivery": { "mode": "latest" }
+    }
+  ]
+}

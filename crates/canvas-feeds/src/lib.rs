@@ -15,7 +15,7 @@
 //! fabricating a partial list that reads as complete.
 
 use canvas_core::stream_socket_path;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     os::unix::net::UnixDatagram,
     time::{SystemTime, UNIX_EPOCH},
@@ -111,7 +111,7 @@ impl std::fmt::Display for Error {
             Error::Empty { source } => write!(f, "{source} returned no items"),
             Error::Row { source, detail } => write!(f, "{source} row: {detail}"),
             Error::NoSocket => write!(f, "no Canvas stream socket home is configured"),
-            Error::Send { detail } => write!(f, "send failed: {detail}")
+            Error::Send { detail } => write!(f, "send failed: {detail}"),
         }
     }
 }
@@ -140,34 +140,36 @@ impl Default for ReqwestHttp {
 }
 impl Http for ReqwestHttp {
     fn get_json(&self, url: &str) -> Result<Value, Error> {
-        let resp = self
-            .client
-            .get(url)
-            .send()
-            .map_err(|e| Error::Fetch { source: url.into(), detail: e.to_string() })?;
+        let resp = self.client.get(url).send().map_err(|e| Error::Fetch {
+            source: url.into(),
+            detail: e.to_string(),
+        })?;
         if !resp.status().is_success() {
             return Err(Error::Fetch {
                 source: url.into(),
                 detail: format!("HTTP {}", resp.status()),
             });
         }
-        resp.json::<Value>()
-            .map_err(|e| Error::Fetch { source: url.into(), detail: e.to_string() })
+        resp.json::<Value>().map_err(|e| Error::Fetch {
+            source: url.into(),
+            detail: e.to_string(),
+        })
     }
     fn get_text(&self, url: &str) -> Result<String, Error> {
-        let resp = self
-            .client
-            .get(url)
-            .send()
-            .map_err(|e| Error::Fetch { source: url.into(), detail: e.to_string() })?;
+        let resp = self.client.get(url).send().map_err(|e| Error::Fetch {
+            source: url.into(),
+            detail: e.to_string(),
+        })?;
         if !resp.status().is_success() {
             return Err(Error::Fetch {
                 source: url.into(),
                 detail: format!("HTTP {}", resp.status()),
             });
         }
-        resp.text()
-            .map_err(|e| Error::Fetch { source: url.into(), detail: e.to_string() })
+        resp.text().map_err(|e| Error::Fetch {
+            source: url.into(),
+            detail: e.to_string(),
+        })
     }
 }
 
@@ -194,13 +196,17 @@ fn fetch_hacker_news(http: &dyn Http) -> Result<Feed, Error> {
     let ids: Vec<u64> = http
         .get_json(&format!("{HN_BASE}/topstories.json?print=compact"))?
         .as_array()
-        .ok_or(Error::Empty { source: "hn".into() })?
+        .ok_or(Error::Empty {
+            source: "hn".into(),
+        })?
         .iter()
         .take(MAX_ROWS)
         .map(|v| v.as_u64().unwrap_or(0))
         .collect();
     if ids.is_empty() {
-        return Err(Error::Empty { source: "hn".into() });
+        return Err(Error::Empty {
+            source: "hn".into(),
+        });
     }
     let mut rows = Vec::with_capacity(ids.len());
     for id in ids {
@@ -210,13 +216,18 @@ fn fetch_hacker_news(http: &dyn Http) -> Result<Feed, Error> {
         }
     }
     rows.truncate(MAX_ROWS);
-    Ok(Feed { title: "Hacker News".into(), source: "hn", rows })
+    Ok(Feed {
+        title: "Hacker News".into(),
+        source: "hn",
+        rows,
+    })
 }
 
 fn normalize_hn_item(item: &Value, source: &'static str) -> Option<Headline> {
-    let Some(title) = item.get("title").and_then(|t| t.as_str()).filter(|s| !s.is_empty()) else {
+    let title = item.get("title")?.as_str()?;
+    if title.is_empty() {
         return None;
-    };
+    }
     let id = item.get("id").and_then(|v| v.as_u64());
     let url = item
         .get("url")
@@ -241,11 +252,15 @@ fn fetch_reddit(http: &dyn Http, sub: &str) -> Result<Feed, Error> {
     let url = format!("https://old.reddit.com/r/{sub}/hot.json?limit=10");
     let body = http.get_json(&url)?;
     let Some(children) = body.pointer("/data/children").and_then(|v| v.as_array()) else {
-        return Err(Error::Empty { source: "reddit".into() });
+        return Err(Error::Empty {
+            source: "reddit".into(),
+        });
     };
     let mut rows = Vec::with_capacity(children.len().min(MAX_ROWS));
     for child in children.iter().take(MAX_ROWS) {
-        if let Some(h) = normalize_reddit_post(&child.pointer("/data").unwrap_or(&Value::Null), "reddit") {
+        if let Some(h) =
+            normalize_reddit_post(child.pointer("/data").unwrap_or(&Value::Null), "reddit")
+        {
             rows.push(h);
         }
     }
@@ -276,7 +291,9 @@ fn normalize_reddit_post(post: &Value, source: &'static str) -> Option<Headline>
         title: trim_title(title),
         url,
         score: post.get("score").and_then(|v| v.as_u64()),
-        by: post.get("author").and_then(|v| v.as_str().map(str::to_owned)),
+        by: post
+            .get("author")
+            .and_then(|v| v.as_str().map(str::to_owned)),
         age_secs,
         source,
     })
@@ -286,7 +303,9 @@ fn fetch_rss(http: &dyn Http, url: &str, title: &str) -> Result<Feed, Error> {
     let body = http.get_text(url)?;
     let items = parse_rss_items(&body);
     if items.is_empty() {
-        return Err(Error::Empty { source: "rss".into() });
+        return Err(Error::Empty {
+            source: "rss".into(),
+        });
     }
     let rows = items
         .into_iter()
@@ -315,7 +334,7 @@ fn parse_rss_items(xml: &str) -> Vec<(String, Option<String>)> {
     for item in xml.split(ITEM).skip(1) {
         if let Some(rest) = item.split_once("</item>") {
             let block = rest.0;
-            let title = field(block, "title").unwrap_or_else(|| untitled());
+            let title = field(block, "title").unwrap_or_else(untitled);
             let link = field(block, "link");
             out.push((title, link));
         }
@@ -368,7 +387,13 @@ pub fn envelope(owner: &str, stream: &str, feed: &Feed, sequence: u64, emitted_m
 
 /// A no-data/error envelope: the source is unhealthy, so the widget is marked
 /// rather than fabricated. Honest staleness, per widget-quality rule 2.
-pub fn error_envelope(owner: &str, stream: &str, detail: &str, sequence: u64, emitted_ms: u64) -> Value {
+pub fn error_envelope(
+    owner: &str,
+    stream: &str,
+    detail: &str,
+    sequence: u64,
+    emitted_ms: u64,
+) -> Value {
     json!({
         "schema_version": SCHEMA_VERSION,
         "owner": owner,
@@ -390,7 +415,10 @@ pub fn error_envelope(owner: &str, stream: &str, detail: &str, sequence: u64, em
 pub fn fit(mut event: Value, budget: usize) -> (Value, bool) {
     let mut thinned = false;
     loop {
-        let over = serde_json::to_vec(&event).map(|b| b.len()).unwrap_or(usize::MAX) > budget;
+        let over = serde_json::to_vec(&event)
+            .map(|b| b.len())
+            .unwrap_or(usize::MAX)
+            > budget;
         let count = event
             .pointer("/payload/rows")
             .and_then(|v| v.as_array())
@@ -398,7 +426,10 @@ pub fn fit(mut event: Value, budget: usize) -> (Value, bool) {
         if !over || count <= 1 {
             break;
         }
-        if let Some(rows) = event.pointer_mut("/payload/rows").and_then(|v| v.as_array_mut()) {
+        if let Some(rows) = event
+            .pointer_mut("/payload/rows")
+            .and_then(|v| v.as_array_mut())
+        {
             rows.pop();
         }
         thinned = true;
@@ -411,9 +442,7 @@ pub fn fit(mut event: Value, budget: usize) -> (Value, bool) {
 /// empty so the widget shows a gap instead of garbled markup.
 fn field(block: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}>");
-    let Some(begin) = block.find(&open).map(|i| i + open.len()) else {
-        return None;
-    };
+    let begin = block.find(&open).map(|i| i + open.len())?;
     let end = block[begin..].find(&format!("</{tag}>"))? + begin;
     Some(unescape(&block[begin..end]))
 }
@@ -435,13 +464,17 @@ pub fn emit(
 /// Send an already-built envelope (e.g. an error/no-data snapshot).
 pub fn send_raw(event: &Value) -> Result<(), Error> {
     let path = stream_socket_path().ok_or(Error::NoSocket)?;
-    let bytes = serde_json::to_vec(event).map_err(|e| Error::Send { detail: e.to_string() })?;
+    let bytes = serde_json::to_vec(event).map_err(|e| Error::Send {
+        detail: e.to_string(),
+    })?;
     let Ok(sock) = UnixDatagram::unbound() else {
         return Err(Error::Send {
             detail: "cannot create datagram socket".into(),
         });
     };
-    sock.send_to(&bytes, &path).map_err(|e| Error::Send { detail: e.to_string() })?;
+    sock.send_to(&bytes, &path).map_err(|e| Error::Send {
+        detail: e.to_string(),
+    })?;
     Ok(())
 }
 
@@ -455,10 +488,16 @@ mod tests {
     }
     impl Http for FakeHttp {
         fn get_json(&self, url: &str) -> Result<Value, Error> {
-            self.json.get(url).cloned().ok_or(Error::Empty { source: url.into() })
+            self.json
+                .get(url)
+                .cloned()
+                .ok_or(Error::Empty { source: url.into() })
         }
         fn get_text(&self, url: &str) -> Result<String, Error> {
-            self.text.get(url).cloned().ok_or(Error::Empty { source: url.into() })
+            self.text
+                .get(url)
+                .cloned()
+                .ok_or(Error::Empty { source: url.into() })
         }
     }
 
@@ -473,8 +512,14 @@ mod tests {
         assert_eq!(h.title, "Show HN: a thing");
         assert_eq!(h.score, Some(42));
         assert_eq!(h.by.as_deref(), Some("alice"));
-        assert_eq!(h.url.as_deref(), Some("https://news.ycombinator.com/item?id=1"));
-        assert!(h.age_secs.is_some(), "age should be derivable from posted time");
+        assert_eq!(
+            h.url.as_deref(),
+            Some("https://news.ycombinator.com/item?id=1")
+        );
+        assert!(
+            h.age_secs.is_some(),
+            "age should be derivable from posted time"
+        );
     }
 
     #[test]
@@ -496,7 +541,10 @@ mod tests {
             "https://hacker-news.firebaseio.com/v0/item/102.json".into(),
             hn_item(102, "Hundred Two", 30, "c", 0),
         );
-        let http = FakeHttp { json, text: std::collections::BTreeMap::new() };
+        let http = FakeHttp {
+            json,
+            text: std::collections::BTreeMap::new(),
+        };
         let feed = fetch(&FeedKind::HackerNews, &http).unwrap();
         assert_eq!(feed.source, "hn");
         assert_eq!(feed.rows.len(), 3);
@@ -509,8 +557,18 @@ mod tests {
                    <item><title>t2</title><link>https://e.com/2</link></item></channel></rss>";
         let mut text = std::collections::BTreeMap::new();
         text.insert("https://example.com/rss".into(), xml.to_string());
-        let http = FakeHttp { json: std::collections::BTreeMap::new(), text };
-        let feed = fetch(&FeedKind::Rss { url: "https://example.com/rss".into(), title: "X".into() }, &http).unwrap();
+        let http = FakeHttp {
+            json: std::collections::BTreeMap::new(),
+            text,
+        };
+        let feed = fetch(
+            &FeedKind::Rss {
+                url: "https://example.com/rss".into(),
+                title: "X".into(),
+            },
+            &http,
+        )
+        .unwrap();
         assert_eq!(feed.rows.len(), 2);
         assert_eq!(feed.rows[0].title, "t1");
         assert_eq!(feed.rows[1].url.as_deref(), Some("https://e.com/2"));
@@ -568,15 +626,29 @@ mod tests {
         assert!(bytes <= budget, "fit left {bytes} bytes > {budget}");
         assert!(thinned, "dropped rows must be reported as partial");
         assert!(
-            trimmed.pointer("payload/rows").and_then(|v| v.as_array()).map_or(0, Vec::len) < 30,
+            trimmed
+                .pointer("payload/rows")
+                .and_then(|v| v.as_array())
+                .map_or(0, Vec::len)
+                < 30,
             "some rows must survive"
         );
     }
 
     #[test]
     fn envelope_matches_the_snapshot_contract_shape() {
-        let feed = Feed { title: "HN".into(), source: "hn", rows: vec![Headline {
-            title: "t".into(), url: None, score: Some(1), by: None, age_secs: None, source: "hn" }] };
+        let feed = Feed {
+            title: "HN".into(),
+            source: "hn",
+            rows: vec![Headline {
+                title: "t".into(),
+                url: None,
+                score: Some(1),
+                by: None,
+                age_secs: None,
+                source: "hn",
+            }],
+        };
         let ev = envelope("feeds", "hn-headlines", &feed, 3, 123);
         assert_eq!(ev["schema_version"], 1);
         assert_eq!(ev["owner"], "feeds");

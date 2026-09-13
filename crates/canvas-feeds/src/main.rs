@@ -82,11 +82,21 @@ fn main() -> ExitCode {
                         feed_items.rows.len(),
                         since.elapsed().as_millis()
                     ),
-                    Err(err) => eprintln!("canvas-feeds: {} ({} rows fetched, not displayed)", err, feed_items.rows.len()),
+                    Err(err) => eprintln!(
+                        "canvas-feeds: {} ({} rows fetched, not displayed)",
+                        err,
+                        feed_items.rows.len()
+                    ),
                 }
             }
             Err(err) => {
-                let envelope = canvas_feeds::error_envelope(&owner, &stream, &err.to_string(), sequence, emitted);
+                let envelope = canvas_feeds::error_envelope(
+                    &owner,
+                    &stream,
+                    &err.to_string(),
+                    sequence,
+                    emitted,
+                );
                 if let Err(send_err) = canvas_feeds::send_raw(&envelope) {
                     eprintln!("canvas-feeds: {send_err}");
                 } else {

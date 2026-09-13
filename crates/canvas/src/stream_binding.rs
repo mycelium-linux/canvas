@@ -82,10 +82,10 @@ impl ArtifactManifest {
             return Self::parse(&bytes, id);
         }
         // 2. Global user state directory
-        if let Some(global_path) = global_artifact_path(id) {
-            if let Ok(bytes) = std::fs::read(&global_path) {
-                return Self::parse(&bytes, id);
-            }
+        if let Some(global_path) = global_artifact_path(id)
+            && let Ok(bytes) = std::fs::read(&global_path)
+        {
+            return Self::parse(&bytes, id);
         }
         // 3. Built-in: compiled into the binary
         let built_in = match id {
@@ -94,27 +94,27 @@ impl ArtifactManifest {
             "fpl-gpu-power" => include_str!("../../../config/artifacts/fpl-gpu-power.json"),
             "music-nowplaying" => include_str!("../../../config/artifacts/music-nowplaying.json"),
             "agent-activity" => include_str!("../../../config/artifacts/agent-activity.json"),
-            _ => return Err(Error(format!("unknown artifact: {id}")).into()),
+            _ => return Err(Error(format!("unknown artifact: {id}"))),
         };
         Self::parse(built_in.as_bytes(), id)
     }
 
     fn parse(bytes: &[u8], id: &str) -> Result<Self> {
         let manifest: Self = serde_json::from_slice(bytes)
-            .map_err(|e| Error(format!("invalid artifact manifest {id}: {e}").into()))?;
+            .map_err(|e| Error(format!("invalid artifact manifest {id}: {e}")))?;
         if manifest.id != id {
             return Err(Error(format!(
                 "artifact manifest id mismatch: expected {id}, got {}",
                 manifest.id
-            ))
-            .into());
+            )));
         }
         if manifest.schema_version != Self::MANIFEST_SCHEMA_VERSION {
             return Err(Error(format!(
                 "artifact manifest {} has unsupported schema_version {} (expected {})",
-                id, manifest.schema_version, Self::MANIFEST_SCHEMA_VERSION
-            ))
-            .into());
+                id,
+                manifest.schema_version,
+                Self::MANIFEST_SCHEMA_VERSION
+            )));
         }
         // Validate the binder name matches the existing apply_named_adapter rules.
         if manifest.binder.is_empty()
@@ -127,16 +127,14 @@ impl ArtifactManifest {
             return Err(Error(format!(
                 "artifact manifest {id} has invalid binder name: {}",
                 manifest.binder
-            ))
-            .into());
+            )));
         }
         // Validate the widget kind is a known Canvas widget kind.
         if !canvas_widgets::is_known_widget_kind(&manifest.widget_kind) {
             return Err(Error(format!(
                 "artifact manifest {} declares unknown widget kind: {}",
                 id, manifest.widget_kind
-            ))
-            .into());
+            )));
         }
         Ok(manifest)
     }
@@ -151,7 +149,11 @@ fn global_artifact_path(id: &str) -> Option<PathBuf> {
                 .map(PathBuf::from)
                 .map(|home| home.join(".local/state"))
         })?;
-    Some(state_root.join("dock/canvas/artifacts").join(format!("{id}.json")))
+    Some(
+        state_root
+            .join("dock/canvas/artifacts")
+            .join(format!("{id}.json")),
+    )
 }
 
 /// Re-exported from canvas-core so stream_binding callers can validate
@@ -321,8 +323,8 @@ impl Drop for StreamSocketGuard {
 }
 
 pub fn socket_path() -> Result<PathBuf> {
-    let control = crate::control::socket_path().map_err(Error)?;
-    Ok(control.with_file_name("stream.sock"))
+    canvas_core::stream_socket_path()
+        .ok_or_else(|| Error("Canvas stream socket home is not configured".into()))
 }
 
 pub fn start_server() -> Result<(StreamInbox, StreamSocketGuard)> {
@@ -898,7 +900,10 @@ mod tests {
         let bytes = serde_json::to_vec(&json).unwrap();
         // Built-in parse is tested via load(); this validates the schema.
         let manifest: ArtifactManifest = serde_json::from_slice(&bytes).expect("parses");
-        assert_eq!(manifest.schema_version, ArtifactManifest::MANIFEST_SCHEMA_VERSION);
+        assert_eq!(
+            manifest.schema_version,
+            ArtifactManifest::MANIFEST_SCHEMA_VERSION
+        );
         assert_eq!(manifest.id, "test");
     }
 }

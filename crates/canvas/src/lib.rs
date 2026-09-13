@@ -1323,19 +1323,39 @@ mod tests {
     fn catalog() -> Catalog {
         Catalog::parse(
             r#"{
-              "schema_version": 1,
-              "projects": [{
+            "schema_version": 1,
+            "projects": [{
                 "id": "dock",
                 "name": "Dock",
                 "theme": {"source": "coherence", "mode": "dark", "accent": "info"},
                 "resources": [
-                  {"id":"docs","title":"Docs","host":"mac","kind":"mac_app","target":"com.apple.Safari"},
-                  {"id":"shell","title":"Shell","host":"agora_one","kind":"terminal_session","target":"dock"}
+                {"id":"docs","title":"Docs","host":"mac","kind":"mac_app","target":"com.apple.Safari"},
+                {"id":"shell","title":"Shell","host":"agora_one","kind":"terminal_session","target":"dock"}
                 ]
-              }]
+            }]
             }"#,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn feeds_reel_workspace_is_a_valid_dock_document() {
+        // Self-validating guarantee (tenet 9): the demo view that wires the
+        // public-API headline feeds to the feed-headlines-v1 Lua binder parses
+        // and passes the same validation a real workspace document does, so a
+        // user dropping it on a dock project sees surfaces instead of a blank.
+        let json = include_str!("../../../config/demo/feeds-reel.json");
+        let doc: WorkspaceDocument = serde_json::from_str(json)
+            .expect("feeds-reel.json must deserialize as a WorkspaceDocument");
+        doc.validate(&catalog())
+            .expect("feeds-reel.json must pass validation");
+        assert_eq!(doc.project_id, "dock");
+        assert_eq!(doc.bindings.len(), 3, "one binding per headline feed");
+        assert!(
+            doc.bindings
+                .iter()
+                .all(|b| b.adapter.as_deref() == Some("feed-headlines-v1"))
+        );
     }
 
     fn document() -> WorkspaceDocument {

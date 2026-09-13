@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt, fs,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 pub use coherence_tokens;
@@ -49,6 +49,27 @@ pub const DECLARED_CONTRACTS: &[&str] = &[
 /// StreamEnvelope validation (ingress) and DataBinding validation (apply time).
 pub fn is_declared_contract(contract: &str) -> bool {
     DECLARED_CONTRACTS.contains(&contract)
+}
+
+/// Filesystem location of the Canvas `stream.sock` UNIX datagram socket.
+///
+/// The single source of truth for where producers (feeders, SSE connectors)
+/// should send `canvas.widget.snapshot.v1` envelopes: macOS uses the app-support
+/// directory; other Unixes use `XDG_RUNTIME_DIR` exactly as Canvas binds it.
+/// Returns `None` when the owning environment variable is unset, so a caller can
+/// fail loud rather than silently sending to the wrong file.
+#[cfg(unix)]
+pub fn stream_socket_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    #[cfg(target_os = "macos")]
+    {
+        Some(home.join("Library/Application Support/Dock/canvas/stream.sock"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")?;
+        Some(PathBuf::from(runtime).join("dock/canvas/stream.sock"))
+    }
 }
 
 #[derive(Debug)]
