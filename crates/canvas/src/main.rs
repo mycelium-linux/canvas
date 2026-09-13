@@ -10038,7 +10038,7 @@ mod tests {
     fn widget_surface_survives_workspace_store_and_runtime_rehydration() {
         let mut app = test_app();
         let spec = canvas_widgets::WidgetSpec::from_json(
-            br#"{"schema_version":1,"id":"demo-meter","kind":"meter","value":0.68,"style":"vu"}"#,
+            br#"{"schema_version":2,"id":"demo-meter","kind":"meter","value":0.68,"style":"vu"}"#,
         )
         .unwrap();
         app.document.surfaces.push(Surface {

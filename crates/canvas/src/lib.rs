@@ -422,7 +422,7 @@ impl<'de> Deserialize<'de> for SurfaceContent {
         // The version boundary exists at two depths: `widget` is a kind this
         // build owns, but the widget *inside* it may not be. Without this a
         // newer widget kind is indistinguishable from a malformed known one and
-        // takes the whole document down — which is how `slo_burn_rate` stopped
+        // takes the whole document down — which is how `rate_bars` stopped
         // Canvas from starting.
         if tag == "widget"
             && raw
@@ -1233,7 +1233,7 @@ mod forward_compatibility_tests {
 
     #[test]
     fn an_unknown_widget_kind_degrades_at_the_surface_rather_than_panicking() {
-        // A kind like `slo_burn_rate` was — before this build gained it — enough
+        // A kind like `rate_bars` was — before this build gained it — enough
         // to stop Canvas booting at all. One tile is the blast radius now.
         let raw = json!({"kind": "widget", "spec": {
             "schema_version": 1, "id": "future", "kind": "flux_capacitor", "jigawatts": 1.21

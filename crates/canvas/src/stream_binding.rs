@@ -425,13 +425,13 @@ pub fn apply_briefing_binder(
 mod tests {
     use super::*;
     use canvas_widgets::{
-        WidgetChrome, WidgetKind,
+        WIDGET_SCHEMA_VERSION, WidgetChrome, WidgetKind,
         quant::{Candle, QuantWidget},
     };
 
     fn spec() -> WidgetSpec {
         WidgetSpec {
-            schema_version: 1,
+            schema_version: WIDGET_SCHEMA_VERSION,
             id: "live-es".into(),
             kind: WidgetKind::Quant {
                 widget: QuantWidget::Candlestick {
@@ -604,7 +604,7 @@ mod tests {
     #[test]
     fn generic_snapshot_adapter_updates_data_but_preserves_surface_spec() {
         let mut target = WidgetSpec {
-            schema_version: 1,
+            schema_version: WIDGET_SCHEMA_VERSION,
             id: "health".into(),
             kind: WidgetKind::Stat {
                 label: "Backend health".into(),
