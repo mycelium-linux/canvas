@@ -2054,12 +2054,25 @@ pub struct EpochParts {
 pub fn chrono_now() -> EpochParts {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
+    chrono_now_at(now)
+}
+
+/// Broken-down *local* time for a given epoch second. The widget is the
+/// documented exception that reads the host clock (a wall clock is presentation
+/// metadata, not a measurement); to agree with Canvas's diagnostics HUD it must
+/// read the same offset the HUD uses rather than the UTC-from-epoch math it did
+/// before, which left the two clocks disagreeing by the host's UTC offset.
+pub fn chrono_now_at(epoch: i64) -> EpochParts {
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::localtime_r(&epoch, &mut tm);
+    }
     EpochParts {
-        hour: (now % 86_400) / 3_600,
-        minute: (now % 3_600) / 60,
-        second: now % 60,
+        hour: tm.tm_hour as u64,
+        minute: tm.tm_min as u64,
+        second: tm.tm_sec as u64,
     }
 }
 
@@ -2204,6 +2217,26 @@ mod tests {
         assert_eq!(strftime(&now, "%H:%M:%S"), "14:03:07");
         assert_eq!(strftime(&now, "100%%"), "100%");
         assert_eq!(strftime(&now, "%Q"), "%Q");
+    }
+
+    #[test]
+    fn clock_reports_local_time_not_utc() {
+        // Acceptance for dock-96j.47: the widget and the diagnostics HUD must
+        // agree. The only tz-INDEPENDENT way to assert that is to require the
+        // widget's broken-down time to equal localtime_r's for the same instant
+        // — which holds in every timezone because both use the host offset. The
+        // old UTC-from-epoch math fails this for any non-UTC host.
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        let resolved = unsafe { libc::localtime_r(&epoch, &mut tm) };
+        assert!(!resolved.is_null());
+        let parts = chrono_now_at(epoch);
+        assert_eq!(parts.hour, tm.tm_hour as u64);
+        assert_eq!(parts.minute, tm.tm_min as u64);
+        assert_eq!(parts.second, tm.tm_sec as u64);
     }
 
     #[test]
