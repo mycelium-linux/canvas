@@ -51,6 +51,61 @@ pub fn is_declared_contract(contract: &str) -> bool {
     DECLARED_CONTRACTS.contains(&contract)
 }
 
+/// Filesystem root for Canvas runtime configuration: binders, views, and
+/// frame files (see [`frame_file`]).
+///
+/// The single source of truth: Canvas's `runtime_config::read` reads from
+/// here, and frame producers write to it — they must agree exactly or the
+/// wall goes silent. `CANVAS_CONFIG_DIR` overrides it for tests and daemons
+/// that keep an isolated runtime tree.
+pub fn runtime_root() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("CANVAS_CONFIG_DIR") {
+        return Some(PathBuf::from(path));
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    #[cfg(target_os = "macos")]
+    return Some(home.join("Library/Application Support/Dock/canvas"));
+    #[cfg(not(target_os = "macos"))]
+    Some(
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"))
+            .join("dock/canvas"),
+    )
+}
+
+/// Whether a frame source id is safe to name a file: lowercase identifier
+/// characters only, so an id coming from a workspace document or a command
+/// line can never carry a path, a traversal, or an extension trick.
+pub fn is_safe_frame_id(source_id: &str) -> bool {
+    !source_id.is_empty()
+        && source_id.len() <= 64
+        && source_id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+/// Where a frame producer writes the current image for a `live_image`
+/// surface: `<root>/frames/<source_id>.jpg`. Producers and the Canvas host
+/// resolve through this one function so the two can never disagree.
+pub fn frame_file(root: &Path, source_id: &str) -> Option<PathBuf> {
+    is_safe_frame_id(source_id)
+        .then(|| root.join("frames").join(format!("{source_id}.jpg")))
+}
+
+/// Land bytes at `path` by sibling-write + rename: a reader either sees the
+/// previous complete file or the new one, never a truncated hybrid. A live
+/// frame read mid-write would decode as garbage and the host would reject
+/// it — this makes that race structurally impossible.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temp = path.with_extension("jpg.tmp");
+    std::fs::write(&temp, bytes)?;
+    std::fs::rename(&temp, path)
+}
+
 /// Filesystem location of the Canvas `stream.sock` UNIX datagram socket.
 ///
 /// The single source of truth for where producers (feeders, SSE connectors)
@@ -88,6 +143,17 @@ fn check(ok: bool, message: impl Into<String>) -> Result<()> {
         Err(Error(message.into()))
     }
 }
+/// Grammar for project ids. Deliberately case-tolerant: Alfalfa owns these
+/// identities and its roster carries human capitalization (`JARVIS`,
+/// `LibreChat`); refusing it would force a lowercase shadow of the truth.
+/// Ids are identity tokens here, not filenames — document ids remain
+/// lowercase `identifier` grammar, and resource ids never widen.
+fn project_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
 fn identifier(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
@@ -568,7 +634,7 @@ impl Catalog {
         let mut ids = BTreeSet::new();
         for p in &self.projects {
             check(
-                identifier(&p.id) && ids.insert(&p.id),
+                project_id(&p.id) && ids.insert(&p.id),
                 format!("Invalid or duplicate project id: {}", p.id),
             )?;
             check(
