@@ -410,15 +410,47 @@ pub fn apply_named_adapter_batch(
             .map_err(|error| Error(format!("Canvas adapter is not UTF-8: {error}")))?;
         return apply_lua_adapter_batch(source, events, target);
     }
-    let source = match adapter {
-        "lockout-v1" => include_str!("../../../config/binders/lockout-v1.lua"),
-        "market-ohlcv-v1" => include_str!("../../../config/binders/market-ohlcv-v1.lua"),
-        "agent-attention-v1" => include_str!("../../../config/binders/agent-attention-v1.lua"),
-        "widget-snapshot-v1" => include_str!("../../../config/binders/widget-snapshot-v1.lua"),
-        "music-nowplaying-v1" => include_str!("../../../config/binders/music-nowplaying-v1.lua"),
-        _ => return Err(Error(format!("unknown stream adapter: {adapter}"))),
-    };
+    let source = built_in_adapter_source(adapter)
+        .ok_or_else(|| Error(format!("unknown stream adapter: {adapter}")))?;
     apply_lua_adapter_batch(source, events, target)
+}
+
+/// Compiled-in binder sources. `binders_are_all_registered` asserts this
+/// table matches `config/binders/`, so a new binder file can never be
+/// added without registering it here too.
+const BUILT_IN_BINDERS: &[(&str, &str)] = &[
+    ("lockout-v1", include_str!("../../../config/binders/lockout-v1.lua")),
+    (
+        "market-ohlcv-v1",
+        include_str!("../../../config/binders/market-ohlcv-v1.lua"),
+    ),
+    (
+        "agent-attention-v1",
+        include_str!("../../../config/binders/agent-attention-v1.lua"),
+    ),
+    (
+        "agent-context-v1",
+        include_str!("../../../config/binders/agent-context-v1.lua"),
+    ),
+    (
+        "feed-headlines-v1",
+        include_str!("../../../config/binders/feed-headlines-v1.lua"),
+    ),
+    (
+        "widget-snapshot-v1",
+        include_str!("../../../config/binders/widget-snapshot-v1.lua"),
+    ),
+    (
+        "music-nowplaying-v1",
+        include_str!("../../../config/binders/music-nowplaying-v1.lua"),
+    ),
+];
+
+fn built_in_adapter_source(adapter: &str) -> Option<&'static str> {
+    BUILT_IN_BINDERS
+        .iter()
+        .find(|(name, _)| *name == adapter)
+        .map(|(_, source)| *source)
 }
 
 pub fn apply_lua_adapter(
@@ -607,6 +639,24 @@ mod tests {
             chrome: WidgetChrome::DragOnly,
             data: canvas_widgets::WidgetData::default(),
         }
+    }
+
+    #[test]
+    fn binders_are_all_registered() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../config/binders");
+        let mut files = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.ends_with(".lua"))
+            .collect::<Vec<_>>();
+        files.sort();
+        let mut registered: Vec<String> = BUILT_IN_BINDERS
+            .iter()
+            .map(|(name, _)| format!("{name}.lua"))
+            .collect();
+        registered.sort();
+        assert_eq!(files, registered, "config/binders and BUILT_IN_BINDERS drifted");
     }
 
     fn event(time: i64, close: f64) -> StreamEnvelope {
@@ -814,6 +864,164 @@ mod tests {
     }
 
     #[test]
+    fn feed_headlines_survives_an_emoji_splitting_the_clip_boundary() {
+        // The live failure: a headline long enough that the binder's 55-byte
+        // clip landed inside a 4-byte emoji, so Lua returned an invalid-UTF-8
+        // string, mlua surfaced it as a byte buffer, and serde rejected the
+        // whole batch ("expected a string") — the reel sat empty on the wall.
+        let mut target = WidgetSpec {
+            schema_version: WIDGET_SCHEMA_VERSION,
+            id: "feed-hn".into(),
+            kind: WidgetKind::Table {
+                title: "Hacker News".into(),
+                columns: ["#", "story", "pts", "who", "age"]
+                    .iter()
+                    .map(|c| (*c).to_string())
+                    .collect(),
+                rows: Vec::new(),
+            },
+            theme: None,
+            refresh_ms: None,
+            chrome: WidgetChrome::DragOnly,
+            data: canvas_widgets::WidgetData::default(),
+        };
+        let mut title = "a".repeat(50);
+        title.push_str("😀😀 reaches the cut");
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "feeds".into(),
+            stream: "hn-headlines".into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            project_id: None,
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "source": "hn",
+                "title": "Hacker News",
+                "rows": [{
+                    "title": title,
+                    "url": "https://news.ycombinator.com/item?id=1",
+                    "score": 42,
+                    "by": "alice",
+                    "age_secs": 120,
+                }],
+            }),
+        };
+        apply_named_adapter("feed-headlines-v1", &event, &mut target)
+            .expect("emoji titles must not poison the batch");
+        let WidgetKind::Table { rows, .. } = &target.kind else {
+            panic!("table")
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][2], "42");
+        assert_eq!(rows[0][3], "alice");
+        assert!(rows[0][1].ends_with('…'), "clipped with ellipsis");
+    }
+
+    #[test]
+    fn feed_headlines_keeps_a_multibyte_dash_ending_exactly_at_the_clip_edge() {
+        // The live HN shape that poisoned a whole batch: a 51-char ASCII
+        // title, an em dash (3 bytes) at 53..55, and clip's limit of 55 —
+        // walking back to the sequence start and cutting there left a lone
+        // 0xE2. The dash must survive whole.
+        let mut target = WidgetSpec {
+            schema_version: WIDGET_SCHEMA_VERSION,
+            id: "feed-hn".into(),
+            kind: WidgetKind::Table {
+                title: "Hacker News".into(),
+                columns: ["#", "story", "pts", "who", "age"]
+                    .iter()
+                    .map(|c| (*c).to_string())
+                    .collect(),
+                rows: Vec::new(),
+            },
+            theme: None,
+            refresh_ms: None,
+            chrome: WidgetChrome::DragOnly,
+            data: canvas_widgets::WidgetData::default(),
+        };
+        let title = "Why don't machine learning research agents overfit?";
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "feeds".into(),
+            stream: "hn-headlines".into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            project_id: None,
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "source": "hn",
+                "title": "Hacker News",
+                "rows": [{
+                    "title": title,
+                    "url": "https://www.amazon.science/blog/x",
+                    "score": 43,
+                    "by": "someone",
+                    "age_secs": 6413,
+                }],
+            }),
+        };
+        apply_named_adapter("feed-headlines-v1", &event, &mut target)
+            .expect("a dash ending at the clip edge must not split");
+        let WidgetKind::Table { rows, .. } = &target.kind else {
+            panic!("table")
+        };
+        assert!(
+            rows[0][1].ends_with("—…"),
+            "dash kept whole before the ellipsis: {:?}",
+            rows[0][1]
+        );
+    }
+
+    #[test]
+    fn feed_headlines_renders_a_sparse_rss_payload() {
+        // xkcd-style rows: title+url only, no score/author/age. Mirrors the
+        // live wire shape byte-for-byte (serde skips None fields).
+        let mut target = WidgetSpec {
+            schema_version: WIDGET_SCHEMA_VERSION,
+            id: "feed-rss".into(),
+            kind: WidgetKind::Table {
+                title: "XKCD".into(),
+                columns: ["#", "story", "pts", "who", "age"]
+                    .iter()
+                    .map(|c| (*c).to_string())
+                    .collect(),
+                rows: Vec::new(),
+            },
+            theme: None,
+            refresh_ms: None,
+            chrome: WidgetChrome::DragOnly,
+            data: canvas_widgets::WidgetData::default(),
+        };
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "feeds".into(),
+            stream: "rss-headlines".into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            project_id: None,
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "source": "rss",
+                "title": "XKCD",
+                "rows": [
+                    {"title": "OH Scale", "url": "https://xkcd.com/3297/", "source": "rss"},
+                    {"title": "Fault Taunting", "url": "https://xkcd.com/3296/", "source": "rss"},
+                ],
+            }),
+        };
+        apply_named_adapter("feed-headlines-v1", &event, &mut target)
+            .expect("sparse rss rows must render");
+        let WidgetKind::Table { title, rows, .. } = &target.kind else {
+            panic!("table")
+        };
+        assert_eq!(title, "XKCD");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][1], "OH Scale — xkcd.com");
+        assert_eq!(rows[0][2], "-");
+    }
+
+    #[test]
     fn project_id_scopes_event_routing() {
         // An event tagged with project_id "cortex" should NOT be delivered
         // to a workspace whose project_id is "alfalfa".
@@ -907,3 +1115,4 @@ mod tests {
         assert_eq!(manifest.id, "test");
     }
 }
+

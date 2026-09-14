@@ -8,6 +8,7 @@ use canvas::control::{
 use canvas::{
     Layout, NormalizedRect, Placement, SCHEMA_VERSION, SurfaceChrome, SurfaceTitleMode,
     WorkspaceDocument, WorkspacePatch,
+    compose::{self, LayoutMode},
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -268,7 +269,7 @@ fn handle_doc(tokens: &[String]) -> Result<(), String> {
 
 fn handle_tile(tokens: &[String]) -> Result<(), String> {
     if tokens.len() < 2 {
-        return Err("usage: tile grid <rows> <cols> | tile monocle | tile next".into());
+        return Err("usage: tile grid <rows> <cols> | tile golden | tile monocle | tile next".into());
     }
     let state = read_document_state()?;
     let doc_rev = state.doc_revision;
@@ -277,6 +278,13 @@ fn handle_tile(tokens: &[String]) -> Result<(), String> {
     let focused = state.focused;
     let workspace_id = state.workspace_id;
     let operation = match tokens[1].as_str() {
+        "golden" => canvas::PatchOperation::SetLayout {
+            // Same algorithm the daemon uses for a fresh stack: the golden
+            // mosaic, sized to a 16:9 wall.
+            layout: Layout::Canvas {
+                placements: compose::compose(LayoutMode::Golden, &surfaces, 16.0 / 9.0),
+            },
+        },
         "grid" => {
             let rows = if tokens.len() > 2 {
                 text::tokenize(&tokens[2])

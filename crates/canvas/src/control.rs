@@ -209,7 +209,7 @@ pub struct ProjectWorkspaceSpec {
 
 impl ProjectWorkspaceSpec {
     pub fn validate(&self) -> Result<(), String> {
-        if !identifier(&self.project_id) {
+        if !workspace_name(&self.project_id) {
             return Err("invalid project workspace id".into());
         }
         if !bounded_printable(&self.name, 256) {
@@ -995,7 +995,7 @@ impl ControlRequest {
             }
             Command::SetOverlays { .. } | Command::SetVisibility { .. } => {}
             Command::SetTheme { project_id } => {
-                if !identifier(project_id) {
+                if !workspace_name(project_id) {
                     return Err("invalid project id".into());
                 }
             }
@@ -1032,14 +1032,14 @@ impl ControlRequest {
                 }
             }
             Command::WorkspaceSave { name } | Command::WorkspaceSwitch { name } => {
-                if !identifier(name) {
+                if !workspace_name(name) {
                     return Err("invalid project workspace id".into());
                 }
             }
             Command::SetBackgroundShader {
                 project_id, speed, ..
             } => {
-                if !identifier(project_id) {
+                if !workspace_name(project_id) {
                     return Err("invalid project id".into());
                 }
                 if !speed.is_finite() || *speed < 0.0 || *speed > MAX_BACKGROUND_SHADER_SPEED {
@@ -1084,6 +1084,18 @@ pub fn validate_frame(frame: Rect) -> Result<(), String> {
         return Err("Canvas frame overflows desktop coordinates".into());
     }
     Ok(())
+}
+
+/// Grammar for workspace *names*: they key the store and arrive from Alfalfa,
+/// whose project ids are human-authored and often capitalized (`JARVIS`,
+/// `LibreChat`). Still closed to anything path-like or whitespace; only the
+/// leading lowercase rule differs from `identifier`.
+fn workspace_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
 fn identifier(value: &str) -> bool {
@@ -1311,7 +1323,7 @@ pub mod text {
                     3,
                     "bg-shader <project_id> <shader-name|index> [speed]",
                 )?;
-                if !identifier(&tokens[1]) {
+                if !workspace_name(&tokens[1]) {
                     return Err("invalid project id".into());
                 }
                 let speed = match tokens.get(3) {
@@ -1366,7 +1378,7 @@ pub mod text {
             }
             "bg" | "theme" => {
                 req(tokens, 2, "bg <project_id>")?;
-                if !identifier(&tokens[1]) {
+                if !workspace_name(&tokens[1]) {
                     return Err("invalid project id".into());
                 }
                 Ok(Command::SetTheme {
@@ -1478,7 +1490,7 @@ pub mod text {
             }
             "wallpaper" | "wp" => {
                 req(tokens, 6, "wp <project> <display_id> <r> <g> <b>")?;
-                if !identifier(&tokens[1]) {
+                if !workspace_name(&tokens[1]) {
                     return Err("invalid project id".into());
                 }
                 if tokens[2].is_empty() || tokens[2].len() > 128 {
@@ -2039,6 +2051,30 @@ mod tests {
     }
 
     #[test]
+    fn workspace_names_accept_alfalfa_capitalization_and_reject_paths() {
+        for good in ["JARVIS", "LibreChat", "dock", "a-B-9"] {
+            let req = ControlRequest {
+                schema_version: CONTROL_VERSION,
+                request_id: "w".into(),
+                expected_revision: None,
+                actor: None,
+                command: Command::WorkspaceSwitch { name: good.into() },
+            };
+            assert!(req.validate().is_ok(), "{good} must be a legal workspace name");
+        }
+        for bad in ["", "jar vis", "a/b", "..", "x.y"] {
+            let req = ControlRequest {
+                schema_version: CONTROL_VERSION,
+                request_id: "w".into(),
+                expected_revision: None,
+                actor: None,
+                command: Command::WorkspaceSwitch { name: bad.into() },
+            };
+            assert!(req.validate().is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
     fn indicator_text_and_ids_are_bounded_and_printable() {
         let valid = StatusIndicator {
             id: "assistant-status".into(),
@@ -2122,8 +2158,7 @@ mod tests {
             }
         );
 
-        let req = parse_line("move 0 25 1920 1150").unwrap();
-        match req.command {
+        let req = parse_line("move 0 25 1920 1150").unwrap();        match req.command {
             Command::SetFrame { frame } => {
                 assert_eq!(
                     frame,
@@ -2291,7 +2326,10 @@ mod tests {
         const { assert!(DEFAULT_BACKGROUND_SHADER_SPEED > 0.0) };
 
         assert!(parse_line("bg-shader dock no-such-shader").is_err());
-        assert!(parse_line("bg-shader Dock tidepool").is_err());
+        // Project ids are case-tolerant (Alfalfa capitalizes); path-like or
+        // empty tokens stay refused.
+        assert!(parse_line("bg-shader Dock tidepool").is_ok());
+        assert!(parse_line("bg-shader do/ck tidepool").is_err());
         assert!(parse_line("bg-shader dock").is_err());
         assert!(
             parse_line(&format!(

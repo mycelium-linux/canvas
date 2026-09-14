@@ -1,0 +1,193 @@
+{
+ "schema_version": 1,
+ "id": "wall",
+ "project_id": "dock",
+ "revision": 1,
+ "theme": {
+  "source": "project"
+ },
+ "surfaces": [
+  {
+   "id": "hn",
+   "title": "Hacker News",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "feed-hn",
+     "kind": "table",
+     "title": "Hacker News",
+     "columns": [
+      "#",
+      "story",
+      "pts",
+      "who",
+      "age"
+     ],
+     "rows": [],
+     "data": {
+      "state": "loading",
+      "source": "feed:hn",
+      "detail": "start: canvas-feeds --feed hn",
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "widget",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "reddit",
+   "title": "r/programming",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "feed-reddit",
+     "kind": "table",
+     "title": "r/programming",
+     "columns": [
+      "#",
+      "story",
+      "pts",
+      "who",
+      "age"
+     ],
+     "rows": [],
+     "data": {
+      "state": "loading",
+      "source": "feed:reddit",
+      "detail": "start: canvas-feeds --feed reddit --sub programming",
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "widget",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "xkcd",
+   "title": "xkcd \u2014 last 4",
+   "content": {
+    "kind": "live_image",
+    "source_id": "xkcd"
+   },
+   "inputs": []
+  },
+  {
+   "id": "door",
+   "title": "Door \u2014 live NVR",
+   "content": {
+    "kind": "live_image",
+    "source_id": "door"
+   },
+   "inputs": []
+  },
+  {
+   "id": "cat",
+   "title": "Cat \u2014 live NVR",
+   "content": {
+    "kind": "live_image",
+    "source_id": "cat"
+   },
+   "inputs": []
+  }
+ ],
+ "layout": {
+  "kind": "canvas",
+  "placements": [
+   {
+    "surface_id": "hn",
+    "bounds": {
+     "x": 0.0,
+     "y": 0.0,
+     "width": 0.38196602,
+     "height": 0.618034
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "reddit",
+    "bounds": {
+     "x": 0.38196602,
+     "y": 0.0,
+     "width": 0.23606798,
+     "height": 1.0
+    },
+    "layer": 1
+   },
+   {
+    "surface_id": "xkcd",
+    "bounds": {
+     "x": 0.618034,
+     "y": 0.0,
+     "width": 0.381966,
+     "height": 0.618034
+    },
+    "layer": 2
+   },
+   {
+    "surface_id": "door",
+    "bounds": {
+     "x": 0.0,
+     "y": 0.618034,
+     "width": 0.38196602,
+     "height": 0.381966
+    },
+    "layer": 3
+   },
+   {
+    "surface_id": "cat",
+    "bounds": {
+     "x": 0.618034,
+     "y": 0.618034,
+     "width": 0.381966,
+     "height": 0.381966
+    },
+    "layer": 4
+   }
+  ]
+ },
+ "bindings": [
+  {
+   "id": "hn-bind",
+   "source": {
+    "owner": "feeds",
+    "stream": "hn-headlines",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "hn",
+    "input_id": "widget"
+   },
+   "adapter": "feed-headlines-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "reddit-bind",
+   "source": {
+    "owner": "feeds",
+    "stream": "reddit-programming",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "reddit",
+    "input_id": "widget"
+   },
+   "adapter": "feed-headlines-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  }
+ ]
+}

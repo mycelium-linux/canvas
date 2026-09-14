@@ -9,8 +9,10 @@ use std::{collections::BTreeSet, fmt};
 
 pub mod backend;
 pub mod background_picker;
+#[cfg(feature = "lua-scenes")]
 pub mod briefing;
 pub mod chart;
+pub mod compose;
 pub mod control;
 pub mod display;
 pub mod hud;
@@ -108,16 +110,40 @@ pub struct WorkspaceDocument {
     pub focused_surface_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub struct SurfaceChrome {
     #[serde(default)]
     pub title: SurfaceTitleMode,
-    #[serde(default)]
+    #[serde(default = "default_canvas_padding")]
     pub canvas_padding: u16,
-    #[serde(default)]
+    #[serde(default = "default_surface_gap")]
     pub surface_gap: u16,
+}
+
+/// Breathing room at the wall's edge. Non-zero so a fresh arrangement is not
+/// four rectangles welded to the display bezel — flush edges read as a bug and
+/// feel mechanical. Well under `MAX_CANVAS_PADDING`, and `surface_layout_metrics`
+/// still clamps it for tiny windows.
+pub const fn default_canvas_padding() -> u16 {
+    24
+}
+
+/// Mullion between neighbouring surfaces. Half is applied to each facing edge,
+/// so two adjacent tiles meet with a full `surface_gap` of quiet between them.
+pub const fn default_surface_gap() -> u16 {
+    12
+}
+
+impl Default for SurfaceChrome {
+    fn default() -> Self {
+        Self {
+            title: SurfaceTitleMode::default(),
+            canvas_padding: default_canvas_padding(),
+            surface_gap: default_surface_gap(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -358,13 +384,21 @@ pub enum SurfaceContent {
     Stream {
         url: String,
     },
+    /// A frame-replaying raster surface: the host reloads
+    /// `<runtime dir>/frames/<source_id>.jpg` whenever its bytes change.
+    /// Producers (e.g. `canvas-frigate`) own transport and decoding; the
+    /// screen stays dumb. `source_id` is a name, never a path, so a document
+    /// cannot steer the host at arbitrary files.
+    LiveImage {
+        source_id: String,
+    },
     /// Content from a newer Canvas, kept exactly as written.
     #[serde(untagged)]
     Unsupported(serde_json::Value),
 }
 
 /// The `kind` tags this build can render. Anything else is a newer Canvas.
-const KNOWN_SURFACE_KINDS: [&str; 7] = [
+const KNOWN_SURFACE_KINDS: [&str; 8] = [
     "project_resource",
     "asset",
     "chart",
@@ -372,6 +406,7 @@ const KNOWN_SURFACE_KINDS: [&str; 7] = [
     "scene",
     "terminal",
     "stream",
+    "live_image",
 ];
 
 impl SurfaceContent {
@@ -385,6 +420,7 @@ impl SurfaceContent {
             Self::Scene { .. } => "scene",
             Self::Terminal { .. } => "terminal",
             Self::Stream { .. } => "stream",
+            Self::LiveImage { .. } => "live_image",
             Self::Unsupported(raw) => raw
                 .get("kind")
                 .and_then(serde_json::Value::as_str)
@@ -453,6 +489,7 @@ enum Known {
     Scene { scene: Scene },
     Terminal { resource_id: String },
     Stream { url: String },
+    LiveImage { source_id: String },
 }
 
 impl Known {
@@ -467,6 +504,7 @@ impl Known {
             Self::Scene { scene } => SurfaceContent::Scene { scene },
             Self::Terminal { resource_id } => SurfaceContent::Terminal { resource_id },
             Self::Stream { url } => SurfaceContent::Stream { url },
+            Self::LiveImage { source_id } => SurfaceContent::LiveImage { source_id },
         }
     }
 }
@@ -981,6 +1019,12 @@ impl WorkspaceDocument {
                 SurfaceContent::Stream { url } => {
                     check(!url.is_empty(), "Stream URL must not be empty")?;
                 }
+                SurfaceContent::LiveImage { source_id } => {
+                    check(
+                        identifier(source_id),
+                        format!("Invalid live image source id: {source_id}"),
+                    )?;
+                }
                 // Retained verbatim from a newer Canvas. There is nothing this
                 // build can check about it, and refusing the whole document is
                 // exactly the failure this variant exists to prevent — but it
@@ -1307,6 +1351,7 @@ mod forward_compatibility_tests {
             json!({"kind": "project_resource", "resource_id": "code"}),
             json!({"kind": "terminal", "resource_id": "shell"}),
             json!({"kind": "stream", "url": "https://example.test/s"}),
+            json!({"kind": "live_image", "source_id": "door"}),
         ] {
             let content: SurfaceContent =
                 serde_json::from_value(value.clone()).expect("known kind parses");
@@ -1356,6 +1401,45 @@ mod tests {
                 .iter()
                 .all(|b| b.adapter.as_deref() == Some("feed-headlines-v1"))
         );
+    }
+
+    #[test]
+    fn frigate_live_workspace_is_a_valid_dock_document() {
+        let json = include_str!("../../../config/demo/frigate-live.json");
+        let doc: WorkspaceDocument = serde_json::from_str(json)
+            .expect("frigate-live.json must deserialize as a WorkspaceDocument");
+        doc.validate(&catalog())
+            .expect("frigate-live.json must pass validation");
+        assert_eq!(doc.project_id, "dock");
+        assert!(
+            doc.surfaces
+                .iter()
+                .all(|s| matches!(s.content, SurfaceContent::LiveImage { .. })),
+            "both surfaces must be live images"
+        );
+    }
+
+    #[test]
+    fn wall_workspace_mixes_text_feeds_and_image_frames() {
+        // The live demo the user watches: two headline tables (stream-bound)
+        // plus three live_image frames (xkcd mosaic + two NVR cameras).
+        // Validating it here means a schema or id drift fails CI, not the wall.
+        let json = include_str!("../../../config/demo/wall.json");
+        let doc: WorkspaceDocument = serde_json::from_str(json)
+            .expect("wall.json must deserialize as a WorkspaceDocument");
+        doc.validate(&catalog())
+            .expect("wall.json must pass validation");
+        let live: Vec<&str> = doc
+            .surfaces
+            .iter()
+            .filter_map(|s| match &s.content {
+                SurfaceContent::LiveImage { source_id } => Some(source_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(live.len(), 3, "xkcd + two cameras are live frames");
+        assert!(live.contains(&"xkcd"));
+        assert_eq!(doc.bindings.len(), 2, "hn + reddit stay stream-bound");
     }
 
     fn document() -> WorkspaceDocument {
@@ -1461,8 +1545,12 @@ mod tests {
         let legacy = WorkspaceDocument::parse(&legacy.to_string(), &catalog).unwrap();
         assert_eq!(legacy.background, Background::Theme);
         assert_eq!(legacy.chrome.title, SurfaceTitleMode::Focused);
-        assert_eq!(legacy.chrome.canvas_padding, 0);
-        assert_eq!(legacy.chrome.surface_gap, 0);
+        // An omitted chrome is no longer flush to the bezel: the humane
+        // default supplies edge padding and a mullion so a legacy workspace
+        // opened in a newer Canvas reads as arranged, not as four welded
+        // rectangles. A document that wants zero air still says so explicitly.
+        assert_eq!(legacy.chrome.canvas_padding, default_canvas_padding());
+        assert_eq!(legacy.chrome.surface_gap, default_surface_gap());
 
         let gradient = Background::Gradient {
             angle_degrees: 125.0,

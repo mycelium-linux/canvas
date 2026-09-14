@@ -106,14 +106,14 @@ pub struct PointerEvent {
 pub struct InteractionConfig {
     pub workspace_bounds: LogicalRect,
     pub minimum_surface_size: LogicalPoint,
-    /// Horizontal portion of the top bar that must remain reachable after a
-    /// move, even when the rest of the surface extends beyond the workspace.
-    pub minimum_visible_top_bar_width: f64,
     pub resize_handle_size: f64,
     /// Height of the draggable window chrome. The remaining body belongs to
     /// the embedded surface after it has been focused and promoted.
     pub top_bar_height: f64,
     pub snap_distance: f64,
+    /// Distance from a workspace edge at which a move gesture offers a
+    /// half-screen or quarter-screen dock zone, like a desktop window manager.
+    pub snap_zone_trigger: f64,
     /// Grid spacing. `None` disables grid snapping while retaining workspace
     /// edge snapping.
     pub grid_size: Option<f64>,
@@ -160,6 +160,11 @@ struct ActiveGesture {
     origin: LogicalPoint,
     original_bounds: LogicalRect,
     current_bounds: LogicalRect,
+    /// Last position seen for this gesture; a release that arrives without a
+    /// fresh move (pointer left the display) still commits where it stalled.
+    last_position: LogicalPoint,
+    /// Half- or quarter-screen zone offered by the current move gesture.
+    snap_zone: Option<LogicalRect>,
 }
 
 /// Stateful pointer capture with no renderer or document ownership.
@@ -182,13 +187,19 @@ impl InteractionEngine {
         self.active.as_ref().map(|active| active.pointer_id)
     }
 
+    /// The dock zone currently offered to an active move gesture, for the
+    /// renderer to preview. `None` while resizing or when no edge is near.
+    pub fn snap_preview(&self) -> Option<LogicalRect> {
+        self.active.as_ref().and_then(|active| active.snap_zone)
+    }
+
     pub fn handle(
         &mut self,
         event: PointerEvent,
         surfaces: &[SurfaceGeometry],
     ) -> Result<Vec<InteractionIntent>, InteractionError> {
         validate_point(event.position)?;
-        validate_surfaces(surfaces, self.config)?;
+        validate_surfaces(surfaces)?;
 
         match event.phase {
             PointerPhase::Press => self.press(event, surfaces),
@@ -203,9 +214,12 @@ impl InteractionEngine {
         event: PointerEvent,
         surfaces: &[SurfaceGeometry],
     ) -> Result<Vec<InteractionIntent>, InteractionError> {
-        if self.active.is_some() {
-            return Ok(Vec::new());
-        }
+        // A fresh press while a gesture is still captured means the previous
+        // release never arrived — the pointer left the display, or focus was
+        // stolen. Recover rather than wedge: the interrupted gesture keeps the
+        // bounds it last reported (they were applied live), and the new press
+        // proceeds normally. Without this one lost event freezes input.
+        self.active = None;
         let Some(hit) = hit_test(
             surfaces,
             event.position,
@@ -228,9 +242,9 @@ impl InteractionEngine {
                 surface_id: surface_id.clone(),
             },
         ];
-        if hit.region == HitRegion::Body {
-            return Ok(intents);
-        }
+        // Body drags move the surface (macOS-style direct manipulation);
+        // resizing stays reserved for the edge handles. A press-release with
+        // no movement is still a click for whatever content was pressed.
         self.active = Some(ActiveGesture {
             pointer_id: event.pointer_id,
             surface_id: surface_id.clone(),
@@ -238,12 +252,41 @@ impl InteractionEngine {
             origin: event.position,
             original_bounds: surface.bounds,
             current_bounds: surface.bounds,
+            last_position: event.position,
+            snap_zone: None,
         });
         intents.push(InteractionIntent::CapturePointer {
             pointer_id: event.pointer_id,
             surface_id,
         });
         Ok(intents)
+    }
+
+    /// Commit a captured gesture whose release event never arrived (pointer
+    /// left the display mid-drag). Applies the same edge/corner snap a normal
+    /// release would, so a drag that stalls at the frame still docks.
+    pub fn force_release(&mut self) -> Vec<InteractionIntent> {
+        let Some(active) = self.active.as_ref() else {
+            return Vec::new();
+        };
+        let pointer_id = active.pointer_id;
+        let zone = match active.region {
+            HitRegion::TopBar | HitRegion::Body => {
+                snap_zone_for_move(self.config, active.last_position)
+            }
+            HitRegion::Resize { .. } => None,
+        };
+        let final_bounds = zone.unwrap_or(active.current_bounds);
+        let mut intents = Vec::with_capacity(2);
+        if final_bounds != active.current_bounds {
+            intents.push(InteractionIntent::SetBounds {
+                surface_id: active.surface_id.clone(),
+                bounds: final_bounds,
+            });
+        }
+        intents.push(InteractionIntent::ReleasePointer { pointer_id });
+        self.active = None;
+        intents
     }
 
     fn update(
@@ -259,12 +302,22 @@ impl InteractionEngine {
         }
 
         let next = manipulate(self.config, active, event.position);
+        active.last_position = event.position;
+        active.snap_zone = match active.region {
+            HitRegion::TopBar | HitRegion::Body => snap_zone_for_move(self.config, event.position),
+            HitRegion::Resize { .. } => None,
+        };
         let mut intents = Vec::with_capacity(2);
-        if next != active.current_bounds {
-            active.current_bounds = next;
+        let final_bounds = if release {
+            active.snap_zone.unwrap_or(next)
+        } else {
+            next
+        };
+        if final_bounds != active.current_bounds {
+            active.current_bounds = final_bounds;
             intents.push(InteractionIntent::SetBounds {
                 surface_id: active.surface_id.clone(),
-                bounds: next,
+                bounds: final_bounds,
             });
         }
         if release {
@@ -349,10 +402,83 @@ fn manipulate(
     point: LogicalPoint,
 ) -> LogicalRect {
     match active.region {
-        HitRegion::TopBar => move_rect(config, active, point),
+        HitRegion::TopBar | HitRegion::Body => move_rect(config, active, point),
         HitRegion::Resize { handle } => resize_rect(config, active, point, handle),
-        HitRegion::Body => active.current_bounds,
     }
+}
+
+/// The dock zone a move gesture earns at its current pointer position:
+/// corner wins quarter zones, a lone edge wins half zones. The caller previews
+/// this rectangle while the pointer is inside and commits it on release,
+/// the way macOS Window-tiling and Windows Snap do.
+fn snap_zone_for_move(config: InteractionConfig, point: LogicalPoint) -> Option<LogicalRect> {
+    let trigger = config.snap_zone_trigger;
+    if trigger <= 0.0 {
+        return None;
+    }
+    let workspace = config.workspace_bounds;
+    let near_west = point.x - workspace.x <= trigger;
+    let near_east = workspace.right() - point.x <= trigger;
+    let near_north = point.y - workspace.y <= trigger;
+    let near_south = workspace.bottom() - point.y <= trigger;
+    let half = workspace.width / 2.0;
+    let middle = workspace.height / 2.0;
+    let x_left = workspace.x;
+    let x_right = workspace.x + half;
+    let y_top = workspace.y;
+    let y_bottom = workspace.y + middle;
+    let zone = match (near_west, near_east, near_north, near_south) {
+        (true, _, true, _) => LogicalRect {
+            x: x_left,
+            y: y_top,
+            width: half,
+            height: middle,
+        },
+        (true, _, _, true) => LogicalRect {
+            x: x_left,
+            y: y_bottom,
+            width: half,
+            height: middle,
+        },
+        (_, true, true, _) => LogicalRect {
+            x: x_right,
+            y: y_top,
+            width: half,
+            height: middle,
+        },
+        (_, true, _, true) => LogicalRect {
+            x: x_right,
+            y: y_bottom,
+            width: half,
+            height: middle,
+        },
+        (true, _, false, false) => LogicalRect {
+            x: x_left,
+            y: y_top,
+            width: half,
+            height: workspace.height,
+        },
+        (_, true, false, false) => LogicalRect {
+            x: x_right,
+            y: y_top,
+            width: half,
+            height: workspace.height,
+        },
+        (false, false, true, _) => LogicalRect {
+            x: workspace.x,
+            y: y_top,
+            width: workspace.width,
+            height: middle,
+        },
+        (false, false, _, true) => LogicalRect {
+            x: workspace.x,
+            y: y_bottom,
+            width: workspace.width,
+            height: middle,
+        },
+        _ => return None,
+    };
+    Some(zone)
 }
 
 fn move_rect(
@@ -379,17 +505,17 @@ fn move_rect(
         config.grid_size,
         config.snap_distance,
     );
-    let reachable_width = config
-        .minimum_visible_top_bar_width
-        .min(bounds.width)
-        .min(config.workspace_bounds.width);
+    // Full containment: a dragged surface never strands off the wall. The
+    // old rule (keep only the top bar reachable) let tiles park mostly
+    // outside the display, where macOS stops delivering events once the
+    // cursor is gone — the tile looked stuck and could not be recovered.
     bounds.x = bounds.x.clamp(
-        config.workspace_bounds.x + reachable_width - bounds.width,
-        config.workspace_bounds.right() - reachable_width,
+        config.workspace_bounds.x,
+        (config.workspace_bounds.right() - bounds.width).max(config.workspace_bounds.x),
     );
     bounds.y = bounds.y.clamp(
         config.workspace_bounds.y,
-        config.workspace_bounds.bottom() - config.top_bar_height,
+        (config.workspace_bounds.bottom() - bounds.height).max(config.workspace_bounds.y),
     );
     bounds
 }
@@ -589,14 +715,6 @@ fn validate_config(config: InteractionConfig) -> Result<(), InteractionError> {
             "minimum surface size must fit within workspace bounds",
         ));
     }
-    if !config.minimum_visible_top_bar_width.is_finite()
-        || config.minimum_visible_top_bar_width <= 0.0
-        || config.minimum_visible_top_bar_width > config.workspace_bounds.width
-    {
-        return Err(InteractionError(
-            "minimum visible top-bar width must fit within workspace bounds",
-        ));
-    }
     if !config.resize_handle_size.is_finite() || config.resize_handle_size < 0.0 {
         return Err(InteractionError(
             "resize handle size must be finite and non-negative",
@@ -615,6 +733,11 @@ fn validate_config(config: InteractionConfig) -> Result<(), InteractionError> {
             "snap distance must be finite and non-negative",
         ));
     }
+    if !config.snap_zone_trigger.is_finite() || config.snap_zone_trigger < 0.0 {
+        return Err(InteractionError(
+            "snap zone trigger must be finite and non-negative",
+        ));
+    }
     if config
         .grid_size
         .is_some_and(|grid| !grid.is_finite() || grid <= 0.0)
@@ -624,10 +747,13 @@ fn validate_config(config: InteractionConfig) -> Result<(), InteractionError> {
     Ok(())
 }
 
-fn validate_surfaces(
-    surfaces: &[SurfaceGeometry],
-    config: InteractionConfig,
-) -> Result<(), InteractionError> {
+/// Validate only that geometry is *interpretable* — finite, positive,
+/// uniquely named. Placement is never a rejection condition: a surface
+/// parked off the wall by an older Canvas must remain draggable back,
+/// because refusing every pointer event when a surface is out of bounds is
+/// a death spiral — the one state where the user most needs to drag is the
+/// state where dragging is disallowed.
+fn validate_surfaces(surfaces: &[SurfaceGeometry]) -> Result<(), InteractionError> {
     let mut ids = BTreeSet::new();
     for surface in surfaces {
         if surface.surface_id.is_empty() {
@@ -637,21 +763,6 @@ fn validate_surfaces(
             return Err(InteractionError("surface IDs must be unique"));
         }
         validate_rect(surface.bounds)?;
-        if surface.bounds.width > config.workspace_bounds.width
-            || surface.bounds.height > config.workspace_bounds.height
-        {
-            return Err(InteractionError("surface must fit within workspace bounds"));
-        }
-        let reachable_width = config
-            .minimum_visible_top_bar_width
-            .min(surface.bounds.width);
-        if surface.bounds.right() < config.workspace_bounds.x + reachable_width
-            || surface.bounds.x > config.workspace_bounds.right() - reachable_width
-            || surface.bounds.y < config.workspace_bounds.y
-            || surface.bounds.y + config.top_bar_height > config.workspace_bounds.bottom()
-        {
-            return Err(InteractionError("surface top bar must remain reachable"));
-        }
     }
     Ok(())
 }
@@ -713,10 +824,10 @@ mod tests {
         InteractionConfig {
             workspace_bounds: rect(0.0, 0.0, 1_000.0, 800.0),
             minimum_surface_size: point(100.0, 80.0),
-            minimum_visible_top_bar_width: 72.0,
             resize_handle_size: 10.0,
             top_bar_height: 24.0,
             snap_distance: 8.0,
+            snap_zone_trigger: 40.0,
             grid_size: Some(50.0),
         }
     }
@@ -762,7 +873,7 @@ mod tests {
     }
 
     #[test]
-    fn content_click_focuses_and_promotes_without_capturing() {
+    fn content_click_focuses_promotes_and_moves_without_capture_loss() {
         let surfaces = vec![surface("card", rect(100.0, 100.0, 300.0, 200.0), 1)];
         let mut engine = InteractionEngine::new(config()).unwrap();
         assert_eq!(
@@ -776,14 +887,19 @@ mod tests {
                 InteractionIntent::PromoteToFront {
                     surface_id: "card".to_owned(),
                 },
+                InteractionIntent::CapturePointer {
+                    pointer_id: 4,
+                    surface_id: "card".to_owned(),
+                },
             ]
         );
-        assert_eq!(engine.captured_pointer(), None);
-        assert!(
+        assert_eq!(engine.captured_pointer(), Some(4));
+        // A press-release without movement is a click: no bounds change.
+        assert_eq!(
             engine
                 .handle(event(4, PointerPhase::Release, 200.0, 180.0), &surfaces)
-                .unwrap()
-                .is_empty()
+                .unwrap(),
+            vec![InteractionIntent::ReleasePointer { pointer_id: 4 }]
         );
         assert_eq!(engine.captured_pointer(), None);
     }
@@ -816,47 +932,55 @@ mod tests {
     }
 
     #[test]
-    fn captured_drag_allows_offscreen_content_but_keeps_top_bar_reachable() {
+    fn drag_to_the_far_corner_docks_and_never_strands_offscreen() {
+        // The old bug this replaces: dragging past the display edge parked
+        // the surface mostly off-screen (928,776 here), macOS stopped
+        // delivering events, the lost release wedged the gesture, and the
+        // tile was gone. Containment + corner snap now put it *on* the wall.
         let surfaces = vec![surface("card", rect(100.0, 100.0, 300.0, 200.0), 1)];
         let mut engine = InteractionEngine::new(config()).unwrap();
         engine
             .handle(event(8, PointerPhase::Press, 200.0, 115.0), &surfaces)
             .unwrap();
-        let intents = engine
+        let moved = engine
             .handle(event(8, PointerPhase::Move, 2_000.0, 2_000.0), &surfaces)
             .unwrap();
-        assert_eq!(
-            intents,
-            vec![InteractionIntent::SetBounds {
-                surface_id: "card".to_owned(),
-                bounds: rect(928.0, 776.0, 300.0, 200.0),
-            }]
-        );
-
-        let moved = vec![surface("card", rect(928.0, 776.0, 300.0, 200.0), 1)];
-        assert!(
-            engine
-                .handle(event(8, PointerPhase::Release, 2_000.0, 2_000.0), &moved)
-                .is_ok()
-        );
+        for intent in &moved {
+            if let InteractionIntent::SetBounds { bounds, .. } = intent {
+                assert!(
+                    bounds.x >= 0.0
+                        && bounds.y >= 0.0
+                        && bounds.x + bounds.width <= 1_000.0
+                        && bounds.y + bounds.height <= 800.0,
+                    "mid-drag bounds {bounds:?} left the wall"
+                );
+            }
+        }
+        assert_eq!(engine.snap_preview(), Some(rect(500.0, 400.0, 500.0, 400.0)));
+        let released = engine
+            .handle(event(8, PointerPhase::Release, 2_000.0, 2_000.0), &surfaces)
+            .unwrap();
+        assert!(released.contains(&InteractionIntent::SetBounds {
+            surface_id: "card".to_owned(),
+            bounds: rect(500.0, 400.0, 500.0, 400.0),
+        }));
     }
 
     #[test]
-    fn moving_left_retains_a_recoverable_top_bar_segment() {
+    fn drag_stops_flush_at_the_edge_rather_than_parking_outside() {
         let surfaces = vec![surface("card", rect(100.0, 100.0, 300.0, 200.0), 1)];
         let mut engine = InteractionEngine::new(config()).unwrap();
         engine
             .handle(event(9, PointerPhase::Press, 200.0, 115.0), &surfaces)
             .unwrap();
-        assert_eq!(
-            engine
-                .handle(event(9, PointerPhase::Move, -2_000.0, -2_000.0), &surfaces)
-                .unwrap(),
-            vec![InteractionIntent::SetBounds {
-                surface_id: "card".to_owned(),
-                bounds: rect(-228.0, 0.0, 300.0, 200.0),
-            }]
-        );
+        let intents = engine
+            .handle(event(9, PointerPhase::Move, -2_000.0, -2_000.0), &surfaces)
+            .unwrap();
+        let InteractionIntent::SetBounds { bounds, .. } = &intents[0] else {
+            panic!("expected move");
+        };
+        assert_eq!(*bounds, rect(0.0, 0.0, 300.0, 200.0));
+        assert!(bounds.x >= 0.0 && bounds.y >= 0.0);
     }
 
     #[test]
@@ -897,6 +1021,130 @@ mod tests {
             820.0,
             "workspace edge wins an equal-distance tie with the grid"
         );
+    }
+
+    #[test]
+    fn body_drag_moves_surface_without_edge_handles() {
+        let surfaces = vec![surface("card", rect(100.0, 100.0, 300.0, 200.0), 1)];
+        let mut engine = InteractionEngine::new(config()).unwrap();
+        engine
+            .handle(event(7, PointerPhase::Press, 200.0, 180.0), &surfaces)
+            .unwrap();
+        assert_eq!(
+            engine
+                .handle(event(7, PointerPhase::Move, 300.0, 260.0), &surfaces)
+                .unwrap(),
+            vec![InteractionIntent::SetBounds {
+                surface_id: "card".to_owned(),
+                bounds: rect(200.0, 180.0, 300.0, 200.0),
+            }]
+        );
+        assert_eq!(engine.snap_preview(), None, "mid-screen offers no zone");
+    }
+
+    #[test]
+    fn lost_release_force_commits_edge_dock() {
+        let surfaces = vec![surface("card", rect(100.0, 100.0, 300.0, 200.0), 1)];
+        let mut engine = InteractionEngine::new(config()).unwrap();
+        engine
+            .handle(event(6, PointerPhase::Press, 200.0, 180.0), &surfaces)
+            .unwrap();
+        // Drag to the bottom-left corner; the pointer then leaves the display
+        // and the button-release is never delivered. force_release docks.
+        engine
+            .handle(event(6, PointerPhase::Move, 5.0, 795.0), &surfaces)
+            .unwrap();
+        assert!(engine.captured_pointer().is_some(), "still captured");
+        let intents = engine.force_release();
+        assert_eq!(
+            intents,
+            vec![
+                InteractionIntent::SetBounds {
+                    surface_id: "card".to_owned(),
+                    bounds: rect(0.0, 400.0, 500.0, 400.0),
+                },
+                InteractionIntent::ReleasePointer { pointer_id: 6 },
+            ]
+        );
+        assert_eq!(engine.captured_pointer(), None, "gesture cleared");
+    }
+
+    #[test]
+    fn a_new_press_recovers_a_wedged_gesture() {
+        let surfaces = vec![surface("card", rect(100.0, 100.0, 300.0, 200.0), 1)];
+        let mut engine = InteractionEngine::new(config()).unwrap();
+        engine
+            .handle(event(1, PointerPhase::Press, 200.0, 180.0), &surfaces)
+            .unwrap();
+        engine
+            .handle(event(1, PointerPhase::Move, 250.0, 250.0), &surfaces)
+            .unwrap();
+        // Release was lost; the gesture is still captured. A fresh press must
+        // not be swallowed - it recovers control rather than wedging forever.
+        let intents = engine
+            .handle(event(2, PointerPhase::Press, 200.0, 180.0), &surfaces)
+            .unwrap();
+        assert!(intents.iter().any(|intent| matches!(
+            intent,
+            InteractionIntent::CapturePointer { pointer_id: 2, .. }
+        )));
+    }
+
+    #[test]
+    fn move_near_side_edge_previews_and_commits_half_zone() {
+        let surfaces = vec![surface("card", rect(100.0, 100.0, 300.0, 200.0), 1)];
+        let mut engine = InteractionEngine::new(config()).unwrap();
+        engine
+            .handle(event(2, PointerPhase::Press, 200.0, 180.0), &surfaces)
+            .unwrap();
+        engine
+            .handle(event(2, PointerPhase::Move, 10.0, 400.0), &surfaces)
+            .unwrap();
+        assert_eq!(
+            engine.snap_preview(),
+            Some(rect(0.0, 0.0, 500.0, 800.0)),
+            "left edge previews the left half"
+        );
+        assert_eq!(
+            engine
+                .handle(event(2, PointerPhase::Release, 10.0, 400.0), &surfaces)
+                .unwrap(),
+            vec![
+                InteractionIntent::SetBounds {
+                    surface_id: "card".to_owned(),
+                    bounds: rect(0.0, 0.0, 500.0, 800.0),
+                },
+                InteractionIntent::ReleasePointer { pointer_id: 2 },
+            ]
+        );
+    }
+
+    #[test]
+    fn move_into_corner_commits_quarter_zone_and_resize_previews_nothing() {
+        let surfaces = vec![surface("card", rect(100.0, 100.0, 300.0, 200.0), 1)];
+        let mut engine = InteractionEngine::new(config()).unwrap();
+        engine
+            .handle(event(3, PointerPhase::Press, 200.0, 180.0), &surfaces)
+            .unwrap();
+        engine
+            .handle(event(3, PointerPhase::Move, 5.0, 5.0), &surfaces)
+            .unwrap();
+        assert_eq!(engine.snap_preview(), Some(rect(0.0, 0.0, 500.0, 400.0)));
+        let intents = engine
+            .handle(event(3, PointerPhase::Release, 5.0, 5.0), &surfaces)
+            .unwrap();
+        assert!(intents.contains(&InteractionIntent::SetBounds {
+            surface_id: "card".to_owned(),
+            bounds: rect(0.0, 0.0, 500.0, 400.0),
+        }));
+
+        engine
+            .handle(event(9, PointerPhase::Press, 400.0, 300.0), &surfaces)
+            .unwrap();
+        engine
+            .handle(event(9, PointerPhase::Move, 5.0, 5.0), &surfaces)
+            .unwrap();
+        assert_eq!(engine.snap_preview(), None, "resize never docks");
     }
 
     #[test]

@@ -107,19 +107,7 @@ pub fn load_appearance() -> Result<canvas_core::appearance::Appearance> {
 }
 
 pub fn root() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("CANVAS_CONFIG_DIR") {
-        return Some(PathBuf::from(path));
-    }
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    #[cfg(target_os = "macos")]
-    return Some(home.join("Library/Application Support/Dock/canvas"));
-    #[cfg(not(target_os = "macos"))]
-    Some(
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".config"))
-            .join("dock/canvas"),
-    )
+    canvas_core::runtime_root()
 }
 
 #[cfg(test)]

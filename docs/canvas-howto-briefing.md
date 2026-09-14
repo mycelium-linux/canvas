@@ -67,18 +67,28 @@ Reset: `echo 'bg-clear' | canvasctl`
 ### 2. Chrome
 
 ```sh
-echo 'titles hidden'    | canvasctl     # Hidden / Focused / Always
-echo 'spacing 24 12'   | canvasctl     # canvas_padding surface_gap
+echo 'titles hidden'     | canvasctl   # Hidden / Focused / Always
+echo 'spacing 24 12'     | canvasctl   # canvas_padding surface_gap (px of air)
 ```
+
+`spacing` sets how much breathing room sits at the wall edge and between
+neighbouring surfaces. New documents default to a humane `24 / 12`; an
+explicit `0 0` returns to flush, welded edges.
 
 ### 3. Layouts
 
 ```sh
-echo 'tile grid 2 2'   | canvasctl     # grid
-echo 'tile monocle'    | canvasctl     # stack
-echo 'tile next'       | canvasctl     # cycle focus
-echo 'restore'         | canvasctl     # reset to 2x2
+echo 'tile grid 2 2'     | canvasctl   # explicit rows x cols grid
+echo 'tile golden'       | canvasctl   # phi:1 mosaic, prime cell first
+echo 'tile monocle'      | canvasctl   # stack all surfaces, one fills the wall
+echo 'tile next'         | canvasctl   # cycle focus through the stack
 ```
+
+`tile golden` and the fresh-stack default share one deterministic algorithm
+(`canvas::compose`): repeatedly split the largest cell at the golden ratio, so
+the first surface claims the prime region and every surface gets a distinct,
+non-overlapping part of the wall. Composition (`tile`) sets *where* surfaces
+land; spacing (`spacing`) sets *how much air* surrounds them — independent axes.
 
 ### 4. Surface Content Types
 

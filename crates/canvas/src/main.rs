@@ -1,4 +1,3 @@
-#[cfg(feature = "lua-scenes")]
 use ::canvas::DeliveryPolicy;
 use ::canvas::chart::{ChartDocument, ChartKind};
 use ::canvas::control::{
@@ -89,7 +88,6 @@ const SURFACE_CONTROL_BAR_HEIGHT: f64 = 24.0;
 const SURFACE_CONTROL_HIT_SIZE: f64 = 18.0;
 const SURFACE_CONTROL_INSET: f64 = 4.0;
 const SURFACE_RESIZE_HANDLE_SIZE: f64 = 10.0;
-const SURFACE_TOP_BAR_GRAB_WIDTH: f64 = 72.0;
 const CANVAS_TOGGLE_KEYS: &str = "Ctrl-Option-C";
 const SNAP_LAYOUT_KEYS: &str = "Ctrl-Option-L";
 const FIT_LAYOUT_KEYS: &str = "Ctrl-Option-F";
@@ -228,6 +226,14 @@ enum ContentSource {
     },
     Stream {
         url: String,
+    },
+    /// Frame-replaying raster from `<runtime dir>/frames/<source_id>.jpg`.
+    /// `seen` is the (mtime, len) that produced the current handle, so a tick
+    /// reloads only when the bytes actually changed — never a steady timer.
+    LiveImage {
+        source_id: String,
+        path: PathBuf,
+        seen: Option<(std::time::SystemTime, u64)>,
     },
     Widget {
         spec: canvas_widgets::WidgetSpec,
@@ -458,6 +464,7 @@ struct App {
     networks: sysinfo::Networks,
     status: String,
     interaction: InteractionEngine,
+    snap_preview: Option<LogicalRect>,
     cursor: Option<LogicalPoint>,
     cursor_window: Option<iced::window::Id>,
     desktop_focused: bool,
@@ -760,6 +767,7 @@ impl App {
                 )
             },
             interaction: interaction_engine(desktop_frame),
+            snap_preview: None,
             cursor: None,
             cursor_window: None,
             desktop_focused: false,
@@ -1023,6 +1031,7 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick => {
+                self.reload_live_images();
                 let toggle_visibility = self
                     .visibility_hotkey
                     .as_ref()
@@ -2095,7 +2104,9 @@ impl App {
             // repo-status table surface so the user sees live data immediately.
             let document = WorkspaceDocument {
                 schema_version: SCHEMA_VERSION,
-                id: format!("{}-active", project_id),
+                // Store keys may carry Alfalfa's capitalization; document ids
+                // follow the lowercase identifier grammar.
+                id: format!("{}-active", project_id.to_ascii_lowercase()),
                 project_id: project_id.clone(),
                 revision: 1,
                 theme: ThemeRef::Project,
@@ -2106,7 +2117,7 @@ impl App {
                     title: format!("{}: Active Work", project_id),
                     content: SurfaceContent::Widget {
                         spec: canvas_widgets::WidgetSpec {
-                            schema_version: SCHEMA_VERSION,
+                            schema_version: canvas_widgets::WIDGET_SCHEMA_VERSION,
                             id: "repo-status".into(),
                             kind: canvas_widgets::WidgetKind::Table {
                                 title: format!("{}: Active Work", project_id),
@@ -2181,96 +2192,15 @@ impl App {
             .unwrap_or_else(|| "http://127.0.0.1:8787".to_string());
         let addr = alfalfa_url.strip_prefix("http://").unwrap_or(&alfalfa_url);
         let timeout = std::time::Duration::from_secs(3);
-        if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
-            &addr.parse().unwrap_or("127.0.0.1:8787".parse().unwrap()),
-            timeout,
-        ) {
-            use std::io::Write;
-            let request = format!(
-                "GET /api/v1/projects HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-                addr
-            );
-            if stream.write_all(request.as_bytes()).is_err() {
-                return;
-            }
-            let mut response = String::new();
-            use std::io::Read;
-            let _ = stream.read_to_string(&mut response);
-            let body = response.split("\r\n\r\n").nth(1).unwrap_or("");
-            let mut found_projects = false;
-            if let Ok(projects) = serde_json::from_str::<Vec<serde_json::Value>>(body) {
-                found_projects = true;
-                for project in projects {
-                    let proj = project.get("project").and_then(|p| p.as_object()).map(|p| {
-                        (
-                            p.get("id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string(),
-                            p.get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string(),
-                        )
-                    });
-                    if let Some((id, name)) = proj {
-                        if id.is_empty() {
-                            continue;
-                        }
-                        if catalog.projects.iter().any(|p| p.id == id) {
-                            continue;
-                        }
-                        let theme = canvas_core::ThemeSelection::Coherence {
-                            mode: canvas_core::ThemeMode::Dark,
-                            accent: canvas_core::Accent::Brand,
-                        };
-                        catalog.projects.push(canvas_core::Project {
-                            id,
-                            name,
-                            theme,
-                            resources: Vec::new(),
-                        });
-                    }
-                }
-            }
-            // Fallback: if /api/v1/projects returned empty, derive projects from
-            // /api/v1/repos. Each repo's id is a project id in Alfalfa's model.
-            if !found_projects {
-                let repos_request = format!(
-                    "GET /api/v1/repos HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-                    addr
-                );
-                if stream.write_all(repos_request.as_bytes()).is_err() {
-                    return;
-                }
-                let mut repos_response = String::new();
-                let _ = stream.read_to_string(&mut repos_response);
-                let repos_body = repos_response.split("\r\n\r\n").nth(1).unwrap_or("");
-                if let Ok(repos) = serde_json::from_str::<Vec<serde_json::Value>>(repos_body) {
-                    for repo in repos {
-                        let id = repo
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        if id.is_empty() {
-                            continue;
-                        }
-                        if catalog.projects.iter().any(|p| p.id == id) {
-                            continue;
-                        }
-                        let theme = canvas_core::ThemeSelection::Coherence {
-                            mode: canvas_core::ThemeMode::Dark,
-                            accent: canvas_core::Accent::Brand,
-                        };
-                        catalog.projects.push(canvas_core::Project {
-                            id: id.clone(),
-                            name: id.clone(),
-                            theme,
-                            resources: Vec::new(),
-                        });
-                    }
-                }
+        let Some(projects) = alfalfa_get(addr, "/api/v1/projects", timeout) else {
+            return;
+        };
+        if !merge_projects_body(catalog, &projects) {
+            // An empty projects array is not a roster: fall back to repos, on
+            // its own connection (the first requested `Connection: close`).
+            // Each repo's id is a project id in Alfalfa's model.
+            if let Some(repos) = alfalfa_get(addr, "/api/v1/repos", timeout) {
+                merge_repos_body(catalog, &repos);
             }
         }
     }
@@ -2378,7 +2308,17 @@ impl App {
         self.theme_picker = None;
         self.project_picker = match self.project_picker {
             Some(_) => None,
-            None => Some(::canvas::project_picker::ProjectPicker::default()),
+            None => {
+                // LRU order for the empty-query view: what's open now leads,
+                // then recent departures (store already tracks them).
+                let mut recency = vec![self.document.project_id.clone()];
+                for recent in &self.workspaces.recent_project_ids {
+                    if !recency.contains(recent) {
+                        recency.push(recent.clone());
+                    }
+                }
+                Some(::canvas::project_picker::ProjectPicker::with_recency(recency))
+            }
         };
         let open = self.project_picker.is_some();
         if open {
@@ -3325,7 +3265,9 @@ impl App {
                     let project_id = name.clone();
                     let document = WorkspaceDocument {
                         schema_version: SCHEMA_VERSION,
-                        id: format!("{}-active", project_id),
+                        // Store keys may carry Alfalfa's capitalization; document ids
+                // follow the lowercase identifier grammar.
+                id: format!("{}-active", project_id.to_ascii_lowercase()),
                         project_id: project_id.clone(),
                         revision: 1,
                         theme: ThemeRef::Project,
@@ -3336,7 +3278,7 @@ impl App {
                             title: format!("{}: Active Work", project_id),
                             content: SurfaceContent::Widget {
                                 spec: canvas_widgets::WidgetSpec {
-                                    schema_version: SCHEMA_VERSION,
+                                    schema_version: canvas_widgets::WIDGET_SCHEMA_VERSION,
                                     id: "repo-status".into(),
                                     kind: canvas_widgets::WidgetKind::Table {
                                         title: format!("{}: Active Work", project_id),
@@ -4330,12 +4272,32 @@ impl App {
                 self.primary_pointer_down = false;
                 Some(PointerPhase::Release)
             }
-            Event::CursorLeft
-                if !self.primary_pointer_down && self.cursor_window == Some(window) =>
-            {
-                self.cursor = None;
-                self.cursor_window = None;
-                None
+            Event::CursorLeft => {
+                if self.cursor_window != Some(window) {
+                    None
+                } else if self.primary_pointer_down {
+                    // The pointer left this display mid-drag (moved onto
+                    // another window or monitor). The button-release will
+                    // likely be delivered elsewhere or lost entirely, so
+                    // commit the gesture now: this both docks an edge/corner
+                    // drag that stalled off-frame and prevents the captured
+                    // gesture from wedging all later input.
+                    self.primary_pointer_down = false;
+                    self.cursor = None;
+                    self.cursor_window = None;
+                    let intents = self.interaction.force_release();
+                    self.apply_interaction_intents(intents);
+                    let preview = self.interaction.snap_preview();
+                    if preview != self.snap_preview {
+                        self.snap_preview = preview;
+                        self.bump();
+                    }
+                    return;
+                } else {
+                    self.cursor = None;
+                    self.cursor_window = None;
+                    None
+                }
             }
             _ => None,
         };
@@ -4356,6 +4318,11 @@ impl App {
                     self.desktop_focused = intents.is_empty();
                 }
                 self.apply_interaction_intents(intents);
+                let preview = self.interaction.snap_preview();
+                if preview != self.snap_preview {
+                    self.snap_preview = preview;
+                    self.bump();
+                }
             }
             Err(error) => self.status = format!("Canvas pointer rejected: {error}"),
         }
@@ -4721,33 +4688,38 @@ impl App {
                 .collect::<BTreeMap<_, _>>(),
             _ => BTreeMap::new(),
         };
+        let aspect = f64::from(self.frame.width.max(1)) / f64::from(self.frame.height.max(1));
+        if existing.is_empty() {
+            // A stack nobody has arranged yet earns a composition, not a
+            // pile: the golden mosaic fills the wall in one deliberate pass
+            // instead of cascading centered rectangles over each other.
+            self.document.layout = Layout::Canvas {
+                placements: ::canvas::compose::compose(
+                    ::canvas::compose::LayoutMode::Golden,
+                    &ids,
+                    aspect as f32,
+                ),
+            };
+            self.document.revision = self.document.revision.saturating_add(1);
+            return;
+        }
         let placements = ids
             .into_iter()
             .enumerate()
             .map(|(index, surface_id)| {
                 existing.get(&surface_id).cloned().unwrap_or_else(|| {
-                    let (width, height) = self
-                        .decoded
-                        .get(&surface_id)
-                        .map(|surface| {
-                            (
-                                (surface.media_plan.display_logical.width
-                                    / f64::from(self.frame.width))
-                                .clamp(0.18, 0.92) as f32,
-                                (surface.media_plan.display_logical.height
-                                    / f64::from(self.frame.height))
-                                .clamp(0.18, 0.92) as f32,
-                            )
-                        })
-                        .unwrap_or((0.72, 0.72));
+                    // The arrangement is already spoken for, so a newcomer
+                    // lands as a golden-sized tile with the old cascade
+                    // nudge; overlap with hand-placed surfaces is the
+                    // user's to resolve, and it promotes to front.
                     let cascade = (index % 6) as f32 * 0.025;
                     Placement {
                         surface_id,
                         bounds: NormalizedRect {
-                            x: ((1.0 - width) * 0.5 + cascade).min(1.0 - width),
-                            y: ((1.0 - height) * 0.5 + cascade).min(1.0 - height),
-                            width,
-                            height,
+                            x: ((1.0 - 0.618) * 0.5 + cascade).min(1.0 - 0.618),
+                            y: ((1.0 - 0.618) * 0.5 + cascade).min(1.0 - 0.618),
+                            width: 0.618,
+                            height: 0.618,
                         },
                         layer: index as i32,
                     }
@@ -4796,6 +4768,22 @@ impl App {
                     ContentKind::Widget,
                     ContentSource::Widget { spec: spec.clone() },
                 ),
+                SurfaceContent::LiveImage { source_id } => {
+                    let Some(root) = ::canvas::runtime_config::root() else {
+                        continue;
+                    };
+                    let Some(path) = canvas_core::frame_file(&root, source_id) else {
+                        continue;
+                    };
+                    (
+                        ContentKind::Image,
+                        ContentSource::LiveImage {
+                            source_id: source_id.clone(),
+                            path,
+                            seen: None,
+                        },
+                    )
+                }
                 // Content this build cannot draw still gets a tile. Rendering it
                 // as markdown reuses a renderer that already exists rather than
                 // adding a path solely to say "no": the surface keeps its place
@@ -5006,7 +4994,9 @@ impl App {
                 let visual = self.presented_visual_theme();
                 canvas_widgets::live::element(spec, &visual)
             }
-            ContentSource::Image { .. } | ContentSource::Pdf { .. } => {
+            ContentSource::Image { .. }
+            | ContentSource::Pdf { .. }
+            | ContentSource::LiveImage { .. } => {
                 let view = self.shared_views.get(&surface.snapshot.id);
                 let mut image = image_widget(surface.handle.clone())
                     .content_fit(ContentFit::Contain)
@@ -5277,6 +5267,74 @@ impl App {
         }
     }
 
+    fn has_live_images(&self) -> bool {
+        self.decoded
+            .values()
+            .any(|surface| matches!(surface.source, ContentSource::LiveImage { .. }))
+    }
+
+    /// Reload `frames/<source_id>.jpg` whenever its bytes actually change.
+    /// Transport, decoding, and retry policy belong to the producer; this
+    /// screen only notices new files. A missing or rejected frame keeps the
+    /// last good image on the wall rather than blinking to black — but the
+    /// miss is emitted as an event, so the gap is visible to anyone looking.
+    fn reload_live_images(&mut self) {
+        let viewport = self.media_viewport();
+        let scale_factor = self.scale_factor;
+        let mut changed = false;
+        let mut notes: Vec<String> = Vec::new();
+        for (surface_id, surface) in self.decoded.iter_mut() {
+            let ContentSource::LiveImage {
+                source_id,
+                path,
+                seen,
+            } = &mut surface.source
+            else {
+                continue;
+            };
+            let metadata = match std::fs::metadata(&*path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    if seen.take().is_some() {
+                        notes.push(format!("live_image_gone {source_id}: {error}"));
+                    }
+                    continue;
+                }
+            };
+            let stamp = (
+                metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+                metadata.len(),
+            );
+            if *seen == Some(stamp) {
+                continue;
+            }
+            *seen = Some(stamp);
+            match prepare_raster(path, format!("live:{source_id}"), viewport, scale_factor) {
+                Ok((handle, _media_type, source_pixels, media_plan)) => {
+                    let upload = [media_plan.target_px.width, media_plan.target_px.height];
+                    surface.handle = handle;
+                    surface.source_pixels = source_pixels;
+                    surface.upload_pixels = upload;
+                    apply_plan_diagnostics(&mut surface.snapshot, &media_plan, upload);
+                    surface.media_plan = media_plan;
+                    if let Ok(sha) = hash_file(path) {
+                        surface.snapshot.asset_sha256 = Some(sha);
+                    }
+                    changed = true;
+                }
+                Err(failure) => {
+                    notes.push(format!("live_image_rejected {surface_id}: {}", failure.message));
+                }
+            }
+        }
+        for note in notes {
+            self.emit_event(note);
+        }
+        if changed {
+            self.bump();
+        }
+    }
+
     fn theme(&self) -> Theme {
         let palette = self.presented_palette();
         Theme::custom(
@@ -5339,7 +5397,7 @@ impl App {
                         placement.layer,
                     )
                 });
-                let surfaces = placements
+                let mut surfaces = placements
                     .into_iter()
                     .filter_map(|placement| {
                         if self.minimized_surfaces.contains(&placement.surface_id) {
@@ -5447,6 +5505,42 @@ impl App {
                         )
                     })
                     .collect::<Vec<Element<'_, Message>>>();
+                if let Some(zone) = self.snap_preview {
+                    // Desktop-manager style dock preview: the ghost shows the
+                    // half or quarter the surface will occupy on release.
+                    let ghost = container(space::vertical())
+                        .width(Length::Fixed(zone.width.max(1.0) as f32))
+                        .height(Length::Fixed(zone.height.max(1.0) as f32))
+                        .style(move |_| container::Style {
+                            background: Some(iced::Background::Color(Color {
+                                a: 0.18,
+                                ..color(palette.primary)
+                            })),
+                            border: iced::Border {
+                                color: Color {
+                                    a: 0.9,
+                                    ..color(palette.primary)
+                                },
+                                width: 2.0,
+                                radius: 9.0.into(),
+                            },
+                            ..Default::default()
+                        });
+                    surfaces.push(
+                        container(ghost)
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .padding(iced::Padding {
+                                top: (zone.y - viewport_y) as f32,
+                                right: 0.0,
+                                bottom: 0.0,
+                                left: (zone.x - viewport_x) as f32,
+                            })
+                            .align_x(iced::alignment::Horizontal::Left)
+                            .align_y(iced::alignment::Vertical::Top)
+                            .into(),
+                    );
+                }
                 if surfaces.is_empty() {
                     container(space::vertical())
                         .width(Length::Fill)
@@ -6331,6 +6425,65 @@ fn hostname() -> String {
     "local".to_string()
 }
 
+/// One owner-local HTTP GET for Alfalfa discovery: fresh connection, bounded
+/// by both connect and read timeouts, because this runs on the daemon's main
+/// thread at startup and on picker open — an untimed read there wedges the
+/// whole wall the moment Alfalfa answers slowly.
+fn alfalfa_get(addr: &str, path: &str, timeout: std::time::Duration) -> Option<String> {
+    let mut stream = std::net::TcpStream::connect_timeout(&addr.parse().ok()?, timeout).ok()?;
+    stream.set_read_timeout(Some(timeout)).ok()?;
+    use std::io::Write;
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut response = String::new();
+    use std::io::Read;
+    let _ = stream.read_to_string(&mut response);
+    Some(response.split("\r\n\r\n").nth(1).unwrap_or("").to_owned())
+}
+
+fn push_catalog_project(catalog: &mut Catalog, id: String, name: String) {
+    if id.is_empty() || catalog.projects.iter().any(|p| p.id == id) {
+        return;
+    }
+    catalog.projects.push(canvas_core::Project {
+        id,
+        name,
+        theme: canvas_core::ThemeSelection::Coherence {
+            mode: canvas_core::ThemeMode::Dark,
+            accent: canvas_core::Accent::Brand,
+        },
+        resources: Vec::new(),
+    });
+}
+
+/// Fold `/api/v1/projects` into the catalog; returns whether any were found.
+fn merge_projects_body(catalog: &mut Catalog, body: &str) -> bool {
+    let Ok(projects) = serde_json::from_str::<Vec<serde_json::Value>>(body) else {
+        return false;
+    };
+    let found = !projects.is_empty();
+    for project in projects {
+        let Some(p) = project.get("project").and_then(|p| p.as_object()) else {
+            continue;
+        };
+        let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        push_catalog_project(catalog, id.to_string(), name.to_string());
+    }
+    found
+}
+
+/// Fold `/api/v1/repos` into the catalog (fallback roster).
+fn merge_repos_body(catalog: &mut Catalog, body: &str) {
+    let Ok(repos) = serde_json::from_str::<Vec<serde_json::Value>>(body) else {
+        return;
+    };
+    for repo in repos {
+        let id = repo.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        push_catalog_project(catalog, id.to_string(), id.to_string());
+    }
+}
+
 fn interaction_engine(frame: Rect) -> InteractionEngine {
     InteractionEngine::new(InteractionConfig {
         workspace_bounds: LogicalRect {
@@ -6340,10 +6493,10 @@ fn interaction_engine(frame: Rect) -> InteractionEngine {
             height: f64::from(frame.height.max(1)),
         },
         minimum_surface_size: LogicalPoint { x: 160.0, y: 120.0 },
-        minimum_visible_top_bar_width: SURFACE_TOP_BAR_GRAB_WIDTH,
         resize_handle_size: SURFACE_RESIZE_HANDLE_SIZE,
         top_bar_height: SURFACE_CONTROL_BAR_HEIGHT,
         snap_distance: 12.0,
+        snap_zone_trigger: 44.0,
         grid_size: Some(8.0),
     })
     .expect("Canvas interaction defaults must remain valid")
@@ -8207,6 +8360,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             Duration::from_millis(canvas_core::appearance::current().motion.idle_tick_ms as u64)
         };
+        // Live camera frames deserve sub-second pickup without becoming a
+        // steady redraw: the reload itself only fires when bytes change.
+        let cadence = if app.has_live_images() {
+            cadence.min(Duration::from_millis(400))
+        } else {
+            cadence
+        };
         Subscription::batch([
             iced::time::every(cadence).map(|_| Message::Tick),
             iced::event::listen_with(|event, _, window| match event {
@@ -8329,6 +8489,14 @@ mod tests {
         )
         .unwrap();
         app.frame = INITIAL_FRAME;
+        // Geometry tests assert exact pixel<->normalized mapping; pin chrome
+        // to zero so the humane edge-padding default (covered separately in
+        // the lib tests) does not shift every expected coordinate by 24px.
+        app.document.chrome = SurfaceChrome {
+            canvas_padding: 0,
+            surface_gap: 0,
+            ..SurfaceChrome::default()
+        };
         app.interaction = interaction_engine(INITIAL_FRAME);
         app.hud_visible = true;
         app
@@ -10577,6 +10745,25 @@ mod tests {
         let visible = visible_surface_bounds(normalized, frame, chrome);
         assert!((visible.x - parked.x).abs() < 0.001);
         assert!((visible.width - parked.width).abs() < 0.001);
+    }
+
+    #[test]
+    fn alfalfa_rosters_fold_into_the_catalog_with_case_preserving_ids() {
+        let mut catalog = Catalog::parse(
+            r#"{"schema_version":1,"projects":[{"id":"dock","name":"Dock",
+            "theme":{"source":"coherence","mode":"dark","accent":"info"},"resources":[]}]}"#,
+        )
+        .unwrap();
+        // An empty projects array must fall through to repos, not "succeed".
+        assert!(!merge_projects_body(&mut catalog, "[]"));
+        assert!(merge_projects_body(
+            &mut catalog,
+            r#"[{"project":{"id":"JARVIS","name":"JARVIS"}}]"#
+        ));
+        assert_eq!(catalog.projects.len(), 2);
+        merge_repos_body(&mut catalog, r#"[{"id":"JARVIS"},{"id":"LibreChat"}]"#);
+        assert_eq!(catalog.projects.len(), 3, "existing JARVIS not duplicated");
+        assert!(catalog.projects.iter().any(|p| p.id == "LibreChat"));
     }
 
     #[test]

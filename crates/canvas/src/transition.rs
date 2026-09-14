@@ -20,6 +20,22 @@ pub const TRANSITION_DURATION: Duration = Duration::from_millis(280);
 /// table so the palette and placement transitions agree with widget animations.
 const TRANSITION_EASING: Easing = Easing::EaseOutCubic;
 
+/// The bounds a brand-new surface starts from: its target shrunk about its
+/// own center. Subtle enough to read as an arrival, not a zoom.
+const ARRIVAL_SCALE: f32 = 0.86;
+
+fn arrive_from(target: [f32; 4]) -> [f32; 4] {
+    let [x, y, w, h] = target;
+    let nw = w * ARRIVAL_SCALE;
+    let nh = h * ARRIVAL_SCALE;
+    [
+        x + (w - nw) / 2.0,
+        y + (h - nh) / 2.0,
+        nw,
+        nh,
+    ]
+}
+
 /// Eased progress of a transition that started at `started`, 1.0 once done.
 pub fn progress_at(started: Instant, duration: Duration) -> f32 {
     let elapsed = started.elapsed().as_secs_f32();
@@ -92,12 +108,18 @@ impl Transition {
     }
 
     /// Interpolated bounds for a surface: lerps from its previous bounds when
-    /// it has one; new surfaces appear at their target bounds (snap).
+    /// it has one. A surface with no predecessor — one that only exists in the
+    /// incoming workspace — eases in from a shrunk, centered version of its
+    /// target instead of snapping. This is what makes a workspace switch replay
+    /// the arrival animation: different projects share few surface ids, so
+    /// without it the only motion would be the background crossfade.
     pub fn placement(&self, surface_id: &str, target: [f32; 4]) -> [f32; 4] {
-        let Some(from) = self.from_placements.get(surface_id) else {
-            return target;
-        };
         let t = self.factor();
+        let from = self
+            .from_placements
+            .get(surface_id)
+            .copied()
+            .unwrap_or_else(|| arrive_from(target));
         [
             lerp(from[0], target[0], t),
             lerp(from[1], target[1], t),
@@ -185,15 +207,27 @@ mod tests {
     }
 
     #[test]
-    fn new_surfaces_snap_to_target() {
-        let transition = Transition::new(
+    fn new_surfaces_arrive_scaled_and_land_on_target() {
+        let target = [0.1, 0.2, 0.3, 0.4];
+        let fresh = Transition::new(
             Instant::now(),
             std::collections::BTreeMap::new(),
             palette(0),
         );
-        assert_eq!(
-            transition.placement("brand-new", [0.1, 0.2, 0.3, 0.4]),
-            [0.1, 0.2, 0.3, 0.4]
+        let start = fresh.placement("brand-new", target);
+        // Smaller than the target (an arrival, not a snap) and centered on it.
+        assert!(start[2] < target[2] && start[3] < target[3], "{start:?}");
+        let start_cx = start[0] + start[2] / 2.0;
+        let start_cy = start[1] + start[3] / 2.0;
+        assert!((start_cx - (target[0] + target[2] / 2.0)).abs() < 1e-6);
+        assert!((start_cy - (target[1] + target[3] / 2.0)).abs() < 1e-6);
+        // A finished transition puts a new surface exactly on its target, so
+        // the arrival can never leave a surface resting at the shrunk bounds.
+        let settled = Transition::new(
+            Instant::now() - TRANSITION_DURATION - Duration::from_millis(50),
+            std::collections::BTreeMap::new(),
+            palette(0),
         );
+        assert_eq!(settled.placement("brand-new", target), target);
     }
 }

@@ -18,6 +18,18 @@ pub enum Action {
 pub struct ProjectPicker {
     query: String,
     selected: usize,
+    /// Most-recent-first project ids captured when the picker opens: the
+    /// workspace currently up, then `recent_project_ids`. Results rank by
+    /// fuzzy score first and recency second, so an empty query leads with
+    /// what you are using rather than with whatever is alphabetically lucky;
+    /// catalog order stays the final tie-break so authored defaults survive.
+    recency: Vec<String>,
+}
+
+impl ProjectPicker {
+    pub fn with_recency(recency: Vec<String>) -> Self {
+        Self { recency, ..Self::default() }
+    }
 }
 
 impl ProjectPicker {
@@ -31,23 +43,29 @@ impl ProjectPicker {
             .map(|project| project.id.clone())
     }
 
-    /// Best matches first, capped at `MAX_RESULTS`. The sort is stable and has
-    /// no tie-break, so equally good matches keep catalog order: that order is
-    /// authored in `config/projects.json`, and its first entry is the project
-    /// the rest of Canvas treats as the default. Ranking by id instead would
-    /// bury the default behind whatever sorts alphabetically first, and would
-    /// look arbitrary next to the names the rows actually show.
+    /// Best matches first, capped at `MAX_RESULTS`, tie-broken by recency and
+    /// then by catalog order. The catalog fallback matters: its first entry is
+    /// the project the rest of Canvas treats as the default, and ranking by id
+    /// instead would bury it behind whatever sorts alphabetically first.
     fn matches<'a>(&self, catalog: &'a Catalog) -> Vec<&'a Project> {
+        let rank = |id: &str| {
+            self.recency
+                .iter()
+                .position(|recent| recent == id)
+                .unwrap_or(usize::MAX)
+        };
         let mut matches = catalog
             .projects
             .iter()
-            .filter_map(|project| fuzzy_score(&self.query, project).map(|score| (score, project)))
+            .filter_map(|project| {
+                fuzzy_score(&self.query, project).map(|score| (score, rank(&project.id), project))
+            })
             .collect::<Vec<_>>();
-        matches.sort_by_key(|(score, _)| *score);
+        matches.sort_by_key(|(score, recency_rank, _)| (*score, *recency_rank));
         matches
             .into_iter()
             .take(MAX_RESULTS)
-            .map(|(_, project)| project)
+            .map(|(_, _, project)| project)
             .collect()
     }
 
@@ -295,6 +313,28 @@ mod tests {
             .iter()
             .map(|project| project.id.clone())
             .collect()
+    }
+
+    #[test]
+    fn empty_query_leads_with_open_and_recent_projects_then_catalog_order() {
+        let catalog = catalog_of(&["alpha", "bravo", "charlie"]);
+        let picker = ProjectPicker::with_recency(vec!["charlie".into(), "bravo".into()]);
+        assert_eq!(
+            listed(&picker, &catalog),
+            vec!["charlie", "bravo", "alpha"],
+            "most recent first; untouched projects keep catalog order"
+        );
+    }
+
+    #[test]
+    fn typed_matches_outrank_recent_nonmatches_and_equal_scores_use_recency() {
+        let catalog = catalog_of(&["docket", "studio", "dock"]);
+        let mut picker = ProjectPicker::with_recency(vec!["studio".into(), "dock".into()]);
+        picker.query = "dock".into();
+        let ids = listed(&picker, &catalog);
+        // studio is recent but scores nothing; dock and docket both score the
+        // prefix match, and recency picks dock first.
+        assert_eq!(ids, vec!["dock", "docket"]);
     }
 
     fn key(key: Key, text: Option<&'static str>) -> Event {
