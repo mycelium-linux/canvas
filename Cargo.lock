@@ -421,9 +421,17 @@ name = "canvas-feeds"
 version = "0.1.0"
 dependencies = [
  "canvas-core",
+ "image",
  "reqwest",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "canvas-frigate"
+version = "0.1.0"
+dependencies = [
+ "canvas-core",
 ]
 
 [[package]]
@@ -501,6 +509,7 @@ version = "0.1.0"
 dependencies = [
  "canvas-core",
  "iced",
+ "libc",
  "schemars",
  "serde",
  "serde_json",

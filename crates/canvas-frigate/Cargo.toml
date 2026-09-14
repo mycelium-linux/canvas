@@ -1,0 +1,17 @@
+[package]
+name = "canvas-frigate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Surface Frigate NVR camera streams as Canvas live_image frames (GPU video decode via ffmpeg/videotoolbox)"
+
+[dependencies]
+canvas-core = { workspace = true }
+
+[lib]
+name = "canvas_frigate"
+path = "src/lib.rs"
+
+[[bin]]
+name = "canvas-frigate"
+path = "src/main.rs"
