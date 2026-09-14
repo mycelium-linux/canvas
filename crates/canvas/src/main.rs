@@ -250,6 +250,20 @@ struct RuntimeSurface {
     upload_pixels: [u32; 2],
 }
 
+/// A live frame decoded and planned off the main thread, ready to swap in.
+/// JPEG decode is the expensive half of a `live_image` update; a Pi 4 wall
+/// at camera rates must never pay it inside the event loop.
+#[derive(Debug, Clone)]
+struct PreparedFrame {
+    handle: iced::widget::image::Handle,
+    source_pixels: [u32; 2],
+    media_plan: MediaPlan,
+    upload_pixels: [u32; 2],
+    sha256: Option<String>,
+}
+
+type LiveFrameResult = Result<PreparedFrame, String>;
+
 struct PresencePreviewVisual {
     value: PresencePreview,
     handle: iced::widget::image::Handle,
@@ -274,6 +288,11 @@ enum Message {
     MouseEvent(iced::window::Id, iced::mouse::Event),
     RestoreSurface(String),
     BackgroundTileClicked(usize),
+    LiveFrameLoaded {
+        surface_id: String,
+        stamp: (std::time::SystemTime, u64),
+        result: Box<LiveFrameResult>,
+    },
     ScaleFactorChanged(iced::window::Id, f32),
     ContentLoaded {
         pending: Box<Pending>,
@@ -443,6 +462,9 @@ struct App {
     _stream_socket: Option<::canvas::stream_binding::StreamSocketGuard>,
     #[cfg(feature = "lua-scenes")]
     stream_sequences: BTreeMap<String, u64>,
+    /// Surface -> stamp of the frame currently being decoded off-thread.
+    /// Blocks duplicate spawns and lets a stale arrival be discarded.
+    live_pending: BTreeMap<String, (std::time::SystemTime, u64)>,
     /// This screen's position in the retained stream log. Held rather than
     /// implied by consumption, so a gap can be named instead of looking like a
     /// quiet producer.
@@ -730,6 +752,7 @@ impl App {
             _stream_socket: stream_socket,
             #[cfg(feature = "lua-scenes")]
             stream_sequences: BTreeMap::new(),
+            live_pending: BTreeMap::new(),
             #[cfg(feature = "lua-scenes")]
             stream_position: 0,
             windows: BTreeMap::new(),
@@ -1031,7 +1054,6 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick => {
-                self.reload_live_images();
                 let toggle_visibility = self
                     .visibility_hotkey
                     .as_ref()
@@ -1078,7 +1100,7 @@ impl App {
                 self.refresh_terminal();
                 #[cfg(feature = "lua-scenes")]
                 self.drain_stream_events();
-                let mut tasks = vec![self.drain_commands()];
+                let mut tasks = vec![self.drain_commands(), self.reload_live_images()];
                 if let Some(settled) = self.display_watch.poll() {
                     tasks.push(self.apply_display_change(settled));
                 }
@@ -1382,6 +1404,14 @@ impl App {
                         }
                     }
                 }
+                Task::none()
+            }
+            Message::LiveFrameLoaded {
+                surface_id,
+                stamp,
+                result,
+            } => {
+                self.apply_live_frame(&surface_id, stamp, *result);
                 Task::none()
             }
             Message::ContentLoaded { pending, result } => {
@@ -5273,16 +5303,22 @@ impl App {
             .any(|surface| matches!(surface.source, ContentSource::LiveImage { .. }))
     }
 
-    /// Reload `frames/<source_id>.jpg` whenever its bytes actually change.
-    /// Transport, decoding, and retry policy belong to the producer; this
-    /// screen only notices new files. A missing or rejected frame keeps the
-    /// last good image on the wall rather than blinking to black — but the
-    /// miss is emitted as an event, so the gap is visible to anyone looking.
-    fn reload_live_images(&mut self) {
+    /// Notice changed `frames/<source_id>.jpg` files and dispatch their decode
+    /// off the main thread. Transport, decoding, and retry policy belong to the
+    /// producer; this screen only notices new files and then hands the JPEG to
+    /// iced's runtime, applying the result in `Message::LiveFrameLoaded`. A
+    /// missing or rejected frame keeps the last good image on the wall rather
+    /// than blinking to black; the miss is emitted so the gap is visible.
+    ///
+    /// `seen` advances at claim time, so a frame that fails to decode is not
+    /// re-decoded every tick until its bytes change — the retry-storm guard a
+    /// Pi 4 needs. `live_pending` blocks a duplicate spawn for a surface that
+    /// is already decoding, and a result is dropped if the file moved on.
+    fn reload_live_images(&mut self) -> Task<Message> {
         let viewport = self.media_viewport();
         let scale_factor = self.scale_factor;
-        let mut changed = false;
         let mut notes: Vec<String> = Vec::new();
+        let mut tasks: Vec<Task<Message>> = Vec::new();
         for (surface_id, surface) in self.decoded.iter_mut() {
             let ContentSource::LiveImage {
                 source_id,
@@ -5305,33 +5341,82 @@ impl App {
                 metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
                 metadata.len(),
             );
-            if *seen == Some(stamp) {
+            let surface_key = surface_id.clone();
+            if *seen == Some(stamp) || self.live_pending.contains_key(&surface_key) {
                 continue;
             }
             *seen = Some(stamp);
-            match prepare_raster(path, format!("live:{source_id}"), viewport, scale_factor) {
-                Ok((handle, _media_type, source_pixels, media_plan)) => {
-                    let upload = [media_plan.target_px.width, media_plan.target_px.height];
-                    surface.handle = handle;
-                    surface.source_pixels = source_pixels;
-                    surface.upload_pixels = upload;
-                    apply_plan_diagnostics(&mut surface.snapshot, &media_plan, upload);
-                    surface.media_plan = media_plan;
-                    if let Ok(sha) = hash_file(path) {
-                        surface.snapshot.asset_sha256 = Some(sha);
-                    }
-                    changed = true;
-                }
-                Err(failure) => {
-                    notes.push(format!("live_image_rejected {surface_id}: {}", failure.message));
-                }
-            }
+            self.live_pending.insert(surface_key.clone(), stamp);
+            let path = path.clone();
+            let source = format!("live:{source_id}");
+            tasks.push(Task::perform(
+                async move {
+                    let sha = hash_file(&path).ok();
+                    let (handle, _media_type, source_pixels, media_plan) = prepare_raster(
+                        &path,
+                        source,
+                        viewport,
+                        scale_factor,
+                    )
+                    .map_err(|failure| failure.message)?;
+                    let upload_pixels =
+                        [media_plan.target_px.width, media_plan.target_px.height];
+                    Ok(PreparedFrame {
+                        handle,
+                        source_pixels,
+                        media_plan,
+                        upload_pixels,
+                        sha256: sha,
+                    })
+                },
+                move |result| Message::LiveFrameLoaded {
+                    surface_id: surface_key,
+                    stamp,
+                    result: Box::new(result),
+                },
+            ));
         }
         for note in notes {
             self.emit_event(note);
         }
-        if changed {
-            self.bump();
+        if tasks.is_empty() {
+            return Task::none();
+        }
+        Task::batch(tasks)
+    }
+
+    /// Swap a decoded frame into its surface, unless the file moved on (a newer
+    /// claim superseded this one) — then the stale result is dropped and the
+    /// newer task applies in its place.
+    fn apply_live_frame(
+        &mut self,
+        surface_id: &str,
+        stamp: (std::time::SystemTime, u64),
+        result: LiveFrameResult,
+    ) {
+        self.live_pending.remove(surface_id);
+        let Some(surface) = self.decoded.get_mut(surface_id) else {
+            return;
+        };
+        let ContentSource::LiveImage { seen, .. } = &mut surface.source else {
+            return;
+        };
+        if *seen != Some(stamp) {
+            return;
+        }
+        match result {
+            Ok(frame) => {
+                surface.handle = frame.handle;
+                surface.source_pixels = frame.source_pixels;
+                surface.upload_pixels = frame.upload_pixels;
+                apply_plan_diagnostics(&mut surface.snapshot, &frame.media_plan, frame.upload_pixels);
+                surface.media_plan = frame.media_plan;
+                surface.snapshot.asset_sha256 = frame.sha256;
+                self.bump();
+            }
+            Err(error) => {
+                self.emit_event(format!("live_image_rejected {surface_id}: {error}"));
+            }
         }
     }
 
@@ -10840,6 +10925,156 @@ mod tests {
         if let Some(parent) = app.workspace_store_path.parent() {
             let _ = std::fs::remove_dir_all(parent);
         }
+    }
+
+    fn live_plan() -> MediaPlan {
+        MediaPlan {
+            viewport_logical: LogicalSize {
+                width: 100.0,
+                height: 100.0,
+            },
+            source_dimensions: SourceDimensions::RasterPixels(PixelSize {
+                width: 1,
+                height: 1,
+            }),
+            target_px: PixelSize {
+                width: 1,
+                height: 1,
+            },
+            display_logical: LogicalSize {
+                width: 100.0,
+                height: 100.0,
+            },
+            scale_factor: 1.0,
+            cache_key: MediaCacheKey {
+                source_id: "live:test".into(),
+                variant: MediaVariant::Raster,
+                pixel_size: PixelSize {
+                    width: 1,
+                    height: 1,
+                },
+            },
+        }
+    }
+
+    fn live_surface(path: PathBuf) -> RuntimeSurface {
+        RuntimeSurface {
+            snapshot: SurfaceSnapshot {
+                id: "cam".into(),
+                title: "Cam".into(),
+                content: ContentKind::Image,
+                asset_sha256: None,
+                page_index: None,
+                page_count: None,
+                source_pixels: None,
+                rendered_pixels: None,
+                display_logical: None,
+                scale_factor: None,
+            },
+            source: ContentSource::LiveImage {
+                source_id: "cam".into(),
+                path,
+                seen: None,
+            },
+            handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
+            source_pixels: [1, 1],
+            media_plan: live_plan(),
+            upload_pixels: [1, 1],
+        }
+    }
+
+    fn live_ready(handle: iced::widget::image::Handle, sha: Option<String>) -> PreparedFrame {
+        let plan = live_plan();
+        let upload = [plan.target_px.width, plan.target_px.height];
+        PreparedFrame {
+            handle,
+            source_pixels: [1, 1],
+            media_plan: plan,
+            upload_pixels: upload,
+            sha256: sha,
+        }
+    }
+
+    #[test]
+    fn live_frames_claim_once_and_apply_supersedes_to_newest() {
+        let dir = std::env::temp_dir().join(format!("canvas-live-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cam.jpg");
+        let mut app = test_app();
+        let stamp1 = {
+            let img: image::RgbImage = image::RgbImage::from_pixel(4, 4, image::Rgb([9, 9, 9]));
+            img.save(&path).unwrap();
+            let meta = std::fs::metadata(&path).unwrap();
+            app.decoded.insert("cam".into(), live_surface(path.clone()));
+            drop(app.reload_live_images());
+            let stamp = app.live_pending.get("cam").copied().unwrap();
+            assert_eq!(stamp.1, meta.len());
+            // A second pass must not spawn a duplicate decode for the in-flight
+            // claim — that is the difference between 2 and 200 decodes.
+            drop(app.reload_live_images());
+            assert_eq!(app.live_pending.len(), 1);
+            stamp
+        };
+        // A newer frame lands while the first is still decoding.
+        let stamp2 = {
+            let img: image::RgbImage =
+                image::RgbImage::from_pixel(64, 64, image::Rgb([200, 10, 10]));
+            img.save_with_format(&path, image::ImageFormat::Jpeg).unwrap();
+            drop(app.reload_live_images());
+            assert_eq!(
+                app.live_pending.get("cam").copied(),
+                Some(stamp1),
+                "the superseding frame waits for the in-flight claim to resolve"
+            );
+            let meta = std::fs::metadata(&path).unwrap();
+            (meta.modified().unwrap(), meta.len())
+        };
+        // The first result applies, clearing the claim; the next pass then
+        // claims the newest bytes.
+        app.apply_live_frame(
+            "cam",
+            stamp1,
+            Ok(live_ready(
+                iced::widget::image::Handle::from_rgba(4, 4, vec![9; 64]),
+                Some("one".into()),
+            )),
+        );
+        assert!(app.live_pending.is_empty());
+        assert_eq!(app.decoded["cam"].snapshot.asset_sha256.as_deref(), Some("one"));
+        drop(app.reload_live_images());
+        assert_eq!(app.live_pending.get("cam").copied(), Some(stamp2));
+        // A stale result (its stamp no longer claimed) must not regress the
+        // wall to an older frame.
+        app.apply_live_frame(
+            "cam",
+            stamp1,
+            Ok(live_ready(
+                iced::widget::image::Handle::from_rgba(4, 4, vec![9; 64]),
+                Some("stale".into()),
+            )),
+        );
+        assert_eq!(app.decoded["cam"].snapshot.asset_sha256.as_deref(), Some("one"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn corrupt_live_frames_log_once_not_every_tick() {
+        let dir = std::env::temp_dir().join(format!("canvas-live-corrupt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cam.jpg");
+        std::fs::write(&path, b"definitely not a jpeg").unwrap();
+        let mut app = test_app();
+        app.decoded.insert("cam".into(), live_surface(path.clone()));
+        drop(app.reload_live_images());
+        let stamp = app.live_pending.get("cam").copied().unwrap();
+        app.apply_live_frame("cam", stamp, Err("decode failed".into()));
+        let events_after = app.events.len();
+        // Same bytes, same refusal: no re-claim and no event storm until the
+        // producer writes something new.
+        drop(app.reload_live_images());
+        assert!(app.live_pending.is_empty());
+        assert_eq!(app.events.len(), events_after);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
