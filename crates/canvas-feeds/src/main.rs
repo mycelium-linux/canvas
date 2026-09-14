@@ -60,7 +60,12 @@ fn main() -> ExitCode {
     let owner = arg(&args, "--owner").unwrap_or_else(|| "feeds".into());
     let stream = arg(&args, "--stream").unwrap_or_else(|| feed_stream(&feed));
     let http = ReqwestHttp::default();
-    let mut sequence: u64 = 0;
+    // Seed the monotonic sequence from the wall clock, not 0. The Canvas
+    // daemon deduplicates by `sequence > last_seen`; a producer restarting at
+    // 1 would have every event silently dropped until it climbed past the
+    // previous process's high-water mark — exactly the "restarted feed shows
+    // nothing" symptom. Epoch-milliseconds are always ahead of any prior run.
+    let mut sequence: u64 = canvas_feeds::now_ms();
 
     eprintln!(
         "canvas-feeds: {} -> {}/{} every {}s (Ctrl-C to stop)",

@@ -21,6 +21,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+pub mod comics;
+
 pub const CONTRACT: &str = "canvas.widget.snapshot.v1";
 pub const SCHEMA_VERSION: u32 = 1;
 /// macOS caps `AF_UNIX` datagrams at this size; a larger send fails with
@@ -63,7 +65,8 @@ pub struct Feed {
 pub enum FeedKind {
     /// Hacker News front page (Firebase API, no auth).
     HackerNews,
-    /// A subreddit's hot list via `old.reddit.com` (public JSON, no auth).
+    /// A subreddit hot list via the open RSS listing (www.reddit.com/r/SUB/hot.rss);
+    /// the JSON API is login-walled for unauthenticated clients.
     Reddit { sub: String },
     /// An arbitrary RSS/Atom-ish feed (raw XML).
     Rss { url: String, title: String },
@@ -122,6 +125,9 @@ impl std::error::Error for Error {}
 pub trait Http {
     fn get_json(&self, url: &str) -> Result<Value, Error>;
     fn get_text(&self, url: &str) -> Result<String, Error>;
+    /// Raw bytes, for a producer that embeds fetched images rather than
+    /// rendering text. Kept on the same seam so tests stub all three together.
+    fn get_bytes(&self, url: &str) -> Result<Vec<u8>, Error>;
 }
 
 /// Boring choice: `reqwest` with `rustls-tls` (no native OpenSSL link).
@@ -167,6 +173,22 @@ impl Http for ReqwestHttp {
             });
         }
         resp.text().map_err(|e| Error::Fetch {
+            source: url.into(),
+            detail: e.to_string(),
+        })
+    }
+    fn get_bytes(&self, url: &str) -> Result<Vec<u8>, Error> {
+        let resp = self.client.get(url).send().map_err(|e| Error::Fetch {
+            source: url.into(),
+            detail: e.to_string(),
+        })?;
+        if !resp.status().is_success() {
+            return Err(Error::Fetch {
+                source: url.into(),
+                detail: format!("HTTP {}", resp.status()),
+            });
+        }
+        resp.bytes().map(|b| b.to_vec()).map_err(|e| Error::Fetch {
             source: url.into(),
             detail: e.to_string(),
         })
@@ -249,53 +271,32 @@ fn normalize_hn_item(item: &Value, source: &'static str) -> Option<Headline> {
 }
 
 fn fetch_reddit(http: &dyn Http, sub: &str) -> Result<Feed, Error> {
-    let url = format!("https://old.reddit.com/r/{sub}/hot.json?limit=10");
-    let body = http.get_json(&url)?;
-    let Some(children) = body.pointer("/data/children").and_then(|v| v.as_array()) else {
+    // Reddit gates its JSON API behind a login wall (302 to /login) for
+    // unauthenticated clients; the RSS view of the same listing stays open.
+    let url = format!("https://www.reddit.com/r/{sub}/hot.rss");
+    let body = http.get_text(&url)?;
+    let items = parse_rss_items(&body);
+    if items.is_empty() {
         return Err(Error::Empty {
             source: "reddit".into(),
         });
-    };
-    let mut rows = Vec::with_capacity(children.len().min(MAX_ROWS));
-    for child in children.iter().take(MAX_ROWS) {
-        if let Some(h) =
-            normalize_reddit_post(child.pointer("/data").unwrap_or(&Value::Null), "reddit")
-        {
-            rows.push(h);
-        }
     }
+    let rows = items
+        .into_iter()
+        .take(MAX_ROWS)
+        .map(|(title, url, author)| Headline {
+            title: trim_title(&title),
+            url,
+            score: None,
+            by: author.map(|a| a.trim_start_matches("/u/").to_owned()).filter(|a| !a.is_empty()),
+            age_secs: None,
+            source: "reddit",
+        })
+        .collect();
     Ok(Feed {
         title: format!("r/{sub}"),
         source: "reddit",
         rows,
-    })
-}
-
-fn normalize_reddit_post(post: &Value, source: &'static str) -> Option<Headline> {
-    let title = post.get("title").and_then(|v| v.as_str())?;
-    let url = post
-        .get("url")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .or_else(|| {
-            post.get("id")
-                .and_then(|v| v.as_str())
-                .map(|id| format!("https://old.reddit.com/comments/{id}"))
-        });
-    let age_secs = post
-        .get("created_utc")
-        .and_then(|v| v.as_u64())
-        .map(|posted| now_ms() / 1000 - posted);
-    Some(Headline {
-        title: trim_title(title),
-        url,
-        score: post.get("score").and_then(|v| v.as_u64()),
-        by: post
-            .get("author")
-            .and_then(|v| v.as_str().map(str::to_owned)),
-        age_secs,
-        source,
     })
 }
 
@@ -310,11 +311,11 @@ fn fetch_rss(http: &dyn Http, url: &str, title: &str) -> Result<Feed, Error> {
     let rows = items
         .into_iter()
         .take(MAX_ROWS)
-        .map(|(t, link)| Headline {
+        .map(|(t, link, author)| Headline {
             title: trim_title(&t),
             url: link,
             score: None,
-            by: None,
+            by: author,
             age_secs: None,
             source: "rss",
         })
@@ -326,23 +327,67 @@ fn fetch_rss(http: &dyn Http, url: &str, title: &str) -> Result<Feed, Error> {
     })
 }
 
-/// Minimal RSS/2.0 item extraction: `<item><title>…</title><link>…</link>`.
-/// Good enough for headline feeds; returns title first then link.
-fn parse_rss_items(xml: &str) -> Vec<(String, Option<String>)> {
-    const ITEM: &str = "<item>";
+/// Extract headline rows from RSS 2.0 **or** Atom feeds.
+///
+/// The two families disagree on every tag we need: RSS uses
+/// `<item><title>…</title><link>URL</link></item>`; Reddit serves Atom as
+/// `<entry><title>…</title><link href="URL"/><author><name>…</name></author></entry>`.
+/// Accepting only `<item>` reads a valid Atom feed as empty and reports a
+/// source fault — which is exactly how r/programming looked dead. Both shapes
+/// normalize to (title, url, author), best-effort per row.
+fn parse_rss_items(xml: &str) -> Vec<(String, Option<String>, Option<String>)> {
     let mut out = Vec::new();
-    for item in xml.split(ITEM).skip(1) {
-        if let Some(rest) = item.split_once("</item>") {
-            let block = rest.0;
-            let title = field(block, "title").unwrap_or_else(untitled);
-            let link = field(block, "link");
-            out.push((title, link));
-        }
+    for block in item_blocks(xml) {
+        let title = field(block, "title").unwrap_or_else(untitled);
+        let link = field(block, "link").or_else(|| atom_link(block));
+        let author = author_of(block);
+        out.push((title, link, author));
     }
     out
 }
 
-fn untitled() -> String {
+/// Yield the inner text of each `<item>` (RSS) or `<entry>` (Atom) block, in
+/// document order, tolerating self-closing and unmatched tags by skipping them.
+pub(crate) fn item_blocks(xml: &str) -> Vec<&str> {
+    const TAGS: [(&str, &str); 2] = [("<item>", "</item>"), ("<entry>", "</entry>")];
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for (open, close) in TAGS {
+        let mut cursor = 0usize;
+        while let Some(start) = xml[cursor..].find(open) {
+            let from = cursor + start + open.len();
+            match xml[from..].find(close) {
+                Some(end) => {
+                    spans.push((from, from + end));
+                    cursor = from + end + close.len();
+                }
+                None => break,
+            }
+        }
+    }
+    spans.sort();
+    spans.into_iter().map(|(a, b)| &xml[a..b]).collect()
+}
+
+/// An Atom `<link href="…"/>` — the URL is an attribute, not element text.
+fn atom_link(block: &str) -> Option<String> {
+    let tag = block.find("<link")?;
+    let href = block[tag..].find("href=\"")? + tag + "href=\"".len();
+    let end = block[href..].find('"')? + href;
+    let url = &block[href..end];
+    (!url.is_empty()).then(|| unescape(url))
+}
+
+/// Author as either RSS `<author>name</author>` text or Atom's nested
+/// `<author><name>…</name></author>`; Atom's raw `<author>` is a block of
+/// tags, never a plain name, so `<name>` must win when present.
+fn author_of(block: &str) -> Option<String> {
+    if let Some(name) = field(block, "name") {
+        return Some(name);
+    }
+    field(block, "author")
+}
+
+pub(crate) fn untitled() -> String {
     "(untitled)".into()
 }
 fn unescape(s: &str) -> String {
@@ -356,7 +401,9 @@ fn unescape(s: &str) -> String {
 fn trim_title(t: &str) -> String {
     let t = t.trim();
     if t.len() > 96 {
-        format!("{}…", &t[..93])
+        // char-not-byte: slicing `&t[..93]` lands mid-sequence on emoji or
+        // curly quotes and panics the whole producer.
+        format!("{}…", t.chars().take(90).collect::<String>())
     } else {
         t.to_owned()
     }
@@ -440,7 +487,7 @@ pub fn fit(mut event: Value, budget: usize) -> (Value, bool) {
 /// Reads the text between `<tag>…</tag>`, unescaping entities. CDATA and nested
 /// tags are not expected in headline titles; anything we cannot decode is left
 /// empty so the widget shows a gap instead of garbled markup.
-fn field(block: &str, tag: &str) -> Option<String> {
+pub(crate) fn field(block: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}>");
     let begin = block.find(&open).map(|i| i + open.len())?;
     let end = block[begin..].find(&format!("</{tag}>"))? + begin;
@@ -482,9 +529,11 @@ pub fn send_raw(event: &Value) -> Result<(), Error> {
 mod tests {
     use super::*;
 
+    #[derive(Default)]
     struct FakeHttp {
         json: std::collections::BTreeMap<String, Value>,
         text: std::collections::BTreeMap<String, String>,
+        bytes: std::collections::BTreeMap<String, Vec<u8>>,
     }
     impl Http for FakeHttp {
         fn get_json(&self, url: &str) -> Result<Value, Error> {
@@ -495,6 +544,12 @@ mod tests {
         }
         fn get_text(&self, url: &str) -> Result<String, Error> {
             self.text
+                .get(url)
+                .cloned()
+                .ok_or(Error::Empty { source: url.into() })
+        }
+        fn get_bytes(&self, url: &str) -> Result<Vec<u8>, Error> {
+            self.bytes
                 .get(url)
                 .cloned()
                 .ok_or(Error::Empty { source: url.into() })
@@ -544,6 +599,7 @@ mod tests {
         let http = FakeHttp {
             json,
             text: std::collections::BTreeMap::new(),
+            ..Default::default()
         };
         let feed = fetch(&FeedKind::HackerNews, &http).unwrap();
         assert_eq!(feed.source, "hn");
@@ -560,6 +616,7 @@ mod tests {
         let http = FakeHttp {
             json: std::collections::BTreeMap::new(),
             text,
+            ..Default::default()
         };
         let feed = fetch(
             &FeedKind::Rss {
@@ -575,18 +632,45 @@ mod tests {
         assert_eq!(feed.rows[0].score, None);
     }
 
-    fn reddit_post() -> Value {
-        json!({ "title": "a post", "score": 7, "author": "bob",
-            "created_utc": 0, "id": "abc", "url": "https://example.com/x" })
+    #[test]
+    fn reddit_fetch_uses_the_open_atom_listing() {
+        // Mirrors the real r/programming/hot.rss shape: Atom <entry>, author
+        // nested in <name>, link as an href attribute.
+        let xml = "<feed><entry><title>Post &gt; one</title><author><name>/u/bob</name></author>\
+                   <link href=\"https://reddit.com/comments/abc\"/></entry>\
+                   <entry><title>Post two</title><link href=\"https://e.com/2\"/></entry></feed>";
+        let mut text = std::collections::BTreeMap::new();
+        text.insert(
+            "https://www.reddit.com/r/programming/hot.rss".into(),
+            xml.to_string(),
+        );
+        let http = FakeHttp {
+            json: std::collections::BTreeMap::new(),
+            text,
+            ..Default::default()
+        };
+        let feed = fetch(&FeedKind::Reddit { sub: "programming".into() }, &http).unwrap();
+        assert_eq!(feed.source, "reddit");
+        assert_eq!(feed.title, "r/programming");
+        assert_eq!(feed.rows.len(), 2);
+        assert_eq!(feed.rows[0].title, "Post > one");
+        assert_eq!(feed.rows[0].by.as_deref(), Some("bob"));
+        assert_eq!(feed.rows[0].url.as_deref(), Some("https://reddit.com/comments/abc"));
+        assert_eq!(feed.rows[0].score, None);
+        assert_eq!(feed.rows[1].by, None);
     }
 
     #[test]
-    fn reddit_normalizes_to_a_headline() {
-        let h = normalize_reddit_post(&reddit_post(), "reddit").unwrap();
-        assert_eq!(h.title, "a post");
-        assert_eq!(h.score, Some(7));
-        assert_eq!(h.by.as_deref(), Some("bob"));
-        assert_eq!(h.url.as_deref(), Some("https://example.com/x"));
+    fn atom_and_rss_blocks_keep_document_order_and_rss_wins_when_mixed() {
+        // The split-on-tag approach must not reorder: this feed interleaves a
+        // <item> between two <entry> blocks.
+        let xml = "<feed><entry><title>a</title></entry>\
+                   <item><title>b</title><link>https://e.com/b</link></item>\
+                   <entry><title>c</title></entry></feed>";
+        let items = parse_rss_items(xml);
+        let titles: Vec<&str> = items.iter().map(|(t, _, _)| t.as_str()).collect();
+        assert_eq!(titles, vec!["a", "b", "c"]);
+        assert_eq!(items[1].1.as_deref(), Some("https://e.com/b"));
     }
 
     #[test]
@@ -598,6 +682,17 @@ mod tests {
         assert_eq!(items[0].0, "hi>there");
         assert_eq!(items[0].1.as_deref(), Some("https://e.com"));
         assert_eq!(items[1].0, "second");
+    }
+
+    #[test]
+    fn long_titles_with_emoji_trim_without_panic() {
+        // Byte-slicing the old `&t[..93]` panics when 93 lands inside a
+        // multi-byte sequence — exactly what emoji-bearing headlines do.
+        let mut title = "a".repeat(89);
+        title.push_str("😀😀 tail");
+        let trimmed = trim_title(&title);
+        assert!(trimmed.ends_with('…'));
+        assert!(trimmed.chars().count() <= 92);
     }
 
     #[test]

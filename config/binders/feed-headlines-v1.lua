@@ -45,16 +45,46 @@ end
 
 -- A story line combines the title and its host; long ones are clipped with an
 -- ellipsis so the table keeps its one-line rhythm across the wall.
+--
+-- Byte clipping is a trap: landing inside a multi-byte sequence yields an
+-- invalid-UTF-8 string, which crosses into Rust as a byte *buffer* and makes
+-- serde reject the whole delivery batch. Clip at sequence edges only: walk
+-- back to the start byte, and drop the sequence unless it fits entirely.
+local function utf8_seq_len(b)
+  if b == nil then return 0 end
+  if b < 0x80 then return 1 end
+  if b < 0xC0 then return 0 end
+  if b < 0xE0 then return 2 end
+  if b < 0xF0 then return 3 end
+  if b < 0xF8 then return 4 end
+  return 0
+end
+
+local function clip(text, width)
+  if #text <= width then return text end
+  local limit = width - 1
+  local start = limit
+  local b = string.byte(text, start)
+  while start > 1 and b >= 0x80 and b < 0xC0 do
+    start = start - 1
+    b = string.byte(text, start)
+  end
+  local len = utf8_seq_len(b)
+  if start + len - 1 > limit then
+    start = start - 1
+  else
+    start = start + len - 1
+  end
+  return string.sub(text, 1, start) .. "…"
+end
+
 local function story(row)
   local title = fmt(row.title, "")
   local h = host(type(row.url) == "string" and row.url or nil)
   if h ~= nil and h ~= "" then
     title = string.format("%s — %s", title, h)
   end
-  if #title > TITLE_WIDTH then
-    title = title:sub(1, TITLE_WIDTH - 1) .. "…"
-  end
-  return title
+  return clip(title, TITLE_WIDTH)
 end
 
 local rows = {}

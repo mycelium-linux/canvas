@@ -3,10 +3,11 @@ name = "canvas-feeds"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Reusable producers that surface public endpoints (Hacker News, Reddit, RSS) as Canvas widget snapshots"
+description = "Reusable producers that surface public endpoints (Hacker News, Reddit, RSS, xkcd) as Canvas widget snapshots and live_image frames"
 
 [dependencies]
 canvas-core = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
@@ -18,3 +19,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "canvas-feeds"
 path = "src/main.rs"
+
+[[bin]]
+name = "canvas-comics"
+path = "src/bin/canvas-comics.rs"
