@@ -168,9 +168,12 @@ pub fn element<'a, Message: 'a>(
                     .size(metrics.small)
                     .color(color(palette.text_muted)),
                 value_line,
-                Canvas::new(SparklineProgram {
+                Canvas::new(                SparklineProgram {
                     values: history.clone(),
-                    color: accent
+                    color: accent,
+                    label: color(palette.text_muted),
+                    label_size: metrics.micro,
+                    unit: unit.clone(),
                 })
                 .width(Length::Fill)
                 .height(Length::Fill),
@@ -219,7 +222,10 @@ pub fn element<'a, Message: 'a>(
                             .collect())
                         .collect(),
                     colors,
-                    grid: with_alpha(color(palette.border), visual.grid_opacity)
+                    grid: with_alpha(color(palette.border), visual.grid_opacity),
+                    label: color(palette.text_muted),
+                    label_size: metrics.micro,
+                    unit: unit.clone(),
                 })
                 .width(Length::Fill)
                 .height(Length::Fill),
@@ -433,6 +439,8 @@ pub fn element<'a, Message: 'a>(
                             track: color(palette.surface_muted),
                             fill: color(palette.primary),
                             radius: metrics.radius_sm,
+                            label: color(palette.text_muted),
+                            label_size: metrics.micro,
                         })
                         .width(Length::Fill)
                         .height(Length::Fixed(12.0)),
@@ -458,7 +466,10 @@ pub fn element<'a, Message: 'a>(
                 Canvas::new(HistogramProgram {
                     values: buckets.iter().map(|bucket| bucket.count as f32).collect(),
                     color: color(palette.info),
-                    grid: with_alpha(color(palette.border), visual.grid_opacity)
+                    grid: with_alpha(color(palette.border), visual.grid_opacity),
+                    label: color(palette.text_muted),
+                    label_size: metrics.micro,
+                    unit: unit.clone(),
                 })
                 .width(Length::Fill)
                 .height(Length::Fill),
@@ -1754,6 +1765,95 @@ fn short_value(value: f64) -> String {
     }
 }
 
+/// 1/2/5 × 10ⁿ tick ladder (Cleveland's "nice numbers"), producing roughly
+/// `target` ticks spanning [min, max]. Returns only ticks within range, so a
+/// blank axis labels nothing rather than inventing values past the data.
+pub fn nice_ticks(min: f64, max: f64, target: usize) -> Vec<f64> {
+    if target == 0 {
+        return Vec::new();
+    }
+    let target = target.max(1);
+    let span = (max - min).max(0.0);
+    if span < 1e-12 || !span.is_finite() {
+        return vec![min];
+    }
+    let raw = span / target as f64;
+    let mag = 10f64.powf(raw.log10().floor());
+    let norm = raw / mag;
+    let step = if norm < 1.5 {
+        mag
+    } else if norm < 3.0 {
+        2.0 * mag
+    } else if norm < 7.0 {
+        5.0 * mag
+    } else {
+        10.0 * mag
+    };
+    let mut ticks = Vec::new();
+    let mut t = (min / step).floor() * step;
+    while t <= max + step {
+        if t >= min && t <= max {
+            ticks.push(t);
+        }
+        t += step;
+    }
+    if ticks.is_empty() {
+        ticks.push(min);
+    }
+    ticks
+}
+
+/// Unit-aware value formatting for axis ticks and legends, reusing metric
+/// abbreviation (`format_metric`) and appending the declared unit when present.
+pub fn format_quantity(value: f64, unit: Option<&str>) -> String {
+    let mut text = format_metric(value);
+    if let Some(unit) = unit.filter(|unit| !unit.is_empty()) {
+        text = format!("{text} {unit}");
+    }
+    text
+}
+
+/// Draw min/mid/max tick labels along the left edge of a plot area and a
+/// current-value legend at its top-right, so a chart can be read back to a
+/// number across the wall (docs/widget-quality.md). `value` is the reading to
+/// surface; for multi-series plots it is the most relevant one (e.g. the max).
+#[allow(clippy::too_many_arguments)]
+fn annotate_plot(
+    frame: &mut canvas::Frame,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    min: f64,
+    max: f64,
+    unit: Option<&str>,
+    value: f64,
+    color: Color,
+    size: f32,
+) {
+    let span = (max - min).max(1e-9);
+    for tick in nice_ticks(min, max, 3) {
+        let frac = ((tick - min) / span) as f32;
+        let label = format_quantity(tick, unit);
+        frame.fill_text(canvas::Text {
+            content: label,
+            position: Point::new(x, y + height * (1.0 - frac) - size * 0.4),
+            color,
+            size: iced::Pixels(size),
+            ..Default::default()
+        });
+    }
+    let legend = format_quantity(value, unit);
+    let legend_w = legend.chars().count() as f32 * 4.8;
+    frame.fill_text(canvas::Text {
+        content: legend,
+        position: Point::new(x + width - legend_w, y + 1.0),
+        color,
+        size: iced::Pixels(size),
+        ..Default::default()
+    });
+}
+
 /// The value window a plot maps onto its bounds, so a mapping is stated once
 /// and shared: a sparkline and a time series that scale differently are two
 /// instruments, not one library.
@@ -1890,6 +1990,9 @@ fn draw_series_line(
 struct SparklineProgram {
     values: Vec<f32>,
     color: Color,
+    label: Color,
+    label_size: f32,
+    unit: Option<String>,
 }
 
 impl<Message> canvas::Program<Message> for SparklineProgram {
@@ -1924,6 +2027,21 @@ impl<Message> canvas::Program<Message> for SparklineProgram {
                 .map(|value| range.project(*value, area))
                 .collect();
             draw_series_line(frame, &points, bounds.height, self.color, AREA_ALPHA);
+            if let Some(last) = self.values.last() {
+                annotate_plot(
+                    frame,
+                    area.x,
+                    area.y,
+                    area.width,
+                    area.height,
+                    range.min_y as f64,
+                    range.max_y as f64,
+                    self.unit.as_deref(),
+                    *last as f64,
+                    self.label,
+                    self.label_size,
+                );
+            }
         })
     }
 }
@@ -1933,6 +2051,8 @@ struct GaugeProgram {
     track: Color,
     fill: Color,
     radius: f32,
+    label: Color,
+    label_size: f32,
 }
 
 impl<Message> canvas::Program<Message> for GaugeProgram {
@@ -1962,6 +2082,19 @@ impl<Message> canvas::Program<Message> for GaugeProgram {
                 ),
                 self.fill,
             );
+            annotate_plot(
+                frame,
+                0.0,
+                0.0,
+                bounds.width,
+                bounds.height,
+                0.0,
+                100.0,
+                None,
+                self.value as f64,
+                self.label,
+                self.label_size,
+            );
         })
     }
 }
@@ -1970,6 +2103,9 @@ struct HistogramProgram {
     values: Vec<f32>,
     color: Color,
     grid: Color,
+    label: Color,
+    label_size: f32,
+    unit: Option<String>,
 }
 
 impl<Message> canvas::Program<Message> for HistogramProgram {
@@ -2012,6 +2148,19 @@ impl<Message> canvas::Program<Message> for HistogramProgram {
                     self.color,
                 );
             }
+            annotate_plot(
+                frame,
+                0.0,
+                0.0,
+                bounds.width,
+                bounds.height,
+                0.0,
+                max as f64,
+                self.unit.as_deref(),
+                max as f64,
+                self.label,
+                self.label_size,
+            );
         })
     }
 }
@@ -2020,6 +2169,9 @@ struct TimeSeriesProgram {
     series: Vec<Vec<(f32, f32)>>,
     colors: Vec<Color>,
     grid: Color,
+    label: Color,
+    label_size: f32,
+    unit: Option<String>,
 }
 
 impl<Message> canvas::Program<Message> for TimeSeriesProgram {
@@ -2068,6 +2220,19 @@ impl<Message> canvas::Program<Message> for TimeSeriesProgram {
                     area_alpha,
                 );
             }
+            annotate_plot(
+                frame,
+                area.x,
+                area.y,
+                area.width,
+                area.height,
+                range.min_y as f64,
+                range.max_y as f64,
+                self.unit.as_deref(),
+                range.max_y as f64,
+                self.label,
+                self.label_size,
+            );
         })
     }
 }
@@ -2218,6 +2383,19 @@ impl<Message> canvas::Program<Message> for ChartProgram {
                     ),
                     stroke,
                 );
+                annotate_plot(
+                    frame,
+                    margin,
+                    margin,
+                    plot_w,
+                    plot_h,
+                    min_y as f64,
+                    max_y as f64,
+                    None,
+                    max_y as f64,
+                    self.axis_color,
+                    11.0,
+                );
             }
 
             match self.chart_type {
@@ -2324,6 +2502,29 @@ mod tests {
         assert_eq!(short_value(-7.0), "-7");
         assert_eq!(short_value(12.5), "12.5");
         assert_eq!(short_value(1000.0), "1.0e3");
+    }
+
+    #[test]
+    fn nice_ticks_pick_a_1_2_5_ramp_inside_the_range() {
+        // A color/spatial scale only helps if the step is a round 1/2/5 × 10ⁿ
+        // value and every label lands inside the data range.
+        let ticks = nice_ticks(0.0, 10.0, 4);
+        assert!(!ticks.is_empty());
+        assert!(ticks[0] >= 0.0);
+        assert!(*ticks.last().unwrap() <= 10.0);
+        let step = ticks[1] - ticks[0];
+        let mantissa = step / 10f64.powf(step.log10().floor());
+        assert!(
+            [1.0, 2.0, 5.0, 10.0].contains(&mantissa.round()),
+            "step {step} is not a 1/2/5 ramp"
+        );
+    }
+
+    #[test]
+    fn format_quantity_appends_units() {
+        assert_eq!(format_quantity(0.0, None), "0");
+        assert_eq!(format_quantity(1234.0, Some("ms")), "1.2k ms");
+        assert_eq!(format_quantity(0.5, Some("°C")), "0.50 °C");
     }
 
     #[test]
