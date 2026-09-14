@@ -7,7 +7,7 @@
 //! child exits it restarts with capped backoff and says so. Run in the
 //! foreground; Ctrl-C stops the whole process group, ffmpeg children included.
 
-use canvas_frigate::{Camera, ffmpeg_args, frame_path, is_safe_source_id, write_atomic};
+use canvas_frigate::{Camera, HwDecode, ffmpeg_args, frame_path, is_safe_source_id, write_atomic};
 use std::{
     collections::BTreeSet,
     io::{BufReader, Read},
@@ -17,7 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const ARG_ERR: &str = "usage: canvas-frigate --camera <id=rtsp-url> [--camera ...] [--fps N] [--max-height PX] [--runtime-dir PATH] [--ffmpeg PATH]";
+const ARG_ERR: &str = "usage: canvas-frigate --camera <id=rtsp-url> [--camera ...] [--fps N] [--max-height PX] [--hwaccel auto|videotoolbox|v4l2m2m|none] [--runtime-dir PATH] [--ffmpeg PATH]";
 
 fn opt(args: &[String], flag: &str) -> Option<String> {
     args.iter()
@@ -61,13 +61,20 @@ fn parse_cameras(args: &[String]) -> Result<Vec<Camera>, String> {
 /// Run one camera forever: pull ffmpeg, frame-scan its stdout, write frames
 /// atomically, and restart on death with backoff that resets after a healthy
 /// run so a flapping source cannot spin the CPU.
-fn serve_camera(camera: &Camera, ffmpeg: &str, fps: f64, max_height: u32, dest: &std::path::Path) {
+fn serve_camera(
+    camera: &Camera,
+    ffmpeg: &str,
+    fps: f64,
+    max_height: u32,
+    hwaccel: HwDecode,
+    dest: &std::path::Path,
+) {
     let mut backoff = Duration::from_millis(500);
     let cap = Duration::from_secs(15);
     loop {
         let started = Instant::now();
         let mut child = match Command::new(ffmpeg)
-            .args(ffmpeg_args(&camera.rtsp_url, fps, max_height))
+            .args(ffmpeg_args(&camera.rtsp_url, fps, max_height, hwaccel))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -150,6 +157,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => canvas_core::runtime_root().ok_or("set CANVAS_CONFIG_DIR or --runtime-dir")?,
     };
     let ffmpeg = opt(&args, "--ffmpeg").unwrap_or_else(|| "ffmpeg".to_string());
+    let hwaccel = match opt(&args, "--hwaccel") {
+        Some(token) => HwDecode::parse(&token).map_err(|error| -> Box<dyn std::error::Error> { error.into() })?,
+        None => HwDecode::Auto,
+    };
 
     let mut builders = Vec::new();
     for camera in cameras {
@@ -166,7 +177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|(camera, dest, ffmpeg)| {
             thread::Builder::new()
                 .name(format!("frigate-{}", camera.source_id))
-                .spawn(move || serve_camera(&camera, &ffmpeg, fps, max_height, &dest))
+                .spawn(move || serve_camera(&camera, &ffmpeg, fps, max_height, hwaccel, &dest))
         })
         .collect::<Result<_, _>>()?;
     // Foreground daemon: block on the workers; SIGINT ends the process group.
