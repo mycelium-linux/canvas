@@ -359,11 +359,14 @@ pub fn default_path() -> Result<PathBuf, Error> {
     Ok(path)
 }
 
-pub fn load(path: &Path, catalog: &Catalog) -> Result<WorkspaceStore, Error> {
+/// Read the store back, salvaging around individually invalid workspaces.
+/// The returned notes name every workspace dropped, so a boot can report
+/// what it refused instead of quietly rewriting history.
+pub fn load(path: &Path, catalog: &Catalog) -> Result<(WorkspaceStore, Vec<String>), Error> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(WorkspaceStore::default());
+            return Ok((WorkspaceStore::default(), Vec::new()));
         }
         Err(error) => return Err(Error(format!("Inspect Canvas workspace store: {error}"))),
     };
@@ -385,10 +388,28 @@ pub fn load(path: &Path, catalog: &Catalog) -> Result<WorkspaceStore, Error> {
             "Canvas workspace store exceeds its byte limit".into(),
         ));
     }
-    let store: WorkspaceStore = serde_json::from_slice(&bytes)
+    let mut store: WorkspaceStore = serde_json::from_slice(&bytes)
         .map_err(|error| Error(format!("Parse Canvas workspace store: {error}")))?;
-    store.validate(catalog)?;
-    Ok(store)
+    // Salvage, don't annihilate: one workspace for an Alfalfa-discovered
+    // project (or one legacy document that no longer validates) must not
+    // discard every other arrangement — that silent reset destroyed users'
+    // walls (dock-8gr). Each document gets the lenient structural pass now;
+    // strict catalog membership resumes at switch/apply/save, when the live
+    // catalog is complete. Rejections are returned as notes for the caller
+    // to report — loud at boot, never swallowed.
+    let effective = store.effective_catalog(catalog)?;
+    let mut rejected = Vec::new();
+    let mut notes = Vec::new();
+    for (project_id, document) in &store.projects {
+        if let Err(error) = document.validate_with(&effective, false) {
+            notes.push(format!("workspace {project_id} rejected: {error}"));
+            rejected.push(project_id.clone());
+        }
+    }
+    for project_id in rejected {
+        store.projects.remove(&project_id);
+    }
+    Ok((store, notes))
 }
 
 pub fn save(path: &Path, store: &WorkspaceStore, catalog: &Catalog) -> Result<(), Error> {
@@ -508,9 +529,50 @@ mod tests {
         let mut store = WorkspaceStore::default();
         store.upsert(document(&project_id));
         save(&path, &store, &catalog).unwrap();
-        let loaded = load(&path, &catalog).unwrap();
+        let loaded = load(&path, &catalog).unwrap().0;
         assert_eq!(loaded, store);
         assert_eq!(loaded.project_ids().collect::<Vec<_>>(), [project_id]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_salvages_unknown_projects_and_reports_rejects() {
+        let catalog = Catalog::bundled().unwrap();
+        let known = catalog.projects[0].id.clone();
+        let root = std::env::temp_dir().join(format!(
+            "canvas-workspace-salvage-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("salvage")
+        ));
+        let path = root.join("workspaces.json");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let mut store = WorkspaceStore::default();
+        store.upsert(document(&known));
+        store.projects.insert("ghost".into(), document("ghost"));
+        let mut broken = document("broken");
+        broken.id = "Bad Id!".into();
+        store.projects.insert("broken".into(), broken);
+        // Written raw, because strict save() refuses the ghost — that is
+        // precisely the real shape: the store was saved against a complete
+        // (Alfalfa-merged) catalog and meets a bare bundled one at boot.
+        fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
+        fs::set_permissions(
+            &path,
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let (loaded, notes) = load(&path, &catalog).unwrap();
+        assert!(loaded.get(&known).is_some(), "valid workspace survives");
+        assert!(
+            loaded.get("ghost").is_some(),
+            "an unknown project's workspace must survive boot, not annihilate the store"
+        );
+        assert!(loaded.get("broken").is_none(), "structural garbage is dropped");
+        assert!(
+            notes.iter().any(|note| note.contains("broken")),
+            "every drop is reported: {notes:?}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -584,7 +646,7 @@ mod tests {
         store.active_project_id = Some("gh-1288853134".into());
         save(&path, &store, &base).unwrap();
 
-        let loaded = load(&path, &base).unwrap();
+        let loaded = load(&path, &base).unwrap().0;
         assert_eq!(loaded, store);
         assert_eq!(loaded.active_project_id.as_deref(), Some("gh-1288853134"));
         assert!(

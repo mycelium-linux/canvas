@@ -524,8 +524,20 @@ impl App {
         workspace_store_path: PathBuf,
     ) -> Result<Self, String> {
         let base_catalog = Catalog::bundled().expect("bundled project catalog must remain valid");
-        let workspaces = workspace_store::load(&workspace_store_path, &base_catalog)
-            .unwrap_or_else(|_| workspace_store::WorkspaceStore::default());
+        // An unusable store must not boot the wall blank in silence
+        // (dock-8gr): salvage what parses, report every drop loudly, and
+        // keep starting from defaults as the last resort — not the quiet one.
+        let (workspaces, mut store_notes) =
+            match workspace_store::load(&workspace_store_path, &base_catalog) {
+                Ok(pair) => pair,
+                Err(error) => {
+                    eprintln!("Canvas workspace store unusable: {error}");
+                    (
+                        workspace_store::WorkspaceStore::default(),
+                        vec![format!("workspace store unusable: {error}")],
+                    )
+                }
+            };
         let mut catalog = workspaces
             .effective_catalog(&base_catalog)
             .map_err(|error| error.to_string())?;
@@ -533,11 +545,37 @@ impl App {
         // not just the 2 bundled ones. New projects get a default Coherence theme;
         // bundled projects keep their configured theme.
         Self::merge_alfalfa_projects(&mut catalog);
-        let project_id = workspaces
+        let mut project_id = workspaces
             .active_project_id
             .clone()
             .unwrap_or_else(|| catalog.projects[0].id.clone());
-        let restored_document = workspaces.get(&project_id).cloned();
+        let mut restored_document = workspaces.get(&project_id).cloned();
+        if let Some(document) = &restored_document
+            && let Err(error) = document.validate(&catalog)
+        {
+            // The lenient tier keeps workspaces for discovered projects in the
+            // store; only the one document rendering at boot must resolve its
+            // theme right now, so the strict re-check happens after the
+            // Alfalfa merge widened the catalog. Failing it falls back to a
+            // default document — loudly, and before the first switch could
+            // upsert anything over the stored one.
+            store_notes.push(format!("active workspace {project_id} unusable: {error}"));
+            restored_document = None;
+            project_id = catalog.projects[0].id.clone();
+        }
+        if restored_document.is_none() && catalog.project(&project_id).is_err() {
+            // Salvage may have dropped the active document entirely; a default
+            // document for a project the catalog does not know would panic the
+            // palette on the first frame. Land on a real project instead.
+            store_notes.push(format!(
+                "active project {project_id} has no usable workspace; falling back to {}",
+                catalog.projects[0].id
+            ));
+            project_id = catalog.projects[0].id.clone();
+        }
+        for note in &store_notes {
+            eprintln!("Canvas workspace store: {note}");
+        }
         let active_project_workspace = restored_document
             .as_ref()
             .map(|document| document.project_id.clone());
@@ -801,7 +839,7 @@ impl App {
             workspaces,
             workspace_store_path,
             active_project_workspace,
-            events: Vec::new(),
+            events: store_notes,
             background_assets: BTreeMap::new(),
             screensaver_settings: ScreensaverSettings::default(),
             screensaver_clock: screensaver::FrameClock::new(
@@ -8587,6 +8625,63 @@ mod tests {
         app
     }
 
+    #[test]
+    fn boot_restores_the_active_workspace_and_reports_every_salvage_drop() {
+        // dock-8gr end to end: a store saved while Alfalfa was merged (so it
+        // holds a workspace for a project the bare bundled catalog does not
+        // know) plus one structurally broken document must come back as the
+        // active arrangement, keep the unknown-project workspace for later,
+        // and say out loud what it dropped.
+        let root = std::env::temp_dir().join(format!("canvas-boot-store-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let store_path = root.join("workspaces.json");
+        let base = Catalog::bundled().unwrap();
+        let dock = base.projects[0].id.clone();
+        let doc = |project: &str, id: &str| WorkspaceDocument {
+            schema_version: SCHEMA_VERSION,
+            id: id.into(),
+            project_id: project.into(),
+            revision: 3,
+            theme: ThemeRef::Project,
+            background: ::canvas::Background::default(),
+            chrome: SurfaceChrome::default(),
+            surfaces: Vec::new(),
+            layout: Layout::Empty,
+            bindings: Vec::new(),
+            focused_surface_id: None,
+        };
+        let mut store = workspace_store::WorkspaceStore::default();
+        store.upsert(doc(&dock, "restored-wall"));
+        store.projects.insert("ghost".into(), doc("ghost", "ghost-workspace"));
+        store.projects.insert("broken".into(), doc("broken", "Bad Id!"));
+        store.active_project_id = Some(dock.clone());
+        fs::write(&store_path, serde_json::to_vec(&store).unwrap()).unwrap();
+        fs::set_permissions(&store_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let (_sender, receiver) = mpsc::sync_channel(1);
+        let app = App::new(
+            Arc::new(Mutex::new(receiver)),
+            SocketGuard {
+                path: root.join("control.sock"),
+            },
+            INITIAL_FRAME,
+            store_path,
+        )
+        .unwrap();
+        assert_eq!(app.document.id, "restored-wall");
+        assert_eq!(app.active_project_workspace.as_deref(), Some(dock.as_str()));
+        assert!(
+            app.workspaces.get("ghost").is_some(),
+            "unknown-project workspaces survive for later switches"
+        );
+        assert!(
+            app.events.iter().any(|event| event.contains("broken")),
+            "drops must be visible in boot events: {:?}",
+            app.events
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     fn execute(app: &mut App, request_id: &str, command: Command) -> ControlReply {
         let (reply, replies) = mpsc::sync_channel(1);
         drop(app.execute(Pending {
@@ -10908,6 +11003,7 @@ mod tests {
         assert_eq!(
             workspace_store::load(&app.workspace_store_path, &app.catalog)
                 .unwrap()
+                .0
                 .get(&dock)
                 .unwrap()
                 .chrome
@@ -11107,6 +11203,7 @@ mod tests {
 
         let stored = workspace_store::load(&app.workspace_store_path, &app.catalog)
             .unwrap()
+            .0
             .get(&project_id)
             .cloned()
             .unwrap();

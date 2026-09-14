@@ -943,14 +943,27 @@ impl WorkspaceDocument {
     }
 
     pub fn validate(&self, catalog: &Catalog) -> Result<()> {
+        self.validate_with(catalog, true)
+    }
+
+    /// `require_project=false` is the boot-ladder lenient tier: the store on
+    /// disk may hold workspaces for projects Alfalfa knows about and the
+    /// bundled catalog does not (yet). Refusing the whole store over one such
+    /// document silently destroyed every arrangement (dock-8gr); instead the
+    /// shape is checked now and catalog membership is enforced at every strict
+    /// touch point — switch, apply, save.
+    pub fn validate_with(&self, catalog: &Catalog, require_project: bool) -> Result<()> {
         check(
             self.schema_version == SCHEMA_VERSION,
             "Unsupported Canvas workspace schema_version",
         )?;
         check(identifier(&self.id), "Invalid Canvas workspace id")?;
-        let project = catalog
-            .project(&self.project_id)
-            .map_err(|error| Error(error.to_string()))?;
+        let project = catalog.project(&self.project_id).ok();
+        if require_project {
+            let _ = catalog
+                .project(&self.project_id)
+                .map_err(|error| Error(error.to_string()))?;
+        }
         check(self.revision > 0, "Workspace revision must be positive")?;
         self.background.validate()?;
         check(
@@ -982,31 +995,37 @@ impl WorkspaceDocument {
                 check(contract(&input.contract), "Invalid input contract")?;
             }
             match &surface.content {
+                // Project-scoped checks only apply once the project is known;
+                // the lenient tier defers them to strict touch points.
                 SurfaceContent::ProjectResource { resource_id } => {
-                    check(
-                        project
-                            .resources
-                            .iter()
-                            .any(|resource| &resource.id == resource_id),
-                        format!("Unknown project resource: {resource_id}"),
-                    )?;
+                    if let Some(project) = project {
+                        check(
+                            project
+                                .resources
+                                .iter()
+                                .any(|resource| &resource.id == resource_id),
+                            format!("Unknown project resource: {resource_id}"),
+                        )?;
+                    }
                 }
                 SurfaceContent::Terminal { resource_id } => {
-                    let resource = project
-                        .resources
-                        .iter()
-                        .find(|resource| &resource.id == resource_id);
-                    check(
-                        resource.is_some_and(|resource| {
-                            matches!(
-                                resource.kind,
-                                ResourceKind::TerminalSession | ResourceKind::AgentSession
-                            )
-                        }),
-                        format!(
-                            "Terminal surface requires a managed session resource: {resource_id}"
-                        ),
-                    )?;
+                    if let Some(project) = project {
+                        let resource = project
+                            .resources
+                            .iter()
+                            .find(|resource| &resource.id == resource_id);
+                        check(
+                            resource.is_some_and(|resource| {
+                                matches!(
+                                    resource.kind,
+                                    ResourceKind::TerminalSession | ResourceKind::AgentSession
+                                )
+                            }),
+                            format!(
+                                "Terminal surface requires a managed session resource: {resource_id}"
+                            ),
+                        )?;
+                    }
                 }
                 SurfaceContent::Asset { asset } => asset.validate()?,
                 SurfaceContent::Chart { chart } => {
