@@ -1,54 +1,48 @@
--- alfalfa-pulse-v1: one project's life — marbles and pull requests, with the
--- stage counts as header context. Marbles use Alfalfa's own word; the row
--- order is exactly what the roster sent (newest activity first), never a
--- invented recency. A project with neither still renders: absence is shown,
--- not hidden.
+-- alfalfa-pulse-v1: one project's recent marbles and pull requests as an
+-- event log — colored by severity instead of another wall of text columns.
+-- The producer already decided the level (blocked screams, in-flight glows,
+-- open waits, closed rests); the row order is exactly what the roster sent,
+-- never an invented recency. Absence renders as one honest entry.
 local payload = event.payload
 if type(payload) ~= "table" then
   error("alfalfa-pulse-v1 requires a payload table")
 end
 
-local rows = {}
+local entries = {}
 local marbles = payload.marbles or {}
 local pulls = payload.pulls or {}
 for index = 1, #marbles do
   local marble = marbles[index]
-  rows[#rows + 1] = {
-    tostring(marble[1]),
-    tostring(marble[2]),
-    tostring(marble[3]),
-    tostring(marble[4]),
+  entries[#entries + 1] = {
+    timestamp = tostring(marble[2]),
+    message = tostring(marble[4]),
+    level = tostring(marble[5] or "neutral"),
   }
 end
 for index = 1, #pulls do
   local pull = pulls[index]
-  rows[#rows + 1] = {
-    tostring(pull[1]),
-    tostring(pull[2]),
-    tostring(pull[3]),
-    tostring(pull[4]),
+  entries[#entries + 1] = {
+    timestamp = tostring(pull[2]),
+    message = "PR " .. tostring(pull[4]) .. " " .. tostring(pull[3]),
+    level = tostring(pull[5] or "good"),
   }
 end
 
-if #rows == 0 then
-  rows[1] = { "—", "no recent marbles or PRs", "", "" }
+if #entries == 0 then
+  entries[1] = { timestamp = "—", message = "no recent marbles or PRs", level = "neutral" }
 end
 
 return {
   kind = "snapshot",
   widget = {
-    kind = "table",
-    title = tostring(payload.project or "?") .. " pulse",
-    columns = { "kind", "ref", "state", "title" },
-    rows = rows,
+    kind = "event_log",
+    title = tostring(payload.project or "?") .. " — recent marbles",
+    entries = entries,
   },
   data = {
     state = "ready",
     source = "alfalfa:" .. tostring(payload.project or "?"),
-    detail = tostring(payload.active or 0) .. " active · "
-      .. tostring(payload.ready or 0) .. " ready · "
-      .. tostring(payload.backlog or 0) .. " backlog · idle "
-      .. tostring(payload.idle or "-"),
+    detail = "backlog " .. tostring(payload.backlog or 0),
     provenance = "live",
   },
 }

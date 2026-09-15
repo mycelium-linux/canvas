@@ -38,6 +38,7 @@ objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSWindow"] }
 objc2-foundation = { version = "0.2", features = ["NSThread"] }
 
 [dev-dependencies]
+canvas-alfalfa = { path = "../canvas-alfalfa" }
 rmcp = { version = "3.2", default-features = false, features = ["client", "server", "transport-io"] }
 
 [[bin]]

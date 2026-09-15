@@ -425,6 +425,14 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/market-ohlcv-v1.lua"),
     ),
     (
+        "alfalfa-activity-v1",
+        include_str!("../../../config/binders/alfalfa-activity-v1.lua"),
+    ),
+    (
+        "alfalfa-fleet-heatmap-v1",
+        include_str!("../../../config/binders/alfalfa-fleet-heatmap-v1.lua"),
+    ),
+    (
         "alfalfa-overview-v1",
         include_str!("../../../config/binders/alfalfa-overview-v1.lua"),
     ),
@@ -622,6 +630,18 @@ mod tests {
         WIDGET_SCHEMA_VERSION, WidgetChrome, WidgetKind,
         quant::{Candle, QuantWidget},
     };
+
+    fn test_spec(kind: WidgetKind) -> WidgetSpec {
+        WidgetSpec {
+            schema_version: WIDGET_SCHEMA_VERSION,
+            id: "probe".into(),
+            kind,
+            theme: None,
+            refresh_ms: None,
+            chrome: WidgetChrome::DragOnly,
+            data: canvas_widgets::WidgetData::default(),
+        }
+    }
 
     fn spec() -> WidgetSpec {
         WidgetSpec {
@@ -872,25 +892,23 @@ mod tests {
     }
 
     #[test]
-    fn alfalfa_pulse_binder_renders_marbles_and_pulls_as_a_table() {
-        // Mirrors canvas-alfalfa's pulse payload; the producer owns its side
-        // of the seam and is tested against the live roster shape.
-        let mut target = WidgetSpec {
-            schema_version: WIDGET_SCHEMA_VERSION,
-            id: "dock-pulse".into(),
-            kind: WidgetKind::Table {
-                title: "dock pulse".into(),
-                columns: ["kind", "ref", "state", "title"]
-                    .iter()
-                    .map(|c| (*c).to_string())
-                    .collect(),
-                rows: Vec::new(),
-            },
-            theme: None,
-            refresh_ms: None,
-            chrome: WidgetChrome::DragOnly,
-            data: canvas_widgets::WidgetData::default(),
-        };
+    fn alfalfa_binders_render_their_widget_kinds() {
+        // The seam: these payloads are built with the producer's own
+        // projections (bead_rows carries the severity), so passing here means
+        // producer + binder agree on the wire, not on a hand-copied fixture.
+        let beads = serde_json::json!([
+            {"id": "dock-8gr", "status": "closed", "title": "Boot restore", "blocked": false},
+            {"id": "dock-1x", "status": "open", "title": "Blocked thing", "blocked": true},
+        ]);
+        let marbles = canvas_alfalfa::bead_rows(beads.as_array(), 6);
+        let payload = serde_json::json!({
+            "project": "dock",
+            "state": "active",
+            "activity": 75,
+            "active": 2, "ready": 1, "backlog": 110, "idle": "25%",
+            "marbles": marbles,
+            "pulls": [["pull", "#12", "open", "Widgets", "good"]],
+        });
         let event = StreamEnvelope {
             schema_version: STREAM_SCHEMA_VERSION,
             owner: "alfalfa".into(),
@@ -899,26 +917,83 @@ mod tests {
             project_id: None,
             sequence: 1,
             emitted_at_ms: now_ms(),
-            payload: serde_json::json!({
-                "project": "dock",
-                "state": "active",
-                "active": 2, "ready": 1, "backlog": 110, "idle": "40%",
-                "marbles": [["marble", "dock-8gr", "closed", "Boot restore"]],
-                "pulls": [["pull", "#12", "open", "Alfalfa widgets"]],
-            }),
+            payload: payload.clone(),
         };
-        apply_named_adapter("alfalfa-pulse-v1", &event, &mut target).expect("pulse renders");
-        let WidgetKind::Table { title, rows, .. } = &target.kind else {
-            panic!("table")
-        };
-        assert_eq!(title, "dock pulse");
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0][1], "dock-8gr");
-        assert_eq!(rows[1][1], "#12");
-        assert_eq!(target.data.state, canvas_widgets::WidgetDataState::Ready);
-        assert!(target.data.detail.as_deref().is_some_and(|d| d.contains("110 backlog")));
-    }
 
+        let mut pulse = test_spec(WidgetKind::EventLog {
+            title: "stale".into(),
+            entries: Vec::new(),
+        });
+        apply_named_adapter("alfalfa-pulse-v1", &event, &mut pulse).expect("eventlog renders");
+        let WidgetKind::EventLog { title, entries, .. } = &pulse.kind else {
+            panic!("eventlog, got {:?}", pulse.kind)
+        };
+        assert_eq!(title, "dock — recent marbles");
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].timestamp, "dock-8gr");
+        assert_eq!(entries[0].level, canvas_widgets::StatusLevel::Neutral);
+        assert_eq!(entries[1].level, canvas_widgets::StatusLevel::Critical);
+        assert_eq!(entries[2].message, "PR Widgets open");
+
+        let mut gauge = test_spec(WidgetKind::Gauge {
+            value: 0.0,
+            label: None,
+        });
+        apply_named_adapter("alfalfa-activity-v1", &event, &mut gauge).expect("gauge renders");
+        let WidgetKind::Gauge { value, label } = &gauge.kind else {
+            panic!("gauge")
+        };
+        assert_eq!(*value, 75.0);
+        assert_eq!(label.as_deref(), Some("dock activity"));
+
+        let fleet_rows = serde_json::json!([
+            ["dock", "active", 2, 1, 110, "25%"],
+            ["JARVIS", "paused", 0, 0, 31, "100%"],
+        ]);
+        let overview = serde_json::json!({
+            "projects": 2, "active": 2, "ready": 1, "backlog": 141, "idle": 1,
+            "rows": fleet_rows, "truncated": false,
+            "matrix": {
+                "columns": ["act", "rdy", "bky"],
+                "rows": ["dock", "JARVIS"],
+                "values": [[2, 1, 110], [0, 0, 31]],
+            },
+        });
+        let overview_event = StreamEnvelope {
+            owner: "alfalfa".into(),
+            stream: "overview".into(),
+            payload: overview,
+            ..event.clone()
+        };
+        let mut fleet = test_spec(WidgetKind::StatusList {
+            title: "stale".into(),
+            nodes: Vec::new(),
+        });
+        apply_named_adapter("alfalfa-overview-v1", &overview_event, &mut fleet)
+            .expect("status list renders");
+        let WidgetKind::StatusList { nodes, .. } = &fleet.kind else {
+            panic!("status list")
+        };
+        assert_eq!(nodes.len(), 3);
+        assert_eq!(nodes[1].label, "dock");
+        assert_eq!(nodes[1].state, canvas_widgets::StatusLevel::Good);
+        assert_eq!(nodes[2].state, canvas_widgets::StatusLevel::Warning);
+
+        let mut heat = test_spec(WidgetKind::Heatmap {
+            title: "stale".into(),
+            rows: Vec::new(),
+            columns: Vec::new(),
+            values: Vec::new(),
+            unit: None,
+        });
+        apply_named_adapter("alfalfa-fleet-heatmap-v1", &overview_event, &mut heat)
+            .expect("heatmap renders");
+        let WidgetKind::Heatmap { rows, values, .. } = &heat.kind else {
+            panic!("heatmap")
+        };
+        assert_eq!(rows.len(), 2);
+        assert_eq!(values[1][2], 31.0);
+    }
     #[test]
     fn feed_headlines_survives_an_emoji_splitting_the_clip_boundary() {
         // The live failure: a headline long enough that the binder's 55-byte

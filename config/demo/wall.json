@@ -99,6 +99,56 @@
     "source_id": "cat"
    },
    "inputs": []
+  },
+  {
+   "id": "marbles",
+   "title": "dock \u2014 recent marbles",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "dock-marbles",
+     "kind": "event_log",
+     "title": "dock \u2014 recent marbles",
+     "entries": [],
+     "data": {
+      "state": "loading",
+      "source": "alfalfa:dock",
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "widget",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "activity",
+   "title": "dock activity",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "dock-activity",
+     "kind": "gauge",
+     "value": 0.0,
+     "label": null,
+     "data": {
+      "state": "loading",
+      "source": "alfalfa:dock",
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "widget",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
   }
  ],
  "layout": {
@@ -153,6 +203,26 @@
      "height": 0.381966
     },
     "layer": 4
+   },
+   {
+    "surface_id": "marbles",
+    "bounds": {
+     "x": 0.0,
+     "y": 0.0,
+     "width": 1.0,
+     "height": 1.0
+    },
+    "layer": 5
+   },
+   {
+    "surface_id": "activity",
+    "bounds": {
+     "x": 0.0,
+     "y": 0.0,
+     "width": 1.0,
+     "height": 1.0
+    },
+    "layer": 6
    }
   ]
  },
@@ -185,6 +255,38 @@
     "input_id": "widget"
    },
    "adapter": "feed-headlines-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "dock-marbles-bind",
+   "source": {
+    "owner": "alfalfa",
+    "stream": "dock-pulse",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "marbles",
+    "input_id": "widget"
+   },
+   "adapter": "alfalfa-pulse-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "dock-activity-bind",
+   "source": {
+    "owner": "alfalfa",
+    "stream": "dock-pulse",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "activity",
+    "input_id": "widget"
+   },
+   "adapter": "alfalfa-activity-v1",
    "delivery": {
     "mode": "latest"
    }

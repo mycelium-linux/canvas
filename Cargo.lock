@@ -359,6 +359,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "canvas-alfalfa",
  "canvas-control",
  "canvas-core",
  "canvas-widgets",

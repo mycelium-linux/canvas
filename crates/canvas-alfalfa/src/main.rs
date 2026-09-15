@@ -112,11 +112,11 @@ fn main() -> ExitCode {
                         .is_some_and(|id| ids.iter().any(|want| want.eq_ignore_ascii_case(id)))
                 })
                 .collect(),
-            None => repos
-                .iter()
-                .filter(|repo| repo.get("state").and_then(Value::as_str) == Some("active"))
-                .take(4)
-                .collect(),
+            // Default: every project gets a pulse stream — tiles bind to it
+            // only in workspaces that actually mount one, so idle streams
+            // cost nothing but a datagram, and opening any project's
+            // workspace shows its marbles instantly.
+            None => repos.iter().take(24).collect(),
         };
         let mut sent = 0;
         for repo in pulses {

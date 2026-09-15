@@ -1396,6 +1396,11 @@ mod tests {
                 {"id":"docs","title":"Docs","host":"mac","kind":"mac_app","target":"com.apple.Safari"},
                 {"id":"shell","title":"Shell","host":"agora_one","kind":"terminal_session","target":"dock"}
                 ]
+            },{
+                "id": "alfalfa",
+                "name": "Alfalfa",
+                "theme": {"source": "coherence", "mode": "dark", "accent": "info"},
+                "resources": []
             }]
             }"#,
         )
@@ -1439,9 +1444,10 @@ mod tests {
     }
 
     #[test]
-    fn wall_workspace_mixes_text_feeds_and_image_frames() {
-        // The live demo the user watches: two headline tables (stream-bound)
-        // plus three live_image frames (xkcd mosaic + two NVR cameras).
+    fn wall_workspace_mixes_text_feeds_image_frames_and_fleet_widgets() {
+        // The live demo the user watches: two headline tables, three
+        // live_image frames (xkcd mosaic + two NVR cameras), and the dock's
+        // own marbles + activity bound to the alfalfa pulse stream.
         // Validating it here means a schema or id drift fails CI, not the wall.
         let json = include_str!("../../../config/demo/wall.json");
         let doc: WorkspaceDocument = serde_json::from_str(json)
@@ -1458,23 +1464,36 @@ mod tests {
             .collect();
         assert_eq!(live.len(), 3, "xkcd + two cameras are live frames");
         assert!(live.contains(&"xkcd"));
-        assert_eq!(doc.bindings.len(), 2, "hn + reddit stay stream-bound");
-    }
-
-    #[test]
-    fn alfalfa_wall_workspace_is_a_valid_dock_document() {
-        let json = include_str!("../../../config/demo/alfalfa-wall.json");
-        let doc: WorkspaceDocument = serde_json::from_str(json)
-            .expect("alfalfa-wall.json must deserialize as a WorkspaceDocument");
-        doc.validate(&catalog())
-            .expect("alfalfa-wall.json must pass validation");
-        assert_eq!(doc.bindings.len(), 4, "fleet + three project pulses");
-        assert!(doc.bindings.iter().all(|b| b.source.owner == "alfalfa"));
+        assert_eq!(doc.bindings.len(), 4, "hn + reddit + marbles + activity");
         assert!(
             doc.bindings
                 .iter()
-                .any(|b| b.adapter.as_deref() == Some("alfalfa-pulse-v1"))
+                .any(|b| b.source.owner == "alfalfa" && b.source.stream == "dock-pulse")
         );
+    }
+
+    #[test]
+    fn alfalfa_fleet_workspace_is_valid_and_kind_locked() {
+        let json = include_str!("../../../config/demo/alfalfa.json");
+        let doc: WorkspaceDocument = serde_json::from_str(json)
+            .expect("alfalfa.json must deserialize as a WorkspaceDocument");
+        doc.validate(&catalog())
+            .expect("alfalfa.json must pass validation");
+        assert!(doc.bindings.iter().all(|b| b.source.owner == "alfalfa"));
+        // Kind parity: a binder may restyle a tile, never hijack its widget
+        // kind - so the seed kinds here must equal what the binders emit.
+        let kinds: Vec<String> = doc
+            .surfaces
+            .iter()
+            .map(|surface| match &surface.content {
+                SurfaceContent::Widget { spec } => serde_json::to_value(&spec.kind).unwrap()["kind"]
+                    .as_str()
+                    .unwrap_or("?")
+                    .to_string(),
+                _ => "?".into(),
+            })
+            .collect();
+        assert_eq!(kinds, ["status_list", "heatmap", "event_log"]);
     }
 
     fn document() -> WorkspaceDocument {
