@@ -16,3 +16,6 @@ schemars = "1"
 canvas-core = { path = "crates/canvas-core" }
 canvas = { path = "crates/canvas" }
 coherence-tokens = { path = "vendor/coherence-tokens" }
+# The household bus contract, shared with JARVIS (dock marbles dock-pubd).
+# Pinned by rev; bump deliberately alongside unibus releases.
+unibus = { git = "ssh://git@github.com/FuturePresentLabs/unibus.git", rev = "8cb630e260f5247b37f1516c16875de5d4fba1e3" }

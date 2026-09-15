@@ -1,0 +1,5 @@
+# The private `unibus` git dependency resolves over SSH; libgit2 cannot use
+# the macOS keychain agent, so delegate fetching to the git CLI on every
+# machine that builds this workspace.
+[net]
+git-fetch-with-cli = true

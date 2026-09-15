@@ -17,6 +17,7 @@ pub mod global_hotkey;
 pub mod layout;
 pub mod manifest_query;
 pub mod theme_file;
+pub mod unibus;
 pub mod working_set;
 
 /// The set of stream contracts Canvas recognises for ingress.
@@ -89,8 +90,7 @@ pub fn is_safe_frame_id(source_id: &str) -> bool {
 /// surface: `<root>/frames/<source_id>.jpg`. Producers and the Canvas host
 /// resolve through this one function so the two can never disagree.
 pub fn frame_file(root: &Path, source_id: &str) -> Option<PathBuf> {
-    is_safe_frame_id(source_id)
-        .then(|| root.join("frames").join(format!("{source_id}.jpg")))
+    is_safe_frame_id(source_id).then(|| root.join("frames").join(format!("{source_id}.jpg")))
 }
 
 /// Land bytes at `path` by sibling-write + rename: a reader either sees the
@@ -149,9 +149,7 @@ fn check(ok: bool, message: impl Into<String>) -> Result<()> {
 /// Ids are identity tokens here, not filenames — document ids remain
 /// lowercase `identifier` grammar, and resource ids never widen.
 fn project_id(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 64
-        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 fn identifier(s: &str) -> bool {
