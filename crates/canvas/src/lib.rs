@@ -1461,6 +1461,22 @@ mod tests {
         assert_eq!(doc.bindings.len(), 2, "hn + reddit stay stream-bound");
     }
 
+    #[test]
+    fn alfalfa_wall_workspace_is_a_valid_dock_document() {
+        let json = include_str!("../../../config/demo/alfalfa-wall.json");
+        let doc: WorkspaceDocument = serde_json::from_str(json)
+            .expect("alfalfa-wall.json must deserialize as a WorkspaceDocument");
+        doc.validate(&catalog())
+            .expect("alfalfa-wall.json must pass validation");
+        assert_eq!(doc.bindings.len(), 4, "fleet + three project pulses");
+        assert!(doc.bindings.iter().all(|b| b.source.owner == "alfalfa"));
+        assert!(
+            doc.bindings
+                .iter()
+                .any(|b| b.adapter.as_deref() == Some("alfalfa-pulse-v1"))
+        );
+    }
+
     fn document() -> WorkspaceDocument {
         WorkspaceDocument {
             schema_version: SCHEMA_VERSION,

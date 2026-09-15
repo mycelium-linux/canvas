@@ -425,6 +425,14 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/market-ohlcv-v1.lua"),
     ),
     (
+        "alfalfa-overview-v1",
+        include_str!("../../../config/binders/alfalfa-overview-v1.lua"),
+    ),
+    (
+        "alfalfa-pulse-v1",
+        include_str!("../../../config/binders/alfalfa-pulse-v1.lua"),
+    ),
+    (
         "agent-attention-v1",
         include_str!("../../../config/binders/agent-attention-v1.lua"),
     ),
@@ -861,6 +869,54 @@ mod tests {
         };
         assert_eq!(value, 1.0);
         assert_eq!(state, Some(canvas_widgets::StatusLevel::Good));
+    }
+
+    #[test]
+    fn alfalfa_pulse_binder_renders_marbles_and_pulls_as_a_table() {
+        // Mirrors canvas-alfalfa's pulse payload; the producer owns its side
+        // of the seam and is tested against the live roster shape.
+        let mut target = WidgetSpec {
+            schema_version: WIDGET_SCHEMA_VERSION,
+            id: "dock-pulse".into(),
+            kind: WidgetKind::Table {
+                title: "dock pulse".into(),
+                columns: ["kind", "ref", "state", "title"]
+                    .iter()
+                    .map(|c| (*c).to_string())
+                    .collect(),
+                rows: Vec::new(),
+            },
+            theme: None,
+            refresh_ms: None,
+            chrome: WidgetChrome::DragOnly,
+            data: canvas_widgets::WidgetData::default(),
+        };
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "alfalfa".into(),
+            stream: "dock-pulse".into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            project_id: None,
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "project": "dock",
+                "state": "active",
+                "active": 2, "ready": 1, "backlog": 110, "idle": "40%",
+                "marbles": [["marble", "dock-8gr", "closed", "Boot restore"]],
+                "pulls": [["pull", "#12", "open", "Alfalfa widgets"]],
+            }),
+        };
+        apply_named_adapter("alfalfa-pulse-v1", &event, &mut target).expect("pulse renders");
+        let WidgetKind::Table { title, rows, .. } = &target.kind else {
+            panic!("table")
+        };
+        assert_eq!(title, "dock pulse");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][1], "dock-8gr");
+        assert_eq!(rows[1][1], "#12");
+        assert_eq!(target.data.state, canvas_widgets::WidgetDataState::Ready);
+        assert!(target.data.detail.as_deref().is_some_and(|d| d.contains("110 backlog")));
     }
 
     #[test]
