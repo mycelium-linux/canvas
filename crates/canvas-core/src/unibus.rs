@@ -17,8 +17,43 @@ pub use ::unibus::{
 pub const COMMAND_KIND_V1: &str = "canvas_command";
 /// v2 namespaced alias.
 pub const COMMAND_KIND: &str = "canvas.command";
+/// Execution receipt an edge sends back to the producer that commanded it.
+pub const RESULT_KIND: &str = "canvas.result";
 /// Edge attention state: which surfaces are actually on screen.
 pub const VISIBILITY_KIND: &str = "canvas.visibility";
+
+/// The receipt frame: `{request_id, ok, error?}` correlated to the
+/// `ControlRequest` the edge executed. The hub routes this by producer back
+/// to the central that sent the command.
+pub fn result_message(request_id: &str, ok: bool, error: Option<String>) -> Message {
+    Message::new(
+        RESULT_KIND,
+        serde_json::json!({
+            "request_id": request_id,
+            "ok": ok,
+            "error": error,
+        }),
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultFrame {
+    pub request_id: String,
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
+/// Parse a receipt body that an edge emitted for a canvas_command envelope.
+pub fn parse_result(message: &Message) -> Option<ResultFrame> {
+    if message.kind != RESULT_KIND {
+        return None;
+    }
+    Some(ResultFrame {
+        request_id: message.body.get("request_id")?.as_str()?.to_owned(),
+        ok: message.body.get("ok")?.as_bool()?,
+        error: message.body.get("error").and_then(|v| v.as_str()).map(str::to_owned),
+    })
+}
 /// v1 capability tag; the v2 namespaced spelling for new grants.
 pub const DISPLAY_CAPABILITY_V1: &str = "display";
 pub const DISPLAY_CAPABILITY: &str = "canvas.display";

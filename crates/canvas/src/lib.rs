@@ -11,6 +11,7 @@ pub mod backend;
 pub mod background_picker;
 #[cfg(feature = "lua-scenes")]
 pub mod briefing;
+pub mod bus;
 pub mod chart;
 pub mod compose;
 pub mod control;
@@ -1450,8 +1451,8 @@ mod tests {
         // own marbles + activity bound to the alfalfa pulse stream.
         // Validating it here means a schema or id drift fails CI, not the wall.
         let json = include_str!("../../../config/demo/wall.json");
-        let doc: WorkspaceDocument = serde_json::from_str(json)
-            .expect("wall.json must deserialize as a WorkspaceDocument");
+        let doc: WorkspaceDocument =
+            serde_json::from_str(json).expect("wall.json must deserialize as a WorkspaceDocument");
         doc.validate(&catalog())
             .expect("wall.json must pass validation");
         let live: Vec<&str> = doc
@@ -1486,10 +1487,12 @@ mod tests {
             .surfaces
             .iter()
             .map(|surface| match &surface.content {
-                SurfaceContent::Widget { spec } => serde_json::to_value(&spec.kind).unwrap()["kind"]
-                    .as_str()
-                    .unwrap_or("?")
-                    .to_string(),
+                SurfaceContent::Widget { spec } => {
+                    serde_json::to_value(&spec.kind).unwrap()["kind"]
+                        .as_str()
+                        .unwrap_or("?")
+                        .to_string()
+                }
                 _ => "?".into(),
             })
             .collect();
