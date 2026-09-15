@@ -37,6 +37,14 @@ struct EdgeConfig {
     /// namespaced `canvas.display` spelling instead.
     #[serde(default)]
     capabilities: Vec<String>,
+    /// Wire schema to present. Deployed hubs run v1; set 2 once the hub is
+    /// the shared unibus-router build.
+    #[serde(default = "default_schema")]
+    schema_version: u32,
+}
+
+fn default_schema() -> u32 {
+    unibus::SCHEMA_VERSION_V1
 }
 
 impl EdgeConfig {
@@ -93,7 +101,7 @@ fn run(config: &EdgeConfig) -> Result<()> {
         config.capabilities.clone()
     };
 
-    let register = Envelope::new(
+    let mut register = Envelope::new(
         &config.installation_id,
         &config.producer_id,
         None,
@@ -107,6 +115,7 @@ fn run(config: &EdgeConfig) -> Result<()> {
             }),
         ),
     );
+    register.schema_version = config.schema_version;
     framing::write_frame(&mut writer, &register, &[]).context("send register")?;
     let (reply, _) = framing::read_frame(&mut reader).context("read register reply")?;
     ensure!(
@@ -124,19 +133,21 @@ fn run(config: &EdgeConfig) -> Result<()> {
         let token = token.clone();
         let installation = config.installation_id.clone();
         let producer = config.producer_id.clone();
+        let schema = config.schema_version;
         let alive = alive.clone();
         thread::Builder::new()
             .name("canvas-edge-heartbeat".into())
             .spawn(move || {
                 while alive.load(Ordering::Acquire) {
                     thread::sleep(HEARTBEAT_INTERVAL);
-                    let envelope = Envelope::new(
+                    let mut envelope = Envelope::new(
                         &installation,
                         &producer,
                         None,
                         &token,
                         Message::new(kinds::V1_HEARTBEAT, serde_json::Value::Null),
                     );
+                    envelope.schema_version = schema;
                     if let Err(e) = framing::write_frame(&mut writer, &envelope, &[]) {
                         eprintln!("canvas-edge: heartbeat failed: {e:#}");
                         break;
