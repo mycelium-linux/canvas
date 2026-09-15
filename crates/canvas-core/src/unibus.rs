@@ -10,7 +10,7 @@
 pub use ::unibus::{
     AuthError, Control, DEFAULT_TTL_MS, Envelope, EnvelopeError, FrameError, MAX_FRAME,
     MAX_FUTURE_SKEW_MS, Message, NodeClaims, NodeGrant, OfflineVerifier, Qos, Role,
-    SCHEMA_VERSION_V1, SCHEMA_VERSION_V2, framing, grants, kinds,
+    SCHEMA_VERSION_V1, SCHEMA_VERSION_V2, envelope, framing, grants, kinds,
 };
 
 /// v1 tag every deployed hub routes today.
