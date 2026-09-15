@@ -1183,7 +1183,7 @@ impl App {
                     eprintln!("{}", self.status);
                 }
                 let frame = self.windows.get(&window).copied().unwrap_or(self.frame);
-                iced::window::set_mode(window, iced::window::Mode::Windowed)
+                iced::window::set_mode(window, iced::window::Mode::Fullscreen)
                     .chain(iced::window::move_to(
                         window,
                         Point::new(frame.x as f32, frame.y as f32),
