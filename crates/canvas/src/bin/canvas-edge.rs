@@ -10,6 +10,7 @@
 //!   actor's identity, and always answered with a `canvas.result` receipt so
 //!   the central learns what *executed*, not just what was delivered.
 
+use std::collections::{BTreeSet, HashMap};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -95,11 +96,12 @@ fn run(config: &EdgeConfig) -> Result<()> {
             .map(|a| a.producer.as_str())
             .collect::<Vec<_>>(),
     );
+    let mut liveness = Liveness::default();
     let quiet_after = Instant::now();
     loop {
         match bus.try_read() {
             Ok(Some((envelope, _payload))) => {
-                if let Err(e) = ingest(&bus, config, &envelope) {
+                if let Err(e) = ingest(&bus, config, &mut liveness, &envelope) {
                     eprintln!("canvas-edge: rejected {}: {e:#}", envelope.message.kind);
                 }
             }
@@ -116,8 +118,42 @@ fn run(config: &EdgeConfig) -> Result<()> {
     }
 }
 
+/// Indicators this edge applied on behalf of each bus producer, so a
+/// `unibus.node_state` offline announcement can clear what the dead
+/// producer left on screen (the stuck "thinking" pill class of bug).
+#[derive(Default)]
+struct Liveness {
+    by_producer: HashMap<String, BTreeSet<String>>,
+}
+
+impl Liveness {
+    fn record(&mut self, producer: &str, indicator_id: &str) {
+        self.by_producer
+            .entry(producer.to_owned())
+            .or_default()
+            .insert(indicator_id.to_owned());
+    }
+
+    fn forget(&mut self, producer: &str, indicator_id: &str) {
+        if let Some(set) = self.by_producer.get_mut(producer) {
+            set.remove(indicator_id);
+        }
+    }
+
+    fn take_for_dismissal(&mut self, producer: &str) -> Vec<String> {
+        self.by_producer
+            .remove(producer)
+            .map_or_else(Vec::new, |s| s.into_iter().collect())
+    }
+}
+
 /// One inbound bus frame -> control action + optional receipt.
-fn ingest(bus: &Bus, config: &EdgeConfig, envelope: &Envelope) -> Result<()> {
+fn ingest(
+    bus: &Bus,
+    config: &EdgeConfig,
+    liveness: &mut Liveness,
+    envelope: &Envelope,
+) -> Result<()> {
     match envelope.message.kind.as_str() {
         "presence_update" | "presence.update" => {
             let summary = envelope
@@ -147,6 +183,16 @@ fn ingest(bus: &Bus, config: &EdgeConfig, envelope: &Envelope) -> Result<()> {
                 .and_then(|v| v.as_str())
                 .unwrap_or(envelope.request_id.as_str())
                 .to_owned();
+            let variant = raw
+                .pointer("/command/command")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned();
+            let indicator_id = raw
+                .pointer("/command/indicator/id")
+                .or_else(|| raw.pointer("/command/indicator_id"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
             let outcome = match authorize(config, envelope, &raw) {
                 Ok(request) => match submit(request) {
                     Ok(()) => (true, None),
@@ -157,9 +203,44 @@ fn ingest(bus: &Bus, config: &EdgeConfig, envelope: &Envelope) -> Result<()> {
                     (false, Some(reason))
                 }
             };
+            if outcome.0 {
+                if let Some(id) = indicator_id {
+                    match variant.as_str() {
+                        "upsert_indicator" => {
+                            liveness.record(&envelope.producer_id, &id);
+                        }
+                        "dismiss_indicator" => {
+                            liveness.forget(&envelope.producer_id, &id);
+                        }
+                        _ => {}
+                    }
+                }
+            }
             receipt(bus, envelope, &request_id, outcome.0, outcome.1)
         }
         kinds::V1_REPLY | kinds::REPLY => Ok(()),
+        canvas_core::unibus::kinds::NODE_STATE => {
+            let online = envelope.message.body["online"].as_bool().unwrap_or(true);
+            if !online {
+                let producer = envelope.message.body["producer_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                for indicator_id in liveness.take_for_dismissal(&producer) {
+                    eprintln!(
+                        "canvas-edge: producer '{producer}' died; dismissing '{indicator_id}'"
+                    );
+                    let _ = submit(ControlRequest {
+                        schema_version: canvas::control::CONTROL_VERSION,
+                        request_id: format!("liveness-{indicator_id}-{}", envelope::now_ms()),
+                        expected_revision: None,
+                        actor: None,
+                        command: Command::DismissIndicator { indicator_id },
+                    });
+                }
+            }
+            Ok(())
+        }
         other => {
             // Unknown kinds are not errors: newer domains must not break
             // older edges. The log line is the loud part.
@@ -418,6 +499,16 @@ mod tests {
         assert_eq!(parsed.request_id, "r4");
         assert!(!parsed.ok);
         assert_eq!(parsed.error.as_deref(), Some("denied"));
+    }
+
+    #[test]
+    fn liveness_tracks_and_drains_per_producer() {
+        let mut l = Liveness::default();
+        l.record("sound-neo", "jarvis-voice");
+        l.record("sound-neo", "other");
+        l.forget("sound-neo", "other");
+        assert_eq!(l.take_for_dismissal("sound-neo"), vec!["jarvis-voice"]);
+        assert!(l.take_for_dismissal("sound-neo").is_empty());
     }
 
     #[test]

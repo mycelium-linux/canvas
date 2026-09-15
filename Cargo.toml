@@ -20,4 +20,4 @@ tempfile = "3"
 coherence-tokens = { path = "vendor/coherence-tokens" }
 # The household bus contract, shared with JARVIS (dock marbles dock-pubd).
 # Pinned by rev; bump deliberately alongside unibus releases.
-unibus = { git = "ssh://git@github.com/FuturePresentLabs/unibus.git", rev = "3819b9935afe96ce659153993725459181c5dbed" }
+unibus = { git = "ssh://git@github.com/FuturePresentLabs/unibus.git", rev = "89f28449e0406db511a778762a089a20fb39433d" }
