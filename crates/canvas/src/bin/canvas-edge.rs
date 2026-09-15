@@ -32,6 +32,11 @@ struct EdgeConfig {
     token_file: PathBuf,
     zones: Vec<String>,
     screen_anchors: Vec<String>,
+    /// Capabilities to claim at registration. Defaults to the v1 tag
+    /// `display` so existing hub route tables match; v2 hubs grant the
+    /// namespaced `canvas.display` spelling instead.
+    #[serde(default)]
+    capabilities: Vec<String>,
 }
 
 impl EdgeConfig {
@@ -82,6 +87,11 @@ fn run(config: &EdgeConfig) -> Result<()> {
     let mut reader = stream;
     reader.set_read_timeout(Some(READ_TIMEOUT))?;
     let token = config.token()?;
+    let claim_caps: Vec<String> = if config.capabilities.is_empty() {
+        vec!["display".to_owned(), "canvas.display".to_owned()]
+    } else {
+        config.capabilities.clone()
+    };
 
     let register = Envelope::new(
         &config.installation_id,
@@ -91,8 +101,7 @@ fn run(config: &EdgeConfig) -> Result<()> {
         Message::new(
             kinds::V1_REGISTER,
             serde_json::json!({
-                // v1 spelling for deployed hub routes; namespaced for v2.
-                "capabilities": ["display", "canvas.display"],
+                "capabilities": claim_caps.clone(),
                 "zones": config.zones,
                 "screen_anchors": config.screen_anchors,
             }),
