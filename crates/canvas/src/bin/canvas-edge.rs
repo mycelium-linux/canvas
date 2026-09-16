@@ -288,9 +288,15 @@ fn authorize(
 
 fn submit(request: ControlRequest) -> Result<()> {
     request.validate().map_err(anyhow::Error::msg)?;
-    canvas::control::send(&request)
-        .map_err(|e| anyhow::anyhow!(e))
-        .map(|_| ())
+    let reply = canvas::control::send(&request).map_err(anyhow::Error::msg)?;
+    // The hub ack proves delivery; the receipt must carry what Canvas
+    // actually answered, including application-level failures.
+    match reply.outcome {
+        canvas::control::Outcome::Ok { .. } => Ok(()),
+        canvas::control::Outcome::Error { code, message } => {
+            bail!("canvas rejected the command ({code:?}): {message}")
+        }
+    }
 }
 
 fn receipt(
