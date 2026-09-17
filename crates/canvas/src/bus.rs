@@ -141,9 +141,11 @@ impl Bus {
                         );
                         beat.schema_version = schema;
                         let Ok(mut guard) = writer.lock() else {
+                            stop.store(true, Ordering::Release);
                             break;
                         };
                         if framing::write_frame(&mut *guard, &beat, &[]).is_err() {
+                            stop.store(true, Ordering::Release);
                             break;
                         }
                     }
@@ -202,6 +204,10 @@ impl Bus {
 
     /// Blocking read of one frame; read-timeout expiry is an idle poll.
     pub fn try_read(&self) -> Result<Option<(Envelope, Vec<u8>)>> {
+        ensure!(
+            !self.stop.load(Ordering::Acquire),
+            "bus heartbeat writer stopped"
+        );
         let mut guard = self
             .reader
             .lock()
@@ -230,6 +236,7 @@ impl Drop for Bus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
 
     #[test]
     fn bus_config_defaults_and_rejects() {
@@ -253,5 +260,32 @@ mod tests {
         )
         .unwrap();
         assert!(BusConfig::read(&path).is_err());
+    }
+
+    #[test]
+    fn stopped_heartbeat_makes_the_reader_reconnect() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_server, _) = listener.accept().unwrap();
+        let bus = Bus {
+            config: BusConfig {
+                installation_id: "home".into(),
+                producer_id: "canvas-edge".into(),
+                hub_endpoint: listener.local_addr().unwrap().to_string(),
+                token_file: PathBuf::from("unused"),
+                zones: vec!["default".into()],
+                capabilities: vec!["canvas.display".into()],
+                screen_anchors: vec!["screen-test".into()],
+                schema_version: canvas_core::unibus::SCHEMA_VERSION_V2,
+            },
+            reader: Mutex::new(client.try_clone().unwrap()),
+            writer: Arc::new(Mutex::new(client)),
+            stop: Arc::new(AtomicBool::new(true)),
+        };
+
+        assert_eq!(
+            bus.try_read().unwrap_err().to_string(),
+            "bus heartbeat writer stopped"
+        );
     }
 }

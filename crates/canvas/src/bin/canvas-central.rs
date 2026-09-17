@@ -11,7 +11,7 @@
 //!                      --to producer) [--timeout SECS] [request.json]
 //!        echo '{"schema_version":1,...}' | canvas-central ... -
 
-use std::io::{IsTerminal, Read, Write};
+use std::io::{IsTerminal, Read};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};

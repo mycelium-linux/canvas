@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use canvas::bus::{Bus, BusConfig};
@@ -97,7 +97,6 @@ fn run(config: &EdgeConfig) -> Result<()> {
             .collect::<Vec<_>>(),
     );
     let mut liveness = Liveness::default();
-    let quiet_after = Instant::now();
     loop {
         match bus.try_read() {
             Ok(Some((envelope, _payload))) => {
@@ -107,13 +106,6 @@ fn run(config: &EdgeConfig) -> Result<()> {
             }
             Ok(None) => {}
             Err(e) => return Err(e.context("hub read")),
-        }
-        // Reconnect if the hub went quiet well past the heartbeat window:
-        // a half-open socket must not pretend to be an alive display.
-        // Hubs push no keepalives, so quiet is normal; this only catches a
-        // half-open downlink after several missed registry windows.
-        if quiet_after.elapsed() > Duration::from_secs(90) {
-            bail!("no hub frames for 90 s; forcing reconnect");
         }
     }
 }
