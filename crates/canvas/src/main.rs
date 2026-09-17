@@ -1930,7 +1930,10 @@ impl App {
                 self.status = beat
                     .message
                     .unwrap_or_else(|| format!("Briefing beat {}.", beat.beat));
-                self.emit_event(format!("briefing_beat beat={} done={}", beat.beat, beat.done));
+                self.emit_event(format!(
+                    "briefing_beat beat={} done={}",
+                    beat.beat, beat.done
+                ));
             }
             Err(error) => {
                 eprintln!("Canvas rejected briefing workspace patch: {error}");
@@ -5824,10 +5827,11 @@ impl App {
 
         let mut layers: Vec<Element<'_, Message>> = Vec::new();
         if self.screensaver_settings.enabled {
-            layers.push(screensaver::view_in(
+            layers.push(screensaver::animated_view_in(
                 self.screensaver_index,
                 self.screensaver_elapsed,
                 desk,
+                self.screensaver_clock.interval(),
             ));
         } else {
             match &self.document.background {
@@ -5842,10 +5846,11 @@ impl App {
                         );
                     }
                 }
-                Background::Shader { shader_id, .. } => layers.push(screensaver::view_in(
+                Background::Shader { shader_id, .. } => layers.push(screensaver::animated_view_in(
                     screensaver::index_for(*shader_id),
                     self.screensaver_elapsed,
                     desk,
+                    self.screensaver_clock.interval(),
                 )),
                 Background::Theme | Background::Solid { .. } | Background::Gradient { .. } => {}
                 // Nothing to layer: the ground above already fell back to the
@@ -6124,26 +6129,21 @@ impl App {
         if self.screensaver_settings.enabled
             || matches!(self.document.background, Background::Shader { .. })
         {
-            let attribution_bottom = if self.overlay_on_viewport(self.overlays.fpl_mark, viewport) {
-                72.0
-            } else {
-                18.0
-            };
             layers.push(
                 container(
                     text(screensaver::attribution(self.screensaver_index))
-                        .size(13)
-                        .color(Color { a: 0.55, ..muted }),
+                        .size(10)
+                        .color(Color { a: 0.45, ..muted }),
                 )
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .padding(iced::Padding {
                     top: 0.0,
-                    right: 0.0,
-                    bottom: attribution_bottom,
-                    left: 20.0,
+                    right: 18.0,
+                    bottom: 14.0,
+                    left: 0.0,
                 })
-                .align_x(iced::alignment::Horizontal::Left)
+                .align_x(iced::alignment::Horizontal::Right)
                 .align_y(iced::alignment::Vertical::Bottom)
                 .into(),
             );

@@ -730,8 +730,18 @@ struct BackgroundProgram {
     index: usize,
     elapsed_seconds: f32,
     field: Field,
+    redraw_interval: Option<Duration>,
     slot: u64,
 }
+
+#[derive(Debug, Default)]
+struct BackgroundState {
+    index: Option<usize>,
+    elapsed_seconds: f32,
+    last_redraw: Option<Instant>,
+}
+
+const MAX_WIDGET_FRAME_DELTA: Duration = Duration::from_millis(250);
 
 impl BackgroundProgram {
     fn new(index: usize, elapsed: Duration, field: Field) -> Self {
@@ -739,7 +749,15 @@ impl BackgroundProgram {
             index: index % SHADERS.len(),
             elapsed_seconds: elapsed.as_secs_f32(),
             field,
+            redraw_interval: None,
             slot: claim_slot(),
+        }
+    }
+
+    fn animated(index: usize, elapsed: Duration, field: Field, interval: Duration) -> Self {
+        Self {
+            redraw_interval: Some(interval),
+            ..Self::new(index, elapsed, field)
         }
     }
 }
@@ -756,6 +774,26 @@ pub fn view_in<'a, Message: 'a>(
         .into()
 }
 
+/// An animated background that schedules bounded redraws independently of
+/// application data changes. This keeps a clock or stream update from becoming
+/// the accidental animation driver while still respecting the frame budget.
+pub fn animated_view_in<'a, Message: 'a>(
+    index: usize,
+    elapsed: Duration,
+    field: Field,
+    redraw_interval: Duration,
+) -> Element<'a, Message> {
+    Shader::new(BackgroundProgram::animated(
+        index,
+        elapsed,
+        field,
+        redraw_interval,
+    ))
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
 /// A background that is its own field.
 ///
 /// Anything covering a window wants [`view_in`] with [`Field::Desk`] instead: a
@@ -766,18 +804,48 @@ pub fn view<'a, Message: 'a>(index: usize, elapsed: Duration) -> Element<'a, Mes
 }
 
 impl<Message> shader::Program<Message> for BackgroundProgram {
-    type State = ();
+    type State = BackgroundState;
     type Primitive = BackgroundPrimitive;
+
+    fn update(
+        &self,
+        state: &mut Self::State,
+        event: &iced::Event,
+        _bounds: Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Option<iced::widget::Action<Message>> {
+        let interval = self.redraw_interval?;
+        match event {
+            iced::Event::Window(iced::window::Event::RedrawRequested(now)) => {
+                if state.index != Some(self.index) {
+                    state.index = Some(self.index);
+                    state.elapsed_seconds = self.elapsed_seconds;
+                    state.last_redraw = Some(*now);
+                } else {
+                    state.elapsed_seconds = state.elapsed_seconds.max(self.elapsed_seconds);
+                    if let Some(last) = state.last_redraw {
+                        state.elapsed_seconds += now
+                            .saturating_duration_since(last)
+                            .min(MAX_WIDGET_FRAME_DELTA)
+                            .as_secs_f32();
+                    }
+                    state.last_redraw = Some(*now);
+                }
+                Some(iced::widget::Action::request_redraw_at(*now + interval))
+            }
+            _ => None,
+        }
+    }
 
     fn draw(
         &self,
-        _state: &Self::State,
+        state: &Self::State,
         _cursor: iced::mouse::Cursor,
         _bounds: Rectangle,
     ) -> Self::Primitive {
         BackgroundPrimitive {
             index: self.index,
-            elapsed_seconds: self.elapsed_seconds,
+            elapsed_seconds: state.elapsed_seconds.max(self.elapsed_seconds),
             field: self.field,
             slot: self.slot,
         }
@@ -1171,6 +1239,49 @@ mod tests {
             advance_elapsed(2, Duration::from_secs(1), Duration::from_secs(30), cap),
             (2, Duration::from_millis(1_250))
         );
+    }
+
+    #[test]
+    fn animated_program_requests_the_next_bounded_frame() {
+        let interval = Duration::from_millis(40);
+        let program = BackgroundProgram::animated(0, Duration::ZERO, Field::Widget, interval);
+        let now = Instant::now();
+        let action = <BackgroundProgram as shader::Program<()>>::update(
+            &program,
+            &mut BackgroundState::default(),
+            &iced::Event::Window(iced::window::Event::RedrawRequested(now)),
+            Rectangle::default(),
+            iced::mouse::Cursor::Unavailable,
+        )
+        .expect("animated backgrounds schedule another frame");
+        let (_, redraw, _) = action.into_inner();
+        assert_eq!(redraw, iced::window::RedrawRequest::At(now + interval));
+    }
+
+    #[test]
+    fn animated_program_advances_time_on_redraw_without_an_app_tick() {
+        let interval = Duration::from_millis(40);
+        let program = BackgroundProgram::animated(0, Duration::ZERO, Field::Widget, interval);
+        let started = Instant::now();
+        let mut state = BackgroundState::default();
+        let redraw = |state: &mut BackgroundState, at| {
+            <BackgroundProgram as shader::Program<()>>::update(
+                &program,
+                state,
+                &iced::Event::Window(iced::window::Event::RedrawRequested(at)),
+                Rectangle::default(),
+                iced::mouse::Cursor::Unavailable,
+            )
+        };
+        redraw(&mut state, started);
+        redraw(&mut state, started + interval);
+        let primitive = <BackgroundProgram as shader::Program<()>>::draw(
+            &program,
+            &state,
+            iced::mouse::Cursor::Unavailable,
+            Rectangle::default(),
+        );
+        assert!((primitive.elapsed_seconds - 0.04).abs() < f32::EPSILON);
     }
 
     #[test]
