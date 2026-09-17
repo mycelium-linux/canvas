@@ -1761,7 +1761,27 @@ impl App {
             eprintln!("Canvas missed {missed} stream events - fell behind the retained window");
             self.emit_event(format!("stream_gap missed={missed}"));
         }
-        let events = read.events;
+        let mut events = read.events;
+        if events.is_empty() {
+            return;
+        }
+        // Briefings are whole-canvas programs, not widget bindings. Render
+        // their Lua beats through the same sandbox, then apply the resulting
+        // visual patch atomically before ordinary stream bindings run.
+        let briefing_events = events
+            .extract_if(.., |event| {
+                event.contract == ::canvas::stream_binding::BRIEFING_CONTRACT
+            })
+            .collect::<Vec<_>>();
+        for event in briefing_events {
+            match ::canvas::briefing::render_beat(&event) {
+                Ok(beat) => self.apply_briefing_visuals(beat),
+                Err(error) => {
+                    eprintln!("Canvas rejected briefing beat: {error}");
+                    self.emit_event(format!("briefing_rejected error={error}"));
+                }
+            }
+        }
         if events.is_empty() {
             return;
         }
@@ -1859,6 +1879,63 @@ impl App {
                  position={} retained={} evicted={}",
                 self.stream_position, stats.retained, stats.evicted
             ));
+        }
+    }
+
+    #[cfg(feature = "lua-scenes")]
+    fn apply_briefing_visuals(&mut self, beat: canvas_widgets::BriefingBeat) {
+        use canvas_widgets::PatchOp as BriefingPatch;
+
+        let mut operations = Vec::new();
+        for patch in beat.pre_actions.iter().chain(&beat.patches) {
+            if matches!(patch, BriefingPatch::SetMeshNode { .. }) {
+                continue;
+            }
+            let operation = serde_json::to_value(patch)
+                .map_err(|error| error.to_string())
+                .and_then(|value| {
+                    serde_json::from_value::<PatchOperation>(value)
+                        .map_err(|error| error.to_string())
+                });
+            match operation {
+                Ok(operation) => operations.push(operation),
+                Err(error) => {
+                    eprintln!("Canvas rejected briefing visual patch: {error}");
+                    self.emit_event(format!("briefing_patch_rejected error={error}"));
+                    return;
+                }
+            }
+        }
+        if operations.is_empty() {
+            return;
+        }
+        let patch = WorkspacePatch {
+            schema_version: SCHEMA_VERSION,
+            workspace_id: self.document.id.clone(),
+            base_revision: self.document.revision,
+            revision: self.document.revision.saturating_add(1),
+            operations,
+        };
+        match self.document.apply_patch(&patch, &self.catalog) {
+            Ok(document) => {
+                let background_changed = self.document.background != document.background;
+                self.start_transition();
+                self.document = document;
+                self.prune_decoded();
+                self.ensure_scene_decoded();
+                if background_changed {
+                    self.reset_background_animation();
+                }
+                self.bump();
+                self.status = beat
+                    .message
+                    .unwrap_or_else(|| format!("Briefing beat {}.", beat.beat));
+                self.emit_event(format!("briefing_beat beat={} done={}", beat.beat, beat.done));
+            }
+            Err(error) => {
+                eprintln!("Canvas rejected briefing workspace patch: {error}");
+                self.emit_event(format!("briefing_patch_rejected error={error}"));
+            }
         }
     }
 
