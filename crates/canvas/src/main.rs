@@ -520,6 +520,9 @@ struct App {
     last_clock_second: u64,
     /// Content identity of runtime theme packs; changes trigger hot reload.
     theme_pack_fingerprint: String,
+    theme_packs: Vec<::canvas::theme_pack::ThemePack>,
+    theme_pack_ids: BTreeMap<String, String>,
+    theme_pack_last_check: Instant,
 }
 
 impl App {
@@ -742,6 +745,11 @@ impl App {
                 None
             }
         };
+        let (theme_packs, theme_notes) = ::canvas::theme_pack::load();
+        for note in theme_notes { store_notes.push(format!("theme pack unusable: {note}")); }
+        let theme_pack_ids = workspaces.projects.keys().filter_map(|project_id| {
+            read_theme_pack_id(project_id).map(|id| (project_id.clone(), id))
+        }).collect();
         let mut app = Self {
             catalog,
             document: restored_document.unwrap_or_else(|| WorkspaceDocument {
@@ -860,6 +868,9 @@ impl App {
             screensaver_fps: 0.0,
             last_clock_second: now_unix_ms() / 1_000,
             theme_pack_fingerprint: ::canvas::theme_pack::fingerprint(),
+            theme_packs,
+            theme_pack_ids,
+            theme_pack_last_check: Instant::now(),
         };
         app.publish_web_themes();
         app.ensure_scene_decoded();
@@ -1097,11 +1108,17 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick => {
-                let theme_pack_fingerprint = ::canvas::theme_pack::fingerprint();
-                if theme_pack_fingerprint != self.theme_pack_fingerprint {
-                    self.theme_pack_fingerprint = theme_pack_fingerprint;
-                    self.publish_web_themes();
-                    self.bump();
+                if self.theme_pack_last_check.elapsed() >= Duration::from_secs(1) {
+                    self.theme_pack_last_check = Instant::now();
+                    let theme_pack_fingerprint = ::canvas::theme_pack::fingerprint();
+                    if theme_pack_fingerprint != self.theme_pack_fingerprint {
+                        self.theme_pack_fingerprint = theme_pack_fingerprint;
+                        let (packs, notes) = ::canvas::theme_pack::load();
+                        self.theme_packs = packs;
+                        for note in notes { self.events.push(format!("theme_pack_invalid {note}")); }
+                        self.publish_web_themes();
+                        self.bump();
+                    }
                 }
                 let clock_second = now_unix_ms() / 1_000;
                 if clock_second != self.last_clock_second
@@ -2441,10 +2458,8 @@ impl App {
         self.theme_picker = match self.theme_picker {
             Some(_) => None,
             None => {
-                let (packs, notes) = ::canvas::theme_pack::load();
-                for note in notes { self.events.push(format!("theme_pack_invalid {note}")); }
                 Some(::canvas::theme_picker::ThemePicker::opened_from(
-                    self.effective_theme(&self.document), &packs,
+                    self.effective_theme(&self.document), &self.theme_packs,
                 ))
             }
         };
@@ -2557,8 +2572,10 @@ impl App {
             if let Err(error) = ::canvas::runtime_config::write(&selection_path, pack_id.as_bytes(), 48) {
                 self.events.push(format!("theme_pack_selection_failed {error}"));
             }
+            self.theme_pack_ids.insert(self.document.project_id.clone(), pack_id.clone());
         } else if let Some(root) = ::canvas::runtime_config::root() {
             let _ = std::fs::remove_file(root.join(selection_path));
+            self.theme_pack_ids.remove(&self.document.project_id);
         }
         self.publish_web_themes();
         let selected = theme.to_project_theme();
@@ -5003,6 +5020,14 @@ impl App {
         self.shared_views.clear();
         self.live_pending.clear();
         self.stream_sequences.clear();
+        #[cfg(feature = "lua-scenes")]
+        {
+            // A workspace switch is a new reader of retained state. Replaying
+            // the tail hydrates its widgets immediately; waiting only for new
+            // packets leaves a quiet project saying "Loading" indefinitely.
+            self.stream_position = self.stream_inbox.replay_tail(256);
+            self.drain_stream_events();
+        }
     }
 
     /// Publish the renderer-neutral Coherence contract consumed by external
@@ -5176,13 +5201,8 @@ impl App {
     }
 
     fn selected_theme_pack(&self, project_id: &str) -> Option<::canvas::theme_pack::ThemePack> {
-        let relative = PathBuf::from("themes/selections").join(format!("{project_id}.txt"));
-        let bytes = ::canvas::runtime_config::read(&relative, 48).ok()??;
-        let id = std::str::from_utf8(&bytes).ok()?.trim();
-        ::canvas::theme_pack::load()
-            .0
-            .into_iter()
-            .find(|pack| pack.id == id)
+        let id = self.theme_pack_ids.get(project_id)?;
+        self.theme_packs.iter().find(|pack| &pack.id == id).cloned()
     }
 
     fn effective_theme(&self, document: &WorkspaceDocument) -> canvas_core::ThemeSelection {
@@ -8813,6 +8833,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Wall-clock milliseconds. Local rather than `stream_binding::now_ms`, which
 /// lives behind the `lua-scenes` feature; presence narrowing must not be
 /// feature-gated.
+fn read_theme_pack_id(project_id: &str) -> Option<String> {
+    let relative = PathBuf::from("themes/selections").join(format!("{project_id}.txt"));
+    let bytes = ::canvas::runtime_config::read(&relative, 48).ok()??;
+    let id = std::str::from_utf8(&bytes).ok()?.trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
 fn now_unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

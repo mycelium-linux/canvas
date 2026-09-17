@@ -61,6 +61,34 @@ fn dashboard_envelope(workspace_id: &str, payload: Value, sequence: u64) -> Valu
     event
 }
 
+/// The stream contract carries the scalar state native widgets consume. Rich
+/// lists and theme data stay in the per-workspace Blitz render input; sending
+/// that whole document over AF_UNIX both duplicated ownership and exceeded the
+/// datagram ceiling on larger projects.
+fn dashboard_stream_payload(workspace: &Value) -> Value {
+    let scalars = |value: Option<&Value>| {
+        Value::Object(
+            value
+                .and_then(Value::as_object)
+                .into_iter()
+                .flatten()
+                .filter(|(_, value)| !value.is_array() && !value.is_object())
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        )
+    };
+    json!({
+        "workspace_id": workspace.get("workspace_id"),
+        "name": workspace.get("name"),
+        "project_count": workspace.get("project_count"),
+        "activity_state": workspace.get("activity_state"),
+        "goals": scalars(workspace.get("goals")),
+        "beads": scalars(workspace.get("beads")),
+        "agents": scalars(workspace.get("agents")),
+        "reviewers": scalars(workspace.get("reviewers")),
+    })
+}
+
 fn bridge_read(bridge: &str, port: u16, action: &str) -> Result<Value, String> {
     let mut child = Command::new(bridge)
         .args(["project-read", action, "--port", &port.to_string()])
@@ -407,7 +435,11 @@ fn main() -> ExitCode {
                     if let Err(error) = attach_canvas_theme(&id, &mut workspace) {
                         eprintln!("canvas-alfalfa: {id} theme unavailable: {error}");
                     }
-                    let event = dashboard_envelope(&id, workspace.clone(), sequence);
+                    let event = dashboard_envelope(
+                        &id,
+                        dashboard_stream_payload(&workspace),
+                        sequence,
+                    );
                     let (fitted, _) = fit(event, MAX_DATAGRAM.saturating_sub(ENVELOPE_OVERHEAD));
                     if let Err(error) = send_raw(&fitted) {
                         eprintln!("canvas-alfalfa: {id} dashboard send failed: {error}");
@@ -562,6 +594,24 @@ mod tests {
         assert!(!blitz_cache_hit(&root, "agora", "abc"));
         assert!(!blitz_cache_hit(&root, "ohm", "changed"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dashboard_stream_projection_keeps_metrics_not_render_lists_or_theme() {
+        let payload = json!({
+            "workspace_id":"ohm", "name":"Ohm", "activity_state":"observed",
+            "goals":{"total":5,"active":2,"items":[{"outcome":"large"}]},
+            "beads":{"open":7,"items":[1,2,3]},
+            "agents":{"running":1,"items":[{"id":"agent"}]},
+            "reviewers":{"running":2},
+            "theme":{"palette":{"primary":"#31e6ff"}}
+        });
+        let projected = dashboard_stream_payload(&payload);
+        assert_eq!(projected["goals"]["total"], 5);
+        assert_eq!(projected["agents"]["running"], 1);
+        assert!(projected["goals"].get("items").is_none());
+        assert!(projected.get("theme").is_none());
+        assert!(serde_json::to_vec(&projected).unwrap().len() < 512);
     }
 
     #[test]

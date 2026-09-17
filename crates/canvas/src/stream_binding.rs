@@ -298,6 +298,13 @@ impl StreamInbox {
         self.0.lock().expect("stream inbox lock poisoned").received
     }
 
+    /// Start close enough to the retained head to replay current state after a
+    /// workspace switch without walking the entire history first.
+    pub fn replay_tail(&self, limit: usize) -> u64 {
+        let state = self.0.lock().expect("stream inbox lock poisoned");
+        state.received.saturating_sub(limit as u64).max(state.base)
+    }
+
     pub fn stats(&self) -> StreamStats {
         let state = self.0.lock().expect("stream inbox lock poisoned");
         StreamStats {
@@ -653,6 +660,14 @@ mod tests {
         WIDGET_SCHEMA_VERSION, WidgetChrome, WidgetKind,
         quant::{Candle, QuantWidget},
     };
+
+    #[test]
+    fn replay_tail_starts_at_the_newest_bounded_window() {
+        let inbox = StreamInbox::default();
+        numbered(&inbox, 20);
+        assert_eq!(inbox.replay_tail(6), 14);
+        assert_eq!(inbox.read_from(inbox.replay_tail(6), 6).events.len(), 6);
+    }
 
     fn test_spec(kind: WidgetKind) -> WidgetSpec {
         WidgetSpec {
