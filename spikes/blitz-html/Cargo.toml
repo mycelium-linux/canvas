@@ -15,7 +15,10 @@ anyrender = "0.13"
 anyrender_vello_cpu = "0.17"
 tera = "1"
 serde_json = "1"
-image = { version = "0.25", default-features = false, features = ["png"] }
+serde = { version = "1", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+mlua = { version = "0.12.1", features = ["luau", "serialize"] }
+canvas-core = { path = "../../crates/canvas-core" }
 
 # vello_cpu is a software rasteriser; unoptimised deps make timings meaningless
 # and the render unusably slow. Optimise deps, keep the spike crate itself cheap.

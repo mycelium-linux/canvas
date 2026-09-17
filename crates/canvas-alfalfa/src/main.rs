@@ -17,14 +17,15 @@ use canvas_feeds::{
 };
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     env,
-    io::Read,
+    io::{Read, Write},
     process::{Command, ExitCode, Stdio},
     thread,
     time::Duration,
 };
 
-const ARG_ERR: &str = "usage: canvas-alfalfa [--url URL] [--bridge-bin PATH] [--alfalfa-port PORT] [--every SECS] [--marbles N] [--prs N] [--pulses id,id,...] [--runtime-dir PATH]";
+const ARG_ERR: &str = "usage: canvas-alfalfa [--url URL] [--bridge-bin PATH] [--alfalfa-port PORT] [--blitz-bin PATH --blitz-template PATH --blitz-workspaces id,id] [--every SECS] [--marbles N] [--prs N] [--pulses id,id,...] [--runtime-dir PATH]";
 const MAX_BRIDGE_RESPONSE: u64 = 4 * 1024 * 1024;
 
 fn arg(args: &[String], flag: &str) -> Option<String> {
@@ -57,14 +58,9 @@ fn dashboard_envelope(workspace_id: &str, payload: Value, sequence: u64) -> Valu
     event
 }
 
-fn fetch_dashboards(bridge: &str, port: u16) -> Result<Vec<Value>, String> {
+fn bridge_read(bridge: &str, port: u16, action: &str) -> Result<Value, String> {
     let mut child = Command::new(bridge)
-        .args([
-            "project-read",
-            "workspace-dashboards",
-            "--port",
-            &port.to_string(),
-        ])
+        .args(["project-read", action, "--port", &port.to_string()])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -99,10 +95,134 @@ fn fetch_dashboards(bridge: &str, port: u16) -> Result<Vec<Value>, String> {
         return Err("Desktop Bridge returned an unsuccessful owner envelope".into());
     }
     value
-        .pointer("/data/workspaces")
-        .and_then(Value::as_array)
+        .get("data")
         .cloned()
-        .ok_or_else(|| "dashboard projection omitted data.workspaces".into())
+        .ok_or_else(|| format!("Desktop Bridge {action} omitted data"))
+}
+
+fn catalog_dashboards(workspaces: &[Value], projects: &[Value]) -> Vec<Value> {
+    let mut dashboards: BTreeMap<String, Value> = workspaces
+        .iter()
+        .filter_map(|workspace| {
+            let id = workspace.get("id")?.as_str()?;
+            Some((
+                id.to_string(),
+                json!({
+                    "workspace_id": id,
+                    "name": workspace.get("name").and_then(Value::as_str).unwrap_or(id),
+                    "project_ids": [],
+                    "goals": {"total": 0, "active": 0, "queued": 0, "items": []},
+                    "beads": {"open": 0, "in_progress": 0, "blocked": 0, "ready": 0, "items": []},
+                    "agents": {"total": 0, "running": 0, "items": []},
+                    "reviewers": {"total": 0, "running": 0},
+                    "activity_state": "unavailable",
+                }),
+            ))
+        })
+        .collect();
+    for project in projects {
+        let Some(workspace_id) = project.pointer("/workspace/id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(dashboard) = dashboards.get_mut(workspace_id) else {
+            continue;
+        };
+        if let Some(project_id) = project.pointer("/project/id").and_then(Value::as_str) {
+            dashboard["project_ids"]
+                .as_array_mut()
+                .expect("catalog projection project_ids remains an array")
+                .push(json!(project_id));
+        }
+        for goal in project
+            .get("goals")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|goal| goal.get("status").and_then(Value::as_str) != Some("idea"))
+        {
+            dashboard["goals"]["total"] =
+                json!(dashboard["goals"]["total"].as_u64().unwrap_or(0) + 1);
+            let status = goal
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            if matches!(status, "active" | "queued") {
+                let count = dashboard["goals"][status].as_u64().unwrap_or(0) + 1;
+                dashboard["goals"][status] = json!(count);
+            }
+            let items = dashboard["goals"]["items"]
+                .as_array_mut()
+                .expect("catalog projection goal items remains an array");
+            if items.len() < 12 {
+                items.push(json!({
+                    "id": goal.get("id").and_then(Value::as_str).unwrap_or("?"),
+                    "outcome": goal.get("outcome").and_then(Value::as_str).unwrap_or("Goal"),
+                    "status": status,
+                }));
+            }
+        }
+    }
+    dashboards.into_values().collect()
+}
+
+fn fetch_dashboards(bridge: &str, port: u16) -> Result<Vec<Value>, String> {
+    match bridge_read(bridge, port, "workspace-dashboards") {
+        Ok(value) => value
+            .get("workspaces")
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| "dashboard projection omitted workspaces".into()),
+        Err(owner_error) => {
+            let workspaces = bridge_read(bridge, port, "workspaces")?;
+            let projects = bridge_read(bridge, port, "list")?;
+            let workspaces = workspaces
+                .as_array()
+                .ok_or("Alfalfa workspaces did not answer with an array")?;
+            let projects = projects
+                .as_array()
+                .ok_or("Alfalfa projects did not answer with an array")?;
+            eprintln!(
+                "canvas-alfalfa: owner dashboard unavailable ({owner_error}); using catalog-only projection"
+            );
+            Ok(catalog_dashboards(workspaces, projects))
+        }
+    }
+}
+
+fn render_blitz(
+    binary: &str,
+    template: &str,
+    workspace_id: &str,
+    payload: &Value,
+) -> Result<(), String> {
+    let source_id = format!(
+        "{}-dashboard-html",
+        dashboard_stream(workspace_id).trim_end_matches("-dashboard")
+    );
+    let mut child = Command::new(binary)
+        .args(["dashboard", template, &source_id, "960", "720"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("start Blitz renderer: {error}"))?;
+    let bytes = serde_json::to_vec(payload).map_err(|error| error.to_string())?;
+    child
+        .stdin
+        .take()
+        .ok_or("Blitz stdin unavailable")?
+        .write_all(&bytes)
+        .map_err(|error| format!("write Blitz snapshot: {error}"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("wait for Blitz renderer: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Blitz renderer failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
 }
 
 fn fetch_repos(http: &dyn Http, url: &str) -> Result<Vec<Value>, String> {
@@ -133,6 +253,14 @@ fn main() -> ExitCode {
     let alfalfa_port = arg(&args, "--alfalfa-port")
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(8791);
+    let blitz = arg(&args, "--blitz-bin").zip(arg(&args, "--blitz-template"));
+    let blitz_workspaces: Vec<String> = arg(&args, "--blitz-workspaces")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect();
     let every = arg(&args, "--every")
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|v| *v >= 5)
@@ -154,6 +282,8 @@ fn main() -> ExitCode {
     });
     let http = ReqwestHttp::default();
     let mut sequence: u64 = now_ms();
+    let mut rendered_dashboards: BTreeMap<String, (Value, Option<std::time::SystemTime>)> =
+        BTreeMap::new();
     eprintln!("canvas-alfalfa: {url} every {every}s (Ctrl-C to stop)");
 
     loop {
@@ -169,6 +299,32 @@ fn main() -> ExitCode {
                     let (fitted, _) = fit(event, MAX_DATAGRAM.saturating_sub(ENVELOPE_OVERHEAD));
                     if let Err(error) = send_raw(&fitted) {
                         eprintln!("canvas-alfalfa: {id} dashboard send failed: {error}");
+                    }
+                    if let Some((binary, template)) = &blitz
+                        && (blitz_workspaces.is_empty()
+                            || blitz_workspaces.iter().any(|wanted| wanted == id))
+                        && rendered_dashboards.get(id)
+                            != Some(&(
+                                workspace.clone(),
+                                std::fs::metadata(template)
+                                    .and_then(|metadata| metadata.modified())
+                                    .ok(),
+                            ))
+                        && let Err(error) = render_blitz(binary, template, id, &workspace)
+                    {
+                        eprintln!("canvas-alfalfa: {id} HTML render failed: {error}");
+                    } else if blitz.is_some() {
+                        rendered_dashboards.insert(
+                            id.to_string(),
+                            (
+                                workspace.clone(),
+                                blitz.as_ref().and_then(|(_, template)| {
+                                    std::fs::metadata(template)
+                                        .and_then(|metadata| metadata.modified())
+                                        .ok()
+                                }),
+                            ),
+                        );
                     }
                 }
             }
@@ -219,5 +375,31 @@ fn main() -> ExitCode {
             repos.len()
         );
         thread::sleep(Duration::from_secs(every));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_fallback_shows_real_goals_and_marks_activity_unavailable() {
+        let workspaces = json!([{"id":"ohm","name":"Ohm"}]);
+        let projects = json!([
+            {"project":{"id":"amp"},"workspace":{"id":"ohm"},"goals":[
+                {"id":"ship","outcome":"Ship it","status":"active"},
+                {"id":"later","outcome":"Later","status":"queued"},
+                {"id":"idea","outcome":"Maybe","status":"idea"}
+            ]},
+            {"project":{"id":"meter"},"workspace":{"id":"ohm"},"goals":[]}
+        ]);
+        let dashboards =
+            catalog_dashboards(workspaces.as_array().unwrap(), projects.as_array().unwrap());
+        assert_eq!(dashboards.len(), 1);
+        assert_eq!(dashboards[0]["project_ids"], json!(["amp", "meter"]));
+        assert_eq!(dashboards[0]["goals"]["total"], 2);
+        assert_eq!(dashboards[0]["goals"]["active"], 1);
+        assert_eq!(dashboards[0]["goals"]["queued"], 1);
+        assert_eq!(dashboards[0]["activity_state"], "unavailable");
     }
 }

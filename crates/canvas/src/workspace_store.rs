@@ -353,14 +353,16 @@ fn default_alfalfa_workspace(project_id: &str) -> Result<WorkspaceDocument, Erro
         "theme": {"source": "project"},
         "background": {"kind": "theme"},
         "surfaces": [
+            {"id": "project-html", "title": "Project dashboard", "content": {"kind": "live_image", "source_id": format!("{stream}-html")}},
             widget_surface("project-pulse", "Project pulse", "status_list", serde_json::json!({"title": "Project pulse", "nodes": []})),
             widget_surface("project-goals", "Goals", "event_log", serde_json::json!({"title": "Goals", "entries": []})),
             widget_surface("project-work", "Open beads", "event_log", serde_json::json!({"title": "Open beads", "entries": []})),
         ],
         "layout": {"kind": "canvas", "placements": [
-            {"surface_id": "project-pulse", "bounds": {"x": 0.0, "y": 0.0, "width": 0.42, "height": 1.0}},
-            {"surface_id": "project-goals", "bounds": {"x": 0.42, "y": 0.0, "width": 0.58, "height": 0.46}},
-            {"surface_id": "project-work", "bounds": {"x": 0.42, "y": 0.46, "width": 0.58, "height": 0.54}},
+            {"surface_id": "project-html", "bounds": {"x": 0.0, "y": 0.0, "width": 0.55, "height": 1.0}},
+            {"surface_id": "project-pulse", "bounds": {"x": 0.55, "y": 0.0, "width": 0.45, "height": 0.36}},
+            {"surface_id": "project-goals", "bounds": {"x": 0.55, "y": 0.36, "width": 0.45, "height": 0.30}},
+            {"surface_id": "project-work", "bounds": {"x": 0.55, "y": 0.66, "width": 0.45, "height": 0.34}},
         ]},
         "bindings": [
             dashboard_binding("project-pulse-bind", &stream, "project-pulse", "alfalfa-project-summary-v1"),
@@ -673,7 +675,7 @@ mod tests {
         let ohm = store.get("gh-1288853134").unwrap();
         assert_eq!(ohm.background, Background::Theme);
         assert_eq!(ohm.theme, ThemeRef::Project);
-        assert_eq!(ohm.surfaces.len(), 3);
+        assert_eq!(ohm.surfaces.len(), 4);
         assert_eq!(ohm.bindings.len(), 3);
         assert!(
             ohm.bindings
@@ -756,7 +758,7 @@ mod tests {
 
         let reset = store.reset_to_default("ohm", &base).unwrap();
         assert_eq!(reset.background, Background::Theme);
-        assert_eq!(reset.surfaces.len(), 3);
+        assert_eq!(reset.surfaces.len(), 4);
         assert_eq!(store.get("dock").unwrap().revision, 7);
     }
 }

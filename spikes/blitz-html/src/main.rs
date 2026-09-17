@@ -13,6 +13,13 @@ use anyrender_vello_cpu::VelloCpuImageRenderer;
 use blitz_dom::DocumentConfig;
 use blitz_html::HtmlDocument;
 use blitz_traits::shell::{ColorScheme, Viewport};
+use mlua::{Lua, LuaOptions, LuaSerdeExt, StdLib, Value as LuaValue};
+use serde::Deserialize;
+use std::io::Read;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 const DOC_FORGE: &str = "/Users/ajmwagar/src/fpl/doc-forge";
 const OUT: &str = "out";
@@ -24,10 +31,21 @@ fn main() {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "render".into());
     std::fs::create_dir_all(OUT).unwrap();
     match mode.as_str() {
-        "render" => { render_target(A6_SLIP); }
-        "invoice" => { render_target(A4_INVOICE); }
+        "render" => {
+            render_target(A6_SLIP);
+        }
+        "invoice" => {
+            render_target(A4_INVOICE);
+        }
         "probe" => probe_css(),
         "compare" => compare_outputs(),
+        // `dashboard <template.lua> <source-id> <width> <height>` reads one
+        // bounded JSON snapshot from stdin. Sandboxed Lua maps data to HTML
+        // and CSS; Blitz owns pixels; Canvas only reloads the atomic frame.
+        "dashboard" => {
+            let a: Vec<String> = std::env::args().collect();
+            render_dashboard(&a[2], &a[3], &a[4], &a[5]);
+        }
         // `file <in.html> <out.png> <css_width> <scale>` - render any HTML file.
         "file" => {
             let a: Vec<String> = std::env::args().collect();
@@ -40,12 +58,100 @@ fn main() {
             let r = render_html(&html, w, sc, 2000.0, true);
             println!(
                 "{inp}: {}x{} in {:?} (content {:.1} css px)",
-                r.width, r.height, t0.elapsed(), r.content_css_height
+                r.width,
+                r.height,
+                t0.elapsed(),
+                r.content_css_height
             );
             save_png(&r, outp);
         }
         other => panic!("unknown mode {other}"),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HtmlView {
+    html: String,
+    css: String,
+}
+
+fn render_dashboard(template: &str, source_id: &str, width: &str, height: &str) {
+    assert!(
+        canvas_core::is_safe_frame_id(source_id),
+        "unsafe frame source id"
+    );
+    let width: u32 = width.parse().expect("width");
+    let height: u32 = height.parse().expect("height");
+    assert!((320..=4096).contains(&width) && (240..=2160).contains(&height));
+    let source = std::fs::read_to_string(template).expect("read Lua template");
+    assert!(!source.is_empty() && source.len() <= 32 * 1024);
+    let mut input = Vec::new();
+    std::io::stdin()
+        .take(4 * 1024 * 1024 + 1)
+        .read_to_end(&mut input)
+        .expect("read dashboard JSON");
+    assert!(input.len() <= 4 * 1024 * 1024);
+    let data: serde_json::Value = serde_json::from_slice(&input).expect("dashboard JSON");
+    let lua = Lua::new_with(
+        StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8,
+        LuaOptions::default(),
+    )
+    .expect("Lua VM");
+    lua.set_memory_limit(4 * 1024 * 1024)
+        .expect("Lua memory limit");
+    let interrupts = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&interrupts);
+    lua.set_interrupt(move |_| {
+        if counter.fetch_add(1, Ordering::Relaxed) >= 10_000 {
+            Err(mlua::Error::RuntimeError(
+                "HTML template instruction budget exceeded".into(),
+            ))
+        } else {
+            Ok(mlua::VmState::Continue)
+        }
+    });
+    for name in [
+        "dofile",
+        "loadfile",
+        "load",
+        "require",
+        "collectgarbage",
+        "debug",
+        "io",
+        "os",
+        "package",
+    ] {
+        lua.globals()
+            .raw_set(name, LuaValue::Nil)
+            .expect("sandbox Lua");
+    }
+    lua.globals()
+        .set("data", lua.to_value(&data).expect("serialize dashboard"))
+        .expect("install dashboard");
+    lua.sandbox(true).expect("sandbox Lua");
+    let value = lua
+        .load(&source)
+        .set_name(template)
+        .eval()
+        .expect("run Lua template");
+    let view: HtmlView = lua.from_value(value).expect("Lua HTML view");
+    assert!(view.html.len() <= 128 * 1024 && view.css.len() <= 64 * 1024);
+    let document = format!(
+        "<!doctype html><meta charset=utf-8><style>{}</style>{}",
+        view.css, view.html
+    );
+    let rendered = render_html(&document, width as f32, 1.0, height as f32, false);
+    let image = image::RgbaImage::from_raw(rendered.width, rendered.height, rendered.rgba)
+        .expect("Blitz RGBA dimensions");
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 88)
+        .encode_image(&image)
+        .expect("encode dashboard JPEG");
+    let root = canvas_core::runtime_root().expect("Canvas runtime root");
+    let path = canvas_core::frame_file(&root, source_id).expect("frame path");
+    canvas_core::write_atomic(&path, &jpeg).expect("write dashboard frame");
+    println!("{}", path.display());
 }
 
 // ---------------------------------------------------------------------------
@@ -60,7 +166,13 @@ struct Rendered {
     content_css_height: f32,
 }
 
-fn render_html(html: &str, css_width: f32, scale: f32, max_css_height: f32, trim: bool) -> Rendered {
+fn render_html(
+    html: &str,
+    css_width: f32,
+    scale: f32,
+    max_css_height: f32,
+    trim: bool,
+) -> Rendered {
     // Lay out and paint in a deliberately tall viewport so nothing is height-constrained.
     let vp = Viewport::new(
         (css_width * scale) as u32,
@@ -219,15 +331,25 @@ fn render_target(t: Target) {
     println!("  html bytes         : {}", final_html.len());
     println!("  page (@page)       : {page_w}x{page_h}mm, margins {margin_x}/{margin_y}mm");
     println!("  viewport css width : {css_width:.1}px ({content_mm:.0}mm content box)");
-    println!("  content height     : {:.1}px = {content_h_mm:.1}mm", r.content_css_height);
+    println!(
+        "  content height     : {:.1}px = {content_h_mm:.1}mm",
+        r.content_css_height
+    );
     println!(
         "  fits one page?     : {} (usable ~{usable_mm:.0}mm; Blitz itself does NOT paginate)",
-        if content_h_mm <= usable_mm { "yes" } else { "NO - would need N pages" }
+        if content_h_mm <= usable_mm {
+            "yes"
+        } else {
+            "NO - would need N pages"
+        }
     );
     println!("  implied page count : {:.2}", content_h_mm / usable_mm);
     println!("  raster             : {}x{} @ {scale}x", r.width, r.height);
     println!("  wall time          : {elapsed:?}");
-    println!("  wrote              : {OUT}/{}.png and {OUT}/{}.html", t.key, t.key);
+    println!(
+        "  wrote              : {OUT}/{}.png and {OUT}/{}.html",
+        t.key, t.key
+    );
 }
 
 const SAMPLE_DATA: &str = r#"{
@@ -473,7 +595,10 @@ fn probe_css() {
     let mut supported = 0usize;
     let mut failed: Vec<&str> = Vec::new();
 
-    println!("{:<30} {:<10} {}", "CSS FEATURE", "RESULT", "WHY IT MATTERS");
+    println!(
+        "{:<30} {:<10} {}",
+        "CSS FEATURE", "RESULT", "WHY IT MATTERS"
+    );
     println!("{}", "-".repeat(100));
 
     for p in PROBES {
@@ -482,9 +607,10 @@ fn probe_css() {
             p.css, p.body
         );
         let r = render_html(&html, W, 1.0, H, false);
-        let ok = p.checks.iter().all(|&(x, y, expect_ink)| {
-            has_ink(&r, x, y) == expect_ink
-        });
+        let ok = p
+            .checks
+            .iter()
+            .all(|&(x, y, expect_ink)| has_ink(&r, x, y) == expect_ink);
         if ok {
             supported += 1;
         } else {
@@ -568,8 +694,14 @@ fn ink_profile(path: &str) -> Option<(Vec<f32>, u32, u32, f32)> {
 }
 
 fn compare_outputs() {
-    let a = std::env::args().nth(2).map(|k| format!("{OUT}/{k}.png")).unwrap_or_else(|| format!("{OUT}/blitz.png"));
-    let b = std::env::args().nth(2).map(|k| format!("{OUT}/{k}.weasy.png")).unwrap_or_else(|| format!("{OUT}/blitz.weasy.png"));
+    let a = std::env::args()
+        .nth(2)
+        .map(|k| format!("{OUT}/{k}.png"))
+        .unwrap_or_else(|| format!("{OUT}/blitz.png"));
+    let b = std::env::args()
+        .nth(2)
+        .map(|k| format!("{OUT}/{k}.weasy.png"))
+        .unwrap_or_else(|| format!("{OUT}/blitz.weasy.png"));
     let (pa, wa, ha, inka) = match ink_profile(&a) {
         Some(v) => v,
         None => {
@@ -614,10 +746,6 @@ fn compare_outputs() {
     println!("\nband  blitz                    weasyprint");
     for i in (0..BANDS).step_by(4) {
         let bar = |v: f32| "#".repeat((v * 40.0).round() as usize);
-        println!(
-            "{i:>4}  {:<24} {}",
-            bar(pa[i]),
-            bar(pb[i])
-        );
+        println!("{i:>4}  {:<24} {}", bar(pa[i]), bar(pb[i]));
     }
 }
