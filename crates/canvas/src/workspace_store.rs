@@ -5,7 +5,7 @@
 //! from these documents when a project becomes active again.
 
 use crate::{
-    Error, SCHEMA_VERSION, WorkspaceDocument,
+    Background, Error, Layout, SCHEMA_VERSION, SurfaceChrome, ThemeRef, WorkspaceDocument,
     control::{MAX_PROJECT_WORKSPACES, OverlaySettings, ProjectWorkspaceSpec},
     display::DisplayTarget,
 };
@@ -280,7 +280,21 @@ impl WorkspaceStore {
             }
             next.definitions
                 .insert(definition.project_id.clone(), definition.clone());
-            if next.projects.contains_key(&definition.project_id) {
+            let inherited_empty =
+                next.projects
+                    .get(&definition.project_id)
+                    .is_some_and(|document| {
+                        document.id == format!("{}-workspace", definition.project_id)
+                            && document.revision == 1
+                            && document.surfaces.is_empty()
+                            && document.bindings.is_empty()
+                            && matches!(document.layout, Layout::Empty)
+                            && document.theme == ThemeRef::Project
+                            && document.background == Background::Theme
+                            && document.chrome == SurfaceChrome::default()
+                            && document.focused_surface_id.is_none()
+                    });
+            if next.projects.contains_key(&definition.project_id) && !inherited_empty {
                 preserved += 1;
             } else {
                 next.projects.insert(
@@ -352,22 +366,26 @@ fn default_alfalfa_workspace(project_id: &str) -> Result<WorkspaceDocument, Erro
         "revision": 1,
         "theme": {"source": "project"},
         "background": {"kind": "theme"},
+        "chrome": {"title": "hidden", "canvas_padding": 16, "surface_gap": 12},
         "surfaces": [
             {"id": "project-html", "title": "Project dashboard", "content": {"kind": "live_image", "source_id": format!("{stream}-html")}},
-            widget_surface("project-pulse", "Project pulse", "status_list", serde_json::json!({"title": "Project pulse", "nodes": []})),
-            widget_surface("project-goals", "Goals", "event_log", serde_json::json!({"title": "Goals", "entries": []})),
-            widget_surface("project-work", "Open beads", "event_log", serde_json::json!({"title": "Open beads", "entries": []})),
+            widget_surface("project-goals", "Goals", "stat", serde_json::json!({"label": "Tracked goals", "value": 0.0, "history": []})),
+            widget_surface("project-work", "Open marbles", "stat", serde_json::json!({"label": "Open marbles", "value": 0.0, "history": []})),
+            widget_surface("project-agents", "Agents", "stat", serde_json::json!({"label": "Running agents", "value": 0.0, "history": []})),
+            widget_surface("project-reviewers", "Reviewers", "stat", serde_json::json!({"label": "Reviewers", "value": 0.0, "history": []})),
         ],
         "layout": {"kind": "canvas", "placements": [
             {"surface_id": "project-html", "bounds": {"x": 0.0, "y": 0.0, "width": 0.55, "height": 1.0}},
-            {"surface_id": "project-pulse", "bounds": {"x": 0.55, "y": 0.0, "width": 0.45, "height": 0.36}},
-            {"surface_id": "project-goals", "bounds": {"x": 0.55, "y": 0.36, "width": 0.45, "height": 0.30}},
-            {"surface_id": "project-work", "bounds": {"x": 0.55, "y": 0.66, "width": 0.45, "height": 0.34}},
+            {"surface_id": "project-goals", "bounds": {"x": 0.55, "y": 0.0, "width": 0.225, "height": 0.5}},
+            {"surface_id": "project-work", "bounds": {"x": 0.775, "y": 0.0, "width": 0.225, "height": 0.5}},
+            {"surface_id": "project-agents", "bounds": {"x": 0.55, "y": 0.5, "width": 0.225, "height": 0.5}},
+            {"surface_id": "project-reviewers", "bounds": {"x": 0.775, "y": 0.5, "width": 0.225, "height": 0.5}},
         ]},
         "bindings": [
-            dashboard_binding("project-pulse-bind", &stream, "project-pulse", "alfalfa-project-summary-v1"),
             dashboard_binding("project-goals-bind", &stream, "project-goals", "alfalfa-project-goals-v1"),
             dashboard_binding("project-work-bind", &stream, "project-work", "alfalfa-project-work-v1"),
+            dashboard_binding("project-agents-bind", &stream, "project-agents", "alfalfa-project-agents-v1"),
+            dashboard_binding("project-reviewers-bind", &stream, "project-reviewers", "alfalfa-project-reviewers-v1"),
         ],
     }))
     .map_err(|error| Error(format!("Build default Alfalfa workspace: {error}")))
@@ -378,6 +396,7 @@ fn widget_surface(id: &str, title: &str, kind: &str, body: serde_json::Value) ->
     spec["schema_version"] = serde_json::json!(2);
     spec["id"] = serde_json::json!(id);
     spec["kind"] = serde_json::json!(kind);
+    spec["data"] = serde_json::json!({"state": "loading", "source": "alfalfa"});
     serde_json::json!({
         "id": id,
         "title": title,
@@ -675,8 +694,8 @@ mod tests {
         let ohm = store.get("gh-1288853134").unwrap();
         assert_eq!(ohm.background, Background::Theme);
         assert_eq!(ohm.theme, ThemeRef::Project);
-        assert_eq!(ohm.surfaces.len(), 4);
-        assert_eq!(ohm.bindings.len(), 3);
+        assert_eq!(ohm.surfaces.len(), 5);
+        assert_eq!(ohm.bindings.len(), 4);
         assert!(
             ohm.bindings
                 .iter()
@@ -689,6 +708,19 @@ mod tests {
             "Dock renamed upstream"
         );
         assert_eq!(catalog.project("gh-1288853134").unwrap().name, "ohmOS");
+    }
+
+    #[test]
+    fn catalog_sync_upgrades_generated_empty_desktops_to_current_default() {
+        let base = Catalog::bundled().unwrap();
+        let mut store = WorkspaceStore::default();
+        store.upsert(document("ohm"));
+
+        let report = store.sync(vec![definition("ohm", "Ohm")], &base).unwrap();
+
+        assert_eq!(report.created, 1);
+        assert_eq!(report.preserved, 0);
+        assert_eq!(store.get("ohm").unwrap().surfaces.len(), 5);
     }
 
     #[test]
@@ -758,7 +790,7 @@ mod tests {
 
         let reset = store.reset_to_default("ohm", &base).unwrap();
         assert_eq!(reset.background, Background::Theme);
-        assert_eq!(reset.surfaces.len(), 4);
+        assert_eq!(reset.surfaces.len(), 5);
         assert_eq!(store.get("dock").unwrap().revision, 7);
     }
 }

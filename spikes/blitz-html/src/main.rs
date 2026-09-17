@@ -17,8 +17,8 @@ use mlua::{Lua, LuaOptions, LuaSerdeExt, StdLib, Value as LuaValue};
 use serde::Deserialize;
 use std::io::Read;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 
 const DOC_FORGE: &str = "/Users/ajmwagar/src/fpl/doc-forge";
@@ -29,7 +29,9 @@ const PX_PER_MM: f32 = 96.0 / 25.4;
 
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "render".into());
-    std::fs::create_dir_all(OUT).unwrap();
+    if mode != "dashboard" {
+        std::fs::create_dir_all(OUT).expect("create renderer output directory");
+    }
     match mode.as_str() {
         "render" => {
             render_target(A6_SLIP);
@@ -39,12 +41,12 @@ fn main() {
         }
         "probe" => probe_css(),
         "compare" => compare_outputs(),
-        // `dashboard <template.lua> <source-id> <width> <height>` reads one
+        // `dashboard <template.lua> <source-id> <width> <height> [scale]` reads one
         // bounded JSON snapshot from stdin. Sandboxed Lua maps data to HTML
         // and CSS; Blitz owns pixels; Canvas only reloads the atomic frame.
         "dashboard" => {
             let a: Vec<String> = std::env::args().collect();
-            render_dashboard(&a[2], &a[3], &a[4], &a[5]);
+            render_dashboard(&a[2], &a[3], &a[4], &a[5], a.get(6));
         }
         // `file <in.html> <out.png> <css_width> <scale>` - render any HTML file.
         "file" => {
@@ -76,14 +78,22 @@ struct HtmlView {
     css: String,
 }
 
-fn render_dashboard(template: &str, source_id: &str, width: &str, height: &str) {
+fn render_dashboard(
+    template: &str,
+    source_id: &str,
+    width: &str,
+    height: &str,
+    scale: Option<&String>,
+) {
     assert!(
         canvas_core::is_safe_frame_id(source_id),
         "unsafe frame source id"
     );
     let width: u32 = width.parse().expect("width");
     let height: u32 = height.parse().expect("height");
+    let scale: f32 = scale.and_then(|value| value.parse().ok()).unwrap_or(1.0);
     assert!((320..=4096).contains(&width) && (240..=2160).contains(&height));
+    assert!((1.0..=3.0).contains(&scale));
     let source = std::fs::read_to_string(template).expect("read Lua template");
     assert!(!source.is_empty() && source.len() <= 32 * 1024);
     let mut input = Vec::new();
@@ -141,11 +151,11 @@ fn render_dashboard(template: &str, source_id: &str, width: &str, height: &str) 
         "<!doctype html><meta charset=utf-8><style>{}</style>{}",
         view.css, view.html
     );
-    let rendered = render_html(&document, width as f32, 1.0, height as f32, false);
+    let rendered = render_html(&document, width as f32, scale, height as f32, false);
     let image = image::RgbaImage::from_raw(rendered.width, rendered.height, rendered.rgba)
         .expect("Blitz RGBA dimensions");
     let mut jpeg = Vec::new();
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 88)
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 94)
         .encode_image(&image)
         .expect("encode dashboard JPEG");
     let root = canvas_core::runtime_root().expect("Canvas runtime root");
@@ -741,7 +751,9 @@ fn compare_outputs() {
     } else {
         f32::NAN
     };
-    println!("\nvertical ink-profile correlation: {corr:.3}  (1.0 = same content bands in the same places)");
+    println!(
+        "\nvertical ink-profile correlation: {corr:.3}  (1.0 = same content bands in the same places)"
+    );
 
     println!("\nband  blitz                    weasyprint");
     for i in (0..BANDS).step_by(4) {

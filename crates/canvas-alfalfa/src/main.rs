@@ -25,7 +25,7 @@ use std::{
     time::Duration,
 };
 
-const ARG_ERR: &str = "usage: canvas-alfalfa [--url URL] [--bridge-bin PATH] [--alfalfa-port PORT] [--blitz-bin PATH --blitz-template PATH --blitz-workspaces id,id] [--every SECS] [--marbles N] [--prs N] [--pulses id,id,...] [--runtime-dir PATH]";
+const ARG_ERR: &str = "usage: canvas-alfalfa [--url URL] [--bridge-bin PATH] [--alfalfa-port PORT] [--blitz-bin PATH --blitz-template PATH --blitz-workspaces id,id --blitz-width PX --blitz-height PX --blitz-scale N] [--every SECS] [--marbles N] [--prs N] [--pulses id,id,...] [--runtime-dir PATH]";
 const MAX_BRIDGE_RESPONSE: u64 = 4 * 1024 * 1024;
 
 fn arg(args: &[String], flag: &str) -> Option<String> {
@@ -110,9 +110,10 @@ fn catalog_dashboards(workspaces: &[Value], projects: &[Value]) -> Vec<Value> {
                 json!({
                     "workspace_id": id,
                     "name": workspace.get("name").and_then(Value::as_str).unwrap_or(id),
+                    "project_count": 0,
                     "project_ids": [],
-                    "goals": {"total": 0, "active": 0, "queued": 0, "items": []},
-                    "beads": {"open": 0, "in_progress": 0, "blocked": 0, "ready": 0, "items": []},
+                    "goals": {"total": 0, "active": 0, "queued": 0, "ideas": 0, "items": []},
+                    "beads": {"open": 0, "in_progress": 0, "blocked": 0, "ready": 0, "linked": 0, "items": []},
                     "agents": {"total": 0, "running": 0, "items": []},
                     "reviewers": {"total": 0, "running": 0},
                     "activity_state": "unavailable",
@@ -128,17 +129,20 @@ fn catalog_dashboards(workspaces: &[Value], projects: &[Value]) -> Vec<Value> {
             continue;
         };
         if let Some(project_id) = project.pointer("/project/id").and_then(Value::as_str) {
-            dashboard["project_ids"]
+            dashboard["project_count"] =
+                json!(dashboard["project_count"].as_u64().unwrap_or(0) + 1);
+            let ids = dashboard["project_ids"]
                 .as_array_mut()
-                .expect("catalog projection project_ids remains an array")
-                .push(json!(project_id));
+                .expect("catalog projection project_ids remains an array");
+            if ids.len() < 12 {
+                ids.push(json!(project_id));
+            }
         }
         for goal in project
             .get("goals")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter(|goal| goal.get("status").and_then(Value::as_str) != Some("idea"))
         {
             dashboard["goals"]["total"] =
                 json!(dashboard["goals"]["total"].as_u64().unwrap_or(0) + 1);
@@ -150,6 +154,16 @@ fn catalog_dashboards(workspaces: &[Value], projects: &[Value]) -> Vec<Value> {
                 let count = dashboard["goals"][status].as_u64().unwrap_or(0) + 1;
                 dashboard["goals"][status] = json!(count);
             }
+            if status == "idea" {
+                dashboard["goals"]["ideas"] =
+                    json!(dashboard["goals"]["ideas"].as_u64().unwrap_or(0) + 1);
+            }
+            let linked = goal
+                .get("beads")
+                .and_then(Value::as_array)
+                .map_or(0, |beads| beads.len() as u64);
+            dashboard["beads"]["linked"] =
+                json!(dashboard["beads"]["linked"].as_u64().unwrap_or(0) + linked);
             let items = dashboard["goals"]["items"]
                 .as_array_mut()
                 .expect("catalog projection goal items remains an array");
@@ -194,13 +208,23 @@ fn render_blitz(
     template: &str,
     workspace_id: &str,
     payload: &Value,
+    width: u32,
+    height: u32,
+    scale: f32,
 ) -> Result<(), String> {
     let source_id = format!(
         "{}-dashboard-html",
         dashboard_stream(workspace_id).trim_end_matches("-dashboard")
     );
     let mut child = Command::new(binary)
-        .args(["dashboard", template, &source_id, "960", "720"])
+        .args([
+            "dashboard",
+            template,
+            &source_id,
+            &width.to_string(),
+            &height.to_string(),
+            &scale.to_string(),
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -261,6 +285,18 @@ fn main() -> ExitCode {
         .filter(|id| !id.is_empty())
         .map(str::to_string)
         .collect();
+    let blitz_width = arg(&args, "--blitz-width")
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| (320..=3840).contains(value))
+        .unwrap_or(900);
+    let blitz_height = arg(&args, "--blitz-height")
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| (320..=2160).contains(value))
+        .unwrap_or(1080);
+    let blitz_scale = arg(&args, "--blitz-scale")
+        .and_then(|value| value.parse::<f32>().ok())
+        .filter(|value| (1.0..=3.0).contains(value))
+        .unwrap_or(2.0);
     let every = arg(&args, "--every")
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|v| *v >= 5)
@@ -310,7 +346,15 @@ fn main() -> ExitCode {
                                     .and_then(|metadata| metadata.modified())
                                     .ok(),
                             ))
-                        && let Err(error) = render_blitz(binary, template, id, &workspace)
+                        && let Err(error) = render_blitz(
+                            binary,
+                            template,
+                            id,
+                            &workspace,
+                            blitz_width,
+                            blitz_height,
+                            blitz_scale,
+                        )
                     {
                         eprintln!("canvas-alfalfa: {id} HTML render failed: {error}");
                     } else if blitz.is_some() {
@@ -387,7 +431,7 @@ mod tests {
         let workspaces = json!([{"id":"ohm","name":"Ohm"}]);
         let projects = json!([
             {"project":{"id":"amp"},"workspace":{"id":"ohm"},"goals":[
-                {"id":"ship","outcome":"Ship it","status":"active"},
+                {"id":"ship","outcome":"Ship it","status":"active","beads":["amp-1"]},
                 {"id":"later","outcome":"Later","status":"queued"},
                 {"id":"idea","outcome":"Maybe","status":"idea"}
             ]},
@@ -397,9 +441,11 @@ mod tests {
             catalog_dashboards(workspaces.as_array().unwrap(), projects.as_array().unwrap());
         assert_eq!(dashboards.len(), 1);
         assert_eq!(dashboards[0]["project_ids"], json!(["amp", "meter"]));
-        assert_eq!(dashboards[0]["goals"]["total"], 2);
+        assert_eq!(dashboards[0]["goals"]["total"], 3);
         assert_eq!(dashboards[0]["goals"]["active"], 1);
         assert_eq!(dashboards[0]["goals"]["queued"], 1);
+        assert_eq!(dashboards[0]["goals"]["ideas"], 1);
+        assert_eq!(dashboards[0]["beads"]["linked"], 1);
         assert_eq!(dashboards[0]["activity_state"], "unavailable");
     }
 }

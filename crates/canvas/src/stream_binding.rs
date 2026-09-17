@@ -456,6 +456,14 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/alfalfa-project-work-v1.lua"),
     ),
     (
+        "alfalfa-project-agents-v1",
+        include_str!("../../../config/binders/alfalfa-project-agents-v1.lua"),
+    ),
+    (
+        "alfalfa-project-reviewers-v1",
+        include_str!("../../../config/binders/alfalfa-project-reviewers-v1.lua"),
+    ),
+    (
         "agent-attention-v1",
         include_str!("../../../config/binders/agent-attention-v1.lua"),
     ),
@@ -1036,17 +1044,43 @@ mod tests {
         assert_eq!(nodes.len(), 4);
         assert_eq!(nodes[1].state, canvas_widgets::StatusLevel::Critical);
 
-        let mut work = test_spec(WidgetKind::EventLog {
-            title: "stale".into(),
-            entries: Vec::new(),
+        let mut work = test_spec(WidgetKind::Stat {
+            label: "stale".into(),
+            value: 0.0,
+            unit: None,
+            change: None,
+            state: None,
+            history: Vec::new(),
         });
         apply_named_adapter("alfalfa-project-work-v1", &dashboard_event, &mut work)
-            .expect("dashboard beads render");
-        let WidgetKind::EventLog { entries, .. } = &work.kind else {
-            panic!("dashboard event log")
+            .expect("dashboard marbles render");
+        let WidgetKind::Stat {
+            label,
+            value,
+            state,
+            ..
+        } = &work.kind
+        else {
+            panic!("dashboard marble stat")
         };
-        assert_eq!(entries[0].timestamp, "ohm-1");
-        assert_eq!(entries[0].level, canvas_widgets::StatusLevel::Critical);
+        assert_eq!(label, "Open marbles");
+        assert_eq!(*value, 3.0);
+        assert_eq!(*state, Some(canvas_widgets::StatusLevel::Critical));
+
+        let mut agents = test_spec(WidgetKind::Stat {
+            label: "stale".into(),
+            value: 0.0,
+            unit: None,
+            change: None,
+            state: None,
+            history: Vec::new(),
+        });
+        apply_named_adapter("alfalfa-project-agents-v1", &dashboard_event, &mut agents)
+            .expect("dashboard agents render");
+        let WidgetKind::Stat { value, .. } = agents.kind else {
+            panic!("agent stat")
+        };
+        assert_eq!(value, 1.0);
     }
     #[test]
     fn feed_headlines_survives_an_emoji_splitting_the_clip_boundary() {

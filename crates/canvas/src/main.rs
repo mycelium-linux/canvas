@@ -3420,6 +3420,7 @@ impl App {
                     self.document = document;
                     self.active_project_workspace = Some(name.clone());
                     self.jump_history.jump(JumpEntry::current(&name, None));
+                    self.reset_workspace_runtime();
                     self.ensure_scene_decoded();
                     self.reset_background_animation();
                     self.bump();
@@ -3517,6 +3518,7 @@ impl App {
                     self.start_transition();
                     self.document = document;
                     self.active_project_workspace = Some(name.clone());
+                    self.reset_workspace_runtime();
                     self.ensure_scene_decoded();
                     self.bump();
                     self.status =
@@ -3598,6 +3600,7 @@ impl App {
                 if self.document.project_id == project_id {
                     self.start_transition();
                     self.document = document;
+                    self.reset_workspace_runtime();
                     self.ensure_scene_decoded();
                 }
                 self.bump();
@@ -4944,12 +4947,31 @@ impl App {
                         SurfaceContent::Asset { asset } => {
                             decoded.snapshot.asset_sha256.as_ref() == Some(&asset.sha256)
                         }
+                        SurfaceContent::LiveImage { source_id } => matches!(
+                            &decoded.source,
+                            ContentSource::LiveImage {
+                                source_id: decoded_source_id,
+                                ..
+                            } if decoded_source_id == source_id
+                        ),
                         _ => true,
                     }
             })
         });
         self.shared_views
             .retain(|id, _| self.decoded.contains_key(id));
+    }
+
+    /// A workspace document is a presentation identity boundary. Surface and
+    /// binding ids are intentionally reusable across projects (every inherited
+    /// dashboard has `project-html`, `project-goals`, and friends), so retaining
+    /// runtime state by those local ids would display the departed project's
+    /// pixels and values in the incoming workspace.
+    fn reset_workspace_runtime(&mut self) {
+        self.decoded.clear();
+        self.shared_views.clear();
+        self.live_pending.clear();
+        self.stream_sequences.clear();
     }
 
     fn ensure_scene_decoded(&mut self) {
@@ -11160,6 +11182,67 @@ mod tests {
         ));
         assert_eq!(app.document.project_id, "dock");
         assert_eq!(app.document.chrome.canvas_padding, 21);
+        if let Some(parent) = app.workspace_store_path.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+    }
+
+    #[test]
+    fn project_workspace_switch_replaces_same_named_live_image_source() {
+        fn live_document(project_id: &str, source_id: &str) -> WorkspaceDocument {
+            WorkspaceDocument {
+                schema_version: SCHEMA_VERSION,
+                id: format!("{project_id}-workspace"),
+                project_id: project_id.into(),
+                revision: 1,
+                theme: ThemeRef::Project,
+                background: Background::default(),
+                chrome: SurfaceChrome::default(),
+                surfaces: vec![Surface {
+                    id: "project-html".into(),
+                    title: "Dashboard".into(),
+                    content: SurfaceContent::LiveImage {
+                        source_id: source_id.into(),
+                    },
+                    inputs: Vec::new(),
+                }],
+                layout: Layout::Surface {
+                    surface_id: "project-html".into(),
+                },
+                bindings: Vec::new(),
+                focused_surface_id: None,
+            }
+        }
+
+        let mut app = test_app();
+        let outgoing = app.document.project_id.clone();
+        let incoming = app
+            .catalog
+            .projects
+            .iter()
+            .find(|project| project.id != outgoing)
+            .expect("second bundled project")
+            .id
+            .clone();
+        app.document = live_document(&outgoing, "ohm-dashboard-html");
+        app.active_project_workspace = Some(outgoing.clone());
+        app.ensure_scene_decoded();
+        app.workspaces.upsert(app.document.clone());
+        app.workspaces
+            .upsert(live_document(&incoming, "other-dashboard-html"));
+
+        let switched = execute(
+            &mut app,
+            "switch-live-dashboard",
+            Command::WorkspaceSwitch { name: incoming },
+        );
+        assert!(matches!(switched.outcome, Outcome::Ok { .. }));
+        let ContentSource::LiveImage { source_id, .. } =
+            &app.decoded.get("project-html").unwrap().source
+        else {
+            panic!("live dashboard")
+        };
+        assert_eq!(source_id, "other-dashboard-html");
         if let Some(parent) = app.workspace_store_path.parent() {
             let _ = std::fs::remove_dir_all(parent);
         }
