@@ -74,6 +74,9 @@ fn get(path: &str) -> Result<Value, String> {
             "/api/v1/projects" => {
                 command.arg("list");
             }
+            "/api/v1/project-workspaces" => {
+                command.arg("workspaces");
+            }
             "/api/v1/project-companies" => {
                 command.arg("companies");
             }
@@ -188,13 +191,8 @@ pub fn list() -> Result<Value, String> {
 /// navigates: the workspace someone means by "Ohm" is the folder `ohm`, and
 /// `gh-1288853134` is one paused repository inside it.
 ///
-/// Fetched over the owner's local origin rather than `project-read`, because the
-/// installed desktop bridge answers "Unsupported project read operation" for
-/// this action and routing it through the CLI would hard-fail the sync. Teaching
-/// the bridge a `workspaces` action is the follow-up; until then this is the
-/// same local origin and trust posture as the existing catalog fallback.
 pub fn workspaces() -> Result<Value, String> {
-    let value = legacy_get("/api/v1/project-workspaces")?;
+    let value = get("/api/v1/project-workspaces")?;
     if !value.is_array() {
         return Err("Alfalfa workspace list has an unsupported shape".into());
     }
