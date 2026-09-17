@@ -1,6 +1,7 @@
 //! Visual selection of the bounded Coherence themes Canvas can persist.
 
 use canvas_core::{Accent, ThemeMode, ThemeSelection};
+use crate::theme_pack::ThemePack;
 use iced::widget::{column, container, mouse_area, row, text};
 use iced::{Color, Element, Length};
 
@@ -43,20 +44,37 @@ pub enum Action {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThemePicker {
     index: usize,
+    choices: Vec<Choice>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Choice {
+    theme: ThemeSelection,
+    mode: String,
+    accent: String,
+    pack_id: Option<String>,
 }
 
 impl ThemePicker {
-    pub fn opened_from(theme: ThemeSelection) -> Self {
-        Self {
-            index: CHOICES
-                .iter()
-                .position(|choice| *choice == theme)
-                .unwrap_or(0),
-        }
+    pub fn opened_from(theme: ThemeSelection, packs: &[ThemePack]) -> Self {
+        let mut choices = packs.iter().map(|pack| Choice {
+            theme: ThemeSelection::Palette { palette: pack.palette },
+            mode: "Personal".into(), accent: pack.name.clone(), pack_id: Some(pack.id.clone()),
+        }).collect::<Vec<_>>();
+        choices.extend(CHOICES.into_iter().map(|theme| {
+            let (mode, accent) = labels(theme);
+            Choice { theme, mode: mode.into(), accent: accent.into(), pack_id: None }
+        }));
+        let index = choices.iter().position(|choice| choice.theme == theme).unwrap_or(0);
+        Self { index, choices }
     }
 
     pub fn selection(&self) -> ThemeSelection {
-        CHOICES[self.index]
+        self.choices[self.index].theme
+    }
+
+    pub fn selected_pack_id(&self) -> Option<&str> {
+        self.choices[self.index].pack_id.as_deref()
     }
 
     pub fn selection_index(&self) -> usize {
@@ -64,7 +82,7 @@ impl ThemePicker {
     }
 
     pub fn select(&mut self, index: usize) {
-        self.index = index % CHOICES.len();
+        self.index = index % self.choices.len();
     }
 
     pub fn handle(&mut self, event: &iced::keyboard::Event) -> Action {
@@ -75,7 +93,7 @@ impl ThemePicker {
         if !modifiers.is_empty() {
             return Action::Ignored;
         }
-        let count = CHOICES.len();
+        let count = self.choices.len();
         match key {
             Key::Named(Named::ArrowRight) => self.index = (self.index + 1) % count,
             Key::Named(Named::ArrowLeft) => self.index = (self.index + count - 1) % count,
@@ -95,12 +113,12 @@ impl ThemePicker {
         let selected = self.selection();
         let shell = selected.palette();
         let mut grid = column![].spacing(10);
-        for chunk in CHOICES.chunks(COLUMNS) {
+        for chunk in self.choices.chunks(COLUMNS) {
             let mut line = row![].spacing(10);
             for (index, choice) in chunk.iter().enumerate() {
-                let abs = CHOICES.iter().position(|c| c == choice).unwrap_or(0);
+                let abs = self.choices.iter().position(|c| c == choice).unwrap_or(0);
                 let _ = index; // chunk-local index; abs is the global index
-                let tile = theme_tile(*choice, *choice == selected);
+                let tile = theme_tile(choice, choice.theme == selected);
                 line = line.push(
                     mouse_area(tile)
                         .on_press(on_pick(abs))
@@ -109,7 +127,8 @@ impl ThemePicker {
             }
             grid = grid.push(line);
         }
-        let (mode, accent) = labels(selected);
+        let choice = &self.choices[self.index];
+        let (mode, accent) = (choice.mode.as_str(), choice.accent.as_str());
         let heading = text(format!("Theme — {mode} / {accent}"))
             .size(16)
             .color(rgb(shell.text));
@@ -133,9 +152,9 @@ impl ThemePicker {
     }
 }
 
-fn theme_tile<'a, Message: 'a>(theme: ThemeSelection, selected: bool) -> Element<'a, Message> {
-    let palette = theme.palette();
-    let (mode, accent) = labels(theme);
+fn theme_tile<'a, Message: 'a>(choice: &Choice, selected: bool) -> Element<'a, Message> {
+    let palette = choice.theme.palette();
+    let (mode, accent) = (&choice.mode, &choice.accent);
     let swatches = row![
         swatch(palette.background),
         swatch(palette.surface),
@@ -226,7 +245,7 @@ mod tests {
     #[test]
     fn opens_on_the_active_native_theme_and_wraps() {
         let active = ThemeSelection::coherence(ThemeMode::Light, Accent::Info);
-        let mut picker = ThemePicker::opened_from(active);
+        let mut picker = ThemePicker::opened_from(active, &[]);
         assert_eq!(picker.selection(), active);
         picker.handle(&pressed(Key::Named(key::Named::ArrowRight)));
         assert_eq!(
@@ -242,7 +261,7 @@ mod tests {
 
     #[test]
     fn enter_applies_and_escape_cancels() {
-        let mut picker = ThemePicker::opened_from(CHOICES[0]);
+        let mut picker = ThemePicker::opened_from(CHOICES[0], &[]);
         assert_eq!(
             picker.handle(&pressed(Key::Named(key::Named::Enter))),
             Action::Apply

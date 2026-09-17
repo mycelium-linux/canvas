@@ -1,0 +1,26 @@
+schema_version = 1
+id = "imperial"
+name = "Imperial"
+subtitle = "Severe command console"
+
+[palette]
+background = "#08090b"
+background_strong = "#0e1013"
+surface = "#15171b"
+surface_muted = "#202328"
+text = "#edeff2"
+text_muted = "#91969e"
+primary = "#f0f1f3"
+success = "#72c991"
+warning = "#e7b854"
+danger = "#ef3e46"
+info = "#a7afba"
+border = "#34383f"
+border_strong = "#686e78"
+
+[effects]
+glow = 0.05
+scanlines = 0.0
+noise = 0.0
+corner_style = "square"
+density = 0.88

@@ -33,6 +33,7 @@ pub mod project_picker;
 pub mod project_switcher;
 pub mod reconcile;
 pub mod runtime_config;
+pub mod theme_pack;
 pub mod screensaver;
 #[cfg(feature = "lua-scenes")]
 pub mod stream_binding;

@@ -1,0 +1,26 @@
+schema_version = 1
+id = "pip-boy"
+name = "Pip-Boy"
+subtitle = "Field terminal phosphor"
+
+[palette]
+background = "#050d06"
+background_strong = "#081609"
+surface = "#0a1c0c"
+surface_muted = "#0d2810"
+text = "#b9f7a3"
+text_muted = "#72a868"
+primary = "#74ff57"
+success = "#74ff57"
+warning = "#e9c45b"
+danger = "#ff6854"
+info = "#9aeb78"
+border = "#254d28"
+border_strong = "#4da44d"
+
+[effects]
+glow = 0.24
+scanlines = 0.34
+noise = 0.09
+corner_style = "rounded"
+density = 1.08

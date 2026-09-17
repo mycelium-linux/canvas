@@ -1,0 +1,26 @@
+schema_version = 1
+id = "jarvis"
+name = "JARVIS"
+subtitle = "Luminous instrumentation"
+
+[palette]
+background = "#020a11"
+background_strong = "#041420"
+surface = "#071d29"
+surface_muted = "#0a2a39"
+text = "#dcf9ff"
+text_muted = "#75acba"
+primary = "#31e6ff"
+success = "#56f2c0"
+warning = "#ffc857"
+danger = "#ff5970"
+info = "#58b8ff"
+border = "#13485b"
+border_strong = "#27a8c2"
+
+[effects]
+glow = 0.46
+scanlines = 0.04
+noise = 0.01
+corner_style = "cut"
+density = 0.94

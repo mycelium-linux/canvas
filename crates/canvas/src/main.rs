@@ -518,6 +518,8 @@ struct App {
     /// idle subscription alone does not guarantee a present when no model
     /// state changed, which left clocks visually frozen on quiet workspaces.
     last_clock_second: u64,
+    /// Content identity of runtime theme packs; changes trigger hot reload.
+    theme_pack_fingerprint: String,
 }
 
 impl App {
@@ -857,6 +859,7 @@ impl App {
             picker_elapsed: Duration::ZERO,
             screensaver_fps: 0.0,
             last_clock_second: now_unix_ms() / 1_000,
+            theme_pack_fingerprint: ::canvas::theme_pack::fingerprint(),
         };
         app.publish_web_themes();
         app.ensure_scene_decoded();
@@ -912,11 +915,7 @@ impl App {
     }
 
     fn presented_visual_theme(&self) -> VisualTheme {
-        let mut visual = self
-            .document
-            .resolved_theme(&self.catalog)
-            .expect("validated Canvas document theme")
-            .visual_theme();
+        let mut visual = self.effective_theme(&self.document).visual_theme();
         visual.palette = self.presented_palette();
         visual
     }
@@ -1098,6 +1097,12 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick => {
+                let theme_pack_fingerprint = ::canvas::theme_pack::fingerprint();
+                if theme_pack_fingerprint != self.theme_pack_fingerprint {
+                    self.theme_pack_fingerprint = theme_pack_fingerprint;
+                    self.publish_web_themes();
+                    self.bump();
+                }
                 let clock_second = now_unix_ms() / 1_000;
                 if clock_second != self.last_clock_second
                     && self.document.surfaces.iter().any(|surface| {
@@ -1318,8 +1323,9 @@ impl App {
                 let selected_index = picker.selection_index();
                 if index == selected_index {
                     let theme = picker.selection();
+                    let pack_id = picker.selected_pack_id().map(str::to_string);
                     self.theme_picker = None;
-                    self.apply_picked_theme(theme)
+                    self.apply_picked_theme(theme, pack_id)
                 } else {
                     picker.select(index);
                     Task::none()
@@ -1365,8 +1371,9 @@ impl App {
                         }
                         Action::Apply => {
                             let theme = picker.selection();
+                            let pack_id = picker.selected_pack_id().map(str::to_string);
                             self.theme_picker = None;
-                            return self.apply_picked_theme(theme);
+                            return self.apply_picked_theme(theme, pack_id);
                         }
                         Action::Cancel => {
                             self.theme_picker = None;
@@ -2433,11 +2440,13 @@ impl App {
         self.background_picker = None;
         self.theme_picker = match self.theme_picker {
             Some(_) => None,
-            None => Some(::canvas::theme_picker::ThemePicker::opened_from(
-                self.document
-                    .resolved_theme(&self.catalog)
-                    .expect("validated Canvas document theme"),
-            )),
+            None => {
+                let (packs, notes) = ::canvas::theme_pack::load();
+                for note in notes { self.events.push(format!("theme_pack_invalid {note}")); }
+                Some(::canvas::theme_picker::ThemePicker::opened_from(
+                    self.effective_theme(&self.document), &packs,
+                ))
+            }
         };
         let open = self.theme_picker.is_some();
         self.transition = None;
@@ -2516,7 +2525,11 @@ impl App {
         }
     }
 
-    fn apply_picked_theme(&mut self, theme: canvas_core::ThemeSelection) -> Task<Message> {
+    fn apply_picked_theme(
+        &mut self,
+        theme: canvas_core::ThemeSelection,
+        pack_id: Option<String>,
+    ) -> Task<Message> {
         let previous = self.document.theme;
         self.document.theme = ThemeRef::Selection { theme };
         if let Err(error) = self.document.validate(&self.catalog) {
@@ -2538,10 +2551,19 @@ impl App {
             }
             self.workspaces = next;
         }
+        let selection_path = PathBuf::from("themes/selections")
+            .join(format!("{}.txt", self.document.project_id));
+        if let Some(pack_id) = &pack_id {
+            if let Err(error) = ::canvas::runtime_config::write(&selection_path, pack_id.as_bytes(), 48) {
+                self.events.push(format!("theme_pack_selection_failed {error}"));
+            }
+        } else if let Some(root) = ::canvas::runtime_config::root() {
+            let _ = std::fs::remove_file(root.join(selection_path));
+        }
         self.publish_web_themes();
         let selected = theme.to_project_theme();
         self.status = selected.map_or_else(
-            || "Theme set to imported palette.".into(),
+            || pack_id.map_or_else(|| "Theme set to imported palette.".into(), |id| format!("Theme set to {id}.")),
             |theme| format!("Theme set to {:?} {:?}.", theme.mode, theme.accent),
         );
         self.emit_event("theme_applied");
@@ -4997,10 +5019,9 @@ impl App {
             if !canvas_core::is_safe_frame_id(project_id) {
                 continue;
             }
-            let Ok(selection) = document.resolved_theme(&self.catalog) else {
-                continue;
-            };
+            let selection = self.effective_theme(document);
             let visual = selection.visual_theme();
+            let pack = self.selected_theme_pack(project_id);
             let mode = match visual.mode {
                 canvas_core::ThemeMode::Light => "light",
                 canvas_core::ThemeMode::Dark => "dark",
@@ -5022,7 +5043,14 @@ impl App {
                     "title": visual.metrics.title, "hero": visual.metrics.hero,
                 },
                 "appearance": appearance,
-                "effects": {"profile": "coherence", "glow": 0.0, "scanlines": 0.0, "noise": 0.0},
+                "effects": pack.as_ref().map(|pack| serde_json::json!({
+                    "profile": pack.id, "glow": pack.effects.glow,
+                    "scanlines": pack.effects.scanlines, "noise": pack.effects.noise,
+                    "corner_style": pack.effects.corner_style, "density": pack.effects.density,
+                })).unwrap_or_else(|| serde_json::json!({
+                    "profile": "coherence", "glow": 0.0, "scanlines": 0.0,
+                    "noise": 0.0, "corner_style": "rounded", "density": 1.0,
+                })),
             });
             let Ok(bytes) = serde_json::to_vec_pretty(&snapshot) else {
                 continue;
@@ -5144,10 +5172,29 @@ impl App {
     }
 
     fn project_palette(&self) -> ThemePalette {
-        self.document
-            .resolved_theme(&self.catalog)
-            .expect("validated Canvas document theme")
-            .palette()
+        self.effective_theme(&self.document).palette()
+    }
+
+    fn selected_theme_pack(&self, project_id: &str) -> Option<::canvas::theme_pack::ThemePack> {
+        let relative = PathBuf::from("themes/selections").join(format!("{project_id}.txt"));
+        let bytes = ::canvas::runtime_config::read(&relative, 48).ok()??;
+        let id = std::str::from_utf8(&bytes).ok()?.trim();
+        ::canvas::theme_pack::load()
+            .0
+            .into_iter()
+            .find(|pack| pack.id == id)
+    }
+
+    fn effective_theme(&self, document: &WorkspaceDocument) -> canvas_core::ThemeSelection {
+        self.selected_theme_pack(&document.project_id)
+            .map(|pack| canvas_core::ThemeSelection::Palette {
+                palette: pack.palette,
+            })
+            .unwrap_or_else(|| {
+                document
+                    .resolved_theme(&self.catalog)
+                    .expect("validated Canvas document theme")
+            })
     }
 
     fn media_viewport(&self) -> LogicalSize {

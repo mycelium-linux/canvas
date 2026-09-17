@@ -389,6 +389,7 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "tokio",
+ "toml",
  "unibus",
  "wgpu",
 ]

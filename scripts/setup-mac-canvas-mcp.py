@@ -51,10 +51,13 @@ def install_canvas_app(source: pathlib.Path, app: pathlib.Path) -> None:
                     "dev.fpl.dock.canvas", str(app)], check=True)
 
 def install_runtime_config(support: pathlib.Path) -> None:
-    binders = support / "binders"; views = support / "views"
+    binders = support / "binders"; views = support / "views"; themes = support / "themes/packs"
     binders.mkdir(parents=True, exist_ok=True); views.mkdir(parents=True, exist_ok=True)
+    themes.mkdir(parents=True, exist_ok=True)
     for source in (REPO_ROOT / "config/binders").glob("*.lua"):
         shutil.copyfile(source, binders / source.name)
+    for source in (REPO_ROOT / "config/themes").glob("*.toml"):
+        shutil.copyfile(source, themes / source.name)
     for source in (REPO_ROOT / "config/views").glob("*.json"):
         document = json.loads(source.read_text())
         identity = document.get("id")
