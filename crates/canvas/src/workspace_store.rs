@@ -5,7 +5,7 @@
 //! from these documents when a project becomes active again.
 
 use crate::{
-    Background, Error, Layout, SCHEMA_VERSION, SurfaceChrome, ThemeRef, WorkspaceDocument,
+    Error, SCHEMA_VERSION, WorkspaceDocument,
     control::{MAX_PROJECT_WORKSPACES, OverlaySettings, ProjectWorkspaceSpec},
     display::DisplayTarget,
 };
@@ -285,7 +285,7 @@ impl WorkspaceStore {
             } else {
                 next.projects.insert(
                     definition.project_id.clone(),
-                    empty_workspace(&definition.project_id),
+                    default_alfalfa_workspace(&definition.project_id)?,
                 );
                 created += 1;
             }
@@ -309,6 +309,25 @@ impl WorkspaceStore {
         self.projects.get(project_id)
     }
 
+    /// Replace one project-specific override with the current inherited
+    /// Alfalfa workspace. Other projects and navigation state are untouched.
+    pub fn reset_to_default(
+        &mut self,
+        project_id: &str,
+        base: &Catalog,
+    ) -> Result<WorkspaceDocument, Error> {
+        if !self.definitions.contains_key(project_id) {
+            return Err(Error(format!("Unknown Alfalfa workspace: {project_id}")));
+        }
+        let document = default_alfalfa_workspace(project_id)?;
+        let mut next = self.clone();
+        next.projects
+            .insert(project_id.to_string(), document.clone());
+        next.validate(base)?;
+        *self = next;
+        Ok(document)
+    }
+
     pub fn project_ids(&self) -> impl Iterator<Item = &str> {
         self.projects.keys().map(String::as_str)
     }
@@ -324,20 +343,55 @@ impl WorkspaceStore {
     }
 }
 
-fn empty_workspace(project_id: &str) -> WorkspaceDocument {
-    WorkspaceDocument {
-        schema_version: SCHEMA_VERSION,
-        id: format!("{project_id}-workspace"),
-        project_id: project_id.into(),
-        revision: 1,
-        theme: ThemeRef::Project,
-        background: Background::Theme,
-        chrome: SurfaceChrome::default(),
-        surfaces: Vec::new(),
-        layout: Layout::Empty,
-        bindings: Vec::new(),
-        focused_surface_id: None,
-    }
+fn default_alfalfa_workspace(project_id: &str) -> Result<WorkspaceDocument, Error> {
+    let stream = canvas_alfalfa::dashboard_stream(project_id);
+    serde_json::from_value(serde_json::json!({
+        "schema_version": SCHEMA_VERSION,
+        "id": format!("{project_id}-workspace"),
+        "project_id": project_id,
+        "revision": 1,
+        "theme": {"source": "project"},
+        "background": {"kind": "theme"},
+        "surfaces": [
+            widget_surface("project-pulse", "Project pulse", "status_list", serde_json::json!({"title": "Project pulse", "nodes": []})),
+            widget_surface("project-goals", "Goals", "event_log", serde_json::json!({"title": "Goals", "entries": []})),
+            widget_surface("project-work", "Open beads", "event_log", serde_json::json!({"title": "Open beads", "entries": []})),
+        ],
+        "layout": {"kind": "canvas", "placements": [
+            {"surface_id": "project-pulse", "bounds": {"x": 0.0, "y": 0.0, "width": 0.42, "height": 1.0}},
+            {"surface_id": "project-goals", "bounds": {"x": 0.42, "y": 0.0, "width": 0.58, "height": 0.46}},
+            {"surface_id": "project-work", "bounds": {"x": 0.42, "y": 0.46, "width": 0.58, "height": 0.54}},
+        ]},
+        "bindings": [
+            dashboard_binding("project-pulse-bind", &stream, "project-pulse", "alfalfa-project-summary-v1"),
+            dashboard_binding("project-goals-bind", &stream, "project-goals", "alfalfa-project-goals-v1"),
+            dashboard_binding("project-work-bind", &stream, "project-work", "alfalfa-project-work-v1"),
+        ],
+    }))
+    .map_err(|error| Error(format!("Build default Alfalfa workspace: {error}")))
+}
+
+fn widget_surface(id: &str, title: &str, kind: &str, body: serde_json::Value) -> serde_json::Value {
+    let mut spec = body;
+    spec["schema_version"] = serde_json::json!(2);
+    spec["id"] = serde_json::json!(id);
+    spec["kind"] = serde_json::json!(kind);
+    serde_json::json!({
+        "id": id,
+        "title": title,
+        "content": {"kind": "widget", "spec": spec},
+        "inputs": [{"id": "widget", "contract": "canvas.widget.snapshot.v1"}],
+    })
+}
+
+fn dashboard_binding(id: &str, stream: &str, surface_id: &str, adapter: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "source": {"owner": "alfalfa", "stream": stream, "contract": "canvas.widget.snapshot.v1"},
+        "target": {"surface_id": surface_id, "input_id": "widget"},
+        "adapter": adapter,
+        "delivery": {"mode": "latest"},
+    })
 }
 
 pub fn default_path() -> Result<PathBuf, Error> {
@@ -619,7 +673,13 @@ mod tests {
         let ohm = store.get("gh-1288853134").unwrap();
         assert_eq!(ohm.background, Background::Theme);
         assert_eq!(ohm.theme, ThemeRef::Project);
-        assert!(ohm.surfaces.is_empty());
+        assert_eq!(ohm.surfaces.len(), 3);
+        assert_eq!(ohm.bindings.len(), 3);
+        assert!(
+            ohm.bindings
+                .iter()
+                .all(|binding| binding.source.stream == "gh-1288853134-dashboard")
+        );
         let catalog = store.effective_catalog(&base).unwrap();
         assert_eq!(catalog.project("dock").unwrap().resources.len(), 2);
         assert_eq!(
@@ -666,6 +726,38 @@ mod tests {
         let project = definition("gh-1288853134", "ohmOS");
         assert!(store.sync(vec![project.clone(), project], &base).is_err());
         assert_eq!(store, before);
+    }
+
+    #[test]
+    fn project_overrides_survive_sync_and_reset_is_scoped() {
+        let base = Catalog::bundled().unwrap();
+        let mut store = WorkspaceStore::default();
+        store
+            .sync(
+                vec![definition("ohm", "Ohm"), definition("dock", "Dock")],
+                &base,
+            )
+            .unwrap();
+        store.projects.get_mut("ohm").unwrap().background = Background::Solid {
+            color: [1, 2, 3, 255],
+        };
+        store.projects.get_mut("dock").unwrap().revision = 7;
+
+        store
+            .sync(
+                vec![definition("ohm", "Ohm"), definition("dock", "Dock")],
+                &base,
+            )
+            .unwrap();
+        assert!(matches!(
+            store.get("ohm").unwrap().background,
+            Background::Solid { .. }
+        ));
+
+        let reset = store.reset_to_default("ohm", &base).unwrap();
+        assert_eq!(reset.background, Background::Theme);
+        assert_eq!(reset.surfaces.len(), 3);
+        assert_eq!(store.get("dock").unwrap().revision, 7);
     }
 }
 

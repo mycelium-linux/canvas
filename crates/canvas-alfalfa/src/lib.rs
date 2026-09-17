@@ -28,6 +28,16 @@ pub fn pulse_stream(project_id: &str) -> String {
     format!("{lowered}-pulse")
 }
 
+/// The dashboard stream for an Alfalfa workspace id.
+pub fn dashboard_stream(project_id: &str) -> String {
+    let lowered: String = project_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .flat_map(char::to_lowercase)
+        .collect();
+    format!("{lowered}-dashboard")
+}
+
 fn idle_percent(ratio: &Value) -> String {
     ratio
         .as_f64()
@@ -190,6 +200,15 @@ pub fn pulse_payload(repo: &Value, marbles: usize, prs: usize) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dashboard_stream_is_project_scoped_and_identifier_safe() {
+        assert_eq!(dashboard_stream("Ohm"), "ohm-dashboard");
+        assert_eq!(
+            dashboard_stream("Player Aerospace"),
+            "playeraerospace-dashboard"
+        );
+    }
 
     fn repo(id: &str, state: &str, backlog: u64, idle: bool) -> Value {
         json!({

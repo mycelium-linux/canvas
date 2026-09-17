@@ -3576,6 +3576,40 @@ impl App {
                 );
                 Task::none()
             }
+            Command::WorkspaceReset { project_id } => {
+                let base_catalog =
+                    Catalog::bundled().expect("bundled project catalog must remain valid");
+                let mut next = self.workspaces.clone();
+                next.upsert(self.document.clone());
+                let document = match next.reset_to_default(&project_id, &base_catalog) {
+                    Ok(document) => document,
+                    Err(error) => {
+                        self.fail(pending, Failure::invalid(error.to_string()));
+                        return Task::none();
+                    }
+                };
+                if let Err(error) =
+                    workspace_store::save(&self.workspace_store_path, &next, &base_catalog)
+                {
+                    self.fail(pending, Failure::resource(error.to_string()));
+                    return Task::none();
+                }
+                self.workspaces = next;
+                if self.document.project_id == project_id {
+                    self.start_transition();
+                    self.document = document;
+                    self.ensure_scene_decoded();
+                }
+                self.bump();
+                self.status = format!("Reset project workspace '{project_id}'.");
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::WorkspaceReset { project_id },
+                    },
+                );
+                Task::none()
+            }
             Command::SetBackground { path } => {
                 let base_document_revision = self.document.revision;
                 Task::perform(async move { load_background(path) }, move |result| {

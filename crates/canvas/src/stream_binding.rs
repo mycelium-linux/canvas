@@ -444,6 +444,18 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/alfalfa-pulse-v1.lua"),
     ),
     (
+        "alfalfa-project-goals-v1",
+        include_str!("../../../config/binders/alfalfa-project-goals-v1.lua"),
+    ),
+    (
+        "alfalfa-project-summary-v1",
+        include_str!("../../../config/binders/alfalfa-project-summary-v1.lua"),
+    ),
+    (
+        "alfalfa-project-work-v1",
+        include_str!("../../../config/binders/alfalfa-project-work-v1.lua"),
+    ),
+    (
         "agent-attention-v1",
         include_str!("../../../config/binders/agent-attention-v1.lua"),
     ),
@@ -998,6 +1010,43 @@ mod tests {
         };
         assert_eq!(rows.len(), 2);
         assert_eq!(values[1][2], 31.0);
+
+        let dashboard_event = StreamEnvelope {
+            stream: "ohm-dashboard".into(),
+            project_id: Some("ohm".into()),
+            payload: serde_json::json!({
+                "workspace_id": "ohm", "name": "Ohm", "activity_state": "observed",
+                "goals": {"total": 4, "active": 1, "queued": 2, "items": [{"id": "g1", "outcome": "Ship", "status": "active"}]},
+                "beads": {"open": 3, "in_progress": 1, "blocked": 1, "ready": 1, "items": [{"id": "ohm-1", "title": "Wire metrics", "status": "blocked", "ready": false}]},
+                "agents": {"total": 2, "running": 1, "items": []},
+                "reviewers": {"total": 1, "running": 1}
+            }),
+            ..event
+        };
+        let mut summary = test_spec(WidgetKind::StatusList {
+            title: "stale".into(),
+            nodes: Vec::new(),
+        });
+        apply_named_adapter("alfalfa-project-summary-v1", &dashboard_event, &mut summary)
+            .expect("dashboard summary renders");
+        let WidgetKind::StatusList { title, nodes } = &summary.kind else {
+            panic!("dashboard status list")
+        };
+        assert_eq!(title, "Ohm pulse");
+        assert_eq!(nodes.len(), 4);
+        assert_eq!(nodes[1].state, canvas_widgets::StatusLevel::Critical);
+
+        let mut work = test_spec(WidgetKind::EventLog {
+            title: "stale".into(),
+            entries: Vec::new(),
+        });
+        apply_named_adapter("alfalfa-project-work-v1", &dashboard_event, &mut work)
+            .expect("dashboard beads render");
+        let WidgetKind::EventLog { entries, .. } = &work.kind else {
+            panic!("dashboard event log")
+        };
+        assert_eq!(entries[0].timestamp, "ohm-1");
+        assert_eq!(entries[0].level, canvas_widgets::StatusLevel::Critical);
     }
     #[test]
     fn feed_headlines_survives_an_emoji_splitting_the_clip_boundary() {

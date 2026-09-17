@@ -13,6 +13,7 @@ mcp = ["dep:rmcp", "dep:schemars", "dep:tokio", "dep:axum", "dep:reqwest", "canv
 base64 = "0.22"
 csv = "1.4"
 canvas-control = { path = "../canvas-control" }
+canvas-alfalfa = { path = "../canvas-alfalfa" }
 canvas-widgets = { path = "../canvas-widgets", features = ["live"] }
 anyhow.workspace = true
 canvas-core.workspace = true
@@ -41,7 +42,6 @@ objc2-foundation = { version = "0.2", features = ["NSThread"] }
 
 [dev-dependencies]
 tempfile.workspace = true
-canvas-alfalfa = { path = "../canvas-alfalfa" }
 rmcp = { version = "3.2", default-features = false, features = ["client", "server", "transport-io"] }
 
 [[bin]]

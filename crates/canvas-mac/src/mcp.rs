@@ -89,6 +89,12 @@ fn tools() -> Vec<Tool> {
             vec!["project_id"],
         ),
         (
+            "canvas_workspace_reset",
+            "Reset one Alfalfa project's Canvas desktop to the current default metrics view. Other project desktops are unchanged.",
+            json!({"project_id":{"type":"string","maxLength":64}}),
+            vec!["project_id"],
+        ),
+        (
             "presence_route",
             "Inspect whether a fresh, identified JARVIS Presence publication resolves to one configured display. Read-only and returns no identity details.",
             json!({}),
@@ -172,7 +178,10 @@ fn arguments(name: &str, args: &Value) -> Result<Arguments, String> {
             project: Some(value("project_id", 64)?),
             ..Arguments::default()
         }),
-        "project_recall" | "workspace_activate" | "canvas_workspace_switch" => Ok(Arguments {
+        "project_recall"
+        | "workspace_activate"
+        | "canvas_workspace_switch"
+        | "canvas_workspace_reset" => Ok(Arguments {
             project: Some(value("project_id", 64)?),
             target,
             ..Arguments::default()
@@ -427,6 +436,26 @@ fn sync_canvas_projects_from_specs(projects: Vec<ProjectWorkspaceSpec>) -> Resul
     }
 }
 
+fn reset_canvas_workspace(project_id: &str) -> Result<Value, String> {
+    let revision = canvas_snapshot()?.revision;
+    let reply = canvas_socket::send(&CanvasRequest {
+        schema_version: CANVAS_CONTROL_VERSION,
+        request_id: "dock-workspace-reset".into(),
+        expected_revision: Some(revision),
+        actor: None,
+        command: CanvasCommand::WorkspaceReset {
+            project_id: project_id.into(),
+        },
+    })?;
+    match reply.outcome {
+        CanvasOutcome::Ok {
+            receipt: CanvasReceipt::WorkspaceReset { project_id },
+        } => Ok(json!({"project_id": project_id, "revision": reply.revision})),
+        CanvasOutcome::Error { message, .. } => Err(message),
+        _ => Err("Canvas returned an unexpected workspace reset receipt".into()),
+    }
+}
+
 /// A desktop that is not a portfolio folder.
 ///
 /// Not everything worth having a desktop for is a company or a repository —
@@ -619,6 +648,7 @@ pub fn execute(name: &str, args: &Value) -> Result<Value, String> {
             | "canvas_workspaces_sync"
             | "canvas_workspace_create"
             | "canvas_workspace_switch"
+            | "canvas_workspace_reset"
     ) {
         Some(
             PRESENTATION
@@ -650,6 +680,9 @@ pub fn execute(name: &str, args: &Value) -> Result<Value, String> {
             let project = arguments.project.as_deref().unwrap();
             let source = super::alfalfa::workspaces()?;
             json!({"canvas":switch_canvas_workspace(&source, project)?})
+        }
+        "canvas_workspace_reset" => {
+            json!({"canvas":reset_canvas_workspace(arguments.project.as_deref().unwrap())?})
         }
         "presence_route" => presence_status(),
         "project_resources" => {
@@ -832,30 +865,38 @@ mod tests {
 
     #[test]
     fn an_ad_hoc_workspace_needs_an_id_and_a_presentable_name() {
-        assert!(arguments(
-            "canvas_workspace_create",
-            &json!({"workspace_id":"desktop","name":"Desktop"})
-        )
-        .is_ok());
+        assert!(
+            arguments(
+                "canvas_workspace_create",
+                &json!({"workspace_id":"desktop","name":"Desktop"})
+            )
+            .is_ok()
+        );
         // A missing half is not a usable desktop.
-        assert!(arguments(
-            "canvas_workspace_create",
-            &json!({"workspace_id":"desktop"})
-        )
-        .is_err());
+        assert!(
+            arguments(
+                "canvas_workspace_create",
+                &json!({"workspace_id":"desktop"})
+            )
+            .is_err()
+        );
         assert!(arguments("canvas_workspace_create", &json!({"name":"Desktop"})).is_err());
         // Control characters would carry into a presented label.
-        assert!(arguments(
-            "canvas_workspace_create",
-            &json!({"workspace_id":"desktop","name":"Desk\ntop"})
-        )
-        .is_err());
+        assert!(
+            arguments(
+                "canvas_workspace_create",
+                &json!({"workspace_id":"desktop","name":"Desk\ntop"})
+            )
+            .is_err()
+        );
         // Unknown arguments are refused rather than ignored.
-        assert!(arguments(
-            "canvas_workspace_create",
-            &json!({"workspace_id":"d","name":"D","extra":1})
-        )
-        .is_err());
+        assert!(
+            arguments(
+                "canvas_workspace_create",
+                &json!({"workspace_id":"d","name":"D","extra":1})
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -963,11 +1004,14 @@ mod tests {
         assert!(arguments("displays_list", &json!({"host":"other"})).is_err());
         assert!(arguments("workspaces_list", &json!({})).is_ok());
         assert!(arguments("canvas_workspaces_sync", &json!({})).is_ok());
-        assert!(arguments(
-            "canvas_workspace_switch",
-            &json!({"project_id":"gh-1288853134"})
-        )
-        .is_ok());
+        assert!(
+            arguments(
+                "canvas_workspace_switch",
+                &json!({"project_id":"gh-1288853134"})
+            )
+            .is_ok()
+        );
+        assert!(arguments("canvas_workspace_reset", &json!({"project_id":"ohm"})).is_ok());
         assert!(arguments("presence_route", &json!({})).is_ok());
         assert!(arguments("projects_list", &json!({})).is_ok());
         assert!(arguments("project_recall", &json!({"project_id":"dock"})).is_ok());
@@ -980,16 +1024,20 @@ mod tests {
             .target,
             Target::Presence
         );
-        assert!(arguments(
-            "workspace_activate",
-            &json!({"project_id":"dock","target":"nearby"})
-        )
-        .is_err());
-        assert!(arguments(
-            "project_recall",
-            &json!({"project_id":"dock","query":"other"})
-        )
-        .is_err());
+        assert!(
+            arguments(
+                "workspace_activate",
+                &json!({"project_id":"dock","target":"nearby"})
+            )
+            .is_err()
+        );
+        assert!(
+            arguments(
+                "project_recall",
+                &json!({"project_id":"dock","query":"other"})
+            )
+            .is_err()
+        );
         assert!(arguments("resource_open", &json!({"project_id":"dock"})).is_err());
         assert!(arguments("unknown", &json!({})).is_err());
     }
@@ -1014,9 +1062,11 @@ mod tests {
                 json!({"workspace_id":"scratch","name":"Scratch"}),
             ),
         ] {
-            assert!(execute(name, &args)
-                .unwrap_err()
-                .contains("presentation is busy"));
+            assert!(
+                execute(name, &args)
+                    .unwrap_err()
+                    .contains("presentation is busy")
+            );
         }
         // Pinned so a new tool is a decision, not an accident: anything added
         // here has to be considered against the presentation lock above.

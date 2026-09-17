@@ -163,6 +163,9 @@ pub enum Command {
     WorkspaceSync {
         projects: Vec<ProjectWorkspaceSpec>,
     },
+    WorkspaceReset {
+        project_id: String,
+    },
     ScreensaverShader {
         index: usize,
     },
@@ -688,6 +691,9 @@ pub enum Receipt {
         preserved: usize,
         total: usize,
     },
+    WorkspaceReset {
+        project_id: String,
+    },
     ScreensaverShaderSet {
         index: usize,
         name: String,
@@ -1029,6 +1035,11 @@ impl ControlRequest {
                     if !ids.insert(project.project_id.as_str()) {
                         return Err("workspace sync contains duplicate project ids".into());
                     }
+                }
+            }
+            Command::WorkspaceReset { project_id } => {
+                if !workspace_name(project_id) {
+                    return Err("invalid project workspace id".into());
                 }
             }
             Command::WorkspaceSave { name } | Command::WorkspaceSwitch { name } => {
@@ -1702,6 +1713,9 @@ pub mod text {
                     } => format!(
                         "workspaces={total} created={created} updated={updated} preserved={preserved}"
                     ),
+                    Receipt::WorkspaceReset { project_id } => {
+                        format!("workspace reset={project_id}")
+                    }
                     Receipt::ScreensaverShaderSet {
                         index,
                         name,
