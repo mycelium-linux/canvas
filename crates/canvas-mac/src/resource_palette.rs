@@ -240,7 +240,7 @@ impl Palette {
                 repeat: false,
                 ..
             }) => {
-                use iced::keyboard::{key::Named, Key};
+                use iced::keyboard::{Key, key::Named};
                 match key.as_ref() {
                     Key::Named(Named::ArrowDown) => {
                         self.cursor = (self.cursor + 1).min(self.matches().len().saturating_sub(1));

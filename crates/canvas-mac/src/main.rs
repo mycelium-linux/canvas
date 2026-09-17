@@ -7,7 +7,7 @@ use canvas_core::{
 use canvas_mac::reservation::{self, Desktop};
 use canvas_mac::workspace::Bindings;
 use canvas_mac::{Rect, RemoteAction, Window, WindowInventory};
-use iced::widget::{button, column, container, row, scrollable, text, text_input, Column};
+use iced::widget::{Column, button, column, container, row, scrollable, text, text_input};
 use iced::{Color, Element, Length, Task, Theme};
 use std::sync::{Arc, Mutex};
 use std::{collections::BTreeMap, path::PathBuf, process::Command};
@@ -182,7 +182,7 @@ impl App {
                 repeat: false,
                 ..
             }) => {
-                use iced::keyboard::{key::Named, Key};
+                use iced::keyboard::{Key, key::Named};
                 match key {
                     Key::Named(Named::Escape) => return self.update(Message::TakeControl),
                     Key::Named(Named::ArrowUp) if !self.diagnostics => {
@@ -1060,7 +1060,8 @@ fn parse_area(value: &str) -> Result<Rect, String> {
 /// that actually exists rather than a definition with nothing behind it.
 fn desktop_catalog(base: &Catalog) -> Result<Catalog, String> {
     let path = canvas::workspace_store::default_path().map_err(|e| e.to_string())?;
-    let store = canvas::workspace_store::load(&path, base).map_err(|e| e.to_string())?;
+    let (store, _recovery_notes) =
+        canvas::workspace_store::load(&path, base).map_err(|e| e.to_string())?;
     let mut catalog = store.effective_catalog(base).map_err(|e| e.to_string())?;
     catalog
         .projects

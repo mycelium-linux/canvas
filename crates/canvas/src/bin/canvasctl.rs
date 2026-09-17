@@ -269,7 +269,9 @@ fn handle_doc(tokens: &[String]) -> Result<(), String> {
 
 fn handle_tile(tokens: &[String]) -> Result<(), String> {
     if tokens.len() < 2 {
-        return Err("usage: tile grid <rows> <cols> | tile golden | tile monocle | tile next".into());
+        return Err(
+            "usage: tile grid <rows> <cols> | tile golden | tile monocle | tile next".into(),
+        );
     }
     let state = read_document_state()?;
     let doc_rev = state.doc_revision;

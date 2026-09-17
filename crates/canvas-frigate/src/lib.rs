@@ -23,7 +23,9 @@ pub struct Camera {
 /// Source-id validation, frame path, and atomic writes come from canvas-core
 /// so every producer (this and `canvas-comics`) lands frames where the Canvas
 /// host reads them, with one shared rule. Re-exported for this crate's callers.
-pub use canvas_core::{frame_file as frame_path, is_safe_frame_id as is_safe_source_id, write_atomic};
+pub use canvas_core::{
+    frame_file as frame_path, is_safe_frame_id as is_safe_source_id, write_atomic,
+};
 
 /// Hardware video decode backend for the input stream. The wall's JPEG encode
 /// stays on CPU everywhere (no Pi has a usable JPEG *encode* path); this is
@@ -52,7 +54,9 @@ impl HwDecode {
             "videotoolbox" => Ok(Self::VideoToolbox),
             "v4l2m2m" => Ok(Self::V4l2M2m),
             "none" => Ok(Self::None),
-            other => Err(format!("unknown --hwaccel {other}; expected auto|videotoolbox|v4l2m2m|none")),
+            other => Err(format!(
+                "unknown --hwaccel {other}; expected auto|videotoolbox|v4l2m2m|none"
+            )),
         }
     }
 
@@ -122,7 +126,6 @@ pub fn ffmpeg_args(rtsp_url: &str, fps: f64, max_height: u32, hwaccel: HwDecode)
     ]);
     args
 }
-
 
 /// Slices a continuous JPEG byte stream (image2pipe concatenates codestreams
 /// back-to-back) into whole frames by scanning SOI (FFD8) and EOI (FFD9).
@@ -230,20 +233,32 @@ mod tests {
         }
     }
 
-
     #[test]
     fn decode_backends_land_where_the_ffmpeg_api_put_them() {
         let vt = ffmpeg_args("rtsp://h/s", 2.0, 540, HwDecode::VideoToolbox).join(" ");
         assert!(vt.contains("-hwaccel videotoolbox -rtsp_transport"));
         let v4l = ffmpeg_args("rtsp://h/s", 2.0, 540, HwDecode::V4l2M2m);
         let joined = v4l.join(" ");
-        assert!(joined.contains("-c:v h264_v4l2m2m -rtsp_transport"), "v4l2 is an INPUT codec override, before -i");
-        assert!(joined.contains("-c:v mjpeg"), "output still re-encodes to JPEG");
+        assert!(
+            joined.contains("-c:v h264_v4l2m2m -rtsp_transport"),
+            "v4l2 is an INPUT codec override, before -i"
+        );
+        assert!(
+            joined.contains("-c:v mjpeg"),
+            "output still re-encodes to JPEG"
+        );
         let input = v4l.iter().position(|a| a == "-i").unwrap();
         let decoder = v4l.iter().position(|a| a == "h264_v4l2m2m").unwrap();
         let encoder = v4l[input..].iter().position(|a| a == "mjpeg").unwrap() + input;
-        assert!(decoder < input && input < encoder, "decoder precedes -i, encoder follows it");
-        assert!(!ffmpeg_args("rtsp://h/s", 2.0, 540, HwDecode::None).join(" ").contains("hwaccel"));
+        assert!(
+            decoder < input && input < encoder,
+            "decoder precedes -i, encoder follows it"
+        );
+        assert!(
+            !ffmpeg_args("rtsp://h/s", 2.0, 540, HwDecode::None)
+                .join(" ")
+                .contains("hwaccel")
+        );
         assert!(HwDecode::parse("nope").is_err());
     }
 
@@ -258,7 +273,11 @@ mod tests {
         stream = a[3..].to_vec();
         stream.extend_from_slice(&b);
         let mut fed = framer.push(&stream);
-        assert_eq!(fed.len(), 2, "split frame completes, next frame rides along");
+        assert_eq!(
+            fed.len(),
+            2,
+            "split frame completes, next frame rides along"
+        );
         assert_eq!(fed.remove(0), a);
         assert_eq!(fed.remove(0), b);
     }
@@ -289,5 +308,4 @@ mod tests {
         let recovered = framer.push(&good);
         assert_eq!(recovered.len(), 1, "buffer was bounded and resynced");
     }
-
 }

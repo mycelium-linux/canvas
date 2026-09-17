@@ -6,8 +6,8 @@
 //! all render through one library.
 
 use crate::{
-    BurnRateWindow, ChartType, MeterStyle, StateLane, StatusLevel, StatusState, WidgetDataState,
-    WidgetKind, WidgetSpec,
+    BurnRateWindow, ChartType, MeterStyle, NeuralEdge, NeuralNode, StateLane, StatusLevel,
+    StatusState, WidgetDataState, WidgetKind, WidgetSpec,
 };
 use std::cell::Cell;
 use std::hash::{Hash, Hasher};
@@ -168,7 +168,7 @@ pub fn element<'a, Message: 'a>(
                     .size(metrics.small)
                     .color(color(palette.text_muted)),
                 value_line,
-                Canvas::new(                SparklineProgram {
+                Canvas::new(SparklineProgram {
                     values: history.clone(),
                     color: accent,
                     label: color(palette.text_muted),
@@ -766,6 +766,33 @@ pub fn element<'a, Message: 'a>(
                 visual,
             )
         }
+        WidgetKind::NeuralGraph {
+            title,
+            nodes,
+            edges,
+        } => panel(
+            spec,
+            column![
+                row![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    space::horizontal(),
+                    text(format!("{} nodes · {} paths", nodes.len(), edges.len()))
+                        .size(metrics.small)
+                        .color(color(palette.text_muted)),
+                ],
+                Canvas::new(NeuralGraphProgram {
+                    nodes: nodes.clone(),
+                    edges: edges.clone(),
+                    palette: *palette,
+                    label_size: metrics.micro,
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .spacing(metrics.space_2)
+            .into(),
+            visual,
+        ),
         WidgetKind::Chart { .. } => {
             // Live charts reuse the canvas ChartProgram; the widgets crate
             // delegates so there is one chart implementation (tenet 1).
@@ -778,6 +805,142 @@ pub fn element<'a, Message: 'a>(
             .into()
         }
     }
+}
+
+struct NeuralGraphProgram {
+    nodes: Vec<NeuralNode>,
+    edges: Vec<NeuralEdge>,
+    palette: ThemePalette,
+    label_size: f32,
+}
+
+impl<Message> canvas::Program<Message> for NeuralGraphProgram {
+    type State = CacheState;
+
+    fn draw(
+        &self,
+        state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let key = self
+            .nodes
+            .iter()
+            .fold(Key::new().add_usize(self.edges.len()), |key, node| {
+                key.add_str(&node.id)
+                    .add_str(&node.label)
+                    .add_f32(node.heat)
+                    .add_u64(node.state as u64)
+            });
+        let key = self.edges.iter().fold(key, |key, edge| {
+            key.add_str(&edge.from).add_str(&edge.to).add_f32(edge.heat)
+        });
+        state.draw_cached(renderer, bounds.size(), key.build(), |frame| {
+            if self.nodes.is_empty() {
+                frame.fill_text(canvas::Text {
+                    content: "Waiting for neural activity".into(),
+                    position: Point::new(12.0, bounds.height * 0.5),
+                    color: color(self.palette.text_muted),
+                    size: iced::Pixels(self.label_size),
+                    ..Default::default()
+                });
+                return;
+            }
+
+            let positions = neural_layout(&self.nodes, bounds.size());
+            let idle_edge = with_alpha(color(self.palette.border), 0.42);
+            for edge in &self.edges {
+                let (Some(from), Some(to)) = (positions.get(&edge.from), positions.get(&edge.to))
+                else {
+                    continue;
+                };
+                let active = lerp_oklch(
+                    idle_edge,
+                    color(self.palette.primary),
+                    edge.heat.clamp(0.0, 1.0),
+                );
+                frame.stroke(
+                    &Path::line(*from, *to),
+                    canvas::Stroke::default()
+                        .with_width(1.0 + edge.heat * 3.0)
+                        .with_color(active),
+                );
+                if edge.heat > 0.02 {
+                    let pulse = Point::new(
+                        from.x + (to.x - from.x) * edge.heat,
+                        from.y + (to.y - from.y) * edge.heat,
+                    );
+                    frame.fill(
+                        &Path::circle(pulse, 2.5 + edge.heat * 3.5),
+                        with_alpha(color(self.palette.primary), 0.7 + edge.heat * 0.3),
+                    );
+                }
+            }
+
+            for node in &self.nodes {
+                let Some(position) = positions.get(&node.id) else {
+                    continue;
+                };
+                let semantic = status_color(node.state, &self.palette);
+                let heat = node.heat.clamp(0.0, 1.0);
+                let radius = 5.0 + heat * 7.0;
+                if heat > 0.02 {
+                    frame.fill(
+                        &Path::circle(*position, radius + 7.0 * heat),
+                        with_alpha(semantic, 0.08 + heat * 0.16),
+                    );
+                }
+                frame.fill(
+                    &Path::circle(*position, radius),
+                    lerp_oklch(
+                        color(self.palette.surface_muted),
+                        semantic,
+                        0.3 + heat * 0.7,
+                    ),
+                );
+                frame.fill_text(canvas::Text {
+                    content: node.label.clone(),
+                    position: Point::new(position.x + radius + 5.0, position.y + 4.0),
+                    color: color(self.palette.text),
+                    size: iced::Pixels(self.label_size),
+                    ..Default::default()
+                });
+            }
+        })
+    }
+}
+
+/// Deterministic grouped columns: stable input order within each first-seen
+/// group, with ungrouped nodes sharing the final/default column.
+fn neural_layout(nodes: &[NeuralNode], size: Size) -> std::collections::BTreeMap<String, Point> {
+    let mut groups: Vec<(String, Vec<&NeuralNode>)> = Vec::new();
+    for node in nodes {
+        let group = node.group.as_deref().unwrap_or("nodes");
+        if let Some((_, members)) = groups.iter_mut().find(|(name, _)| name == group) {
+            members.push(node);
+        } else {
+            groups.push((group.to_owned(), vec![node]));
+        }
+    }
+    let margin_x = 24.0;
+    let margin_y = 22.0;
+    let usable_w = (size.width - margin_x * 2.0).max(1.0);
+    let usable_h = (size.height - margin_y * 2.0).max(1.0);
+    let mut positions = std::collections::BTreeMap::new();
+    for (column, (_, members)) in groups.iter().enumerate() {
+        let x = if groups.len() == 1 {
+            size.width * 0.38
+        } else {
+            margin_x + usable_w * column as f32 / (groups.len() - 1) as f32
+        };
+        for (row, node) in members.iter().enumerate() {
+            let y = margin_y + usable_h * (row + 1) as f32 / (members.len() + 1) as f32;
+            positions.insert(node.id.clone(), Point::new(x, y));
+        }
+    }
+    positions
 }
 
 pub(crate) fn panel<'a, Message: 'a>(
@@ -1459,7 +1622,10 @@ impl<Message> canvas::Program<Message> for HeatmapProgram {
                 let color = lerp_oklch(self.low, self.high, t);
                 frame.fill(
                     &Path::rectangle(
-                        Point::new(strip_x + index as f32 * step, strip_y + (scale_h - strip_h) / 2.0),
+                        Point::new(
+                            strip_x + index as f32 * step,
+                            strip_y + (scale_h - strip_h) / 2.0,
+                        ),
                         Size::new(step, strip_h),
                     ),
                     color,
@@ -2444,6 +2610,39 @@ impl<Message> canvas::Program<Message> for ChartProgram {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn neural_layout_is_stable_and_groups_columns() {
+        let nodes = vec![
+            NeuralNode {
+                id: "a".into(),
+                label: "A".into(),
+                group: Some("client".into()),
+                heat: 0.0,
+                state: StatusLevel::Neutral,
+            },
+            NeuralNode {
+                id: "b".into(),
+                label: "B".into(),
+                group: Some("gateway".into()),
+                heat: 1.0,
+                state: StatusLevel::Good,
+            },
+            NeuralNode {
+                id: "c".into(),
+                label: "C".into(),
+                group: Some("gateway".into()),
+                heat: 0.5,
+                state: StatusLevel::Warning,
+            },
+        ];
+        let first = neural_layout(&nodes, Size::new(600.0, 300.0));
+        let second = neural_layout(&nodes, Size::new(600.0, 300.0));
+        assert_eq!(first, second);
+        assert!(first["a"].x < first["b"].x);
+        assert_eq!(first["b"].x, first["c"].x);
+        assert!(first["b"].y < first["c"].y);
+    }
 
     #[test]
     fn clock_formats_hours_minutes_seconds() {

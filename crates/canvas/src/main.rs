@@ -2385,7 +2385,9 @@ impl App {
                         recency.push(recent.clone());
                     }
                 }
-                Some(::canvas::project_picker::ProjectPicker::with_recency(recency))
+                Some(::canvas::project_picker::ProjectPicker::with_recency(
+                    recency,
+                ))
             }
         };
         let open = self.project_picker.is_some();
@@ -3334,8 +3336,8 @@ impl App {
                     let document = WorkspaceDocument {
                         schema_version: SCHEMA_VERSION,
                         // Store keys may carry Alfalfa's capitalization; document ids
-                // follow the lowercase identifier grammar.
-                id: format!("{}-active", project_id.to_ascii_lowercase()),
+                        // follow the lowercase identifier grammar.
+                        id: format!("{}-active", project_id.to_ascii_lowercase()),
                         project_id: project_id.clone(),
                         revision: 1,
                         theme: ThemeRef::Project,
@@ -5390,15 +5392,10 @@ impl App {
             tasks.push(Task::perform(
                 async move {
                     let sha = hash_file(&path).ok();
-                    let (handle, _media_type, source_pixels, media_plan) = prepare_raster(
-                        &path,
-                        source,
-                        viewport,
-                        scale_factor,
-                    )
-                    .map_err(|failure| failure.message)?;
-                    let upload_pixels =
-                        [media_plan.target_px.width, media_plan.target_px.height];
+                    let (handle, _media_type, source_pixels, media_plan) =
+                        prepare_raster(&path, source, viewport, scale_factor)
+                            .map_err(|failure| failure.message)?;
+                    let upload_pixels = [media_plan.target_px.width, media_plan.target_px.height];
                     Ok(PreparedFrame {
                         handle,
                         source_pixels,
@@ -5447,7 +5444,11 @@ impl App {
                 surface.handle = frame.handle;
                 surface.source_pixels = frame.source_pixels;
                 surface.upload_pixels = frame.upload_pixels;
-                apply_plan_diagnostics(&mut surface.snapshot, &frame.media_plan, frame.upload_pixels);
+                apply_plan_diagnostics(
+                    &mut surface.snapshot,
+                    &frame.media_plan,
+                    frame.upload_pixels,
+                );
                 surface.media_plan = frame.media_plan;
                 surface.snapshot.asset_sha256 = frame.sha256;
                 self.bump();
@@ -8653,8 +8654,12 @@ mod tests {
         };
         let mut store = workspace_store::WorkspaceStore::default();
         store.upsert(doc(&dock, "restored-wall"));
-        store.projects.insert("ghost".into(), doc("ghost", "ghost-workspace"));
-        store.projects.insert("broken".into(), doc("broken", "Bad Id!"));
+        store
+            .projects
+            .insert("ghost".into(), doc("ghost", "ghost-workspace"));
+        store
+            .projects
+            .insert("broken".into(), doc("broken", "Bad Id!"));
         store.active_project_id = Some(dock.clone());
         fs::write(&store_path, serde_json::to_vec(&store).unwrap()).unwrap();
         fs::set_permissions(&store_path, fs::Permissions::from_mode(0o600)).unwrap();
@@ -11115,7 +11120,8 @@ mod tests {
         let stamp2 = {
             let img: image::RgbImage =
                 image::RgbImage::from_pixel(64, 64, image::Rgb([200, 10, 10]));
-            img.save_with_format(&path, image::ImageFormat::Jpeg).unwrap();
+            img.save_with_format(&path, image::ImageFormat::Jpeg)
+                .unwrap();
             drop(app.reload_live_images());
             assert_eq!(
                 app.live_pending.get("cam").copied(),
@@ -11136,7 +11142,10 @@ mod tests {
             )),
         );
         assert!(app.live_pending.is_empty());
-        assert_eq!(app.decoded["cam"].snapshot.asset_sha256.as_deref(), Some("one"));
+        assert_eq!(
+            app.decoded["cam"].snapshot.asset_sha256.as_deref(),
+            Some("one")
+        );
         drop(app.reload_live_images());
         assert_eq!(app.live_pending.get("cam").copied(), Some(stamp2));
         // A stale result (its stamp no longer claimed) must not regress the
@@ -11149,7 +11158,10 @@ mod tests {
                 Some("stale".into()),
             )),
         );
-        assert_eq!(app.decoded["cam"].snapshot.asset_sha256.as_deref(), Some("one"));
+        assert_eq!(
+            app.decoded["cam"].snapshot.asset_sha256.as_deref(),
+            Some("one")
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

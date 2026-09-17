@@ -138,6 +138,11 @@ every existing caller unchanged.
 
 This is a bus, not a network. Each layer borrows what it should not build:
 
+> **Edges are Rust** (or Lua where a Canvas host embeds it). Python is for
+> throwaway test harnesses on the producer side — never for an edge process
+> a machine relies on. The deployed edges are `jarvis-edge` (audio, display,
+> mute) and `canvas-edge` (Canvas surfaces).
+
 | Layer | Owner | What it provides |
 |---|---|---|
 | L0 reachability | Tailscale (externally owned) | tailnet identity, IP across machines/OSes |

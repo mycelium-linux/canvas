@@ -2060,7 +2060,10 @@ mod tests {
                 actor: None,
                 command: Command::WorkspaceSwitch { name: good.into() },
             };
-            assert!(req.validate().is_ok(), "{good} must be a legal workspace name");
+            assert!(
+                req.validate().is_ok(),
+                "{good} must be a legal workspace name"
+            );
         }
         for bad in ["", "jar vis", "a/b", "..", "x.y"] {
             let req = ControlRequest {
@@ -2158,7 +2161,8 @@ mod tests {
             }
         );
 
-        let req = parse_line("move 0 25 1920 1150").unwrap();        match req.command {
+        let req = parse_line("move 0 25 1920 1150").unwrap();
+        match req.command {
             Command::SetFrame { frame } => {
                 assert_eq!(
                     frame,

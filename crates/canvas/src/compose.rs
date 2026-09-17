@@ -186,7 +186,10 @@ mod tests {
             .map(|p| (p.bounds.x, p.bounds.y))
             .collect();
         corners.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
-        assert_eq!(corners, vec![(0.0, 0.0), (0.0, 0.5), (0.5, 0.0), (0.5, 0.5)]);
+        assert_eq!(
+            corners,
+            vec![(0.0, 0.0), (0.0, 0.5), (0.5, 0.0), (0.5, 0.5)]
+        );
         for placement in &placements {
             assert!((placement.bounds.width - 0.5).abs() < 1e-6);
             assert!((placement.bounds.height - 0.5).abs() < 1e-6);

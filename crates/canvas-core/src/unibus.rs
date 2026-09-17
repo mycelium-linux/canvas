@@ -51,7 +51,11 @@ pub fn parse_result(message: &Message) -> Option<ResultFrame> {
     Some(ResultFrame {
         request_id: message.body.get("request_id")?.as_str()?.to_owned(),
         ok: message.body.get("ok")?.as_bool()?,
-        error: message.body.get("error").and_then(|v| v.as_str()).map(str::to_owned),
+        error: message
+            .body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
     })
 }
 /// v1 capability tag; the v2 namespaced spelling for new grants.
@@ -205,6 +209,10 @@ mod tests {
             auth_subject: "avery/home-pi".into(),
             zones: vec!["living-room".into()],
             capabilities: vec![DISPLAY_CAPABILITY.into()],
+            publishes: Vec::new(),
+            publish_zones: Vec::new(),
+            publish_screen_anchors: Vec::new(),
+            publish_producers: Vec::new(),
             screen_anchors: vec!["screen-tv".into()],
             site: "home-lan".into(),
             role: Role::Edge,

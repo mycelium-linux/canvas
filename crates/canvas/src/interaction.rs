@@ -956,7 +956,10 @@ mod tests {
                 );
             }
         }
-        assert_eq!(engine.snap_preview(), Some(rect(500.0, 400.0, 500.0, 400.0)));
+        assert_eq!(
+            engine.snap_preview(),
+            Some(rect(500.0, 400.0, 500.0, 400.0))
+        );
         let released = engine
             .handle(event(8, PointerPhase::Release, 2_000.0, 2_000.0), &surfaces)
             .unwrap();

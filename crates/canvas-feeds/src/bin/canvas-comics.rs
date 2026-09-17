@@ -12,8 +12,7 @@
 use canvas_feeds::{Http, ReqwestHttp, comics};
 use std::{env, process::ExitCode, thread, time::Duration};
 
-const ARG_ERR: &str =
-    "usage: canvas-comics --url <feed> [--title T] [--source-id ID] [--count N] [--every SECS] \
+const ARG_ERR: &str = "usage: canvas-comics --url <feed> [--title T] [--source-id ID] [--count N] [--every SECS] \
      [--tile PX] [--gutter PX] [--runtime-dir PATH]";
 
 fn arg(args: &[String], flag: &str) -> Option<String> {
@@ -37,7 +36,9 @@ fn main() -> ExitCode {
         Some(dir) => std::path::PathBuf::from(dir),
         None => {
             let Some(root) = canvas_core::runtime_root() else {
-                eprintln!("canvas-comics: no runtime root (set CANVAS_CONFIG_DIR or --runtime-dir)");
+                eprintln!(
+                    "canvas-comics: no runtime root (set CANVAS_CONFIG_DIR or --runtime-dir)"
+                );
                 return ExitCode::from(2);
             };
             root
@@ -102,10 +103,7 @@ fn refresh(
         match http.get_bytes(&comic.image_url) {
             Ok(bytes) => slots.push(Some(bytes)),
             Err(error) => {
-                eprintln!(
-                    "canvas-comics: {} image unavailable: {error}",
-                    comic.title
-                );
+                eprintln!("canvas-comics: {} image unavailable: {error}", comic.title);
                 slots.push(None);
             }
         }

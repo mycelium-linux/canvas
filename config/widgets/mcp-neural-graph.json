@@ -1,0 +1,24 @@
+{
+  "schema_version": 2,
+  "id": "mcp-neural-graph",
+  "kind": "neural_graph",
+  "title": "MCP neural activity",
+  "nodes": [
+    {"id":"client:codex","label":"Codex","group":"client","heat":0.15,"state":"good"},
+    {"id":"gateway:fpl-mcp","label":"FPL MCP","group":"gateway","heat":0.72,"state":"good"},
+    {"id":"desktop:studio","label":"Studio","group":"device","heat":1.0,"state":"good"},
+    {"id":"connector:blender","label":"Blender","group":"connector","heat":0.84,"state":"good"},
+    {"id":"connector:github","label":"GitHub","group":"connector","heat":0.0,"state":"neutral"}
+  ],
+  "edges": [
+    {"from":"client:codex","to":"gateway:fpl-mcp","heat":0.32},
+    {"from":"gateway:fpl-mcp","to":"desktop:studio","heat":0.65},
+    {"from":"desktop:studio","to":"connector:blender","heat":0.92},
+    {"from":"gateway:fpl-mcp","to":"connector:github","heat":0.0}
+  ],
+  "data": {
+    "state": "ready",
+    "source": "mcp.observe.effect.v1",
+    "provenance": "sample"
+  }
+}

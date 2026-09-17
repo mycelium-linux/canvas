@@ -28,7 +28,10 @@ pub struct ProjectPicker {
 
 impl ProjectPicker {
     pub fn with_recency(recency: Vec<String>) -> Self {
-        Self { recency, ..Self::default() }
+        Self {
+            recency,
+            ..Self::default()
+        }
     }
 }
 

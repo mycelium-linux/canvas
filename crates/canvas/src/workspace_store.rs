@@ -557,18 +557,17 @@ mod tests {
         // precisely the real shape: the store was saved against a complete
         // (Alfalfa-merged) catalog and meets a bare bundled one at boot.
         fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
-        fs::set_permissions(
-            &path,
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         let (loaded, notes) = load(&path, &catalog).unwrap();
         assert!(loaded.get(&known).is_some(), "valid workspace survives");
         assert!(
             loaded.get("ghost").is_some(),
             "an unknown project's workspace must survive boot, not annihilate the store"
         );
-        assert!(loaded.get("broken").is_none(), "structural garbage is dropped");
+        assert!(
+            loaded.get("broken").is_none(),
+            "structural garbage is dropped"
+        );
         assert!(
             notes.iter().any(|note| note.contains("broken")),
             "every drop is reported: {notes:?}"

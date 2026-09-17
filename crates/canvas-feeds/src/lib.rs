@@ -288,7 +288,9 @@ fn fetch_reddit(http: &dyn Http, sub: &str) -> Result<Feed, Error> {
             title: trim_title(&title),
             url,
             score: None,
-            by: author.map(|a| a.trim_start_matches("/u/").to_owned()).filter(|a| !a.is_empty()),
+            by: author
+                .map(|a| a.trim_start_matches("/u/").to_owned())
+                .filter(|a| !a.is_empty()),
             age_secs: None,
             source: "reddit",
         })
@@ -649,13 +651,22 @@ mod tests {
             text,
             ..Default::default()
         };
-        let feed = fetch(&FeedKind::Reddit { sub: "programming".into() }, &http).unwrap();
+        let feed = fetch(
+            &FeedKind::Reddit {
+                sub: "programming".into(),
+            },
+            &http,
+        )
+        .unwrap();
         assert_eq!(feed.source, "reddit");
         assert_eq!(feed.title, "r/programming");
         assert_eq!(feed.rows.len(), 2);
         assert_eq!(feed.rows[0].title, "Post > one");
         assert_eq!(feed.rows[0].by.as_deref(), Some("bob"));
-        assert_eq!(feed.rows[0].url.as_deref(), Some("https://reddit.com/comments/abc"));
+        assert_eq!(
+            feed.rows[0].url.as_deref(),
+            Some("https://reddit.com/comments/abc")
+        );
         assert_eq!(feed.rows[0].score, None);
         assert_eq!(feed.rows[1].by, None);
     }

@@ -154,17 +154,17 @@ pub fn pulse_payload(repo: &Value, marbles: usize, prs: usize) -> Value {
                             .or_else(|| pr.get("id").and_then(Value::as_str).map(str::to_owned))
                             .unwrap_or_else(|| "?".into()),
                         pr.get("state").and_then(Value::as_str).unwrap_or("?"),
-                        trim(
-                            pr.get("title").and_then(Value::as_str).unwrap_or(""),
-                            34
-                        ),
+                        trim(pr.get("title").and_then(Value::as_str).unwrap_or(""), 34),
                         "good",
                     ])
                 })
                 .collect()
         })
         .unwrap_or_default();
-    let idle_pct = repo.get("idle_ratio").and_then(Value::as_f64).map(|r| (r * 100.0).round() as u64);
+    let idle_pct = repo
+        .get("idle_ratio")
+        .and_then(Value::as_f64)
+        .map(|r| (r * 100.0).round() as u64);
     json!({
         "project": project,
         "state": repo.get("state").and_then(Value::as_str).unwrap_or("?"),
@@ -224,7 +224,10 @@ mod tests {
 
     #[test]
     fn overview_folds_totals_and_keeps_bounded_rows() {
-        let repos = vec![repo("dock", "active", 110, false), repo("JARVIS", "paused", 31, true)];
+        let repos = vec![
+            repo("dock", "active", 110, false),
+            repo("JARVIS", "paused", 31, true),
+        ];
         let payload = overview_payload(&repos, 25);
         assert_eq!(payload["projects"], 2);
         assert_eq!(payload["active"], 2);
@@ -238,11 +241,16 @@ mod tests {
 
     #[test]
     fn overview_reports_truncation_honestly() {
-        let repos: Vec<Value> = (0..30).map(|i| repo(&format!("p{i}"), "active", 1, false)).collect();
+        let repos: Vec<Value> = (0..30)
+            .map(|i| repo(&format!("p{i}"), "active", 1, false))
+            .collect();
         let payload = overview_payload(&repos, 8);
         assert_eq!(payload["rows"].as_array().unwrap().len(), 8);
         assert_eq!(payload["truncated"], true);
-        assert_eq!(payload["projects"], 30, "totals count everything, not just shown rows");
+        assert_eq!(
+            payload["projects"], 30,
+            "totals count everything, not just shown rows"
+        );
     }
 
     #[test]
@@ -270,9 +278,15 @@ mod tests {
 
     #[test]
     fn overview_carries_a_tight_matrix_for_the_heatmap() {
-        let repos: Vec<Value> = (0..15).map(|i| repo(&format!("p{i}"), "active", i, false)).collect();
+        let repos: Vec<Value> = (0..15)
+            .map(|i| repo(&format!("p{i}"), "active", i, false))
+            .collect();
         let matrix = &overview_payload(&repos, 25)["matrix"];
-        assert_eq!(matrix["rows"].as_array().unwrap().len(), 12, "matrix caps tighter than rows");
+        assert_eq!(
+            matrix["rows"].as_array().unwrap().len(),
+            12,
+            "matrix caps tighter than rows"
+        );
         assert_eq!(matrix["columns"], json!(["act", "rdy", "bky"]));
         assert_eq!(matrix["values"][0][2], 0);
     }
@@ -297,7 +311,11 @@ mod tests {
         assert_eq!(payload["activity"], 75, "idle_ratio 0.25 means 75% active");
         assert_eq!(payload["marble_count"], 2);
         let bare = pulse_payload(&json!({"id": "bare"}), 6, 4);
-        assert_eq!(bare["activity"], Value::Null, "no ratio, no invented number");
+        assert_eq!(
+            bare["activity"],
+            Value::Null,
+            "no ratio, no invented number"
+        );
     }
 
     #[test]

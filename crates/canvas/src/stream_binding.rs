@@ -419,7 +419,10 @@ pub fn apply_named_adapter_batch(
 /// table matches `config/binders/`, so a new binder file can never be
 /// added without registering it here too.
 const BUILT_IN_BINDERS: &[(&str, &str)] = &[
-    ("lockout-v1", include_str!("../../../config/binders/lockout-v1.lua")),
+    (
+        "lockout-v1",
+        include_str!("../../../config/binders/lockout-v1.lua"),
+    ),
     (
         "market-ohlcv-v1",
         include_str!("../../../config/binders/market-ohlcv-v1.lua"),
@@ -671,8 +674,7 @@ mod tests {
 
     #[test]
     fn binders_are_all_registered() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../config/binders");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/binders");
         let mut files = std::fs::read_dir(&dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
@@ -684,7 +686,10 @@ mod tests {
             .map(|(name, _)| format!("{name}.lua"))
             .collect();
         registered.sort();
-        assert_eq!(files, registered, "config/binders and BUILT_IN_BINDERS drifted");
+        assert_eq!(
+            files, registered,
+            "config/binders and BUILT_IN_BINDERS drifted"
+        );
     }
 
     fn event(time: i64, close: f64) -> StreamEnvelope {
@@ -1246,4 +1251,3 @@ mod tests {
         assert_eq!(manifest.id, "test");
     }
 }
-

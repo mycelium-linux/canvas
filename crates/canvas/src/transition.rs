@@ -28,12 +28,7 @@ fn arrive_from(target: [f32; 4]) -> [f32; 4] {
     let [x, y, w, h] = target;
     let nw = w * ARRIVAL_SCALE;
     let nh = h * ARRIVAL_SCALE;
-    [
-        x + (w - nw) / 2.0,
-        y + (h - nh) / 2.0,
-        nw,
-        nh,
-    ]
+    [x + (w - nw) / 2.0, y + (h - nh) / 2.0, nw, nh]
 }
 
 /// Eased progress of a transition that started at `started`, 1.0 once done.

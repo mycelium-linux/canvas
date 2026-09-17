@@ -33,10 +33,9 @@ fn parse_cameras(args: &[String]) -> Result<Vec<Camera>, String> {
             let spec = args
                 .get(i + 1)
                 .ok_or_else(|| format!("--camera needs a value: {ARG_ERR}"))?;
-            let (id, url) =
-                spec.split_once('=').ok_or_else(|| {
-                    format!("--camera wants id=rtsp-url, got {spec:?}: {ARG_ERR}")
-                })?;
+            let (id, url) = spec
+                .split_once('=')
+                .ok_or_else(|| format!("--camera wants id=rtsp-url, got {spec:?}: {ARG_ERR}"))?;
             if !is_safe_source_id(id) {
                 return Err(format!("unsafe camera id {id:?}"));
             }
@@ -158,7 +157,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let ffmpeg = opt(&args, "--ffmpeg").unwrap_or_else(|| "ffmpeg".to_string());
     let hwaccel = match opt(&args, "--hwaccel") {
-        Some(token) => HwDecode::parse(&token).map_err(|error| -> Box<dyn std::error::Error> { error.into() })?,
+        Some(token) => HwDecode::parse(&token)
+            .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?,
         None => HwDecode::Auto,
     };
 

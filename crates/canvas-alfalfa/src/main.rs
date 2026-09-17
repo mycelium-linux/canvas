@@ -10,11 +10,11 @@
 //! the hard way. A cycle that fails leaves the last snapshot on the wall and
 //! says so on stderr; widgets never show fabricated freshness.
 
+use canvas_alfalfa::{OWNER, overview_payload, pulse_payload, pulse_stream};
 use canvas_feeds::{
     CONTRACT, ENVELOPE_OVERHEAD, Http, MAX_DATAGRAM, ReqwestHttp, SCHEMA_VERSION, fit, now_ms,
     send_raw,
 };
-use canvas_alfalfa::{OWNER, overview_payload, pulse_payload, pulse_stream};
 use serde_json::{Value, json};
 use std::{env, process::ExitCode, thread, time::Duration};
 
@@ -63,7 +63,9 @@ fn main() -> ExitCode {
     if arg(&args, "--runtime-dir").is_some() {
         // send_raw resolves through canvas_core; the flag is accepted for
         // symmetry with other producers and validated for absence of surprises.
-        eprintln!("canvas-alfalfa: use CANVAS_CONFIG_DIR for the stream socket; --runtime-dir is ignored");
+        eprintln!(
+            "canvas-alfalfa: use CANVAS_CONFIG_DIR for the stream socket; --runtime-dir is ignored"
+        );
     }
     let url = arg(&args, "--url").unwrap_or_else(|| "http://127.0.0.1:8787".into());
     let every = arg(&args, "--every")

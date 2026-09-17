@@ -27,7 +27,10 @@ pub fn latest_comics(feed_xml: &str, count: usize) -> Vec<Comic> {
             continue;
         };
         let title = crate::field(block, "title").unwrap_or_else(|| "(untitled)".into());
-        out.push(Comic { title, image_url: url });
+        out.push(Comic {
+            title,
+            image_url: url,
+        });
         if out.len() >= count {
             break;
         }
@@ -79,7 +82,12 @@ fn fit_within(w: u32, h: u32, box_size: u32) -> (u32, u32) {
 /// cells separated by `gutter` pixels (including the outer margin), on a
 /// solid `background`. Missing or undecodable entries leave their cell
 /// empty. Returns JPEG bytes.
-pub fn mosaic(images: &[Option<Vec<u8>>], tile: u32, gutter: u32, background: [u8; 3]) -> Result<Vec<u8>, Error> {
+pub fn mosaic(
+    images: &[Option<Vec<u8>>],
+    tile: u32,
+    gutter: u32,
+    background: [u8; 3],
+) -> Result<Vec<u8>, Error> {
     use image::{ImageBuffer, Rgb, RgbImage};
     if tile == 0 || gutter == 0 {
         return Err(Error::Row {
@@ -149,8 +157,14 @@ mod tests {
         let comics = latest_comics(xml, 4);
         assert_eq!(comics.len(), 2, "items without images are skipped");
         assert_eq!(comics[0].title, "Barren");
-        assert_eq!(comics[0].image_url, "https://imgs.xkcd.com/comics/barren.png");
-        assert_eq!(comics[1].image_url, "https://imgs.xkcd.com/comics/sketch.gif");
+        assert_eq!(
+            comics[0].image_url,
+            "https://imgs.xkcd.com/comics/barren.png"
+        );
+        assert_eq!(
+            comics[1].image_url,
+            "https://imgs.xkcd.com/comics/sketch.gif"
+        );
     }
 
     #[test]
@@ -230,8 +244,16 @@ mod tests {
         // (cell spans 10..110): red across the full width at mid-cell height,
         // background at the cell's top where a squished square would have bled.
         let [r, g, b] = grid.get_pixel(60, 60).0;
-        assert!(r > 200 && g < 60 && b < 60, "strip mid-body {:?}", [r, g, b]);
-        assert_eq!(grid.get_pixel(60, 15).0, [12, 12, 12], "cell top stays background");
+        assert!(
+            r > 200 && g < 60 && b < 60,
+            "strip mid-body {:?}",
+            [r, g, b]
+        );
+        assert_eq!(
+            grid.get_pixel(60, 15).0,
+            [12, 12, 12],
+            "cell top stays background"
+        );
     }
 
     #[test]

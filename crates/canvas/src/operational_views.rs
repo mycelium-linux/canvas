@@ -228,6 +228,7 @@ fn appetite(kind: &WidgetKind) -> f32 {
         | WidgetKind::Table { .. }
         | WidgetKind::EventLog { .. }
         | WidgetKind::StatusList { .. }
+        | WidgetKind::NeuralGraph { .. }
         | WidgetKind::Chart { .. }
         | WidgetKind::Quant { .. }
         | WidgetKind::Module { .. }
@@ -558,7 +559,8 @@ fn widget_title(spec: &canvas_widgets::WidgetSpec) -> String {
         | WidgetKind::RateBars { title, .. }
         | WidgetKind::Table { title, .. }
         | WidgetKind::EventLog { title, .. }
-        | WidgetKind::StatusList { title, .. } => title.clone(),
+        | WidgetKind::StatusList { title, .. }
+        | WidgetKind::NeuralGraph { title, .. } => title.clone(),
         _ => spec.id.clone(),
     }
 }
