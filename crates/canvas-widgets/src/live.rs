@@ -109,6 +109,19 @@ pub fn element<'a, Message: 'a>(
     spec: &'a WidgetSpec,
     visual: &VisualTheme,
 ) -> Element<'a, Message> {
+    element_at(spec, visual, chrono_now())
+}
+
+/// Render a widget against an explicit wall-clock value.
+///
+/// Canvas uses this entry point so its clock text is derived from application
+/// state. That makes each second a real iced tree change instead of relying on
+/// an incidental wall-clock read during a potentially memoized view pass.
+pub fn element_at<'a, Message: 'a>(
+    spec: &'a WidgetSpec,
+    visual: &VisualTheme,
+    now: EpochParts,
+) -> Element<'a, Message> {
     // Freshness is carried by the value, so the body draws from a palette the
     // data state has already been applied to. `panel` is handed the true theme:
     // the provenance badge, the state dot and the footer have to stay legible
@@ -303,7 +316,6 @@ pub fn element<'a, Message: 'a>(
             visual,
         ),
         WidgetKind::Clock { format } => {
-            let now = chrono_now();
             let rendered = strftime(&now, format);
             panel(
                 spec,

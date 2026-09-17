@@ -514,6 +514,10 @@ struct App {
     /// stopped at, which reads as most of the shaders being broken.
     picker_elapsed: Duration,
     screensaver_fps: f32,
+    /// Last wall-clock second used to invalidate live clock widgets. Iced's
+    /// idle subscription alone does not guarantee a present when no model
+    /// state changed, which left clocks visually frozen on quiet workspaces.
+    last_clock_second: u64,
 }
 
 impl App {
@@ -852,6 +856,7 @@ impl App {
             screensaver_elapsed: Duration::ZERO,
             picker_elapsed: Duration::ZERO,
             screensaver_fps: 0.0,
+            last_clock_second: now_unix_ms() / 1_000,
         };
         app.ensure_scene_decoded();
         app.reset_background_animation();
@@ -1092,6 +1097,23 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick => {
+                let clock_second = now_unix_ms() / 1_000;
+                if clock_second != self.last_clock_second
+                    && self.document.surfaces.iter().any(|surface| {
+                        matches!(
+                            surface.content,
+                            SurfaceContent::Widget {
+                                spec: canvas_widgets::WidgetSpec {
+                                    kind: canvas_widgets::WidgetKind::Clock { .. },
+                                    ..
+                                }
+                            }
+                        )
+                    })
+                {
+                    self.last_clock_second = clock_second;
+                    self.bump();
+                }
                 let toggle_visibility = self
                     .visibility_hotkey
                     .as_ref()
@@ -5062,7 +5084,11 @@ impl App {
                 // arrives here, it means the host hasn't bound it yet — show
                 // a labeled panel rather than an empty blank.
                 let visual = self.presented_visual_theme();
-                canvas_widgets::live::element(spec, &visual)
+                canvas_widgets::live::element_at(
+                    spec,
+                    &visual,
+                    canvas_widgets::live::chrono_now_at(self.last_clock_second as i64),
+                )
             }
             ContentSource::Image { .. }
             | ContentSource::Pdf { .. }
