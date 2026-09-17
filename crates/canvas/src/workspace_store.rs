@@ -376,10 +376,10 @@ fn default_alfalfa_workspace(project_id: &str) -> Result<WorkspaceDocument, Erro
         ],
         "layout": {"kind": "canvas", "placements": [
             {"surface_id": "project-html", "bounds": {"x": 0.0, "y": 0.0, "width": 0.55, "height": 1.0}},
-            {"surface_id": "project-goals", "bounds": {"x": 0.55, "y": 0.0, "width": 0.225, "height": 0.5}},
-            {"surface_id": "project-work", "bounds": {"x": 0.775, "y": 0.0, "width": 0.225, "height": 0.5}},
-            {"surface_id": "project-agents", "bounds": {"x": 0.55, "y": 0.5, "width": 0.225, "height": 0.5}},
-            {"surface_id": "project-reviewers", "bounds": {"x": 0.775, "y": 0.5, "width": 0.225, "height": 0.5}},
+            {"surface_id": "project-goals", "bounds": {"x": 0.55, "y": 0.0, "width": 0.225, "height": 0.22}},
+            {"surface_id": "project-work", "bounds": {"x": 0.775, "y": 0.0, "width": 0.225, "height": 0.22}},
+            {"surface_id": "project-agents", "bounds": {"x": 0.55, "y": 0.22, "width": 0.225, "height": 0.22}},
+            {"surface_id": "project-reviewers", "bounds": {"x": 0.775, "y": 0.22, "width": 0.225, "height": 0.22}},
         ]},
         "bindings": [
             dashboard_binding("project-goals-bind", &stream, "project-goals", "alfalfa-project-goals-v1"),

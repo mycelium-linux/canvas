@@ -4578,6 +4578,9 @@ impl App {
     }
 
     fn hit_test_surface_control(&self) -> Option<(String, WindowAction)> {
+        if self.document.chrome.title == SurfaceTitleMode::Hidden {
+            return None;
+        }
         let position = self.cursor?;
         let frame = self.frame;
         let Layout::Canvas { placements } = &self.document.layout else {
@@ -5269,6 +5272,12 @@ impl App {
         maximized: bool,
         widget_chrome: Option<canvas_widgets::WidgetChrome>,
     ) -> Element<'a, Message> {
+        if self.document.chrome.title == SurfaceTitleMode::Hidden {
+            return container(space::horizontal())
+                .width(Length::Fill)
+                .height(Length::Fixed(0.0))
+                .into();
+        }
         let visual_theme = self.presented_visual_theme();
         let palette = visual_theme.palette;
         let dot = |rgb| {
@@ -5726,19 +5735,26 @@ impl App {
                         {
                             return None;
                         }
+                        let control_height =
+                            if self.document.chrome.title == SurfaceTitleMode::Hidden {
+                                0.0
+                            } else {
+                                SURFACE_CONTROL_BAR_HEIGHT
+                            };
                         let content = self.surface_widget(
                             surface,
                             Length::Fill,
                             Length::Fill,
                             LogicalSize {
                                 width: bounds.width.max(1.0),
-                                height: (bounds.height - SURFACE_CONTROL_BAR_HEIGHT).max(1.0),
+                                height: (bounds.height - control_height).max(1.0),
                             },
                         );
                         let focused = self.document.focused_surface_id.as_deref()
                             == Some(placement.surface_id.as_str());
                         let maximized = self.maximized_surfaces.contains(&placement.surface_id);
-                        let edge = if focused {
+                        let chrome_hidden = self.document.chrome.title == SurfaceTitleMode::Hidden;
+                        let edge = if focused && !chrome_hidden {
                             color(palette.primary)
                         } else {
                             border_color
@@ -5757,21 +5773,48 @@ impl App {
                         .style(move |_| container::Style {
                             border: iced::Border {
                                 color: Color {
-                                    a: if focused { 0.88 } else { 0.62 },
+                                    a: if chrome_hidden {
+                                        0.52
+                                    } else if focused {
+                                        0.88
+                                    } else {
+                                        0.62
+                                    },
                                     ..edge
                                 },
-                                width: if focused { 1.5 } else { 1.0 },
-                                radius: 9.0.into(),
+                                width: if focused && !chrome_hidden { 1.5 } else { 1.0 },
+                                radius: if chrome_hidden { 6.0 } else { 9.0 }.into(),
                             },
                             shadow: iced::Shadow {
                                 color: Color::from_rgba8(
                                     0,
                                     0,
                                     0,
-                                    if focused { 0.38 } else { 0.24 },
+                                    if chrome_hidden {
+                                        0.12
+                                    } else if focused {
+                                        0.38
+                                    } else {
+                                        0.24
+                                    },
                                 ),
-                                offset: iced::Vector::new(0.0, if focused { 8.0 } else { 5.0 }),
-                                blur_radius: if focused { 24.0 } else { 16.0 },
+                                offset: iced::Vector::new(
+                                    0.0,
+                                    if chrome_hidden {
+                                        2.0
+                                    } else if focused {
+                                        8.0
+                                    } else {
+                                        5.0
+                                    },
+                                ),
+                                blur_radius: if chrome_hidden {
+                                    8.0
+                                } else if focused {
+                                    24.0
+                                } else {
+                                    16.0
+                                },
                             },
                             ..Default::default()
                         });
@@ -5856,7 +5899,10 @@ impl App {
                                 .into();
                         }
                         let mut viewport = self.media_viewport();
-                        viewport.height = (viewport.height - SURFACE_CONTROL_BAR_HEIGHT).max(1.0);
+                        if self.document.chrome.title != SurfaceTitleMode::Hidden {
+                            viewport.height =
+                                (viewport.height - SURFACE_CONTROL_BAR_HEIGHT).max(1.0);
+                        }
                         let content =
                             self.surface_widget(surface, Length::Fill, Length::Fill, viewport);
                         container(column![
@@ -6019,51 +6065,43 @@ impl App {
                 color(visual_theme.surface_raised),
                 color(palette.text),
             );
-            let separator = container(space::horizontal())
-                .width(Length::Fixed(1.0))
-                .height(Length::Fixed(18.0))
-                .style(move |_| container::Style {
-                    background: Some(
-                        Color {
-                            a: 0.24,
-                            ..border_color
-                        }
-                        .into(),
-                    ),
-                    ..Default::default()
-                });
+            let project_label = workspace_name.to_uppercase();
             let identity = row![
-                mark,
-                separator,
-                text(workspace_name).size(12).color(Color {
-                    a: 0.78,
-                    ..text_color
-                })
+                container(mark).padding([0, 2]),
+                column![
+                    text("WORKSPACE").size(8).color(Color { a: 0.56, ..muted }),
+                    text(project_label).size(12).color(Color {
+                        a: 0.92,
+                        ..text_color
+                    })
+                ]
+                .spacing(1),
+                text("⌘K").size(9).color(Color { a: 0.42, ..muted })
             ]
-            .spacing(9)
+            .spacing(11)
             .align_y(iced::Alignment::Center);
             let signature = container(identity)
-                .padding([7, 10])
+                .padding([8, 11])
                 .style(move |_| container::Style {
                     background: Some(
                         Color {
-                            a: 0.66,
+                            a: 0.92,
                             ..color(visual_theme.surface_raised)
                         }
                         .into(),
                     ),
                     border: iced::Border {
                         color: Color {
-                            a: 0.32,
-                            ..color(palette.primary)
+                            a: 0.58,
+                            ..border_color
                         },
                         width: 1.0,
-                        radius: 12.0.into(),
+                        radius: 7.0.into(),
                     },
                     shadow: iced::Shadow {
-                        color: Color::from_rgba8(0, 0, 0, visual_theme.shadow_opacity * 0.72),
-                        offset: iced::Vector::new(0.0, visual_theme.shadow_offset_y * 0.7),
-                        blur_radius: visual_theme.shadow_blur,
+                        color: Color::from_rgba8(0, 0, 0, visual_theme.shadow_opacity * 0.45),
+                        offset: iced::Vector::new(0.0, 3.0),
+                        blur_radius: 10.0,
                     },
                     ..Default::default()
                 });
