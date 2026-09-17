@@ -16,6 +16,7 @@ use canvas_feeds::{
     send_raw,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     env,
@@ -214,10 +215,7 @@ fn render_blitz(
     height: u32,
     scale: f32,
 ) -> Result<(), String> {
-    let source_id = format!(
-        "{}-dashboard-html",
-        dashboard_stream(workspace_id).trim_end_matches("-dashboard")
-    );
+    let source_id = blitz_source_id(workspace_id);
     let mut child = Command::new(binary)
         .args([
             "dashboard",
@@ -249,6 +247,51 @@ fn render_blitz(
         ));
     }
     Ok(())
+}
+
+fn blitz_source_id(workspace_id: &str) -> String {
+    format!(
+        "{}-dashboard-html",
+        dashboard_stream(workspace_id).trim_end_matches("-dashboard")
+    )
+}
+
+fn blitz_signature(
+    template: &str,
+    payload: &Value,
+    width: u32,
+    height: u32,
+    scale: f32,
+) -> Result<String, String> {
+    let mut digest = Sha256::new();
+    digest.update(b"canvas.blitz.workspace.v1\0");
+    digest.update(std::fs::read(template).map_err(|error| format!("read {template}: {error}"))?);
+    digest.update(serde_json::to_vec(payload).map_err(|error| error.to_string())?);
+    digest.update(width.to_le_bytes());
+    digest.update(height.to_le_bytes());
+    digest.update(scale.to_bits().to_le_bytes());
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn blitz_cache_file(root: &Path, workspace_id: &str) -> std::path::PathBuf {
+    root.join("cache")
+        .join("blitz")
+        .join(format!("{workspace_id}.sha256"))
+}
+
+fn blitz_cache_hit(root: &Path, workspace_id: &str, signature: &str) -> bool {
+    let source_id = blitz_source_id(workspace_id);
+    canvas_core::frame_file(root, &source_id).is_some_and(|path| path.is_file())
+        && std::fs::read_to_string(blitz_cache_file(root, workspace_id))
+            .is_ok_and(|cached| cached == signature)
+}
+
+fn record_blitz_cache(root: &Path, workspace_id: &str, signature: &str) -> Result<(), String> {
+    canvas_core::write_atomic(
+        &blitz_cache_file(root, workspace_id),
+        signature.as_bytes(),
+    )
+    .map_err(|error| format!("persist {workspace_id} Blitz cache: {error}"))
 }
 
 fn attach_canvas_theme(workspace_id: &str, workspace: &mut Value) -> Result<(), String> {
@@ -348,8 +391,7 @@ fn main() -> ExitCode {
     });
     let http = ReqwestHttp::default();
     let mut sequence: u64 = now_ms();
-    let mut rendered_dashboards: BTreeMap<String, (Value, Option<std::time::SystemTime>)> =
-        BTreeMap::new();
+    let mut rendered_dashboards: BTreeMap<String, String> = BTreeMap::new();
     eprintln!("canvas-alfalfa: {url} every {every}s (Ctrl-C to stop)");
 
     loop {
@@ -373,36 +415,51 @@ fn main() -> ExitCode {
                     if let Some((binary, template)) = &blitz
                         && (blitz_workspaces.is_empty()
                             || blitz_workspaces.iter().any(|wanted| wanted == &id))
-                        && rendered_dashboards.get(&id)
-                            != Some(&(
-                                workspace.clone(),
-                                std::fs::metadata(template)
-                                    .and_then(|metadata| metadata.modified())
-                                    .ok(),
-                            ))
-                        && let Err(error) = render_blitz(
-                            binary,
+                    {
+                        match blitz_signature(
                             template,
-                            &id,
                             &workspace,
                             blitz_width,
                             blitz_height,
                             blitz_scale,
-                        )
-                    {
-                        eprintln!("canvas-alfalfa: {id} HTML render failed: {error}");
-                    } else if blitz.is_some() {
-                        rendered_dashboards.insert(
-                            id,
-                            (
-                                workspace.clone(),
-                                blitz.as_ref().and_then(|(_, template)| {
-                                    std::fs::metadata(template)
-                                        .and_then(|metadata| metadata.modified())
-                                        .ok()
-                                }),
-                            ),
-                        );
+                        ) {
+                            Ok(signature) => {
+                                let root = canvas_core::runtime_root();
+                                let cached = rendered_dashboards.get(&id) == Some(&signature)
+                                    || root.as_ref().is_some_and(|root| {
+                                        blitz_cache_hit(root, &id, &signature)
+                                    });
+                                if cached {
+                                    rendered_dashboards.insert(id, signature);
+                                } else {
+                                    match render_blitz(
+                                        binary,
+                                        template,
+                                        &id,
+                                        &workspace,
+                                        blitz_width,
+                                        blitz_height,
+                                        blitz_scale,
+                                    ) {
+                                        Ok(()) => {
+                                            if let Some(root) = &root
+                                                && let Err(error) =
+                                                    record_blitz_cache(root, &id, &signature)
+                                            {
+                                                eprintln!("canvas-alfalfa: {error}");
+                                            }
+                                            rendered_dashboards.insert(id, signature);
+                                        }
+                                        Err(error) => eprintln!(
+                                            "canvas-alfalfa: {id} HTML render failed: {error}"
+                                        ),
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                eprintln!("canvas-alfalfa: {id} cache key failed: {error}")
+                            }
+                        }
                     }
                 }
             }
@@ -482,6 +539,28 @@ mod tests {
 
         assert_eq!(workspace["theme"]["project_id"], "ohm");
         assert_eq!(workspace["theme"]["palette"]["primary"], "#9aafff");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn blitz_cache_is_workspace_scoped_and_requires_its_frame() {
+        let root = std::env::temp_dir().join(format!(
+            "canvas-alfalfa-blitz-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let ohm_source = blitz_source_id("ohm");
+        let ohm_frame = canvas_core::frame_file(&root, &ohm_source).unwrap();
+        std::fs::create_dir_all(ohm_frame.parent().unwrap()).unwrap();
+        std::fs::write(&ohm_frame, b"jpeg").unwrap();
+        record_blitz_cache(&root, "ohm", "abc").unwrap();
+
+        assert!(blitz_cache_hit(&root, "ohm", "abc"));
+        assert!(!blitz_cache_hit(&root, "agora", "abc"));
+        assert!(!blitz_cache_hit(&root, "ohm", "changed"));
         std::fs::remove_dir_all(root).unwrap();
     }
 

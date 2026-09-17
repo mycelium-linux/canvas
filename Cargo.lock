@@ -410,6 +410,7 @@ dependencies = [
  "canvas-core",
  "canvas-feeds",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
