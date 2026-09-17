@@ -858,6 +858,7 @@ impl App {
             screensaver_fps: 0.0,
             last_clock_second: now_unix_ms() / 1_000,
         };
+        app.publish_web_themes();
         app.ensure_scene_decoded();
         app.reset_background_animation();
         Ok(app)
@@ -2537,6 +2538,7 @@ impl App {
             }
             self.workspaces = next;
         }
+        self.publish_web_themes();
         let selected = theme.to_project_theme();
         self.status = selected.map_or_else(
             || "Theme set to imported palette.".into(),
@@ -3420,6 +3422,7 @@ impl App {
                     self.document = document;
                     self.active_project_workspace = Some(name.clone());
                     self.jump_history.jump(JumpEntry::current(&name, None));
+                    self.publish_web_themes();
                     self.reset_workspace_runtime();
                     self.ensure_scene_decoded();
                     self.reset_background_animation();
@@ -3518,6 +3521,7 @@ impl App {
                     self.start_transition();
                     self.document = document;
                     self.active_project_workspace = Some(name.clone());
+                    self.publish_web_themes();
                     self.reset_workspace_runtime();
                     self.ensure_scene_decoded();
                     self.bump();
@@ -3563,6 +3567,7 @@ impl App {
                 self.workspaces = next;
                 self.catalog = catalog;
                 self.active_project_workspace = Some(self.document.project_id.clone());
+                self.publish_web_themes();
                 self.bump();
                 self.status = format!("Synchronized {} project workspaces.", report.total);
                 self.answer(
@@ -3603,6 +3608,7 @@ impl App {
                     self.reset_workspace_runtime();
                     self.ensure_scene_decoded();
                 }
+                self.publish_web_themes();
                 self.bump();
                 self.status = format!("Reset project workspace '{project_id}'.");
                 self.answer(
@@ -4975,6 +4981,58 @@ impl App {
         self.shared_views.clear();
         self.live_pending.clear();
         self.stream_sequences.clear();
+    }
+
+    /// Publish the renderer-neutral Coherence contract consumed by external
+    /// presentation engines such as Blitz. These files are derived snapshots,
+    /// never another theme source: Canvas resolves project inheritance and
+    /// selected palettes, while renderers only consume semantic roles.
+    fn publish_web_themes(&mut self) {
+        let Some(root) = canvas_core::runtime_root() else {
+            return;
+        };
+        let directory = root.join("themes");
+        let appearance = canvas_core::appearance::current();
+        for (project_id, document) in &self.workspaces.projects {
+            if !canvas_core::is_safe_frame_id(project_id) {
+                continue;
+            }
+            let Ok(selection) = document.resolved_theme(&self.catalog) else {
+                continue;
+            };
+            let visual = selection.visual_theme();
+            let mode = match visual.mode {
+                canvas_core::ThemeMode::Light => "light",
+                canvas_core::ThemeMode::Dark => "dark",
+            };
+            let snapshot = serde_json::json!({
+                "schema_version": 1,
+                "project_id": project_id,
+                "mode": mode,
+                "palette": visual.palette,
+                "surface_raised": format!("#{:02x}{:02x}{:02x}", visual.surface_raised[0], visual.surface_raised[1], visual.surface_raised[2]),
+                "surface_accent": format!("#{:02x}{:02x}{:02x}", visual.surface_accent[0], visual.surface_accent[1], visual.surface_accent[2]),
+                "focus": format!("#{:02x}{:02x}{:02x}", visual.focus[0], visual.focus[1], visual.focus[2]),
+                "metrics": {
+                    "space_1": visual.metrics.space_1, "space_2": visual.metrics.space_2,
+                    "space_3": visual.metrics.space_3, "space_4": visual.metrics.space_4,
+                    "space_5": visual.metrics.space_5, "radius_sm": visual.metrics.radius_sm,
+                    "radius_md": visual.metrics.radius_md, "radius_lg": visual.metrics.radius_lg,
+                    "small": visual.metrics.small, "body": visual.metrics.body,
+                    "title": visual.metrics.title, "hero": visual.metrics.hero,
+                },
+                "appearance": appearance,
+                "effects": {"profile": "coherence", "glow": 0.0, "scanlines": 0.0, "noise": 0.0},
+            });
+            let Ok(bytes) = serde_json::to_vec_pretty(&snapshot) else {
+                continue;
+            };
+            let path = directory.join(format!("{project_id}.json"));
+            if let Err(error) = canvas_core::write_atomic(&path, &bytes) {
+                self.events
+                    .push(format!("theme_snapshot_failed {project_id}: {error}"));
+            }
+        }
     }
 
     fn ensure_scene_decoded(&mut self) {

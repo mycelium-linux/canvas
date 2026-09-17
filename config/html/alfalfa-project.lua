@@ -9,6 +9,27 @@ local reviewers = data.reviewers or {}
 local projects = data.project_ids or {}
 local items = goals.items or {}
 local live = data.activity_state == "observed"
+local theme = data.theme or {}
+local palette = theme.palette or {}
+local function color(name, fallback)
+  local value = palette[name]
+  if type(value) == "string" and value:match("^#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]$") then return value end
+  return fallback
+end
+local theme_css = ':root {'
+  .. '--co-background:' .. color("background", "#0c1016") .. ';'
+  .. '--co-background-strong:' .. color("background_strong", "#111821") .. ';'
+  .. '--co-surface:' .. color("surface", "#121821") .. ';'
+  .. '--co-surface-muted:' .. color("surface_muted", "#18212c") .. ';'
+  .. '--co-text:' .. color("text", "#f2f5f9") .. ';'
+  .. '--co-text-muted:' .. color("text_muted", "#a9b3c0") .. ';'
+  .. '--co-primary:' .. color("primary", "#62d5e9") .. ';'
+  .. '--co-success:' .. color("success", "#72dfa0") .. ';'
+  .. '--co-warning:' .. color("warning", "#f0c76f") .. ';'
+  .. '--co-danger:' .. color("danger", "#ff8f9f") .. ';'
+  .. '--co-info:' .. color("info", "#69d7e9") .. ';'
+  .. '--co-border:' .. color("border", "#293340") .. ';'
+  .. '--co-border-strong:' .. color("border_strong", "#394759") .. ';}'
 
 local function metric(label, value, detail, tone)
   return '<article class="metric ' .. tone .. '"><div class="metric-label">' .. esc(label)
@@ -40,38 +61,38 @@ return {
     .. esc(#items) .. ' shown</span></div><ul>' .. rows .. '</ul></section><footer><span>'
     .. esc(data.project_count or #projects) .. ' projects</span><span>' .. (live and "Realtime activity connected" or "Waiting for activity snapshot")
     .. '</span></footer></main>',
-  css = [[
+  css = theme_css .. [[
     * { box-sizing: border-box; }
-    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #0c1016; color: #f2f5f9; font-family: system-ui, sans-serif; }
-    body { border-top: 3px solid #51c6dc; }
-    main { width: 100vw; height: 100vh; padding: 42px 42px 30px; display: flex; flex-direction: column; background: #0c1016; }
-    header { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; padding-bottom: 28px; border-bottom: 1px solid #29313d; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: var(--co-background); color: var(--co-text); font-family: system-ui, sans-serif; }
+    body { border-top: 3px solid var(--co-primary); }
+    main { width: 100vw; height: 100vh; padding: 42px 42px 30px; display: flex; flex-direction: column; background: var(--co-background); }
+    header { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; padding-bottom: 28px; border-bottom: 1px solid var(--co-border); }
     .identity { min-width: 0; }
-    .eyebrow { color: #62d5e9; font-size: 14px; letter-spacing: 3.4px; font-weight: 750; }
+    .eyebrow { color: var(--co-primary); font-size: 14px; letter-spacing: 3.4px; font-weight: 750; }
     h1 { font-size: 58px; line-height: .98; letter-spacing: -2px; margin: 10px 0 0; font-weight: 640; }
     .projects { margin-top: 20px; display: flex; flex-wrap: wrap; gap: 7px; max-height: 64px; overflow: hidden; }
-    .projects span { color: #aeb8c5; background: #131922; border: 1px solid #303947; border-radius: 7px; padding: 6px 9px; font-size: 12px; }
-    .state { flex: 0 0 auto; display: flex; align-items: center; gap: 9px; color: #b7c0cc; border: 1px solid #394351; border-radius: 7px; padding: 10px 13px; font-size: 12px; font-weight: 750; letter-spacing: 1.8px; }
-    .state i { width: 8px; height: 8px; border-radius: 50%; background: #e3b659; }
-    .state.live i { background: #67dc96; }
+    .projects span { color: var(--co-text-muted); background: var(--co-surface); border: 1px solid var(--co-border); border-radius: 7px; padding: 6px 9px; font-size: 12px; }
+    .state { flex: 0 0 auto; display: flex; align-items: center; gap: 9px; color: var(--co-text-muted); border: 1px solid var(--co-border-strong); border-radius: 7px; padding: 10px 13px; font-size: 12px; font-weight: 750; letter-spacing: 1.8px; }
+    .state i { width: 8px; height: 8px; border-radius: 50%; background: var(--co-warning); }
+    .state.live i { background: var(--co-success); }
     .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 24px; }
-    .metric { min-height: 150px; padding: 20px 22px; background: #121821; border: 1px solid #293340; border-left-width: 3px; border-radius: 8px; }
-    .metric-label { color: #a9b3c0; font-size: 15px; font-weight: 560; }
+    .metric { min-height: 150px; padding: 20px 22px; background: var(--co-surface); border: 1px solid var(--co-border); border-left-width: 3px; border-radius: 8px; }
+    .metric-label { color: var(--co-text-muted); font-size: 15px; font-weight: 560; }
     .metric-value { font-size: 50px; line-height: 1; margin: 15px 0 10px; font-weight: 680; letter-spacing: -1.5px; }
-    .metric-detail { color: #778391; font-size: 13px; }
-    .cyan { border-left-color: #5ccfe3; } .cyan .metric-value { color: #69d7e9; }
-    .amber { border-left-color: #dfb35d; } .amber .metric-value { color: #f0c76f; }
-    .green { border-left-color: #64d891; } .green .metric-value { color: #72dfa0; }
-    .violet { border-left-color: #a890ea; } .violet .metric-value { color: #b9a6ee; }
-    .work { min-height: 0; flex: 1 1 auto; margin-top: 24px; background: #10161e; border: 1px solid #293340; border-radius: 8px; padding: 20px 22px; overflow: hidden; }
+    .metric-detail { color: var(--co-text-muted); font-size: 13px; }
+    .cyan { border-left-color: var(--co-info); } .cyan .metric-value { color: var(--co-info); }
+    .amber { border-left-color: var(--co-warning); } .amber .metric-value { color: var(--co-warning); }
+    .green { border-left-color: var(--co-success); } .green .metric-value { color: var(--co-success); }
+    .violet { border-left-color: var(--co-primary); } .violet .metric-value { color: var(--co-primary); }
+    .work { min-height: 0; flex: 1 1 auto; margin-top: 24px; background: var(--co-surface); border: 1px solid var(--co-border); border-radius: 8px; padding: 20px 22px; overflow: hidden; }
     .section-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
-    h2 { margin: 0; font-size: 16px; font-weight: 650; } .section-head span { color: #687482; font-size: 12px; }
+    h2 { margin: 0; font-size: 16px; font-weight: 650; } .section-head span { color: var(--co-text-muted); font-size: 12px; }
     ul { list-style: none; margin: 0; padding: 0; }
-    li { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 42px; border-top: 1px solid #242c37; font-size: 13px; }
-    .goal-copy { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #cbd3dd; }
-    .goal-state { flex: 0 0 auto; color: #dcb55f; background: #211d14; border: 1px solid #493b20; border-radius: 5px; padding: 3px 7px; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
-    .empty { color: #737f8c; }
-    footer { display: flex; justify-content: space-between; gap: 20px; padding-top: 17px; color: #65717f; font-size: 11px; letter-spacing: .3px; }
+    li { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 42px; border-top: 1px solid var(--co-border); font-size: 13px; }
+    .goal-copy { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--co-text); }
+    .goal-state { flex: 0 0 auto; color: var(--co-warning); background: var(--co-background-strong); border: 1px solid var(--co-border); border-radius: 5px; padding: 3px 7px; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
+    .empty { color: var(--co-text-muted); }
+    footer { display: flex; justify-content: space-between; gap: 20px; padding-top: 17px; color: var(--co-text-muted); font-size: 11px; letter-spacing: .3px; }
     @media (max-aspect-ratio: 4/5) {
       main { padding: 34px 30px 24px; } h1 { font-size: 50px; }
       .metrics { grid-template-columns: 1fr; } .metric { min-height: 112px; }

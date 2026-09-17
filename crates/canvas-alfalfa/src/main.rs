@@ -20,6 +20,7 @@ use std::{
     collections::BTreeMap,
     env,
     io::{Read, Write},
+    path::Path,
     process::{Command, ExitCode, Stdio},
     thread,
     time::Duration,
@@ -27,6 +28,7 @@ use std::{
 
 const ARG_ERR: &str = "usage: canvas-alfalfa [--url URL] [--bridge-bin PATH] [--alfalfa-port PORT] [--blitz-bin PATH --blitz-template PATH --blitz-workspaces id,id --blitz-width PX --blitz-height PX --blitz-scale N] [--every SECS] [--marbles N] [--prs N] [--pulses id,id,...] [--runtime-dir PATH]";
 const MAX_BRIDGE_RESPONSE: u64 = 4 * 1024 * 1024;
+const MAX_THEME_BYTES: u64 = 64 * 1024;
 
 fn arg(args: &[String], flag: &str) -> Option<String> {
     args.iter()
@@ -249,6 +251,34 @@ fn render_blitz(
     Ok(())
 }
 
+fn attach_canvas_theme(workspace_id: &str, workspace: &mut Value) -> Result<(), String> {
+    let root = canvas_core::runtime_root().ok_or("Canvas runtime root unavailable")?;
+    attach_canvas_theme_from(&root, workspace_id, workspace)
+}
+
+fn attach_canvas_theme_from(
+    root: &Path,
+    workspace_id: &str,
+    workspace: &mut Value,
+) -> Result<(), String> {
+    if !canvas_core::is_safe_frame_id(workspace_id) {
+        return Err("unsafe workspace id for theme snapshot".into());
+    }
+    let path = root.join("themes").join(format!("{workspace_id}.json"));
+    let file =
+        std::fs::File::open(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_THEME_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("read {}: {error}", path.display()))?;
+    if bytes.len() as u64 > MAX_THEME_BYTES {
+        return Err("Canvas theme snapshot exceeds 64 KiB".into());
+    }
+    workspace["theme"] =
+        serde_json::from_slice(&bytes).map_err(|error| format!("parse Canvas theme: {error}"))?;
+    Ok(())
+}
+
 fn fetch_repos(http: &dyn Http, url: &str) -> Result<Vec<Value>, String> {
     let value = http
         .get_json(&format!("{url}/api/v1/repos"))
@@ -326,20 +356,24 @@ fn main() -> ExitCode {
         sequence += 1;
         match fetch_dashboards(&bridge, alfalfa_port) {
             Ok(workspaces) => {
-                for workspace in workspaces {
+                for mut workspace in workspaces {
                     let Some(id) = workspace.get("workspace_id").and_then(Value::as_str) else {
                         eprintln!("canvas-alfalfa: dashboard omitted workspace_id");
                         continue;
                     };
-                    let event = dashboard_envelope(id, workspace.clone(), sequence);
+                    let id = id.to_string();
+                    if let Err(error) = attach_canvas_theme(&id, &mut workspace) {
+                        eprintln!("canvas-alfalfa: {id} theme unavailable: {error}");
+                    }
+                    let event = dashboard_envelope(&id, workspace.clone(), sequence);
                     let (fitted, _) = fit(event, MAX_DATAGRAM.saturating_sub(ENVELOPE_OVERHEAD));
                     if let Err(error) = send_raw(&fitted) {
                         eprintln!("canvas-alfalfa: {id} dashboard send failed: {error}");
                     }
                     if let Some((binary, template)) = &blitz
                         && (blitz_workspaces.is_empty()
-                            || blitz_workspaces.iter().any(|wanted| wanted == id))
-                        && rendered_dashboards.get(id)
+                            || blitz_workspaces.iter().any(|wanted| wanted == &id))
+                        && rendered_dashboards.get(&id)
                             != Some(&(
                                 workspace.clone(),
                                 std::fs::metadata(template)
@@ -349,7 +383,7 @@ fn main() -> ExitCode {
                         && let Err(error) = render_blitz(
                             binary,
                             template,
-                            id,
+                            &id,
                             &workspace,
                             blitz_width,
                             blitz_height,
@@ -359,7 +393,7 @@ fn main() -> ExitCode {
                         eprintln!("canvas-alfalfa: {id} HTML render failed: {error}");
                     } else if blitz.is_some() {
                         rendered_dashboards.insert(
-                            id.to_string(),
+                            id,
                             (
                                 workspace.clone(),
                                 blitz.as_ref().and_then(|(_, template)| {
@@ -425,6 +459,31 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attaches_only_the_requested_workspace_theme() {
+        let root = std::env::temp_dir().join(format!(
+            "canvas-alfalfa-theme-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("themes")).unwrap();
+        std::fs::write(
+            root.join("themes/ohm.json"),
+            br##"{"schema_version":1,"project_id":"ohm","palette":{"primary":"#9aafff"}}"##,
+        )
+        .unwrap();
+        let mut workspace = json!({"id":"ohm"});
+
+        attach_canvas_theme_from(&root, "ohm", &mut workspace).unwrap();
+
+        assert_eq!(workspace["theme"]["project_id"], "ohm");
+        assert_eq!(workspace["theme"]["palette"]["primary"], "#9aafff");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn catalog_fallback_shows_real_goals_and_marks_activity_unavailable() {
