@@ -84,6 +84,10 @@ const MAX_PDF_PAGES: u32 = 10_000;
 /// Largest single-frame gap accepted by the screensaver delta-time clock.
 const MAX_SCREENSAVER_FRAME_DELTA: Duration = Duration::from_millis(250);
 const METRICS_REFRESH: Duration = Duration::from_secs(2);
+#[cfg(feature = "lua-scenes")]
+const STREAM_FIRST_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(feature = "lua-scenes")]
+const STREAM_STALE_AFTER: Duration = Duration::from_secs(60);
 const SURFACE_CONTROL_BAR_HEIGHT: f64 = 24.0;
 const SURFACE_CONTROL_HIT_SIZE: f64 = 18.0;
 const SURFACE_CONTROL_INSET: f64 = 4.0;
@@ -462,6 +466,10 @@ struct App {
     _stream_socket: Option<::canvas::stream_binding::StreamSocketGuard>,
     #[cfg(feature = "lua-scenes")]
     stream_sequences: BTreeMap<String, u64>,
+    #[cfg(feature = "lua-scenes")]
+    stream_started_at: Instant,
+    #[cfg(feature = "lua-scenes")]
+    stream_last_applied: BTreeMap<String, Instant>,
     /// Surface -> stamp of the frame currently being decoded off-thread.
     /// Blocks duplicate spawns and lets a stale arrival be discarded.
     live_pending: BTreeMap<String, (std::time::SystemTime, u64)>,
@@ -749,10 +757,16 @@ impl App {
             }
         };
         let (theme_packs, theme_notes) = ::canvas::theme_pack::load();
-        for note in theme_notes { store_notes.push(format!("theme pack unusable: {note}")); }
-        let theme_pack_ids = workspaces.projects.keys().filter_map(|project_id| {
-            read_theme_pack_id(project_id).map(|id| (project_id.clone(), id))
-        }).collect();
+        for note in theme_notes {
+            store_notes.push(format!("theme pack unusable: {note}"));
+        }
+        let theme_pack_ids = workspaces
+            .projects
+            .keys()
+            .filter_map(|project_id| {
+                read_theme_pack_id(project_id).map(|id| (project_id.clone(), id))
+            })
+            .collect();
         let mut app = Self {
             catalog,
             document: restored_document.unwrap_or_else(|| WorkspaceDocument {
@@ -807,6 +821,10 @@ impl App {
             _stream_socket: stream_socket,
             #[cfg(feature = "lua-scenes")]
             stream_sequences: BTreeMap::new(),
+            #[cfg(feature = "lua-scenes")]
+            stream_started_at: Instant::now(),
+            #[cfg(feature = "lua-scenes")]
+            stream_last_applied: BTreeMap::new(),
             live_pending: BTreeMap::new(),
             live_frame_cache: BTreeMap::new(),
             #[cfg(feature = "lua-scenes")]
@@ -1120,7 +1138,9 @@ impl App {
                         self.theme_pack_fingerprint = theme_pack_fingerprint;
                         let (packs, notes) = ::canvas::theme_pack::load();
                         self.theme_packs = packs;
-                        for note in notes { self.events.push(format!("theme_pack_invalid {note}")); }
+                        for note in notes {
+                            self.events.push(format!("theme_pack_invalid {note}"));
+                        }
                         self.publish_web_themes();
                         self.bump();
                     }
@@ -1187,7 +1207,10 @@ impl App {
                 }
                 self.refresh_terminal();
                 #[cfg(feature = "lua-scenes")]
-                self.drain_stream_events();
+                {
+                    self.drain_stream_events();
+                    self.refresh_stream_health();
+                }
                 let mut tasks = vec![self.drain_commands(), self.reload_live_images()];
                 if let Some(settled) = self.display_watch.poll() {
                     tasks.push(self.apply_display_change(settled));
@@ -1885,6 +1908,8 @@ impl App {
                     let last = matching.last().expect("non-empty stream batch");
                     self.stream_sequences
                         .insert(binding.id.clone(), last.sequence);
+                    self.stream_last_applied
+                        .insert(binding.id.clone(), Instant::now());
                     applied = applied.saturating_add(matching.len() as u64);
                     oldest_age = oldest_age.max(
                         matching
@@ -1897,11 +1922,13 @@ impl App {
                 Err(error) => {
                     rejected = rejected.saturating_add(matching.len() as u64);
                     eprintln!("Canvas rejected {} batch: {error}", binding.id);
+                    spec.data.state = canvas_widgets::WidgetDataState::Error;
+                    spec.data.detail = Some(format!("Binder rejected payload: {error}"));
                 }
             }
         }
 
-        if applied > 0 {
+        if applied > 0 || rejected > 0 {
             self.bump();
             let stats = self.stream_inbox.stats();
             self.emit_event(format!(
@@ -1909,6 +1936,51 @@ impl App {
                  position={} retained={} evicted={}",
                 self.stream_position, stats.retained, stats.evicted
             ));
+        }
+    }
+
+    #[cfg(feature = "lua-scenes")]
+    fn refresh_stream_health(&mut self) {
+        let mut changed = false;
+        for binding in &self.document.bindings {
+            let Some(surface) = self.decoded.get_mut(&binding.target.surface_id) else {
+                continue;
+            };
+            let ContentSource::Widget { spec } = &mut surface.source else {
+                continue;
+            };
+            let last_age = self
+                .stream_last_applied
+                .get(&binding.id)
+                .map(Instant::elapsed);
+            match stream_health_transition(
+                spec.data.state,
+                self.stream_started_at.elapsed(),
+                last_age,
+            ) {
+                Some(canvas_widgets::WidgetDataState::Stale) => {
+                    let age = last_age.expect("stale transition requires an observation");
+                    spec.data.state = canvas_widgets::WidgetDataState::Stale;
+                    spec.data.detail = Some(format!(
+                        "{} stream has not updated for {}s",
+                        binding.source.owner,
+                        age.as_secs()
+                    ));
+                    changed = true;
+                }
+                Some(canvas_widgets::WidgetDataState::Disconnected) => {
+                    spec.data.state = canvas_widgets::WidgetDataState::Disconnected;
+                    spec.data.detail = Some(format!(
+                        "No first event from {}/{}",
+                        binding.source.owner, binding.source.stream
+                    ));
+                    changed = true;
+                }
+                _ => {}
+            }
+        }
+        if changed {
+            self.bump();
         }
     }
 
@@ -2462,11 +2534,10 @@ impl App {
         self.background_picker = None;
         self.theme_picker = match self.theme_picker {
             Some(_) => None,
-            None => {
-                Some(::canvas::theme_picker::ThemePicker::opened_from(
-                    self.effective_theme(&self.document), &self.theme_packs,
-                ))
-            }
+            None => Some(::canvas::theme_picker::ThemePicker::opened_from(
+                self.effective_theme(&self.document),
+                &self.theme_packs,
+            )),
         };
         let open = self.theme_picker.is_some();
         self.transition = None;
@@ -2571,13 +2642,17 @@ impl App {
             }
             self.workspaces = next;
         }
-        let selection_path = PathBuf::from("themes/selections")
-            .join(format!("{}.txt", self.document.project_id));
+        let selection_path =
+            PathBuf::from("themes/selections").join(format!("{}.txt", self.document.project_id));
         if let Some(pack_id) = &pack_id {
-            if let Err(error) = ::canvas::runtime_config::write(&selection_path, pack_id.as_bytes(), 48) {
-                self.events.push(format!("theme_pack_selection_failed {error}"));
+            if let Err(error) =
+                ::canvas::runtime_config::write(&selection_path, pack_id.as_bytes(), 48)
+            {
+                self.events
+                    .push(format!("theme_pack_selection_failed {error}"));
             }
-            self.theme_pack_ids.insert(self.document.project_id.clone(), pack_id.clone());
+            self.theme_pack_ids
+                .insert(self.document.project_id.clone(), pack_id.clone());
         } else if let Some(root) = ::canvas::runtime_config::root() {
             let _ = std::fs::remove_file(root.join(selection_path));
             self.theme_pack_ids.remove(&self.document.project_id);
@@ -2585,7 +2660,12 @@ impl App {
         self.publish_web_themes();
         let selected = theme.to_project_theme();
         self.status = selected.map_or_else(
-            || pack_id.map_or_else(|| "Theme set to imported palette.".into(), |id| format!("Theme set to {id}.")),
+            || {
+                pack_id.map_or_else(
+                    || "Theme set to imported palette.".into(),
+                    |id| format!("Theme set to {id}."),
+                )
+            },
             |theme| format!("Theme set to {:?} {:?}.", theme.mode, theme.accent),
         );
         self.emit_event("theme_applied");
@@ -5024,10 +5104,12 @@ impl App {
         self.decoded.clear();
         self.shared_views.clear();
         self.live_pending.clear();
-        self.stream_sequences.clear();
         self.publish_active_project();
         #[cfg(feature = "lua-scenes")]
         {
+            self.stream_sequences.clear();
+            self.stream_last_applied.clear();
+            self.stream_started_at = Instant::now();
             // A workspace switch is a new reader of retained state. Replaying
             // the tail hydrates its widgets immediately; waiting only for new
             // packets leaves a quiet project saying "Loading" indefinitely.
@@ -5037,12 +5119,15 @@ impl App {
     }
 
     fn publish_active_project(&mut self) {
-        let Some(root) = canvas_core::runtime_root() else { return };
+        let Some(root) = canvas_core::runtime_root() else {
+            return;
+        };
         if let Err(error) = canvas_core::write_atomic(
             &root.join("state/active-project"),
             self.document.project_id.as_bytes(),
         ) {
-            self.events.push(format!("active_project_publish_failed {error}"));
+            self.events
+                .push(format!("active_project_publish_failed {error}"));
         }
     }
 
@@ -5216,31 +5301,37 @@ impl App {
                 },
                 upload_pixels: [1, 1],
             };
-            if let ContentSource::LiveImage { source_id, path, seen } = &mut runtime.source
+            if let ContentSource::LiveImage {
+                source_id,
+                path,
+                seen,
+            } = &mut runtime.source
                 && let Ok(metadata) = std::fs::metadata(&*path)
             {
                 let stamp = (
                     metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
                     metadata.len(),
                 );
-                if let Some((cached_stamp, cached)) = self.live_frame_cache.get(source_id).cloned() {
+                if let Some((cached_stamp, cached)) = self.live_frame_cache.get(source_id).cloned()
+                {
                     let same_content = cached_stamp == stamp
                         || cached.sha256.as_ref().is_some_and(|expected| {
                             hash_file(path).ok().as_ref() == Some(expected)
                         });
                     if same_content {
-                    *seen = Some(stamp);
-                    runtime.handle = cached.handle.clone();
-                    runtime.source_pixels = cached.source_pixels;
-                    runtime.upload_pixels = cached.upload_pixels;
-                    runtime.media_plan = cached.media_plan.clone();
-                    runtime.snapshot.asset_sha256 = cached.sha256.clone();
-                    apply_plan_diagnostics(
-                        &mut runtime.snapshot,
-                        &cached.media_plan,
-                        cached.upload_pixels,
-                    );
-                    self.live_frame_cache.insert(source_id.clone(), (stamp, cached));
+                        *seen = Some(stamp);
+                        runtime.handle = cached.handle.clone();
+                        runtime.source_pixels = cached.source_pixels;
+                        runtime.upload_pixels = cached.upload_pixels;
+                        runtime.media_plan = cached.media_plan.clone();
+                        runtime.snapshot.asset_sha256 = cached.sha256.clone();
+                        apply_plan_diagnostics(
+                            &mut runtime.snapshot,
+                            &cached.media_plan,
+                            cached.upload_pixels,
+                        );
+                        self.live_frame_cache
+                            .insert(source_id.clone(), (stamp, cached));
                     }
                 }
             }
@@ -5828,7 +5919,8 @@ impl App {
                     {
                         self.live_frame_cache.remove(&oldest);
                     }
-                    self.live_frame_cache.insert(source_id, (stamp, cached_frame));
+                    self.live_frame_cache
+                        .insert(source_id, (stamp, cached_frame));
                 }
                 self.bump();
             }
@@ -8932,6 +9024,31 @@ fn now_unix_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+#[cfg(feature = "lua-scenes")]
+fn stream_health_transition(
+    current: canvas_widgets::WidgetDataState,
+    since_start: Duration,
+    last_age: Option<Duration>,
+) -> Option<canvas_widgets::WidgetDataState> {
+    match last_age {
+        Some(age)
+            if age >= STREAM_STALE_AFTER
+                && !matches!(
+                    current,
+                    canvas_widgets::WidgetDataState::Stale | canvas_widgets::WidgetDataState::Error
+                ) =>
+        {
+            Some(canvas_widgets::WidgetDataState::Stale)
+        }
+        None if since_start >= STREAM_FIRST_EVENT_TIMEOUT
+            && current == canvas_widgets::WidgetDataState::Loading =>
+        {
+            Some(canvas_widgets::WidgetDataState::Disconnected)
+        }
+        _ => None,
+    }
+}
+
 /// Builds the presence a caller may see, rather than handing out the roster.
 ///
 /// Canvas is not an identity authority: it renders what a publisher observed.
@@ -8977,6 +9094,32 @@ fn assemble_presence(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "lua-scenes")]
+    #[test]
+    fn stream_health_names_missing_first_events_and_preserves_errors() {
+        use canvas_widgets::WidgetDataState;
+        assert_eq!(
+            stream_health_transition(WidgetDataState::Loading, STREAM_FIRST_EVENT_TIMEOUT, None),
+            Some(WidgetDataState::Disconnected)
+        );
+        assert_eq!(
+            stream_health_transition(
+                WidgetDataState::Ready,
+                Duration::ZERO,
+                Some(STREAM_STALE_AFTER)
+            ),
+            Some(WidgetDataState::Stale)
+        );
+        assert_eq!(
+            stream_health_transition(
+                WidgetDataState::Error,
+                Duration::from_secs(600),
+                Some(Duration::from_secs(600))
+            ),
+            None
+        );
+    }
     use ::canvas::{BackgroundShader, control::MeshNode};
 
     fn test_shared_view(id: &str, revision: u64) -> SharedViewDocument {

@@ -560,6 +560,32 @@ pub fn apply_lua_adapter_batch(
     ] {
         globals.raw_set(name, mlua::Value::Nil).map_err(lua_error)?;
     }
+    let canvas = lua.create_table().map_err(lua_error)?;
+    canvas
+        .raw_set(
+            "array",
+            lua.create_function(|lua, table: Option<mlua::Table>| {
+                let table = match table {
+                    Some(table) => table,
+                    None => lua.create_table()?,
+                };
+                table.set_metatable(Some(lua.array_metatable()))?;
+                Ok(table)
+            })
+            .map_err(lua_error)?,
+        )
+        .map_err(lua_error)?;
+    canvas
+        .raw_set(
+            "object",
+            lua.create_function(|lua, table: Option<mlua::Table>| match table {
+                Some(table) => Ok(table),
+                None => lua.create_table(),
+            })
+            .map_err(lua_error)?,
+        )
+        .map_err(lua_error)?;
+    globals.raw_set("canvas", canvas).map_err(lua_error)?;
     lua.sandbox(true).map_err(lua_error)?;
     let wrapped = format!("return function(event)\n{source}\nend");
     let binder: Function = lua
