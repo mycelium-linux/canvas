@@ -30,13 +30,22 @@ for _, agent in ipairs(items) do
     end
   end
 end
+local active_count = #nodes
+if active_count == 0 then
+  nodes[1] = {
+    id = "no-active-agents", label = "No active agents", group = "idle",
+    heat = 0, state = "neutral",
+  }
+end
+local widget = { kind = "dag_graph", title = "Agent lineage", nodes = nodes }
+if #edges > 0 then widget.edges = edges end
 return {
   kind = "snapshot",
-  widget = { kind = "dag_graph", title = "Agent lineage", nodes = nodes, edges = edges },
+  widget = widget,
   data = {
-    state = #nodes > 0 and "ready" or (p.activity_state == "observed" and "no_data" or "partial"),
+    state = active_count > 0 and "ready" or (p.activity_state == "observed" and "no_data" or "partial"),
     source = "alfalfa:" .. tostring(p.workspace_id or "?"),
-    detail = #nodes > 0 and nil or "No observed agent lineage",
+    detail = active_count > 0 and nil or "No observed agent lineage",
     provenance = "live",
   },
 }

@@ -1113,13 +1113,24 @@ mod tests {
         ]);
         apply_named_adapter("alfalfa-agent-dag-v1", &lineage_event, &mut lineage)
             .expect("agent lineage renders");
-        let WidgetKind::DagGraph { nodes, edges, .. } = lineage.kind else {
+        let WidgetKind::DagGraph {
+            ref nodes,
+            ref edges,
+            ..
+        } = lineage.kind
+        else {
             panic!("agent lineage DAG")
         };
         assert_eq!(nodes.len(), 2);
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].from, "root");
         assert_eq!(edges[0].to, "child");
+
+        lineage_event.payload["agents"]["items"] = serde_json::json!([]);
+        lineage_event.payload["activity_state"] = serde_json::json!("unavailable");
+        apply_named_adapter("alfalfa-agent-dag-v1", &lineage_event, &mut lineage)
+            .expect("empty agent lineage renders an honest data state");
+        assert_eq!(lineage.data.state, canvas_widgets::WidgetDataState::Partial);
     }
     #[test]
     fn feed_headlines_survives_an_emoji_splitting_the_clip_boundary() {
