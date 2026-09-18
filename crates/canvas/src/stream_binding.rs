@@ -467,6 +467,10 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/alfalfa-project-agents-v1.lua"),
     ),
     (
+        "alfalfa-agent-dag-v1",
+        include_str!("../../../config/binders/alfalfa-agent-dag-v1.lua"),
+    ),
+    (
         "alfalfa-project-reviewers-v1",
         include_str!("../../../config/binders/alfalfa-project-reviewers-v1.lua"),
     ),
@@ -1096,6 +1100,26 @@ mod tests {
             panic!("agent stat")
         };
         assert_eq!(value, 1.0);
+
+        let mut lineage = test_spec(WidgetKind::DagGraph {
+            title: "stale".into(),
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        });
+        let mut lineage_event = dashboard_event.clone();
+        lineage_event.payload["agents"]["items"] = serde_json::json!([
+            {"id":"root","role":"orchestrator","state":"working"},
+            {"id":"child","parent_id":"root","role":"reviewer","state":"idle"}
+        ]);
+        apply_named_adapter("alfalfa-agent-dag-v1", &lineage_event, &mut lineage)
+            .expect("agent lineage renders");
+        let WidgetKind::DagGraph { nodes, edges, .. } = lineage.kind else {
+            panic!("agent lineage DAG")
+        };
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].from, "root");
+        assert_eq!(edges[0].to, "child");
     }
     #[test]
     fn feed_headlines_survives_an_emoji_splitting_the_clip_boundary() {

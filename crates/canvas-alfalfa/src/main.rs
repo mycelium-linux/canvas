@@ -78,6 +78,37 @@ fn dashboard_stream_payload(workspace: &Value) -> Value {
                 .collect(),
         )
     };
+    let mut agents = scalars(workspace.get("agents"));
+    let lineage = workspace
+        .pointer("/agents/items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(12)
+        .filter_map(|agent| {
+            let object = agent.as_object()?;
+            Some(Value::Object(
+                [
+                    "id",
+                    "session_id",
+                    "parent_id",
+                    "parent_session_id",
+                    "label",
+                    "role",
+                    "kind",
+                    "state",
+                    "status",
+                ]
+                .into_iter()
+                .filter_map(|key| object.get(key).map(|value| (key.to_owned(), value.clone())))
+                .filter(|(_, value)| !value.is_array() && !value.is_object())
+                .collect(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    if !lineage.is_empty() {
+        agents["items"] = Value::Array(lineage);
+    }
     json!({
         "workspace_id": workspace.get("workspace_id"),
         "name": workspace.get("name"),
@@ -85,7 +116,7 @@ fn dashboard_stream_payload(workspace: &Value) -> Value {
         "activity_state": workspace.get("activity_state"),
         "goals": scalars(workspace.get("goals")),
         "beads": scalars(workspace.get("beads")),
-        "agents": scalars(workspace.get("agents")),
+        "agents": agents,
         "reviewers": scalars(workspace.get("reviewers")),
     })
 }
@@ -322,11 +353,8 @@ fn blitz_cache_hit(root: &Path, workspace_id: &str, signature: &str) -> bool {
 }
 
 fn record_blitz_cache(root: &Path, workspace_id: &str, signature: &str) -> Result<(), String> {
-    canvas_core::write_atomic(
-        &blitz_cache_file(root, workspace_id),
-        signature.as_bytes(),
-    )
-    .map_err(|error| format!("persist {workspace_id} Blitz cache: {error}"))
+    canvas_core::write_atomic(&blitz_cache_file(root, workspace_id), signature.as_bytes())
+        .map_err(|error| format!("persist {workspace_id} Blitz cache: {error}"))
 }
 
 fn attach_canvas_theme(workspace_id: &str, workspace: &mut Value) -> Result<(), String> {
@@ -435,36 +463,73 @@ fn main() -> ExitCode {
             let mut seen = file_signature(&template).ok();
             loop {
                 thread::sleep(Duration::from_millis(250));
-                let Ok(signature) = file_signature(&template) else { continue };
-                if seen.as_ref() == Some(&signature) { continue; }
+                let Ok(signature) = file_signature(&template) else {
+                    continue;
+                };
+                if seen.as_ref() == Some(&signature) {
+                    continue;
+                }
                 seen = Some(signature);
-                let snapshot = payloads.lock()
+                let snapshot = payloads
+                    .lock()
                     .map(|payloads| payloads.clone())
                     .unwrap_or_else(|_| {
                         eprintln!("canvas-alfalfa: Blitz live-reload payload cache poisoned");
                         BTreeMap::new()
                     });
                 let active = canvas_core::runtime_root()
-                    .and_then(|root| std::fs::read_to_string(root.join("state/active-project")).ok())
+                    .and_then(|root| {
+                        std::fs::read_to_string(root.join("state/active-project")).ok()
+                    })
                     .map(|id| id.trim().to_string());
                 let mut snapshot = snapshot.into_iter().collect::<Vec<_>>();
                 snapshot.sort_by_key(|(id, _)| active.as_ref().is_none_or(|active| active != id));
                 if blitz_scale > 1.0
                     && let Some((id, payload)) = snapshot.first()
                     && (allowed.is_empty() || allowed.iter().any(|wanted| wanted == id))
-                    && let Err(error) = render_blitz(&binary, &template, id, payload, blitz_width, blitz_height, 1.0)
+                    && let Err(error) = render_blitz(
+                        &binary,
+                        &template,
+                        id,
+                        payload,
+                        blitz_width,
+                        blitz_height,
+                        1.0,
+                    )
                 {
                     eprintln!("canvas-alfalfa: {id} HTML preview reload failed: {error}");
                 }
                 for (id, payload) in snapshot {
-                    if !allowed.is_empty() && !allowed.iter().any(|wanted| wanted == &id) { continue; }
-                    match render_blitz(&binary, &template, &id, &payload, blitz_width, blitz_height, blitz_scale) {
+                    if !allowed.is_empty() && !allowed.iter().any(|wanted| wanted == &id) {
+                        continue;
+                    }
+                    match render_blitz(
+                        &binary,
+                        &template,
+                        &id,
+                        &payload,
+                        blitz_width,
+                        blitz_height,
+                        blitz_scale,
+                    ) {
                         Ok(()) => {
-                            if let (Some(root), Ok(key)) = (canvas_core::runtime_root(), blitz_signature(&template, &payload, blitz_width, blitz_height, blitz_scale))
-                                && let Err(error) = record_blitz_cache(&root, &id, &key)
-                            { eprintln!("canvas-alfalfa: {error}"); }
+                            if let (Some(root), Ok(key)) = (
+                                canvas_core::runtime_root(),
+                                blitz_signature(
+                                    &template,
+                                    &payload,
+                                    blitz_width,
+                                    blitz_height,
+                                    blitz_scale,
+                                ),
+                            ) && let Err(error) = record_blitz_cache(&root, &id, &key)
+                            {
+                                eprintln!("canvas-alfalfa: {error}");
+                            }
                         }
-                        Err(error) => eprintln!("canvas-alfalfa: {id} HTML live reload failed: {error}"),
+                        Err(error) => {
+                            eprintln!("canvas-alfalfa: {id} HTML live reload failed: {error}")
+                        }
                     }
                 }
             }
@@ -488,11 +553,8 @@ fn main() -> ExitCode {
                     if let Ok(mut payloads) = latest_blitz_payloads.lock() {
                         payloads.insert(id.clone(), workspace.clone());
                     }
-                    let event = dashboard_envelope(
-                        &id,
-                        dashboard_stream_payload(&workspace),
-                        sequence,
-                    );
+                    let event =
+                        dashboard_envelope(&id, dashboard_stream_payload(&workspace), sequence);
                     let (fitted, _) = fit(event, MAX_DATAGRAM.saturating_sub(ENVELOPE_OVERHEAD));
                     if let Err(error) = send_raw(&fitted) {
                         eprintln!("canvas-alfalfa: {id} dashboard send failed: {error}");
@@ -511,9 +573,9 @@ fn main() -> ExitCode {
                             Ok(signature) => {
                                 let root = canvas_core::runtime_root();
                                 let cached = rendered_dashboards.get(&id) == Some(&signature)
-                                    || root.as_ref().is_some_and(|root| {
-                                        blitz_cache_hit(root, &id, &signature)
-                                    });
+                                    || root
+                                        .as_ref()
+                                        .is_some_and(|root| blitz_cache_hit(root, &id, &signature));
                                 if cached {
                                     rendered_dashboards.insert(id, signature);
                                 } else {
@@ -650,18 +712,28 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_stream_projection_keeps_metrics_not_render_lists_or_theme() {
+    fn dashboard_stream_projection_keeps_metrics_and_bounded_agent_lineage() {
         let payload = json!({
             "workspace_id":"ohm", "name":"Ohm", "activity_state":"observed",
             "goals":{"total":5,"active":2,"items":[{"outcome":"large"}]},
             "beads":{"open":7,"items":[1,2,3]},
-            "agents":{"running":1,"items":[{"id":"agent"}]},
+            "agents":{"running":1,"items":[{
+                "id":"child", "parent_id":"root", "role":"reviewer",
+                "state":"working", "private_prompt":"must not cross the bus"
+            }]},
             "reviewers":{"running":2},
             "theme":{"palette":{"primary":"#31e6ff"}}
         });
         let projected = dashboard_stream_payload(&payload);
         assert_eq!(projected["goals"]["total"], 5);
         assert_eq!(projected["agents"]["running"], 1);
+        assert_eq!(projected["agents"]["items"][0]["parent_id"], "root");
+        assert_eq!(projected["agents"]["items"][0]["role"], "reviewer");
+        assert!(
+            projected["agents"]["items"][0]
+                .get("private_prompt")
+                .is_none()
+        );
         assert!(projected["goals"].get("items").is_none());
         assert!(projected.get("theme").is_none());
         assert!(serde_json::to_vec(&projected).unwrap().len() < 512);

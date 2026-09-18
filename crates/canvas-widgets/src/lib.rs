@@ -195,6 +195,7 @@ pub const KNOWN_WIDGET_KINDS: &[&str] = &[
     "event_log",
     "status_list",
     "neural_graph",
+    "dag_graph",
     "chart",
     "status",
     "text",
@@ -331,6 +332,14 @@ pub enum WidgetKind {
     /// only deterministic layout and presentation. This keeps clocks, sockets,
     /// and transport retries out of the renderer.
     NeuralGraph {
+        title: String,
+        nodes: Vec<NeuralNode>,
+        #[serde(default)]
+        edges: Vec<NeuralEdge>,
+    },
+    /// Rooted execution lineage with deterministic parent-before-child layout.
+    /// Intended for agents/sub-agents, Merkle trees, and workflow ancestry.
+    DagGraph {
         title: String,
         nodes: Vec<NeuralNode>,
         #[serde(default)]
@@ -865,6 +874,83 @@ fn neutral_status_level() -> StatusLevel {
     StatusLevel::Neutral
 }
 
+fn validate_graph(
+    title: &str,
+    nodes: &[NeuralNode],
+    edges: &[NeuralEdge],
+    label: &str,
+) -> Result<()> {
+    bounded_label(title, &format!("{label} graph title"))?;
+    check(
+        nodes.len() <= 512,
+        &format!("{label} graph exceeds 512 nodes"),
+    )?;
+    check(
+        edges.len() <= 2048,
+        &format!("{label} graph exceeds 2048 edges"),
+    )?;
+    let mut ids = std::collections::BTreeSet::new();
+    for node in nodes {
+        check(
+            !node.id.is_empty()
+                && node.id.len() <= 128
+                && node.id.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'/' | b'.')
+                })
+                && ids.insert(node.id.as_str()),
+            &format!("{label} graph nodes require unique, bounded IDs"),
+        )?;
+        bounded_label(&node.label, &format!("{label} graph node label"))?;
+        optional_label(&node.group, &format!("{label} graph node group"))?;
+        check(
+            node.heat.is_finite() && (0.0..=1.0).contains(&node.heat),
+            &format!("{label} graph node heat must be finite within 0..1"),
+        )?;
+    }
+    let mut pairs = std::collections::BTreeSet::new();
+    for edge in edges {
+        check(
+            ids.contains(edge.from.as_str())
+                && ids.contains(edge.to.as_str())
+                && edge.from != edge.to
+                && pairs.insert((edge.from.as_str(), edge.to.as_str()))
+                && edge.heat.is_finite()
+                && (0.0..=1.0).contains(&edge.heat),
+            &format!(
+                "{label} graph edges require distinct known nodes, unique pairs, and heat within 0..1"
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+fn is_acyclic(nodes: &[NeuralNode], edges: &[NeuralEdge]) -> bool {
+    let mut indegree = nodes
+        .iter()
+        .map(|node| (node.id.as_str(), 0usize))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for edge in edges {
+        *indegree.get_mut(edge.to.as_str()).expect("validated edge") += 1;
+    }
+    let mut ready = indegree
+        .iter()
+        .filter(|(_, degree)| **degree == 0)
+        .map(|(id, _)| *id)
+        .collect::<Vec<_>>();
+    let mut visited = 0;
+    while let Some(id) = ready.pop() {
+        visited += 1;
+        for edge in edges.iter().filter(|edge| edge.from == id) {
+            let degree = indegree.get_mut(edge.to.as_str()).expect("validated edge");
+            *degree -= 1;
+            if *degree == 0 {
+                ready.push(edge.to.as_str());
+            }
+        }
+    }
+    visited == nodes.len()
+}
+
 /// Ceilings for a module spec. Bounded because an agent writes these, and an
 /// unbounded series is a denial of service against the renderer rather than a
 /// rendering bug.
@@ -1251,6 +1337,14 @@ impl WidgetSpec {
                     )?;
                 }
             }
+            WidgetKind::DagGraph {
+                title,
+                nodes,
+                edges,
+            } => {
+                validate_graph(title, nodes, edges, "DAG")?;
+                check(is_acyclic(nodes, edges), "DAG graph contains a cycle")?;
+            }
             WidgetKind::Chart { source, .. } => check(
                 !source.is_empty() && source.len() <= 128,
                 "chart requires a non-empty content-addressed source identifier",
@@ -1542,7 +1636,9 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
             let row = metrics.small * 1.6;
             SizeHint::new(240.0, row * 4.0 + chrome, 420.0, row * 8.0 + chrome, 1.8)
         }
-        WidgetKind::NeuralGraph { .. } => SizeHint::new(300.0, 180.0, 640.0, 380.0, 1.7),
+        WidgetKind::NeuralGraph { .. } | WidgetKind::DagGraph { .. } => {
+            SizeHint::new(300.0, 180.0, 640.0, 380.0, 1.7)
+        }
         WidgetKind::Ticker { .. } => SizeHint::new(
             200.0,
             metrics.large * 3.0 + pad,
@@ -1656,6 +1752,11 @@ mod tests {
                 }],
                 edges: Vec::new(),
             },
+            WidgetKind::DagGraph {
+                title: "Agent lineage".into(),
+                nodes: Vec::new(),
+                edges: Vec::new(),
+            },
             WidgetKind::Ticker {
                 entries: vec![BarValue {
                     label: "A".into(),
@@ -1689,6 +1790,22 @@ mod tests {
             .unwrap()
             .replace("\"heat\":0.75", "\"heat\":1.25");
         assert!(WidgetSpec::from_json(invalid_heat.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn dag_graph_rejects_cycles() {
+        let cyclic = br#"{
+          "schema_version":2,"id":"lineage","kind":"dag_graph","title":"Agents",
+          "nodes":[
+            {"id":"root","label":"Root","heat":1.0},
+            {"id":"child","label":"Child","heat":0.5}
+          ],
+          "edges":[
+            {"from":"root","to":"child","heat":1.0},
+            {"from":"child","to":"root","heat":0.5}
+          ]
+        }"#;
+        assert!(WidgetSpec::from_json(cyclic).is_err());
     }
 
     #[test]

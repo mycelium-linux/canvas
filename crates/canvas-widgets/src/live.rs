@@ -797,6 +797,39 @@ pub fn element_at<'a, Message: 'a>(
                     edges: edges.clone(),
                     palette: *palette,
                     label_size: metrics.micro,
+                    dag: false,
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .spacing(metrics.space_2)
+            .into(),
+            visual,
+        ),
+        WidgetKind::DagGraph {
+            title,
+            nodes,
+            edges,
+        } => panel(
+            spec,
+            column![
+                row![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    space::horizontal(),
+                    text(format!(
+                        "{} agents · {} delegations",
+                        nodes.len(),
+                        edges.len()
+                    ))
+                    .size(metrics.small)
+                    .color(color(palette.text_muted)),
+                ],
+                Canvas::new(NeuralGraphProgram {
+                    nodes: nodes.clone(),
+                    edges: edges.clone(),
+                    palette: *palette,
+                    label_size: metrics.micro,
+                    dag: true,
                 })
                 .width(Length::Fill)
                 .height(Length::Fill),
@@ -824,6 +857,7 @@ struct NeuralGraphProgram {
     edges: Vec<NeuralEdge>,
     palette: ThemePalette,
     label_size: f32,
+    dag: bool,
 }
 
 impl<Message> canvas::Program<Message> for NeuralGraphProgram {
@@ -861,7 +895,11 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
                 return;
             }
 
-            let positions = neural_layout(&self.nodes, bounds.size());
+            let positions = if self.dag {
+                dag_layout(&self.nodes, &self.edges, bounds.size())
+            } else {
+                neural_layout(&self.nodes, bounds.size())
+            };
             let idle_edge = with_alpha(color(self.palette.border), 0.42);
             for edge in &self.edges {
                 let (Some(from), Some(to)) = (positions.get(&edge.from), positions.get(&edge.to))
@@ -873,8 +911,19 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
                     color(self.palette.primary),
                     edge.heat.clamp(0.0, 1.0),
                 );
+                let path = if self.dag {
+                    Path::new(|path| {
+                        let mid = (from.y + to.y) * 0.5;
+                        path.move_to(*from);
+                        path.line_to(Point::new(from.x, mid));
+                        path.line_to(Point::new(to.x, mid));
+                        path.line_to(*to);
+                    })
+                } else {
+                    Path::line(*from, *to)
+                };
                 frame.stroke(
-                    &Path::line(*from, *to),
+                    &path,
                     canvas::Stroke::default()
                         .with_width(1.0 + edge.heat * 3.0)
                         .with_color(active),
@@ -898,6 +947,29 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
                 let semantic = status_color(node.state, &self.palette);
                 let heat = node.heat.clamp(0.0, 1.0);
                 let radius = 5.0 + heat * 7.0;
+                if self.dag {
+                    let node_size = Size::new(108.0, 32.0);
+                    let origin = Point::new(
+                        position.x - node_size.width * 0.5,
+                        position.y - node_size.height * 0.5,
+                    );
+                    let shape = Path::rounded_rectangle(origin, node_size, 3.0.into());
+                    frame.fill(&shape, color(self.palette.surface_muted));
+                    frame.stroke(
+                        &shape,
+                        canvas::Stroke::default()
+                            .with_width(1.0 + heat * 2.0)
+                            .with_color(semantic),
+                    );
+                    frame.fill_text(canvas::Text {
+                        content: node.label.clone(),
+                        position: Point::new(origin.x + 8.0, position.y + 4.0),
+                        color: color(self.palette.text),
+                        size: iced::Pixels(self.label_size),
+                        ..Default::default()
+                    });
+                    continue;
+                }
                 if heat > 0.02 {
                     frame.fill(
                         &Path::circle(*position, radius + 7.0 * heat),
@@ -949,6 +1021,55 @@ fn neural_layout(nodes: &[NeuralNode], size: Size) -> std::collections::BTreeMap
         };
         for (row, node) in members.iter().enumerate() {
             let y = margin_y + usable_h * (row + 1) as f32 / (members.len() + 1) as f32;
+            positions.insert(node.id.clone(), Point::new(x, y));
+        }
+    }
+    positions
+}
+
+/// Stable top-down lineage layout. Depth is the longest parent path so a node
+/// with multiple parents never appears above one of its dependencies.
+fn dag_layout(
+    nodes: &[NeuralNode],
+    edges: &[NeuralEdge],
+    size: Size,
+) -> std::collections::BTreeMap<String, Point> {
+    let mut depth = nodes
+        .iter()
+        .map(|node| (node.id.as_str(), 0usize))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for _ in 0..nodes.len() {
+        let mut changed = false;
+        for edge in edges {
+            let next = depth[edge.from.as_str()] + 1;
+            let target = depth.get_mut(edge.to.as_str()).expect("validated DAG edge");
+            if next > *target {
+                *target = next;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let max_depth = depth.values().copied().max().unwrap_or(0);
+    let margin_x = 70.0;
+    let margin_y = 28.0;
+    let usable_w = (size.width - margin_x * 2.0).max(1.0);
+    let usable_h = (size.height - margin_y * 2.0).max(1.0);
+    let mut positions = std::collections::BTreeMap::new();
+    for level in 0..=max_depth {
+        let members = nodes
+            .iter()
+            .filter(|node| depth[node.id.as_str()] == level)
+            .collect::<Vec<_>>();
+        for (column, node) in members.iter().enumerate() {
+            let x = margin_x + usable_w * (column + 1) as f32 / (members.len() + 1) as f32;
+            let y = if max_depth == 0 {
+                size.height * 0.5
+            } else {
+                margin_y + usable_h * level as f32 / max_depth as f32
+            };
             positions.insert(node.id.clone(), Point::new(x, y));
         }
     }
@@ -2654,6 +2775,33 @@ mod tests {
         assert!(first["a"].x < first["b"].x);
         assert_eq!(first["b"].x, first["c"].x);
         assert!(first["b"].y < first["c"].y);
+    }
+
+    #[test]
+    fn dag_layout_is_stable_and_places_parents_before_children() {
+        let node = |id: &str| NeuralNode {
+            id: id.into(),
+            label: id.into(),
+            group: None,
+            heat: 0.0,
+            state: StatusLevel::Neutral,
+        };
+        let nodes = vec![node("root"), node("child-a"), node("child-b"), node("leaf")];
+        let edge = |from: &str, to: &str| NeuralEdge {
+            from: from.into(),
+            to: to.into(),
+            heat: 0.0,
+        };
+        let edges = vec![
+            edge("root", "child-a"),
+            edge("root", "child-b"),
+            edge("child-a", "leaf"),
+        ];
+        let first = dag_layout(&nodes, &edges, Size::new(600.0, 400.0));
+        assert_eq!(first, dag_layout(&nodes, &edges, Size::new(600.0, 400.0)));
+        assert!(first["root"].y < first["child-a"].y);
+        assert_eq!(first["child-a"].y, first["child-b"].y);
+        assert!(first["child-a"].y < first["leaf"].y);
     }
 
     #[test]
