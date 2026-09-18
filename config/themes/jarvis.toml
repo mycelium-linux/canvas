@@ -24,3 +24,8 @@ scanlines = 0.04
 noise = 0.01
 corner_style = "cut"
 density = 0.94
+
+[typography]
+font_family = "Rajdhani, Eurostile, system-ui, sans-serif"
+mono_family = "Berkeley Mono, IBM Plex Mono, ui-monospace, monospace"
+letter_spacing = 0.35

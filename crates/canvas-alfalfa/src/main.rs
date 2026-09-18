@@ -23,6 +23,7 @@ use std::{
     io::{Read, Write},
     path::Path,
     process::{Command, ExitCode, Stdio},
+    sync::{Arc, Mutex},
     thread,
     time::Duration,
 };
@@ -301,6 +302,12 @@ fn blitz_signature(
     Ok(format!("{:x}", digest.finalize()))
 }
 
+fn file_signature(path: &str) -> Result<String, String> {
+    let mut digest = Sha256::new();
+    digest.update(std::fs::read(path).map_err(|error| format!("read {path}: {error}"))?);
+    Ok(format!("{:x}", digest.finalize()))
+}
+
 fn blitz_cache_file(root: &Path, workspace_id: &str) -> std::path::PathBuf {
     root.join("cache")
         .join("blitz")
@@ -420,6 +427,49 @@ fn main() -> ExitCode {
     let http = ReqwestHttp::default();
     let mut sequence: u64 = now_ms();
     let mut rendered_dashboards: BTreeMap<String, String> = BTreeMap::new();
+    let latest_blitz_payloads: Arc<Mutex<BTreeMap<String, Value>>> = Default::default();
+    if let Some((binary, template)) = blitz.clone() {
+        let payloads = Arc::clone(&latest_blitz_payloads);
+        let allowed = blitz_workspaces.clone();
+        thread::spawn(move || {
+            let mut seen = file_signature(&template).ok();
+            loop {
+                thread::sleep(Duration::from_millis(250));
+                let Ok(signature) = file_signature(&template) else { continue };
+                if seen.as_ref() == Some(&signature) { continue; }
+                seen = Some(signature);
+                let snapshot = payloads.lock()
+                    .map(|payloads| payloads.clone())
+                    .unwrap_or_else(|_| {
+                        eprintln!("canvas-alfalfa: Blitz live-reload payload cache poisoned");
+                        BTreeMap::new()
+                    });
+                let active = canvas_core::runtime_root()
+                    .and_then(|root| std::fs::read_to_string(root.join("state/active-project")).ok())
+                    .map(|id| id.trim().to_string());
+                let mut snapshot = snapshot.into_iter().collect::<Vec<_>>();
+                snapshot.sort_by_key(|(id, _)| active.as_ref().is_none_or(|active| active != id));
+                if blitz_scale > 1.0
+                    && let Some((id, payload)) = snapshot.first()
+                    && (allowed.is_empty() || allowed.iter().any(|wanted| wanted == id))
+                    && let Err(error) = render_blitz(&binary, &template, id, payload, blitz_width, blitz_height, 1.0)
+                {
+                    eprintln!("canvas-alfalfa: {id} HTML preview reload failed: {error}");
+                }
+                for (id, payload) in snapshot {
+                    if !allowed.is_empty() && !allowed.iter().any(|wanted| wanted == &id) { continue; }
+                    match render_blitz(&binary, &template, &id, &payload, blitz_width, blitz_height, blitz_scale) {
+                        Ok(()) => {
+                            if let (Some(root), Ok(key)) = (canvas_core::runtime_root(), blitz_signature(&template, &payload, blitz_width, blitz_height, blitz_scale))
+                                && let Err(error) = record_blitz_cache(&root, &id, &key)
+                            { eprintln!("canvas-alfalfa: {error}"); }
+                        }
+                        Err(error) => eprintln!("canvas-alfalfa: {id} HTML live reload failed: {error}"),
+                    }
+                }
+            }
+        });
+    }
     eprintln!("canvas-alfalfa: {url} every {every}s (Ctrl-C to stop)");
 
     loop {
@@ -434,6 +484,9 @@ fn main() -> ExitCode {
                     let id = id.to_string();
                     if let Err(error) = attach_canvas_theme(&id, &mut workspace) {
                         eprintln!("canvas-alfalfa: {id} theme unavailable: {error}");
+                    }
+                    if let Ok(mut payloads) = latest_blitz_payloads.lock() {
+                        payloads.insert(id.clone(), workspace.clone());
                     }
                     let event = dashboard_envelope(
                         &id,

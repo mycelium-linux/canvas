@@ -21,3 +21,12 @@ coherence-tokens = { path = "vendor/coherence-tokens" }
 # The household bus contract, shared with JARVIS (dock marbles dock-pubd).
 # Pinned by rev; bump deliberately alongside unibus releases.
 unibus = { git = "ssh://git@github.com/FuturePresentLabs/unibus.git", rev = "b47a6cc15a6246296ac34136d513533d21dd11c1" }
+
+# Canvas runs directly from dev artifacts during local UI iteration. Keep the
+# JPEG hot path representative of deployed performance without optimizing the
+# entire workspace and slowing every edit/build cycle.
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.zune-jpeg]
+opt-level = 3

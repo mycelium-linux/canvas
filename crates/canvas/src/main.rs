@@ -465,6 +465,9 @@ struct App {
     /// Surface -> stamp of the frame currently being decoded off-thread.
     /// Blocks duplicate spawns and lets a stale arrival be discarded.
     live_pending: BTreeMap<String, (std::time::SystemTime, u64)>,
+    /// Prepared live frames survive workspace switches. The disk JPEG is the
+    /// producer cache; this is the decode/upload cache keyed by source id.
+    live_frame_cache: BTreeMap<String, ((std::time::SystemTime, u64), PreparedFrame)>,
     /// This screen's position in the retained stream log. Held rather than
     /// implied by consumption, so a gap can be named instead of looking like a
     /// quiet producer.
@@ -805,6 +808,7 @@ impl App {
             #[cfg(feature = "lua-scenes")]
             stream_sequences: BTreeMap::new(),
             live_pending: BTreeMap::new(),
+            live_frame_cache: BTreeMap::new(),
             #[cfg(feature = "lua-scenes")]
             stream_position: 0,
             windows: BTreeMap::new(),
@@ -873,6 +877,7 @@ impl App {
             theme_pack_last_check: Instant::now(),
         };
         app.publish_web_themes();
+        app.publish_active_project();
         app.ensure_scene_decoded();
         app.reset_background_animation();
         Ok(app)
@@ -926,7 +931,7 @@ impl App {
     }
 
     fn presented_visual_theme(&self) -> VisualTheme {
-        let mut visual = self.effective_theme(&self.document).visual_theme();
+        let mut visual = self.effective_visual_theme(&self.document);
         visual.palette = self.presented_palette();
         visual
     }
@@ -5020,6 +5025,7 @@ impl App {
         self.shared_views.clear();
         self.live_pending.clear();
         self.stream_sequences.clear();
+        self.publish_active_project();
         #[cfg(feature = "lua-scenes")]
         {
             // A workspace switch is a new reader of retained state. Replaying
@@ -5027,6 +5033,16 @@ impl App {
             // packets leaves a quiet project saying "Loading" indefinitely.
             self.stream_position = self.stream_inbox.replay_tail(256);
             self.drain_stream_events();
+        }
+    }
+
+    fn publish_active_project(&mut self) {
+        let Some(root) = canvas_core::runtime_root() else { return };
+        if let Err(error) = canvas_core::write_atomic(
+            &root.join("state/active-project"),
+            self.document.project_id.as_bytes(),
+        ) {
+            self.events.push(format!("active_project_publish_failed {error}"));
         }
     }
 
@@ -5044,8 +5060,7 @@ impl App {
             if !canvas_core::is_safe_frame_id(project_id) {
                 continue;
             }
-            let selection = self.effective_theme(document);
-            let visual = selection.visual_theme();
+            let visual = self.effective_visual_theme(document);
             let pack = self.selected_theme_pack(project_id);
             let mode = match visual.mode {
                 canvas_core::ThemeMode::Light => "light",
@@ -5068,6 +5083,15 @@ impl App {
                     "title": visual.metrics.title, "hero": visual.metrics.hero,
                 },
                 "appearance": appearance,
+                "typography": pack.as_ref().map(|pack| serde_json::json!({
+                    "font_family": pack.typography.font_family,
+                    "mono_family": pack.typography.mono_family,
+                    "letter_spacing": pack.typography.letter_spacing,
+                })).unwrap_or_else(|| serde_json::json!({
+                    "font_family": "system-ui, sans-serif",
+                    "mono_family": "ui-monospace, monospace",
+                    "letter_spacing": 0.0,
+                })),
                 "effects": pack.as_ref().map(|pack| serde_json::json!({
                     "profile": pack.id, "glow": pack.effects.glow,
                     "scanlines": pack.effects.scanlines, "noise": pack.effects.noise,
@@ -5158,7 +5182,7 @@ impl App {
                 display_logical: None,
                 scale_factor: None,
             };
-            let runtime = RuntimeSurface {
+            let mut runtime = RuntimeSurface {
                 snapshot,
                 source,
                 handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
@@ -5192,6 +5216,34 @@ impl App {
                 },
                 upload_pixels: [1, 1],
             };
+            if let ContentSource::LiveImage { source_id, path, seen } = &mut runtime.source
+                && let Ok(metadata) = std::fs::metadata(&*path)
+            {
+                let stamp = (
+                    metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+                    metadata.len(),
+                );
+                if let Some((cached_stamp, cached)) = self.live_frame_cache.get(source_id).cloned() {
+                    let same_content = cached_stamp == stamp
+                        || cached.sha256.as_ref().is_some_and(|expected| {
+                            hash_file(path).ok().as_ref() == Some(expected)
+                        });
+                    if same_content {
+                    *seen = Some(stamp);
+                    runtime.handle = cached.handle.clone();
+                    runtime.source_pixels = cached.source_pixels;
+                    runtime.upload_pixels = cached.upload_pixels;
+                    runtime.media_plan = cached.media_plan.clone();
+                    runtime.snapshot.asset_sha256 = cached.sha256.clone();
+                    apply_plan_diagnostics(
+                        &mut runtime.snapshot,
+                        &cached.media_plan,
+                        cached.upload_pixels,
+                    );
+                    self.live_frame_cache.insert(source_id.clone(), (stamp, cached));
+                    }
+                }
+            }
             self.decoded.insert(surface.id.clone(), runtime);
         }
     }
@@ -5215,6 +5267,23 @@ impl App {
                     .resolved_theme(&self.catalog)
                     .expect("validated Canvas document theme")
             })
+    }
+
+    fn effective_visual_theme(&self, document: &WorkspaceDocument) -> VisualTheme {
+        let mut visual = self.effective_theme(document).visual_theme();
+        if let Some(pack) = self.selected_theme_pack(&document.project_id) {
+            let scale = match pack.effects.corner_style.as_str() {
+                "square" => 0.0,
+                "cut" => 0.28,
+                _ => 1.0,
+            };
+            visual.metrics.radius_xs *= scale;
+            visual.metrics.radius_sm *= scale;
+            visual.metrics.radius_md *= scale;
+            visual.metrics.radius_lg *= scale;
+            visual.metrics.radius *= scale;
+        }
+        visual
     }
 
     fn media_viewport(&self) -> LogicalSize {
@@ -5737,6 +5806,11 @@ impl App {
         }
         match result {
             Ok(frame) => {
+                let cached_frame = frame.clone();
+                let source_id = match &surface.source {
+                    ContentSource::LiveImage { source_id, .. } => Some(source_id.clone()),
+                    _ => None,
+                };
                 surface.handle = frame.handle;
                 surface.source_pixels = frame.source_pixels;
                 surface.upload_pixels = frame.upload_pixels;
@@ -5747,6 +5821,15 @@ impl App {
                 );
                 surface.media_plan = frame.media_plan;
                 surface.snapshot.asset_sha256 = frame.sha256;
+                if let Some(source_id) = source_id {
+                    if self.live_frame_cache.len() >= 32
+                        && !self.live_frame_cache.contains_key(&source_id)
+                        && let Some(oldest) = self.live_frame_cache.keys().next().cloned()
+                    {
+                        self.live_frame_cache.remove(&oldest);
+                    }
+                    self.live_frame_cache.insert(source_id, (stamp, cached_frame));
+                }
                 self.bump();
             }
             Err(error) => {

@@ -24,3 +24,8 @@ scanlines = 0.34
 noise = 0.09
 corner_style = "rounded"
 density = 1.08
+
+[typography]
+font_family = "Berkeley Mono, IBM Plex Mono, ui-monospace, monospace"
+mono_family = "Berkeley Mono, IBM Plex Mono, ui-monospace, monospace"
+letter_spacing = 0.55

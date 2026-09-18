@@ -16,6 +16,28 @@ pub struct ThemePack {
     pub palette: ThemePalette,
     #[serde(default)]
     pub effects: ThemeEffects,
+    #[serde(default)]
+    pub typography: ThemeTypography,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThemeTypography {
+    #[serde(default = "default_font_family")]
+    pub font_family: String,
+    #[serde(default = "default_mono_family")]
+    pub mono_family: String,
+    #[serde(default)]
+    pub letter_spacing: f32,
+}
+
+fn default_font_family() -> String { "system-ui, sans-serif".into() }
+fn default_mono_family() -> String { "ui-monospace, monospace".into() }
+
+impl Default for ThemeTypography {
+    fn default() -> Self {
+        Self { font_family: default_font_family(), mono_family: default_mono_family(), letter_spacing: 0.0 }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
@@ -59,6 +81,14 @@ impl ThemePack {
             || !matches!(pack.effects.corner_style.as_str(), "rounded" | "square" | "cut")
         {
             return Err("theme pack effects are outside their bounded ranges".into());
+        }
+        if pack.typography.font_family.len() > 160
+            || pack.typography.mono_family.len() > 160
+            || pack.typography.font_family.chars().any(char::is_control)
+            || pack.typography.mono_family.chars().any(char::is_control)
+            || !(-1.0..=3.0).contains(&pack.typography.letter_spacing)
+        {
+            return Err("theme pack typography is outside its bounded ranges".into());
         }
         Ok(pack)
     }

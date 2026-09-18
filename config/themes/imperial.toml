@@ -24,3 +24,8 @@ scanlines = 0.0
 noise = 0.0
 corner_style = "square"
 density = 0.88
+
+[typography]
+font_family = "DIN Alternate, Arial Narrow, system-ui, sans-serif"
+mono_family = "IBM Plex Mono, ui-monospace, monospace"
+letter_spacing = 0.8

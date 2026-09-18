@@ -12,11 +12,20 @@ local live = data.activity_state == "observed"
 local theme = data.theme or {}
 local palette = theme.palette or {}
 local effects = theme.effects or {}
+local typography = theme.typography or {}
 local function amount(name, fallback)
   local value = tonumber(effects[name])
   if value and value >= 0 and value <= 1 then return value end
   return fallback
 end
+local function font(name, fallback)
+  local value = typography[name]
+  if type(value) == "string" and #value <= 160 and value:match("^[%w%s,%-]+$") then return value end
+  return fallback
+end
+local corner = effects.corner_style == "square" and "0px" or (effects.corner_style == "cut" and "2px" or "8px")
+local tracking = tonumber(typography.letter_spacing) or 0
+if tracking < -1 or tracking > 3 then tracking = 0 end
 local function color(name, fallback)
   local value = palette[name]
   if type(value) == "string" and value:match("^#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]$") then return value end
@@ -40,6 +49,11 @@ local theme_css = ':root {'
   .. '--fx-glow-blur:' .. math.floor(amount("glow", 0) * 22) .. 'px;'
   .. '--fx-scanlines:' .. amount("scanlines", 0) .. ';'
   .. '--fx-noise:' .. amount("noise", 0) .. ';}'
+  .. ':root {'
+  .. '--theme-font:' .. font("font_family", "system-ui, sans-serif") .. ';'
+  .. '--theme-mono:' .. font("mono_family", "ui-monospace, monospace") .. ';'
+  .. '--theme-tracking:' .. tracking .. 'px;'
+  .. '--theme-radius:' .. corner .. ';}'
 
 local function metric(label, value, detail, tone)
   return '<article class="metric ' .. tone .. '"><div class="metric-label">' .. esc(label)
@@ -72,8 +86,9 @@ return {
     .. esc(data.project_count or #projects) .. ' projects</span><span>' .. (live and "Realtime activity connected" or "Waiting for activity snapshot")
     .. '</span></footer></main>',
   css = theme_css .. [[
+    /* Runtime-watched: editing this template never requires a Canvas rebuild. */
     * { box-sizing: border-box; }
-    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: var(--co-background); color: var(--co-text); font-family: system-ui, sans-serif; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: var(--co-background); color: var(--co-text); font-family: var(--theme-font); letter-spacing: var(--theme-tracking); }
     body { border-top: 3px solid var(--co-primary); }
     body::after { content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 20; opacity: var(--fx-scanlines); background: repeating-linear-gradient(0deg, transparent 0 3px, rgba(0,0,0,.42) 3px 4px); }
     main { width: 100vw; height: 100vh; padding: 42px 42px 30px; display: flex; flex-direction: column; background: var(--co-background); }
@@ -87,7 +102,7 @@ return {
     .state i { width: 8px; height: 8px; border-radius: 50%; background: var(--co-warning); }
     .state.live i { background: var(--co-success); }
     .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 24px; }
-    .metric { min-height: 150px; padding: 20px 22px; background: var(--co-surface); border: 1px solid var(--co-border); border-left-width: 3px; border-radius: 8px; box-shadow: 0 0 var(--fx-glow-blur) var(--co-border-strong); }
+    .metric { min-height: 150px; padding: 20px 22px; background: var(--co-surface); border: 1px solid var(--co-border); border-left-width: 3px; border-radius: var(--theme-radius); box-shadow: 0 0 var(--fx-glow-blur) var(--co-border-strong); }
     .metric-label { color: var(--co-text-muted); font-size: 15px; font-weight: 560; }
     .metric-value { font-size: 50px; line-height: 1; margin: 15px 0 10px; font-weight: 680; letter-spacing: -1.5px; }
     .metric-detail { color: var(--co-text-muted); font-size: 13px; }
@@ -95,7 +110,7 @@ return {
     .amber { border-left-color: var(--co-warning); } .amber .metric-value { color: var(--co-warning); }
     .green { border-left-color: var(--co-success); } .green .metric-value { color: var(--co-success); }
     .violet { border-left-color: var(--co-primary); } .violet .metric-value { color: var(--co-primary); }
-    .work { min-height: 0; flex: 1 1 auto; margin-top: 24px; background: var(--co-surface); border: 1px solid var(--co-border); border-radius: 8px; padding: 20px 22px; overflow: hidden; }
+    .work { min-height: 0; flex: 1 1 auto; margin-top: 24px; background: var(--co-surface); border: 1px solid var(--co-border); border-radius: var(--theme-radius); padding: 20px 22px; overflow: hidden; }
     .section-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
     h2 { margin: 0; font-size: 16px; font-weight: 650; } .section-head span { color: var(--co-text-muted); font-size: 12px; }
     ul { list-style: none; margin: 0; padding: 0; }
