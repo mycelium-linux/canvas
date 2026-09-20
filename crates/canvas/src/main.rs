@@ -5263,6 +5263,18 @@ impl App {
                         SurfaceContent::Asset { asset } => {
                             decoded.snapshot.asset_sha256.as_ref() == Some(&asset.sha256)
                         }
+                        SurfaceContent::Widget { spec } => matches!(
+                            &decoded.source,
+                            ContentSource::Widget { spec: decoded_spec } if decoded_spec == spec
+                        ),
+                        SurfaceContent::Chart { chart } => matches!(
+                            &decoded.source,
+                            ContentSource::DataViz { chart: decoded_chart } if decoded_chart == chart
+                        ),
+                        SurfaceContent::Scene { scene } => matches!(
+                            &decoded.source,
+                            ContentSource::Scene { scene: decoded_scene } if decoded_scene == scene
+                        ),
                         SurfaceContent::LiveImage { source_id } => matches!(
                             &decoded.source,
                             ContentSource::LiveImage {
