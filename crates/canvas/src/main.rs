@@ -566,6 +566,7 @@ struct App {
     /// idle subscription alone does not guarantee a present when no model
     /// state changed, which left clocks visually frozen on quiet workspaces.
     last_clock_second: u64,
+    last_clock_millis: u64,
     /// Content identity of runtime theme packs; changes trigger hot reload.
     theme_pack_fingerprint: String,
     theme_packs: Vec<::canvas::theme_pack::ThemePack>,
@@ -938,6 +939,7 @@ impl App {
             picker_elapsed: Duration::ZERO,
             screensaver_fps: 0.0,
             last_clock_second: now_unix_ms() / 1_000,
+            last_clock_millis: now_unix_ms(),
             theme_pack_fingerprint: ::canvas::theme_pack::fingerprint(),
             theme_packs,
             theme_pack_ids,
@@ -1258,6 +1260,26 @@ impl App {
                     })
                 {
                     self.last_clock_second = clock_second;
+                    self.bump();
+                }
+                let clock_millis = now_unix_ms();
+                if clock_millis.saturating_sub(self.last_clock_millis) >= 40
+                    && self.document.surfaces.iter().any(|surface| {
+                        matches!(
+                            surface.content,
+                            SurfaceContent::Widget {
+                                spec: canvas_widgets::WidgetSpec {
+                                    kind: canvas_widgets::WidgetKind::Clock {
+                                        mode: canvas_widgets::ClockMode::Analog,
+                                        ..
+                                    },
+                                    ..
+                                }
+                            }
+                        )
+                    })
+                {
+                    self.last_clock_millis = clock_millis;
                     self.bump();
                 }
                 let toggle_visibility = self
@@ -5778,7 +5800,7 @@ impl App {
                 canvas_widgets::live::element_at(
                     spec,
                     &visual,
-                    canvas_widgets::live::chrono_now_at(self.last_clock_second as i64),
+                    canvas_widgets::live::chrono_now_at_millis(self.last_clock_millis as i64),
                 )
             }
             ContentSource::Image { .. }
@@ -6119,6 +6141,23 @@ impl App {
             matches!(
                 surface.source,
                 ContentSource::LiveImage { .. } | ContentSource::LiveVideo { .. }
+            )
+        })
+    }
+
+    fn has_sweeping_clock(&self) -> bool {
+        self.document.surfaces.iter().any(|surface| {
+            matches!(
+                surface.content,
+                SurfaceContent::Widget {
+                    spec: canvas_widgets::WidgetSpec {
+                        kind: canvas_widgets::WidgetKind::Clock {
+                            mode: canvas_widgets::ClockMode::Analog,
+                            ..
+                        },
+                        ..
+                    }
+                }
             )
         })
     }
@@ -9543,6 +9582,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Live camera frames deserve sub-second pickup without becoming a
         // steady redraw: the reload itself only fires when bytes change.
         let cadence = if app.has_live_frames() {
+            cadence.min(Duration::from_millis(40))
+        } else {
+            cadence
+        };
+        let cadence = if app.has_sweeping_clock() {
             cadence.min(Duration::from_millis(40))
         } else {
             cadence

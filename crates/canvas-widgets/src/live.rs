@@ -6,8 +6,8 @@
 //! all render through one library.
 
 use crate::{
-    BurnRateWindow, ChartType, MeterStyle, NeuralEdge, NeuralNode, StateLane, StatusLevel,
-    StatusState, WidgetDataState, WidgetKind, WidgetSpec,
+    BurnRateWindow, ChartType, ClockMode, MeterStyle, NeuralEdge, NeuralNode, SpatialBounds,
+    SpatialTrack, StateLane, StatusLevel, StatusState, WidgetDataState, WidgetKind, WidgetSpec,
 };
 use std::cell::Cell;
 use std::hash::{Hash, Hasher};
@@ -15,10 +15,12 @@ use std::hash::{Hash, Hasher};
 use canvas_core::{ThemePalette, VisualTheme};
 use iced::mouse;
 use iced::widget::canvas::{Cache, Geometry, Path};
-use iced::widget::{Canvas, canvas, column, container, row, space, text};
+use iced::widget::{Canvas, canvas, column, container, row, scrollable, space, text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
+mod clock;
 mod quant;
+use clock::AnalogClockProgram;
 
 /// Per-program cache state. Stores an iced `Cache` plus a data-derived key.
 ///
@@ -155,12 +157,16 @@ pub fn element_at<'a, Message: 'a>(
                 color(palette.text)
             };
             let mut value_line = row![
-                text(format_metric(*value))
+                text(format_quantity(*value, unit.as_deref()))
                     .size(metrics.hero)
                     .color(value_color),
-                text(unit.clone().unwrap_or_default())
-                    .size(metrics.small)
-                    .color(color(palette.text_muted)),
+                text(if unit.as_deref() == Some("$") {
+                    String::new()
+                } else {
+                    unit.clone().unwrap_or_default()
+                })
+                .size(metrics.small)
+                .color(color(palette.text_muted)),
             ]
             .spacing(metrics.space_1)
             .align_y(iced::alignment::Vertical::Bottom);
@@ -199,7 +205,7 @@ pub fn element_at<'a, Message: 'a>(
             series,
             unit,
         } => {
-            let colors = series_colors(palette);
+            let colors = series_colors(visual);
             let legend = row(series
                 .iter()
                 .enumerate()
@@ -315,17 +321,31 @@ pub fn element_at<'a, Message: 'a>(
                 .into(),
             visual,
         ),
-        WidgetKind::Clock { format } => {
-            let rendered = strftime(&now, format);
-            panel(
-                spec,
-                container(text(rendered).size(metrics.hero).color(color(palette.text)))
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .center(Length::Fill)
-                    .into(),
-                visual,
-            )
+        WidgetKind::Clock { format, mode } => {
+            let content = match mode {
+                ClockMode::Digital => container(
+                    text(strftime(&now, format))
+                        .size(metrics.hero)
+                        .color(color(palette.text)),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center(Length::Fill)
+                .into(),
+                ClockMode::Analog => Canvas::new(AnalogClockProgram {
+                    hour: now.hour,
+                    minute: now.minute,
+                    second: now.second as f32 + now.millisecond as f32 / 1_000.0,
+                    face: color(palette.surface),
+                    marks: color(palette.text_muted),
+                    hands: color(palette.text),
+                    accent: color(palette.primary),
+                })
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into(),
+            };
+            panel(spec, content, visual)
         }
         WidgetKind::Ticker { entries } => {
             let quotes = entries
@@ -543,7 +563,7 @@ pub fn element_at<'a, Message: 'a>(
                             )
                         })
                         .collect(),
-                    palette: series_colors(palette),
+                    palette: series_colors(visual),
                     label: color(palette.text_muted),
                     label_size: metrics.micro,
                 })
@@ -562,7 +582,7 @@ pub fn element_at<'a, Message: 'a>(
         } => {
             // One ramp for the whole widget: the legend and the bars have to
             // agree, and rebuilding it per legend item is a Vec per series.
-            let colors = series_colors(palette);
+            let colors = series_colors(visual);
             panel(
                 spec,
                 column![
@@ -603,6 +623,39 @@ pub fn element_at<'a, Message: 'a>(
                 visual,
             )
         }
+        WidgetKind::PieChart {
+            title,
+            values,
+            unit,
+            period,
+        } => panel(
+            spec,
+            column![
+                row![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    space::horizontal(),
+                    text(period.clone().unwrap_or_default())
+                        .size(metrics.small)
+                        .color(color(palette.text_muted)),
+                ],
+                Canvas::new(PieChartProgram {
+                    values: values
+                        .iter()
+                        .map(|value| (value.label.clone(), value.value))
+                        .collect(),
+                    colors: series_colors(visual),
+                    text: color(palette.text),
+                    surface: color(palette.surface),
+                    label_size: metrics.small,
+                    unit: unit.clone(),
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .spacing(metrics.space_2)
+            .into(),
+            visual,
+        ),
         WidgetKind::StateTimeline { title, lanes } => panel(
             spec,
             column![
@@ -665,7 +718,12 @@ pub fn element_at<'a, Message: 'a>(
                         .into()
                 })
                 .collect::<Vec<Element<'_, Message>>>());
-            let lines = rows.iter().take(8).fold(
+            // The table contract is already bounded to 256 rows. Render that
+            // bounded dataset into a viewport instead of imposing a second,
+            // unrelated eight-row cap: tall tiles should reveal more data,
+            // while short tiles remain scrollable rather than lying about
+            // how much space is available.
+            let lines = rows.iter().fold(
                 column![header].spacing(metrics.space_2),
                 |column, values| {
                     column.push(row(values
@@ -680,20 +738,11 @@ pub fn element_at<'a, Message: 'a>(
                         .collect::<Vec<Element<'_, Message>>>()))
                 },
             );
-            let lines = if let Some(overflow) = overflow_label(rows.len(), 8, "rows") {
-                lines.push(
-                    text(overflow)
-                        .size(metrics.small)
-                        .color(color(palette.warning)),
-                )
-            } else {
-                lines
-            };
             panel(
                 spec,
                 column![
                     text(title).size(metrics.body).color(color(palette.text)),
-                    lines
+                    scrollable(lines).height(Length::Fill)
                 ]
                 .spacing(metrics.space_2)
                 .into(),
@@ -838,6 +887,33 @@ pub fn element_at<'a, Message: 'a>(
             .into(),
             visual,
         ),
+        WidgetKind::SpatialTracks {
+            title,
+            tracks,
+            bounds,
+        } => panel(
+            spec,
+            column![
+                row![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    space::horizontal(),
+                    text(format!("{} tracks", tracks.len()))
+                        .size(metrics.small)
+                        .color(color(palette.text_muted)),
+                ],
+                Canvas::new(SpatialTracksProgram {
+                    tracks: tracks.clone(),
+                    bounds: bounds.clone(),
+                    palette: *palette,
+                    label_size: metrics.micro,
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .spacing(metrics.space_2)
+            .into(),
+            visual,
+        ),
         WidgetKind::Chart { .. } => {
             // Live charts reuse the canvas ChartProgram; the widgets crate
             // delegates so there is one chart implementation (tenet 1).
@@ -849,6 +925,118 @@ pub fn element_at<'a, Message: 'a>(
             .center(Length::Fill)
             .into()
         }
+    }
+}
+
+struct SpatialTracksProgram {
+    tracks: Vec<SpatialTrack>,
+    bounds: SpatialBounds,
+    palette: ThemePalette,
+    label_size: f32,
+}
+
+impl<Message> canvas::Program<Message> for SpatialTracksProgram {
+    type State = CacheState;
+
+    fn draw(
+        &self,
+        state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let key = self.tracks.iter().fold(Key::new(), |key, track| {
+            track.trail.iter().fold(
+                key.add_u64(u64::from(track.id))
+                    .add_f32(track.position.x as f32)
+                    .add_f32(track.position.z as f32)
+                    .add_f32(track.confidence as f32)
+                    .add_f32(track.motion as f32),
+                |key, point| key.add_f32(point.x as f32).add_f32(point.z as f32),
+            )
+        });
+        state.draw_cached(renderer, bounds.size(), key.build(), |frame| {
+            let pad = 12.0;
+            let area = Rectangle::new(
+                Point::new(pad, pad),
+                Size::new(
+                    (bounds.width - pad * 2.0).max(1.0),
+                    (bounds.height - pad * 2.0).max(1.0),
+                ),
+            );
+            let project = |x: f64, z: f64| {
+                let nx = ((x - self.bounds.min_x) / (self.bounds.max_x - self.bounds.min_x)) as f32;
+                let nz = ((z - self.bounds.min_z) / (self.bounds.max_z - self.bounds.min_z)) as f32;
+                Point::new(
+                    area.x + nx.clamp(0.0, 1.0) * area.width,
+                    area.y + (1.0 - nz.clamp(0.0, 1.0)) * area.height,
+                )
+            };
+            let grid = with_alpha(color(self.palette.border), 0.35);
+            for step in 0..=4 {
+                let t = step as f32 / 4.0;
+                frame.stroke(
+                    &Path::line(
+                        Point::new(area.x + area.width * t, area.y),
+                        Point::new(area.x + area.width * t, area.y + area.height),
+                    ),
+                    canvas::Stroke::default().with_width(1.0).with_color(grid),
+                );
+                frame.stroke(
+                    &Path::line(
+                        Point::new(area.x, area.y + area.height * t),
+                        Point::new(area.x + area.width, area.y + area.height * t),
+                    ),
+                    canvas::Stroke::default().with_width(1.0).with_color(grid),
+                );
+            }
+            if self.tracks.is_empty() {
+                frame.fill_text(canvas::Text {
+                    content: "Waiting for RuView tracks".into(),
+                    position: Point::new(area.x + 8.0, area.y + area.height * 0.5),
+                    color: color(self.palette.text_muted),
+                    size: iced::Pixels(self.label_size),
+                    ..Default::default()
+                });
+                return;
+            }
+            for track in &self.tracks {
+                let trail = track
+                    .trail
+                    .iter()
+                    .map(|point| project(point.x, point.z))
+                    .collect::<Vec<_>>();
+                if trail.len() > 1 {
+                    let path = Path::new(|builder| {
+                        builder.move_to(trail[0]);
+                        for point in &trail[1..] {
+                            builder.line_to(*point);
+                        }
+                    });
+                    frame.stroke(
+                        &path,
+                        canvas::Stroke::default()
+                            .with_width(2.0)
+                            .with_color(with_alpha(color(self.palette.primary), 0.35)),
+                    );
+                }
+                let position = project(track.position.x, track.position.z);
+                let heat = (track.motion as f32 / 100.0).clamp(0.0, 1.0);
+                let dot = lerp_oklch(color(self.palette.info), color(self.palette.primary), heat);
+                frame.fill(
+                    &Path::circle(position, 5.0 + heat * 4.0),
+                    with_alpha(dot, 0.6 + track.confidence as f32 * 0.4),
+                );
+                frame.fill_text(canvas::Text {
+                    content: track.id.to_string(),
+                    position: Point::new(position.x + 9.0, position.y - 7.0),
+                    color: color(self.palette.text),
+                    size: iced::Pixels(self.label_size),
+                    ..Default::default()
+                });
+            }
+        })
     }
 }
 
@@ -1428,7 +1616,8 @@ fn status_color(level: StatusLevel, palette: &ThemePalette) -> Color {
     })
 }
 
-/// Distinct colours a series is identified by, derived from the theme.
+/// Distinct colours a series is identified by, supplied by the resolved theme
+/// or derived from its semantic palette for backward compatibility.
 ///
 /// Categorical colour and status colour are two languages, and this used to
 /// speak one where it meant the other: the ramp *was* `[primary, success, info,
@@ -1442,7 +1631,11 @@ fn status_color(level: StatusLevel, palette: &ThemePalette) -> Color {
 /// red-green colour-blind reader. The hue windows the status roles occupy are
 /// excluded from the walk rather than merely stepped over, so no palette,
 /// imported ones included, can produce a series that reads as a state.
-pub fn series_colors(palette: &ThemePalette) -> Vec<Color> {
+pub fn series_colors(visual: &VisualTheme) -> Vec<Color> {
+    if let Some(colors) = visual.categorical {
+        return colors.into_iter().map(color).collect();
+    }
+    let palette = &visual.palette;
     let base = to_oklch(color(palette.primary));
     let open = categorical_arcs(&[
         to_oklch(color(palette.success)).h,
@@ -1898,6 +2091,173 @@ impl<Message> canvas::Program<Message> for StackedBarProgram {
     }
 }
 
+struct PieChartProgram {
+    values: Vec<(String, f64)>,
+    colors: Vec<Color>,
+    text: Color,
+    surface: Color,
+    label_size: f32,
+    unit: Option<String>,
+}
+
+impl<Message> canvas::Program<Message> for PieChartProgram {
+    type State = CacheState;
+
+    fn draw(
+        &self,
+        state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let total = self
+            .values
+            .iter()
+            .map(|(_, value)| value.max(0.0))
+            .sum::<f64>();
+        if total <= f64::EPSILON || self.colors.is_empty() {
+            return Vec::new();
+        }
+        let center = Point::new(bounds.width * 0.5, bounds.height * 0.5);
+        let radius = bounds.width.min(bounds.height) * 0.42;
+        let inner = radius * 0.55;
+        let key = self
+            .values
+            .iter()
+            .fold(Key::new(), |key, (label, value)| {
+                key.add_str(label).add_f64(*value)
+            })
+            .build();
+        let mut output = state.draw_cached(renderer, bounds.size(), key, |frame| {
+            let mut start = -std::f32::consts::FRAC_PI_2;
+            for (index, (_, value)) in self.values.iter().enumerate() {
+                let sweep = (*value / total) as f32 * std::f32::consts::TAU;
+                let steps = ((sweep.abs() * 24.0).ceil() as usize).max(2);
+                let path = Path::new(|path| {
+                    path.move_to(center);
+                    for step in 0..=steps {
+                        let angle = start + sweep * step as f32 / steps as f32;
+                        path.line_to(Point::new(
+                            center.x + radius * angle.cos(),
+                            center.y + radius * angle.sin(),
+                        ));
+                    }
+                    path.close();
+                });
+                frame.fill(&path, self.colors[index % self.colors.len()]);
+                start += sweep;
+            }
+            frame.fill(&Path::circle(center, inner), self.surface);
+            frame.fill_text(canvas::Text {
+                content: format_quantity(total, self.unit.as_deref()),
+                position: Point::new(center.x, center.y + self.label_size * 0.25),
+                color: self.text,
+                size: iced::Pixels(self.label_size * 1.15),
+                align_x: iced::alignment::Horizontal::Center.into(),
+                ..Default::default()
+            });
+        });
+
+        let Some(position) = cursor.position_in(bounds) else {
+            return output;
+        };
+        let dx = position.x - center.x;
+        let dy = position.y - center.y;
+        let distance = (dx * dx + dy * dy).sqrt();
+        if distance < inner || distance > radius {
+            return output;
+        }
+        let angle = (dy.atan2(dx) + std::f32::consts::FRAC_PI_2).rem_euclid(std::f32::consts::TAU);
+        let mut start_angle = 0.0f32;
+        let hovered = self
+            .values
+            .iter()
+            .enumerate()
+            .find_map(|(index, (label, value))| {
+                let sweep = (*value / total) as f32 * std::f32::consts::TAU;
+                let end = start_angle + sweep;
+                let hit = angle <= end;
+                let midpoint = start_angle + sweep * 0.5 - std::f32::consts::FRAC_PI_2;
+                start_angle = end;
+                hit.then_some((index, label, *value, midpoint))
+            });
+        if let Some((index, label, value, midpoint)) = hovered {
+            let mut overlay = canvas::Frame::new(renderer, bounds.size());
+            let detail = format!(
+                "{} · {:.1}%",
+                format_quantity(value, self.unit.as_deref()),
+                value / total * 100.0
+            );
+            let label = if label.chars().count() > 34 {
+                format!("{}…", label.chars().take(33).collect::<String>())
+            } else {
+                label.clone()
+            };
+            let characters = label.chars().count().max(detail.chars().count()) as f32;
+            let width =
+                (characters * self.label_size * 0.56 + 24.0).clamp(128.0, bounds.width * 0.72);
+            // Two baselines plus real descender room; the prior 3.35× box
+            // clipped the quantity line by a few pixels on high-DPI displays.
+            let height = self.label_size * 3.8;
+            let anchor = Point::new(
+                center.x + midpoint.cos() * (radius + 10.0),
+                center.y + midpoint.sin() * (radius + 10.0),
+            );
+            let preferred_x = if midpoint.cos() >= 0.0 {
+                anchor.x + 8.0
+            } else {
+                anchor.x - width - 8.0
+            };
+            let x = preferred_x.clamp(4.0, bounds.width - width - 4.0);
+            let y = (anchor.y - height * 0.5).clamp(4.0, bounds.height - height - 4.0);
+            let box_path =
+                Path::rounded_rectangle(Point::new(x, y), Size::new(width, height), 6.0.into());
+            overlay.fill(
+                &box_path,
+                Color {
+                    a: 0.98,
+                    ..self.surface
+                },
+            );
+            overlay.stroke(
+                &box_path,
+                canvas::Stroke::default().with_width(1.0).with_color(Color {
+                    a: 0.55,
+                    ..self.colors[index % self.colors.len()]
+                }),
+            );
+            overlay.fill(
+                &Path::rounded_rectangle(
+                    Point::new(x + 6.0, y + 8.0),
+                    Size::new(4.0, height - 16.0),
+                    2.0.into(),
+                ),
+                self.colors[index % self.colors.len()],
+            );
+            overlay.fill_text(canvas::Text {
+                content: label,
+                position: Point::new(x + 18.0, y + self.label_size * 1.25),
+                color: self.text,
+                size: iced::Pixels(self.label_size),
+                ..Default::default()
+            });
+            overlay.fill_text(canvas::Text {
+                content: detail,
+                position: Point::new(x + 18.0, y + self.label_size * 2.55),
+                color: Color {
+                    a: 0.78,
+                    ..self.text
+                },
+                size: iced::Pixels(self.label_size * 0.86),
+                ..Default::default()
+            });
+            output.push(overlay.into_geometry());
+        }
+        output
+    }
+}
+
 struct StateTimelineProgram {
     lanes: Vec<StateLane>,
     palette: ThemePalette,
@@ -2105,6 +2465,9 @@ pub fn nice_ticks(min: f64, max: f64, target: usize) -> Vec<f64> {
 /// Unit-aware value formatting for axis ticks and legends, reusing metric
 /// abbreviation (`format_metric`) and appending the declared unit when present.
 pub fn format_quantity(value: f64, unit: Option<&str>) -> String {
+    if unit == Some("$") {
+        return format!("${value:.2}");
+    }
     let mut text = format_metric(value);
     if let Some(unit) = unit.filter(|unit| !unit.is_empty()) {
         text = format!("{text} {unit}");
@@ -2573,14 +2936,20 @@ pub struct EpochParts {
     pub hour: u64,
     pub minute: u64,
     pub second: u64,
+    pub millisecond: u16,
 }
 
 pub fn chrono_now() -> EpochParts {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    chrono_now_at(now)
+        .unwrap_or_default();
+    chrono_now_at_millis(now.as_millis() as i64)
+}
+
+pub fn chrono_now_at_millis(epoch_millis: i64) -> EpochParts {
+    let mut parts = chrono_now_at(epoch_millis.div_euclid(1_000));
+    parts.millisecond = epoch_millis.rem_euclid(1_000) as u16;
+    parts
 }
 
 /// Broken-down *local* time for a given epoch second. The widget is the
@@ -2597,6 +2966,7 @@ pub fn chrono_now_at(epoch: i64) -> EpochParts {
         hour: tm.tm_hour as u64,
         minute: tm.tm_min as u64,
         second: tm.tm_sec as u64,
+        millisecond: 0,
     }
 }
 
@@ -2810,6 +3180,7 @@ mod tests {
             hour: 14,
             minute: 3,
             second: 7,
+            millisecond: 0,
         };
         assert_eq!(strftime(&now, "%H:%M:%S"), "14:03:07");
         assert_eq!(strftime(&now, "100%%"), "100%");
@@ -2884,6 +3255,7 @@ mod tests {
         assert_eq!(format_quantity(0.0, None), "0");
         assert_eq!(format_quantity(1234.0, Some("ms")), "1.2k ms");
         assert_eq!(format_quantity(0.5, Some("°C")), "0.50 °C");
+        assert_eq!(format_quantity(28.27, Some("$")), "$28.27");
     }
 
     #[test]
@@ -3009,7 +3381,7 @@ mod tests {
         // nothing, and that is worse than an old chart. The ramp's own chroma
         // floor is what bounds the drain.
         for (name, palette) in palettes() {
-            let colors = series_colors(&drain(palette, STALE_CHROMA));
+            let colors = series_colors(&visual(drain(palette, STALE_CHROMA)));
             for (index, first) in colors.iter().enumerate() {
                 for second in &colors[index + 1..] {
                     let apart = separation(to_oklch(*first), to_oklch(*second));
@@ -3127,7 +3499,7 @@ mod tests {
                 ("danger", to_oklch(color(palette.danger)).h),
                 ("info", to_oklch(color(palette.info)).h),
             ];
-            for (index, series) in series_colors(&palette).into_iter().enumerate() {
+            for (index, series) in series_colors(&visual(palette)).into_iter().enumerate() {
                 let hue = to_oklch(series).h;
                 for (role, status_hue) in status {
                     // A degree of slack for the trip out through 8-bit sRGB and
@@ -3144,7 +3516,7 @@ mod tests {
     #[test]
     fn series_colours_stay_apart_from_each_other() {
         for (name, palette) in palettes() {
-            let colors = series_colors(&palette);
+            let colors = series_colors(&visual(palette));
             assert!(
                 colors.len() >= 3,
                 "{name} cannot even give three series their own colour"
@@ -3163,7 +3535,7 @@ mod tests {
         // Light and dark differ in lightness in the direction the background
         // demands; a hard-coded ramp would be identical in both.
         let lightness = |palette: &ThemePalette| {
-            let colors = series_colors(palette);
+            let colors = series_colors(&visual(*palette));
             colors.iter().map(|c| to_oklch(*c).l).sum::<f32>() / colors.len() as f32
         };
         use canvas_core::{Accent, ThemeMode, ThemeSelection};
@@ -3173,7 +3545,25 @@ mod tests {
         // And the first entry still carries the brand: identity starts where
         // the theme's primary already points.
         let brand = to_oklch(color(light.primary)).h;
-        assert!(hue_gap(to_oklch(series_colors(&light)[0]).h, brand) < 1.0);
+        assert!(hue_gap(to_oklch(series_colors(&visual(light))[0]).h, brand) < 1.0);
+    }
+
+    #[test]
+    fn charts_honor_an_explicit_theme_palette_in_order() {
+        let expected = [
+            [1, 2, 3],
+            [4, 5, 6],
+            [7, 8, 9],
+            [10, 11, 12],
+            [13, 14, 15],
+            [16, 17, 18],
+        ];
+        let mut theme = visual(palettes()[0].1);
+        theme.categorical = Some(expected);
+        assert_eq!(
+            series_colors(&theme),
+            expected.into_iter().map(color).collect::<Vec<_>>()
+        );
     }
 
     #[test]
