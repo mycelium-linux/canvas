@@ -54,8 +54,6 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
     let width = ((u64::from(stream.width) * u64::from(height) / u64::from(stream.height)) as u32)
         .max(16)
         & !1;
-    let fps = (f64::from(stream.frame_rate_millihz) / 1_000.0).min(policy.max_fps);
-    let fps_numerator = (fps * 1_000.0).round() as u32;
     let mut argv = vec!["-q".into()];
     match stream.transport {
         VideoTransport::UdpMpegTs => {
@@ -84,6 +82,8 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
             "latency=120".into(),
             "drop-on-latency=true".into(),
             "!".into(),
+            "application/x-rtp,media=video,encoding-name=H264".into(),
+            "!".into(),
             "rtph264depay".into(),
             "!".into(),
             "h264parse".into(),
@@ -96,9 +96,7 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
         "!".into(),
         "v4l2convert".into(),
         "!".into(),
-        format!(
-            "video/x-raw,format=RGBA,width={width},height={height},framerate={fps_numerator}/1000"
-        ),
+        format!("video/x-raw,format=RGBA,width={width},height={height}"),
         "!".into(),
         "fdsink".into(),
         "fd=1".into(),

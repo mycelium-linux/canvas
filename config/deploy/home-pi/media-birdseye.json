@@ -11,18 +11,31 @@
   },
   "destination": "living-room",
   "ttl_ms": 30000,
-  "stream": {
+  "streams": [{
     "schema_version": 1,
-    "camera_id": "security-birdseye",
-    "display_name": "Security",
+    "camera_id": "cat",
+    "display_name": "CAT",
     "zone": "living-room",
     "transport": "rtsp",
-    "endpoint": "rtsp://192.168.30.12:8554/birdseye",
+    "endpoint": "rtsp://192.168.30.12:8554/cat",
     "codec": "h264",
-    "width": 1280,
-    "height": 720,
+    "width": 704,
+    "height": 480,
     "frame_rate_millihz": 10000,
     "announced_at_unix_ms": 0,
     "valid_until_unix_ms": 1
-  }
+  }, {
+    "schema_version": 1,
+    "camera_id": "door",
+    "display_name": "DOOR",
+    "zone": "living-room",
+    "transport": "rtsp",
+    "endpoint": "rtsp://192.168.30.12:8554/door",
+    "codec": "h264",
+    "width": 704,
+    "height": 480,
+    "frame_rate_millihz": 10000,
+    "announced_at_unix_ms": 0,
+    "valid_until_unix_ms": 1
+  }]
 }

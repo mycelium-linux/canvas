@@ -11,7 +11,7 @@ struct Config {
     bus: BusConfig,
     destination: String,
     ttl_ms: u64,
-    stream: CameraStream,
+    streams: Vec<CameraStream>,
 }
 
 fn main() -> Result<()> {
@@ -25,18 +25,24 @@ fn main() -> Result<()> {
         "ttl_ms must be 5000..=300000"
     );
     ensure!(!config.destination.is_empty(), "destination is required");
+    ensure!(
+        !config.streams.is_empty() && config.streams.len() <= 16,
+        "streams must contain 1..=16 entries"
+    );
     let bus = Bus::connect(config.bus.clone())?;
     loop {
         let now = canvas_media_edge::now_unix_ms();
-        config.stream.announced_at_unix_ms = now;
-        config.stream.valid_until_unix_ms = now + config.ttl_ms;
-        config.stream.validate().map_err(anyhow::Error::msg)?;
-        let body = serde_json::to_value(&config.stream).context("encode stream")?;
-        let envelope = bus.to_destination(
-            &config.destination,
-            Message::new(CAMERA_STREAM_CONTRACT, body),
-        )?;
-        bus.send(&envelope, &[])?;
+        for stream in &mut config.streams {
+            stream.announced_at_unix_ms = now;
+            stream.valid_until_unix_ms = now + config.ttl_ms;
+            stream.validate().map_err(anyhow::Error::msg)?;
+            let body = serde_json::to_value(&*stream).context("encode stream")?;
+            let envelope = bus.to_destination(
+                &config.destination,
+                Message::new(CAMERA_STREAM_CONTRACT, body),
+            )?;
+            bus.send(&envelope, &[])?;
+        }
         std::thread::sleep(Duration::from_millis(config.ttl_ms / 2));
     }
 }
