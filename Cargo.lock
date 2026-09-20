@@ -367,8 +367,11 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "canvas-alfalfa",
+ "canvas-bifrost",
  "canvas-control",
  "canvas-core",
+ "canvas-fab",
+ "canvas-shroud",
  "canvas-widgets",
  "csv",
  "iced",
@@ -415,6 +418,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "canvas-bifrost"
+version = "0.1.0"
+dependencies = [
+ "canvas-feeds",
+ "serde_json",
+]
+
+[[package]]
 name = "canvas-control"
 version = "0.1.0"
 dependencies = [
@@ -436,6 +447,14 @@ dependencies = [
  "serde_json",
  "toml",
  "unibus",
+]
+
+[[package]]
+name = "canvas-fab"
+version = "0.1.0"
+dependencies = [
+ "canvas-feeds",
+ "serde_json",
 ]
 
 [[package]]
@@ -498,10 +517,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "canvas-media-edge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "canvas",
+ "canvas-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "unibus-media",
+]
+
+[[package]]
 name = "canvas-metrics"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "canvas-shroud"
+version = "0.1.0"
+dependencies = [
+ "canvas-feeds",
  "serde_json",
 ]
 
@@ -4366,6 +4406,13 @@ source = "git+ssh://git@github.com/FuturePresentLabs/unibus.git?rev=b47a6cc15a62
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "unibus-media"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

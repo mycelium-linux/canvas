@@ -33,10 +33,10 @@ pub mod project_picker;
 pub mod project_switcher;
 pub mod reconcile;
 pub mod runtime_config;
-pub mod theme_pack;
 pub mod screensaver;
 #[cfg(feature = "lua-scenes")]
 pub mod stream_binding;
+pub mod theme_pack;
 pub mod theme_picker;
 pub mod view;
 pub mod workspace_store;
@@ -394,13 +394,21 @@ pub enum SurfaceContent {
     LiveImage {
         source_id: String,
     },
+    /// Hardware-decoded, transport-neutral video. The media edge publishes a
+    /// fixed-size RGBA frame in the volatile runtime directory; Canvas owns
+    /// scaling, clipping, chrome, layout, and GPU presentation.
+    LiveVideo {
+        source_id: String,
+        width: u32,
+        height: u32,
+    },
     /// Content from a newer Canvas, kept exactly as written.
     #[serde(untagged)]
     Unsupported(serde_json::Value),
 }
 
 /// The `kind` tags this build can render. Anything else is a newer Canvas.
-const KNOWN_SURFACE_KINDS: [&str; 8] = [
+const KNOWN_SURFACE_KINDS: [&str; 9] = [
     "project_resource",
     "asset",
     "chart",
@@ -409,6 +417,7 @@ const KNOWN_SURFACE_KINDS: [&str; 8] = [
     "terminal",
     "stream",
     "live_image",
+    "live_video",
 ];
 
 impl SurfaceContent {
@@ -423,6 +432,7 @@ impl SurfaceContent {
             Self::Terminal { .. } => "terminal",
             Self::Stream { .. } => "stream",
             Self::LiveImage { .. } => "live_image",
+            Self::LiveVideo { .. } => "live_video",
             Self::Unsupported(raw) => raw
                 .get("kind")
                 .and_then(serde_json::Value::as_str)
@@ -484,14 +494,35 @@ impl<'de> Deserialize<'de> for SurfaceContent {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Known {
-    ProjectResource { resource_id: String },
-    Asset { asset: AssetRef },
-    Chart { chart: chart::ChartDocument },
-    Widget { spec: canvas_widgets::WidgetSpec },
-    Scene { scene: Scene },
-    Terminal { resource_id: String },
-    Stream { url: String },
-    LiveImage { source_id: String },
+    ProjectResource {
+        resource_id: String,
+    },
+    Asset {
+        asset: AssetRef,
+    },
+    Chart {
+        chart: chart::ChartDocument,
+    },
+    Widget {
+        spec: canvas_widgets::WidgetSpec,
+    },
+    Scene {
+        scene: Scene,
+    },
+    Terminal {
+        resource_id: String,
+    },
+    Stream {
+        url: String,
+    },
+    LiveImage {
+        source_id: String,
+    },
+    LiveVideo {
+        source_id: String,
+        width: u32,
+        height: u32,
+    },
 }
 
 impl Known {
@@ -507,6 +538,15 @@ impl Known {
             Self::Terminal { resource_id } => SurfaceContent::Terminal { resource_id },
             Self::Stream { url } => SurfaceContent::Stream { url },
             Self::LiveImage { source_id } => SurfaceContent::LiveImage { source_id },
+            Self::LiveVideo {
+                source_id,
+                width,
+                height,
+            } => SurfaceContent::LiveVideo {
+                source_id,
+                width,
+                height,
+            },
         }
     }
 }
@@ -1046,6 +1086,27 @@ impl WorkspaceDocument {
                         format!("Invalid live image source id: {source_id}"),
                     )?;
                 }
+                SurfaceContent::LiveVideo {
+                    source_id,
+                    width,
+                    height,
+                } => {
+                    check(
+                        identifier(source_id),
+                        format!("Invalid live video source id: {source_id}"),
+                    )?;
+                    check(
+                        (16..=4096).contains(width) && (16..=4096).contains(height),
+                        format!("Invalid live video dimensions: {width}x{height}"),
+                    )?;
+                    let frame_bytes = u64::from(*width)
+                        .checked_mul(u64::from(*height))
+                        .and_then(|pixels| pixels.checked_mul(4));
+                    check(
+                        frame_bytes.is_some_and(|bytes| bytes <= 64 * 1024 * 1024),
+                        format!("Live video frame is too large: {width}x{height}"),
+                    )?;
+                }
                 // Retained verbatim from a newer Canvas. There is nothing this
                 // build can check about it, and refusing the whole document is
                 // exactly the failure this variant exists to prevent — but it
@@ -1373,6 +1434,7 @@ mod forward_compatibility_tests {
             json!({"kind": "terminal", "resource_id": "shell"}),
             json!({"kind": "stream", "url": "https://example.test/s"}),
             json!({"kind": "live_image", "source_id": "door"}),
+            json!({"kind": "live_video", "source_id": "hyperspace", "width": 640, "height": 480}),
         ] {
             let content: SurfaceContent =
                 serde_json::from_value(value.clone()).expect("known kind parses");

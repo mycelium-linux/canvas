@@ -88,7 +88,6 @@ const METRICS_REFRESH: Duration = Duration::from_secs(2);
 const STREAM_FIRST_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(feature = "lua-scenes")]
 const STREAM_STALE_AFTER: Duration = Duration::from_secs(60);
-const SURFACE_CONTROL_BAR_HEIGHT: f64 = 24.0;
 const SURFACE_CONTROL_HIT_SIZE: f64 = 18.0;
 const SURFACE_CONTROL_INSET: f64 = 4.0;
 const SURFACE_RESIZE_HANDLE_SIZE: f64 = 10.0;
@@ -237,6 +236,15 @@ enum ContentSource {
     LiveImage {
         source_id: String,
         path: PathBuf,
+        seen: Option<(std::time::SystemTime, u64)>,
+    },
+    /// A fixed-size RGBA frame produced by the transport-specific media edge.
+    /// Canvas remains transport agnostic and only owns presentation.
+    LiveVideo {
+        source_id: String,
+        path: PathBuf,
+        width: u32,
+        height: u32,
         seen: Option<(std::time::SystemTime, u64)>,
     },
     Widget {
@@ -388,6 +396,25 @@ fn placement_surface_ids(layout: &Layout) -> Vec<String> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// Recover the operational-view identity already encoded in materialized
+/// surface ids. This keeps restart state inferred from the document instead of
+/// persisting a second view-name field that could drift from its layout.
+fn inferred_snapped_view(document: &WorkspaceDocument) -> Option<String> {
+    let Layout::Canvas { placements } = &document.layout else {
+        return None;
+    };
+    if placements.is_empty() {
+        return None;
+    }
+    ::canvas::operational_views::NAMES.iter().find_map(|name| {
+        let prefix = format!("view-{}-", name.replace('/', "-"));
+        placements
+            .iter()
+            .all(|placement| placement.surface_id.starts_with(&prefix))
+            .then(|| (*name).to_owned())
+    })
 }
 
 /// Names the widgets a frame is too small to draw legibly, for a status line.
@@ -767,21 +794,31 @@ impl App {
                 read_theme_pack_id(project_id).map(|id| (project_id.clone(), id))
             })
             .collect();
+        let document = restored_document.unwrap_or_else(|| WorkspaceDocument {
+            schema_version: SCHEMA_VERSION,
+            id: "canvas-runtime".into(),
+            project_id: project_id.clone(),
+            revision: 1,
+            theme: ThemeRef::Project,
+            background: ::canvas::Background::default(),
+            chrome: SurfaceChrome::default(),
+            surfaces: Vec::new(),
+            layout: Layout::Empty,
+            bindings: Vec::new(),
+            focused_surface_id: None,
+        });
+        let snapped_view = inferred_snapped_view(&document);
+        let layout_policy = snapped_view
+            .as_deref()
+            .and_then(|view_id| ::canvas::operational_views::load(view_id).ok())
+            .map(|view| view.layout_policy)
+            .unwrap_or_default();
+        let titlebar_height =
+            theme_chrome_for(&theme_packs, &theme_pack_ids, &document.project_id).titlebar_height;
+        let interaction = interaction_engine(desktop_frame, document.chrome, titlebar_height);
         let mut app = Self {
             catalog,
-            document: restored_document.unwrap_or_else(|| WorkspaceDocument {
-                schema_version: SCHEMA_VERSION,
-                id: "canvas-runtime".into(),
-                project_id: project_id.clone(),
-                revision: 1,
-                theme: ThemeRef::Project,
-                background: ::canvas::Background::default(),
-                chrome: SurfaceChrome::default(),
-                surfaces: Vec::new(),
-                layout: Layout::Empty,
-                bindings: Vec::new(),
-                focused_surface_id: None,
-            }),
+            document,
             runtime_revision: 1,
             frame: desktop_frame,
             display_frames,
@@ -793,8 +830,8 @@ impl App {
             visibility_hotkey,
             snap_hotkey,
             fit_hotkey,
-            layout_policy: ::canvas::view::LayoutPolicy::default(),
-            snapped_view: None,
+            layout_policy,
+            snapped_view,
             free_layout: None,
             jump_history: JumpHistory::new(JumpEntry::current(&project_id.clone(), None)),
             jump_back_hotkey,
@@ -863,7 +900,7 @@ impl App {
                     shortcut_errors.join("; ")
                 )
             },
-            interaction: interaction_engine(desktop_frame),
+            interaction,
             snap_preview: None,
             cursor: None,
             cursor_window: None,
@@ -1040,10 +1077,14 @@ impl App {
             self.emit_event("layout_restored".to_owned());
             return;
         }
+        self.restore_snapped_layout();
+    }
+
+    /// Return to the active view's canonical layout without acting as a
+    /// toggle. This is the button-safe form: repeated clicks are idempotent.
+    fn restore_snapped_layout(&mut self) {
         let Some(view_id) = self.snapped_view.clone() else {
-            // Nothing has been materialized, so there is no saved arrangement to
-            // snap to. Say so rather than silently doing nothing.
-            self.status = "No saved view is active to snap to.".into();
+            self.restore_saved_workspace_layout();
             return;
         };
         match ::canvas::operational_views::materialize(&view_id, &self.document, self.view_fit()) {
@@ -1071,6 +1112,50 @@ impl App {
             // where the stash is gone and the layout did not change.
             Err(error) => self.status = format!("Could not snap to {view_id}: {error}"),
         }
+    }
+
+    /// Restore the persisted per-project arrangement when the current screen
+    /// is a project dashboard rather than a named operational view.
+    fn restore_saved_workspace_layout(&mut self) {
+        let Some(saved_layout) = self
+            .workspaces
+            .get(&self.document.project_id)
+            .map(|saved| saved.layout.clone())
+        else {
+            self.status = "No saved workspace layout is available to snap to.".into();
+            return;
+        };
+        if saved_layout == self.document.layout {
+            self.status = "Layout already matches the saved workspace.".into();
+            return;
+        }
+        let saved_ids = placement_surface_ids(&saved_layout)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let current_ids = self
+            .document
+            .surfaces
+            .iter()
+            .map(|surface| surface.id.clone())
+            .collect::<BTreeSet<_>>();
+        if !saved_ids.is_subset(&current_ids) {
+            self.status =
+                "Saved workspace layout references surfaces that are no longer open.".into();
+            return;
+        }
+        self.free_layout = Some(self.document.layout.clone());
+        self.start_transition();
+        self.document.layout = saved_layout;
+        self.document.revision = self.document.revision.saturating_add(1);
+        self.bump();
+        self.status = format!(
+            "Snapped to the saved {} workspace.",
+            self.document.project_id
+        );
+        self.emit_event(format!(
+            "workspace_layout_snapped {}",
+            self.document.project_id
+        ));
     }
 
     /// Navigate to the previous entry in the jump list (Ctrl-O).
@@ -1142,6 +1227,7 @@ impl App {
                             self.events.push(format!("theme_pack_invalid {note}"));
                         }
                         self.publish_web_themes();
+                        self.refresh_interaction_geometry();
                         self.bump();
                     }
                 }
@@ -1294,7 +1380,11 @@ impl App {
                 }
                 if metrics_changed {
                     if self.interaction.captured_pointer().is_none() {
-                        self.interaction = interaction_engine(self.frame);
+                        self.interaction = interaction_engine(
+                            self.frame,
+                            self.document.chrome,
+                            self.window_chrome().titlebar_height,
+                        );
                     }
                     self.replan_rasters();
                 }
@@ -1469,6 +1559,10 @@ impl App {
                         }
                         SwitchAction::Ignored => {}
                     }
+                }
+                if snap_layout_requested(&kbd_event) {
+                    self.toggle_snapped_layout();
+                    return Task::none();
                 }
                 if background_picker_requested(&kbd_event) {
                     return self.toggle_background_picker();
@@ -2871,6 +2965,7 @@ impl App {
                 let workspace_id = document.id.clone();
                 self.start_transition();
                 self.document = document;
+                self.refresh_interaction_geometry();
                 self.prune_decoded();
                 self.active_project_workspace = None;
                 self.ensure_scene_decoded();
@@ -2897,6 +2992,7 @@ impl App {
                         let background_changed = self.document.background != document.background;
                         self.start_transition();
                         self.document = document;
+                        self.refresh_interaction_geometry();
                         self.prune_decoded();
                         self.ensure_scene_decoded();
                         if background_changed {
@@ -3070,7 +3166,11 @@ impl App {
                     .map(|display| vec![display.id.clone()])
                     .unwrap_or_default();
                 if self.interaction.captured_pointer().is_none() {
-                    self.interaction = interaction_engine(frame);
+                    self.interaction = interaction_engine(
+                        frame,
+                        self.document.chrome,
+                        self.window_chrome().titlebar_height,
+                    );
                 }
                 self.replan_rasters();
                 self.bump();
@@ -3544,6 +3644,14 @@ impl App {
                     self.workspaces = next;
                     self.start_transition();
                     self.document = document;
+                    self.snapped_view = inferred_snapped_view(&self.document);
+                    self.free_layout = None;
+                    self.layout_policy = self
+                        .snapped_view
+                        .as_deref()
+                        .and_then(|view_id| ::canvas::operational_views::load(view_id).ok())
+                        .map(|view| view.layout_policy)
+                        .unwrap_or_default();
                     self.active_project_workspace = Some(name.clone());
                     self.jump_history.jump(JumpEntry::current(&name, None));
                     self.publish_web_themes();
@@ -3644,6 +3752,9 @@ impl App {
                     }
                     self.start_transition();
                     self.document = document;
+                    self.snapped_view = inferred_snapped_view(&self.document);
+                    self.free_layout = None;
+                    self.layout_policy = ::canvas::view::LayoutPolicy::default();
                     self.active_project_workspace = Some(name.clone());
                     self.publish_web_themes();
                     self.reset_workspace_runtime();
@@ -3845,6 +3956,60 @@ impl App {
                 );
                 Task::none()
             }
+            Command::OpenLiveVideo {
+                surface_id,
+                source_id,
+                width,
+                height,
+            } => {
+                let content = SurfaceContent::LiveVideo {
+                    source_id: source_id.clone(),
+                    width,
+                    height,
+                };
+                let Some(path) = canvas_core::video_frame_file(&source_id) else {
+                    self.fail(pending, Failure::invalid("Invalid live video source id"));
+                    return Task::none();
+                };
+                let surface = Surface {
+                    id: surface_id.clone(),
+                    title: source_id.clone(),
+                    content,
+                    inputs: Vec::new(),
+                };
+                if let Some(existing) = self
+                    .document
+                    .surfaces
+                    .iter_mut()
+                    .find(|candidate| candidate.id == surface_id)
+                {
+                    *existing = surface;
+                } else {
+                    self.document.surfaces.push(surface);
+                }
+                self.decoded.remove(&surface_id);
+                self.ensure_scene_decoded();
+                self.start_transition();
+                self.bump();
+                self.emit_event(format!(
+                    "live_video_opened {surface_id} {source_id} {width}x{height}"
+                ));
+                self.status = format!("Opened live video {source_id} on {surface_id}.");
+                let snapshot = self
+                    .decoded
+                    .get(&surface_id)
+                    .map(|surface| surface.snapshot.clone());
+                let _ = path;
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::SurfaceOpened {
+                            surface: snapshot.expect("live video runtime was inserted"),
+                        },
+                    },
+                );
+                Task::none()
+            }
             Command::OpenWidget {
                 surface_id,
                 spec_path,
@@ -3877,7 +4042,7 @@ impl App {
                 }
                 match canvas_widgets::WidgetSpec::from_file(&canonical_spec) {
                     Ok(spec) => {
-                        let title = format!("Widget: {}", spec.id);
+                        let title = spec.id.clone();
                         let snapshot = SurfaceSnapshot {
                             id: surface_id.clone(),
                             title: title.clone(),
@@ -4360,7 +4525,11 @@ impl App {
             Background::Shader { shader_id, speed } if *speed > 0.0 => Some((*shader_id, *speed)),
             _ => None,
         };
-        let picker_open = self.background_picker.is_some() || self.project_switcher.is_some();
+        // Only the animated background picker consumes `picker_elapsed`.
+        // Treating the static project switcher as animated forced the entire
+        // Canvas through the shader cadence while Cmd-K was open, making the
+        // very control used to switch projects feel needlessly heavy.
+        let picker_open = self.background_picker.is_some();
         if (!self.screensaver_settings.enabled && document_shader.is_none() && !picker_open)
             || !self.screensaver_clock.record_if_due(now)
         {
@@ -4713,6 +4882,7 @@ impl App {
         }
         let position = self.cursor?;
         let frame = self.frame;
+        let titlebar_height = f64::from(self.window_chrome().titlebar_height);
         let Layout::Canvas { placements } = &self.document.layout else {
             return None;
         };
@@ -4744,7 +4914,7 @@ impl App {
                 self.document.chrome,
             );
             let top = bounds.y;
-            let bottom = top + SURFACE_CONTROL_BAR_HEIGHT;
+            let bottom = top + titlebar_height;
             let left = bounds.x;
             let right_edge = bounds.x + bounds.width;
             if position.x < left
@@ -4786,7 +4956,7 @@ impl App {
             &surfaces,
             cursor,
             SURFACE_RESIZE_HANDLE_SIZE,
-            SURFACE_CONTROL_BAR_HEIGHT,
+            f64::from(self.window_chrome().titlebar_height),
         ) else {
             return mouse::Interaction::None;
         };
@@ -5087,6 +5257,21 @@ impl App {
                                 ..
                             } if decoded_source_id == source_id
                         ),
+                        SurfaceContent::LiveVideo {
+                            source_id,
+                            width,
+                            height,
+                        } => matches!(
+                            &decoded.source,
+                            ContentSource::LiveVideo {
+                                source_id: decoded_source_id,
+                                width: decoded_width,
+                                height: decoded_height,
+                                ..
+                            } if decoded_source_id == source_id
+                                && decoded_width == width
+                                && decoded_height == height
+                        ),
                         _ => true,
                     }
             })
@@ -5101,6 +5286,7 @@ impl App {
     /// runtime state by those local ids would display the departed project's
     /// pixels and values in the incoming workspace.
     fn reset_workspace_runtime(&mut self) {
+        self.refresh_interaction_geometry();
         self.decoded.clear();
         self.shared_views.clear();
         self.live_pending.clear();
@@ -5114,7 +5300,21 @@ impl App {
             // the tail hydrates its widgets immediately; waiting only for new
             // packets leaves a quiet project saying "Loading" indefinitely.
             self.stream_position = self.stream_inbox.replay_tail(256);
+            // Bindings mutate decoded runtime surfaces, not the persisted
+            // loading-state document. Decode the incoming workspace before
+            // replaying or every cached event is rejected as a missing target.
+            self.ensure_scene_decoded();
             self.drain_stream_events();
+        }
+    }
+
+    fn refresh_interaction_geometry(&mut self) {
+        if self.interaction.captured_pointer().is_none() {
+            self.interaction = interaction_engine(
+                self.frame,
+                self.document.chrome,
+                self.window_chrome().titlebar_height,
+            );
         }
     }
 
@@ -5146,6 +5346,17 @@ impl App {
                 continue;
             }
             let visual = self.effective_visual_theme(document);
+            let chart_colors = canvas_widgets::live::series_colors(&visual)
+                .into_iter()
+                .map(|color| {
+                    format!(
+                        "#{:02x}{:02x}{:02x}",
+                        (color.r * 255.0).round() as u8,
+                        (color.g * 255.0).round() as u8,
+                        (color.b * 255.0).round() as u8,
+                    )
+                })
+                .collect::<Vec<_>>();
             let pack = self.selected_theme_pack(project_id);
             let mode = match visual.mode {
                 canvas_core::ThemeMode::Light => "light",
@@ -5156,6 +5367,7 @@ impl App {
                 "project_id": project_id,
                 "mode": mode,
                 "palette": visual.palette,
+                "charts": { "categorical": chart_colors },
                 "surface_raised": format!("#{:02x}{:02x}{:02x}", visual.surface_raised[0], visual.surface_raised[1], visual.surface_raised[2]),
                 "surface_accent": format!("#{:02x}{:02x}{:02x}", visual.surface_accent[0], visual.surface_accent[1], visual.surface_accent[2]),
                 "focus": format!("#{:02x}{:02x}{:02x}", visual.focus[0], visual.focus[1], visual.focus[2]),
@@ -5231,6 +5443,25 @@ impl App {
                         ContentSource::LiveImage {
                             source_id: source_id.clone(),
                             path,
+                            seen: None,
+                        },
+                    )
+                }
+                SurfaceContent::LiveVideo {
+                    source_id,
+                    width,
+                    height,
+                } => {
+                    let Some(path) = canvas_core::video_frame_file(source_id) else {
+                        continue;
+                    };
+                    (
+                        ContentKind::Image,
+                        ContentSource::LiveVideo {
+                            source_id: source_id.clone(),
+                            path,
+                            width: *width,
+                            height: *height,
                             seen: None,
                         },
                     )
@@ -5348,6 +5579,14 @@ impl App {
         self.theme_packs.iter().find(|pack| &pack.id == id).cloned()
     }
 
+    fn window_chrome(&self) -> ::canvas::theme_pack::ThemeChrome {
+        theme_chrome_for(
+            &self.theme_packs,
+            &self.theme_pack_ids,
+            &self.document.project_id,
+        )
+    }
+
     fn effective_theme(&self, document: &WorkspaceDocument) -> canvas_core::ThemeSelection {
         self.selected_theme_pack(&document.project_id)
             .map(|pack| canvas_core::ThemeSelection::Palette {
@@ -5363,6 +5602,9 @@ impl App {
     fn effective_visual_theme(&self, document: &WorkspaceDocument) -> VisualTheme {
         let mut visual = self.effective_theme(document).visual_theme();
         if let Some(pack) = self.selected_theme_pack(&document.project_id) {
+            if let Ok(categorical) = pack.charts.categorical.clone().try_into() {
+                visual.categorical = Some(categorical);
+            }
             let scale = match pack.effects.corner_style.as_str() {
                 "square" => 0.0,
                 "cut" => 0.28,
@@ -5471,7 +5713,7 @@ impl App {
                     // Categorical identity, not status: a ramp of
                     // `[primary, success, danger, warning]` made series three
                     // and four claim "failed" and "degraded" by list position.
-                    series_colors: canvas_widgets::live::series_colors(&palette),
+                    series_colors: canvas_widgets::live::series_colors(&visual),
                     metrics: visual.metrics,
                 })
                 .width(width)
@@ -5516,7 +5758,8 @@ impl App {
             }
             ContentSource::Image { .. }
             | ContentSource::Pdf { .. }
-            | ContentSource::LiveImage { .. } => {
+            | ContentSource::LiveImage { .. }
+            | ContentSource::LiveVideo { .. } => {
                 let view = self.shared_views.get(&surface.snapshot.id);
                 let mut image = image_widget(surface.handle.clone())
                     .content_fit(ContentFit::Contain)
@@ -5565,28 +5808,53 @@ impl App {
         }
         let visual_theme = self.presented_visual_theme();
         let palette = visual_theme.palette;
-        let dot = |rgb| {
+        let chrome = self.window_chrome();
+        let bar_height = chrome.titlebar_height;
+        let control_style = chrome.control_style.clone();
+        let mark = move |rgb, symbol: &'static str| -> Element<'a, Message> {
             let fill = color(rgb);
-            container(space::horizontal())
-                .width(Length::Fixed(9.0))
-                .height(Length::Fixed(9.0))
-                .style(move |_| container::Style {
-                    background: Some(fill.into()),
-                    border: iced::Border {
-                        color: Color { a: 0.42, ..fill },
-                        width: 1.0,
-                        radius: 4.5.into(),
-                    },
-                    ..Default::default()
-                })
+            match control_style.as_str() {
+                "glyphs" => container(text(symbol).size(11).color(fill))
+                    .width(Length::Fixed(14.0))
+                    .height(Length::Fixed(14.0))
+                    .center(Length::Fill)
+                    .into(),
+                "segments" => container(text(symbol).size(10).color(fill))
+                    .width(Length::Fixed(15.0))
+                    .height(Length::Fixed(15.0))
+                    .center(Length::Fill)
+                    .style(move |_| container::Style {
+                        background: Some(Color { a: 0.10, ..fill }.into()),
+                        border: iced::Border {
+                            color: Color { a: 0.72, ..fill },
+                            width: 1.0,
+                            radius: 1.0.into(),
+                        },
+                        ..Default::default()
+                    })
+                    .into(),
+                _ => container(space::horizontal())
+                    .width(Length::Fixed(9.0))
+                    .height(Length::Fixed(9.0))
+                    .style(move |_| container::Style {
+                        background: Some(fill.into()),
+                        border: iced::Border {
+                            color: Color { a: 0.42, ..fill },
+                            width: 1.0,
+                            radius: 4.5.into(),
+                        },
+                        ..Default::default()
+                    })
+                    .into(),
+            }
         };
-        let control = |rgb, label: &'static str| {
+        let control = |rgb, symbol: &'static str, label: &'static str| {
             tooltip(
                 mouse_area(
-                    container(dot(rgb))
+                    container(mark(rgb, symbol))
                         .width(Length::Fixed(SURFACE_CONTROL_HIT_SIZE as f32))
-                        .height(Length::Fixed(SURFACE_CONTROL_BAR_HEIGHT as f32))
-                        .align_x(iced::alignment::Horizontal::Left)
+                        .height(Length::Fixed(bar_height))
+                        .align_x(iced::alignment::Horizontal::Center)
                         .align_y(iced::alignment::Vertical::Center),
                 )
                 .interaction(mouse::Interaction::Pointer),
@@ -5616,7 +5884,7 @@ impl App {
                 });
             return container(grip)
                 .width(Length::Fill)
-                .height(Length::Fixed(SURFACE_CONTROL_BAR_HEIGHT as f32))
+                .height(Length::Fixed(bar_height))
                 .center_x(Length::Fill)
                 .align_y(iced::alignment::Vertical::Center)
                 .into();
@@ -5624,31 +5892,44 @@ impl App {
         let controls = row![
             control(
                 palette.danger,
+                "×",
                 window_action_label(WindowAction::Close, maximized)
             ),
             control(
                 palette.warning,
+                "−",
                 window_action_label(WindowAction::Minimize, maximized)
             ),
             control(
                 palette.success,
+                if maximized { "◇" } else { "□" },
                 window_action_label(WindowAction::Maximize, maximized)
             ),
         ]
         .spacing(0)
         .align_y(iced::alignment::Vertical::Center);
         let show_title = surface_title_visible(self.document.chrome.title, focused);
+        let title = if chrome.uppercase_titles {
+            title.to_uppercase()
+        } else {
+            title.to_owned()
+        };
         let bar = if show_title {
             row![
                 controls,
-                container(text(title).size(11).color(color(palette.text_muted))).padding(
-                    iced::Padding {
+                container(text(title).size(11).color(color(palette.text_muted)))
+                    .padding(iced::Padding {
                         top: 0.0,
                         right: 8.0,
                         bottom: 0.0,
-                        left: 8.0,
-                    }
-                )
+                        left: 8.0
+                    })
+                    .width(Length::Fill)
+                    .align_x(if chrome.title_alignment == "center" {
+                        iced::alignment::Horizontal::Center
+                    } else {
+                        iced::alignment::Horizontal::Left
+                    })
             ]
             .align_y(iced::alignment::Vertical::Center)
         } else {
@@ -5662,7 +5943,7 @@ impl App {
                 left: 8.0,
             })
             .width(Length::Fill)
-            .height(Length::Fixed(SURFACE_CONTROL_BAR_HEIGHT as f32))
+            .height(Length::Fixed(bar_height))
             .align_x(iced::alignment::Horizontal::Left)
             .align_y(iced::alignment::Vertical::Top)
             .style(move |_| container::Style {
@@ -5671,7 +5952,7 @@ impl App {
                         palette.surface[0],
                         palette.surface[1],
                         palette.surface[2],
-                        0.78,
+                        chrome.header_opacity,
                     )
                     .into(),
                 ),
@@ -5680,10 +5961,10 @@ impl App {
                         palette.border[0],
                         palette.border[1],
                         palette.border[2],
-                        0.78,
+                        if focused { 0.92 } else { 0.62 },
                     ),
-                    width: 1.0,
-                    radius: 8.0.into(),
+                    width: chrome.border_width,
+                    radius: chrome.border_radius.into(),
                 },
                 ..Default::default()
             })
@@ -5793,10 +6074,13 @@ impl App {
         }
     }
 
-    fn has_live_images(&self) -> bool {
-        self.decoded
-            .values()
-            .any(|surface| matches!(surface.source, ContentSource::LiveImage { .. }))
+    fn has_live_frames(&self) -> bool {
+        self.decoded.values().any(|surface| {
+            matches!(
+                surface.source,
+                ContentSource::LiveImage { .. } | ContentSource::LiveVideo { .. }
+            )
+        })
     }
 
     /// Notice changed `frames/<source_id>.jpg` files and dispatch their decode
@@ -5816,13 +6100,20 @@ impl App {
         let mut notes: Vec<String> = Vec::new();
         let mut tasks: Vec<Task<Message>> = Vec::new();
         for (surface_id, surface) in self.decoded.iter_mut() {
-            let ContentSource::LiveImage {
-                source_id,
-                path,
-                seen,
-            } = &mut surface.source
-            else {
-                continue;
+            let (source_id, path, seen, raw_size) = match &mut surface.source {
+                ContentSource::LiveImage {
+                    source_id,
+                    path,
+                    seen,
+                } => (source_id, path, seen, None),
+                ContentSource::LiveVideo {
+                    source_id,
+                    path,
+                    width,
+                    height,
+                    seen,
+                } => (source_id, path, seen, Some((*width, *height))),
+                _ => continue,
             };
             let metadata = match std::fs::metadata(&*path) {
                 Ok(metadata) => metadata,
@@ -5847,11 +6138,46 @@ impl App {
             let source = format!("live:{source_id}");
             tasks.push(Task::perform(
                 async move {
-                    let sha = hash_file(&path).ok();
-                    let (handle, _media_type, source_pixels, media_plan) =
-                        prepare_raster(&path, source, viewport, scale_factor)
-                            .map_err(|failure| failure.message)?;
-                    let upload_pixels = [media_plan.target_px.width, media_plan.target_px.height];
+                    let (handle, source_pixels, media_plan, upload_pixels, sha) =
+                        if let Some((width, height)) = raw_size {
+                            let expected = usize::try_from(width)
+                                .ok()
+                                .and_then(|value| value.checked_mul(height as usize))
+                                .and_then(|pixels| pixels.checked_mul(4))
+                                .ok_or_else(|| format!("invalid raw frame dimensions {width}x{height}"))?;
+                            let bytes = std::fs::read(&path)
+                                .map_err(|error| format!("read {}: {error}", path.display()))?;
+                            if bytes.len() != expected {
+                                return Err(format!(
+                                    "raw frame length {} does not match {width}x{height} RGBA ({expected})",
+                                    bytes.len()
+                                ));
+                            }
+                            let source_pixels = [width, height];
+                            let media_plan = plan_raster(
+                                source,
+                                PixelSize { width, height },
+                                viewport,
+                                scale_factor,
+                                MediaLimits::default(),
+                            )
+                            .map_err(|error| error.to_string())?;
+                            (
+                                iced::widget::image::Handle::from_rgba(width, height, bytes),
+                                source_pixels,
+                                media_plan,
+                                source_pixels,
+                                None,
+                            )
+                        } else {
+                            let sha = hash_file(&path).ok();
+                            let (handle, _media_type, source_pixels, media_plan) =
+                                prepare_raster(&path, source, viewport, scale_factor)
+                                    .map_err(|failure| failure.message)?;
+                            let upload_pixels =
+                                [media_plan.target_px.width, media_plan.target_px.height];
+                            (handle, source_pixels, media_plan, upload_pixels, sha)
+                        };
                     Ok(PreparedFrame {
                         handle,
                         source_pixels,
@@ -5889,8 +6215,9 @@ impl App {
         let Some(surface) = self.decoded.get_mut(surface_id) else {
             return;
         };
-        let ContentSource::LiveImage { seen, .. } = &mut surface.source else {
-            return;
+        let seen = match &mut surface.source {
+            ContentSource::LiveImage { seen, .. } | ContentSource::LiveVideo { seen, .. } => seen,
+            _ => return,
         };
         if *seen != Some(stamp) {
             return;
@@ -5899,7 +6226,8 @@ impl App {
             Ok(frame) => {
                 let cached_frame = frame.clone();
                 let source_id = match &surface.source {
-                    ContentSource::LiveImage { source_id, .. } => Some(source_id.clone()),
+                    ContentSource::LiveImage { source_id, .. }
+                    | ContentSource::LiveVideo { source_id, .. } => Some(source_id.clone()),
                     _ => None,
                 };
                 surface.handle = frame.handle;
@@ -5951,6 +6279,7 @@ impl App {
         let viewport_y = f64::from(viewport.y - self.frame.y);
         let visual_theme = self.presented_visual_theme();
         let palette = visual_theme.palette;
+        let window_chrome = self.window_chrome();
         let background: iced::Background = if self.screensaver_settings.enabled {
             Color::TRANSPARENT.into()
         } else {
@@ -6039,7 +6368,7 @@ impl App {
                             if self.document.chrome.title == SurfaceTitleMode::Hidden {
                                 0.0
                             } else {
-                                SURFACE_CONTROL_BAR_HEIGHT
+                                f64::from(window_chrome.titlebar_height)
                             };
                         let content = self.surface_widget(
                             surface,
@@ -6055,10 +6384,15 @@ impl App {
                         let maximized = self.maximized_surfaces.contains(&placement.surface_id);
                         let chrome_hidden = self.document.chrome.title == SurfaceTitleMode::Hidden;
                         let edge = if focused && !chrome_hidden {
-                            color(palette.primary)
+                            if window_chrome.focus_edge == "left" {
+                                color(palette.danger)
+                            } else {
+                                color(palette.primary)
+                            }
                         } else {
                             border_color
                         };
+                        let chrome_style = window_chrome.clone();
                         let plane = container(column![
                             self.surface_controls(
                                 &surface.snapshot.title,
@@ -6082,8 +6416,19 @@ impl App {
                                     },
                                     ..edge
                                 },
-                                width: if focused && !chrome_hidden { 1.5 } else { 1.0 },
-                                radius: if chrome_hidden { 6.0 } else { 9.0 }.into(),
+                                width: if chrome_hidden {
+                                    1.0
+                                } else if focused {
+                                    chrome_style.border_width + 0.5
+                                } else {
+                                    chrome_style.border_width
+                                },
+                                radius: if chrome_hidden {
+                                    4.0
+                                } else {
+                                    chrome_style.border_radius
+                                }
+                                .into(),
                             },
                             shadow: iced::Shadow {
                                 color: Color::from_rgba8(
@@ -6091,29 +6436,25 @@ impl App {
                                     0,
                                     0,
                                     if chrome_hidden {
-                                        0.12
+                                        0.10
                                     } else if focused {
-                                        0.38
+                                        chrome_style.shadow_opacity
                                     } else {
-                                        0.24
+                                        chrome_style.shadow_opacity * 0.66
                                     },
                                 ),
                                 offset: iced::Vector::new(
                                     0.0,
                                     if chrome_hidden {
                                         2.0
-                                    } else if focused {
-                                        8.0
                                     } else {
-                                        5.0
+                                        chrome_style.shadow_offset
                                     },
                                 ),
                                 blur_radius: if chrome_hidden {
                                     8.0
-                                } else if focused {
-                                    24.0
                                 } else {
-                                    16.0
+                                    chrome_style.shadow_blur
                                 },
                             },
                             ..Default::default()
@@ -6200,8 +6541,9 @@ impl App {
                         }
                         let mut viewport = self.media_viewport();
                         if self.document.chrome.title != SurfaceTitleMode::Hidden {
-                            viewport.height =
-                                (viewport.height - SURFACE_CONTROL_BAR_HEIGHT).max(1.0);
+                            viewport.height = (viewport.height
+                                - f64::from(window_chrome.titlebar_height))
+                            .max(1.0);
                         }
                         let content =
                             self.surface_widget(surface, Length::Fill, Length::Fill, viewport);
@@ -6229,11 +6571,10 @@ impl App {
 
         let mut layers: Vec<Element<'_, Message>> = Vec::new();
         if self.screensaver_settings.enabled {
-            layers.push(screensaver::animated_view_in(
+            layers.push(screensaver::view_in(
                 self.screensaver_index,
                 self.screensaver_elapsed,
                 desk,
-                self.screensaver_clock.interval(),
             ));
         } else {
             match &self.document.background {
@@ -6248,11 +6589,10 @@ impl App {
                         );
                     }
                 }
-                Background::Shader { shader_id, .. } => layers.push(screensaver::animated_view_in(
+                Background::Shader { shader_id, .. } => layers.push(screensaver::view_in(
                     screensaver::index_for(*shader_id),
                     self.screensaver_elapsed,
                     desk,
-                    self.screensaver_clock.interval(),
                 )),
                 Background::Theme | Background::Solid { .. } | Background::Gradient { .. } => {}
                 // Nothing to layer: the ground above already fell back to the
@@ -6848,6 +7188,22 @@ fn display_shortcut(event: &iced::keyboard::Event) -> Option<usize> {
     }
 }
 
+fn snap_layout_requested(event: &iced::keyboard::Event) -> bool {
+    use iced::keyboard::{Event, Key};
+    matches!(
+        event,
+        Event::KeyPressed {
+            key: Key::Character(character),
+            modifiers,
+            repeat: false,
+            ..
+        } if character.eq_ignore_ascii_case("l")
+            && modifiers.control()
+            && modifiers.alt()
+            && !modifiers.logo()
+    )
+}
+
 fn shortcut_help_requested(event: &iced::keyboard::Event) -> bool {
     use iced::keyboard::Event;
     matches!(
@@ -7105,22 +7461,47 @@ fn merge_repos_body(catalog: &mut Catalog, body: &str) {
     }
 }
 
-fn interaction_engine(frame: Rect) -> InteractionEngine {
+fn theme_chrome_for(
+    packs: &[::canvas::theme_pack::ThemePack],
+    selections: &BTreeMap<String, String>,
+    project_id: &str,
+) -> ::canvas::theme_pack::ThemeChrome {
+    selections
+        .get(project_id)
+        .and_then(|id| packs.iter().find(|pack| &pack.id == id))
+        .map(|pack| pack.chrome.clone())
+        .unwrap_or_default()
+}
+
+fn interaction_engine(
+    frame: Rect,
+    chrome: SurfaceChrome,
+    titlebar_height: f32,
+) -> InteractionEngine {
+    let workspace = interaction_workspace_bounds(frame, chrome);
     InteractionEngine::new(InteractionConfig {
-        workspace_bounds: LogicalRect {
-            x: 0.0,
-            y: 0.0,
-            width: f64::from(frame.width.max(1)),
-            height: f64::from(frame.height.max(1)),
-        },
+        workspace_bounds: workspace,
         minimum_surface_size: LogicalPoint { x: 160.0, y: 120.0 },
         resize_handle_size: SURFACE_RESIZE_HANDLE_SIZE,
-        top_bar_height: SURFACE_CONTROL_BAR_HEIGHT,
+        top_bar_height: f64::from(titlebar_height),
         snap_distance: 12.0,
         snap_zone_trigger: 44.0,
         grid_size: Some(8.0),
     })
     .expect("Canvas interaction defaults must remain valid")
+}
+
+fn interaction_workspace_bounds(frame: Rect, chrome: SurfaceChrome) -> LogicalRect {
+    visible_surface_bounds(
+        NormalizedRect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
+        frame,
+        chrome,
+    )
 }
 
 fn resize_cursor(handle: ResizeHandle) -> mouse::Interaction {
@@ -8902,6 +9283,35 @@ fn canvas_window_settings(frame: Rect) -> iced::window::Settings {
     }
 }
 
+fn render_cadence(
+    screensaver_enabled: bool,
+    background_animated: bool,
+    picker_open: bool,
+    transient_animated: bool,
+    screensaver_interval: Duration,
+    background_interval: Duration,
+    idle_interval: Duration,
+) -> Duration {
+    if screensaver_enabled || picker_open {
+        screensaver_interval
+    } else if background_animated || transient_animated {
+        background_interval
+    } else {
+        idle_interval
+    }
+}
+
+fn background_redraw_interval() -> Duration {
+    Duration::from_secs_f64(
+        1.0 / f64::from(
+            canvas_core::appearance::current()
+                .motion
+                .background_max_fps
+                .max(1),
+        ),
+    )
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args_os().len() != 1 {
         return Err("canvas takes no commands; control it through its owner-local socket".into());
@@ -8957,34 +9367,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Background-only animation uses the configured background_max_fps, not
         // a hardcoded 60 Hz: shaders like Star Nest and Smoke Rings are
         // low-frequency motion where 20-24 fps is indistinguishable from 60.
-        let background_interval = Duration::from_secs_f64(
-            1.0 / f64::from(
-                canvas_core::appearance::current()
-                    .motion
-                    .background_max_fps
-                    .max(1),
-            ),
-        );
+        let background_interval = background_redraw_interval();
         // An open picker needs frames whatever the workspace background is doing.
-        let cadence = if app.screensaver_settings.enabled
-            || background_animated
-            || app.background_picker.is_some()
-        {
-            let screensaver = app.screensaver_clock.interval();
-            if animated {
-                screensaver.min(background_interval)
-            } else {
-                screensaver
-            }
-        } else if animated {
-            background_interval
-        } else {
-            Duration::from_millis(canvas_core::appearance::current().motion.idle_tick_ms as u64)
-        };
+        let cadence = render_cadence(
+            app.screensaver_settings.enabled,
+            background_animated,
+            app.background_picker.is_some(),
+            animated,
+            app.screensaver_clock.interval(),
+            background_interval,
+            Duration::from_millis(canvas_core::appearance::current().motion.idle_tick_ms as u64),
+        );
         // Live camera frames deserve sub-second pickup without becoming a
         // steady redraw: the reload itself only fires when bytes change.
-        let cadence = if app.has_live_images() {
-            cadence.min(Duration::from_millis(400))
+        let cadence = if app.has_live_frames() {
+            cadence.min(Duration::from_millis(40))
         } else {
             cadence
         };
@@ -9176,7 +9573,11 @@ mod tests {
             surface_gap: 0,
             ..SurfaceChrome::default()
         };
-        app.interaction = interaction_engine(INITIAL_FRAME);
+        app.interaction = interaction_engine(
+            INITIAL_FRAME,
+            app.document.chrome,
+            ::canvas::theme_pack::ThemeChrome::default().titlebar_height,
+        );
         app.hud_visible = true;
         app
     }
@@ -10693,16 +11094,123 @@ mod tests {
     }
 
     #[test]
+    fn restore_snapped_layout_is_idempotent_for_a_button() {
+        let mut app = test_app();
+        app.snapped_view = Some("bifrost/runtime".into());
+        let fit = app.view_fit();
+        app.document =
+            ::canvas::operational_views::materialize("bifrost/runtime", &app.document, fit)
+                .expect("built-in view materializes")
+                .document;
+        let saved = app.document.layout.clone();
+        let moved = match &saved {
+            Layout::Canvas { placements } => {
+                let mut placements = placements.clone();
+                placements[0].bounds.x = 0.123;
+                Layout::Canvas { placements }
+            }
+            _ => unreachable!("operational views materialize as a canvas"),
+        };
+        app.document.layout = moved.clone();
+
+        app.restore_snapped_layout();
+        assert_eq!(app.document.layout, saved);
+        assert_eq!(app.free_layout.as_ref(), Some(&moved));
+
+        app.restore_snapped_layout();
+        assert_eq!(
+            app.document.layout, saved,
+            "a second click must stay snapped"
+        );
+        assert_eq!(
+            app.free_layout.as_ref(),
+            Some(&moved),
+            "the reversible keyboard stash must remain intact"
+        );
+    }
+
+    #[test]
+    fn saved_operational_view_is_inferred_after_restart() {
+        let app = test_app();
+        let document = ::canvas::operational_views::materialize(
+            "bifrost/runtime",
+            &app.document,
+            app.view_fit(),
+        )
+        .expect("built-in view materializes")
+        .document;
+
+        assert_eq!(
+            inferred_snapped_view(&document).as_deref(),
+            Some("bifrost/runtime")
+        );
+
+        let mut mixed = document;
+        let Layout::Canvas { placements } = &mut mixed.layout else {
+            unreachable!("operational views materialize as a canvas")
+        };
+        placements[0].surface_id = "unrelated-surface".into();
+        assert_eq!(inferred_snapped_view(&mixed), None);
+    }
+
+    #[test]
     fn snapping_with_no_active_view_reports_rather_than_panicking() {
         let mut app = test_app();
         let before = app.document.layout.clone();
         app.toggle_snapped_layout();
         assert_eq!(app.document.layout, before, "layout must not change");
         assert!(
-            app.status.contains("No saved view"),
+            app.status.contains("No saved workspace"),
             "status was {:?}",
             app.status
         );
+    }
+
+    #[test]
+    fn project_dashboard_snaps_to_its_persisted_workspace_layout() {
+        let mut app = test_app();
+        app.document.surfaces = vec![Surface {
+            id: "dashboard".into(),
+            title: "Dashboard".into(),
+            content: SurfaceContent::Stream {
+                url: "https://example.com".into(),
+            },
+            inputs: Vec::new(),
+        }];
+        let saved_layout = Layout::Canvas {
+            placements: vec![Placement {
+                surface_id: "dashboard".into(),
+                bounds: NormalizedRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1.0,
+                    height: 1.0,
+                },
+                layer: 0,
+            }],
+        };
+        app.document.layout = saved_layout.clone();
+        app.workspaces.upsert(app.document.clone());
+        let moved = Layout::Canvas {
+            placements: vec![Placement {
+                surface_id: "dashboard".into(),
+                bounds: NormalizedRect {
+                    x: 0.2,
+                    y: 0.2,
+                    width: 0.6,
+                    height: 0.6,
+                },
+                layer: 0,
+            }],
+        };
+        app.document.layout = moved.clone();
+
+        app.toggle_snapped_layout();
+        assert_eq!(app.document.layout, saved_layout);
+        assert_eq!(app.free_layout.as_ref(), Some(&moved));
+
+        app.toggle_snapped_layout();
+        assert_eq!(app.document.layout, moved);
     }
 
     #[test]
@@ -10824,6 +11332,28 @@ mod tests {
         assert_eq!(display_shortcut(&pressed("2")), Some(2));
         assert_eq!(display_shortcut(&pressed("3")), Some(3));
         assert_eq!(display_shortcut(&pressed("4")), None);
+    }
+
+    #[test]
+    fn control_alt_l_is_an_in_app_snap_shortcut() {
+        use iced::keyboard::{Event, Key, Location, Modifiers, key};
+        let pressed = |modifiers| Event::KeyPressed {
+            key: Key::Character("l".into()),
+            modified_key: Key::Character("l".into()),
+            physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+            location: Location::Standard,
+            modifiers,
+            text: Some("l".into()),
+            repeat: false,
+        };
+
+        assert!(snap_layout_requested(&pressed(
+            Modifiers::CTRL | Modifiers::ALT
+        )));
+        assert!(!snap_layout_requested(&pressed(Modifiers::CTRL)));
+        assert!(!snap_layout_requested(&pressed(
+            Modifiers::CTRL | Modifiers::ALT | Modifiers::LOGO
+        )));
     }
 
     #[test]
@@ -11171,7 +11701,11 @@ mod tests {
         app.frame.x = 3_840;
         let window = iced::window::Id::unique();
         app.windows.insert(window, app.frame);
-        app.interaction = interaction_engine(app.frame);
+        app.interaction = interaction_engine(
+            app.frame,
+            app.document.chrome,
+            ::canvas::theme_pack::ThemeChrome::default().titlebar_height,
+        );
         app.document.layout = Layout::Canvas {
             placements: vec![
                 Placement {
@@ -11222,7 +11756,11 @@ mod tests {
             width: 3_840,
             height: 1_200,
         };
-        app.interaction = interaction_engine(app.frame);
+        app.interaction = interaction_engine(
+            app.frame,
+            app.document.chrome,
+            ::canvas::theme_pack::ThemeChrome::default().titlebar_height,
+        );
         let right = iced::window::Id::unique();
         app.windows.insert(
             right,
@@ -11488,6 +12026,36 @@ mod tests {
     }
 
     #[test]
+    fn interactive_snapping_uses_the_authored_layout_viewport() {
+        let frame = Rect {
+            x: 0,
+            y: 0,
+            width: 1_000,
+            height: 800,
+        };
+        let chrome = SurfaceChrome {
+            title: SurfaceTitleMode::Focused,
+            canvas_padding: 12,
+            surface_gap: 8,
+        };
+        let authored = visible_surface_bounds(
+            NormalizedRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            frame,
+            chrome,
+        );
+        assert_eq!(interaction_workspace_bounds(frame, chrome), authored);
+        assert_eq!(authored.x, 16.0);
+        assert_eq!(authored.y, 16.0);
+        assert_eq!(authored.width, 968.0);
+        assert_eq!(authored.height, 768.0);
+    }
+
+    #[test]
     fn alfalfa_rosters_fold_into_the_catalog_with_case_preserving_ids() {
         let mut catalog = Catalog::parse(
             r#"{"schema_version":1,"projects":[{"id":"dock","name":"Dock",
@@ -11642,6 +12210,57 @@ mod tests {
         if let Some(parent) = app.workspace_store_path.parent() {
             let _ = std::fs::remove_dir_all(parent);
         }
+    }
+
+    #[cfg(feature = "lua-scenes")]
+    #[test]
+    fn workspace_switch_hydrates_from_retained_owner_snapshots() {
+        let mut app = test_app();
+        app.workspaces
+            .sync(
+                vec![::canvas::control::ProjectWorkspaceSpec {
+                    project_id: "fab".into(),
+                    name: "Fab".into(),
+                    status: "active".into(),
+                    theme: canvas_core::ThemeSelection::Coherence {
+                        mode: canvas_core::ThemeMode::Dark,
+                        accent: canvas_core::Accent::Info,
+                    },
+                }],
+                &app.catalog,
+            )
+            .unwrap();
+        app.catalog = app.workspaces.effective_catalog(&app.catalog).unwrap();
+        app.stream_inbox
+            .push(::canvas::stream_binding::StreamEnvelope {
+                schema_version: ::canvas::stream_binding::STREAM_SCHEMA_VERSION,
+                owner: canvas_fab::OWNER.into(),
+                stream: canvas_fab::METRICS_STREAM.into(),
+                contract: "canvas.widget.snapshot.v1".into(),
+                sequence: 42,
+                emitted_at_ms: ::canvas::stream_binding::now_ms(),
+                project_id: Some("fab".into()),
+                payload: serde_json::json!({
+                    "totals":{"projects":3,"recentRuns":420,"activeWebsites":0,"failingWebsites":0},
+                    "worker":{"concurrency":4,"cpusPerRun":2}
+                }),
+            });
+
+        let switched = execute(
+            &mut app,
+            "switch-fab-from-cache",
+            Command::WorkspaceSwitch { name: "fab".into() },
+        );
+
+        assert!(matches!(switched.outcome, Outcome::Ok { .. }));
+        let ContentSource::Widget { spec } = &app.decoded["fab-metrics"].source else {
+            panic!("Fab metrics widget")
+        };
+        assert_eq!(spec.data.state, canvas_widgets::WidgetDataState::Ready);
+        let canvas_widgets::WidgetKind::StatusList { nodes, .. } = &spec.kind else {
+            panic!("Fab metrics status list")
+        };
+        assert_eq!(nodes[0].detail.as_deref(), Some("3"));
     }
 
     fn live_plan() -> MediaPlan {
@@ -11810,7 +12429,7 @@ mod tests {
         .unwrap();
         app.document.surfaces.push(Surface {
             id: "widget-meter".into(),
-            title: "Widget: demo-meter".into(),
+            title: "demo-meter".into(),
             content: SurfaceContent::Widget { spec: spec.clone() },
             inputs: Vec::new(),
         });
@@ -11976,6 +12595,36 @@ mod tests {
         assert!(!settings.decorations);
         assert!(!settings.exit_on_close_request);
         assert!(settings.visible);
+    }
+
+    #[test]
+    fn animated_background_honors_its_frame_cap() {
+        let cadence = render_cadence(
+            false,
+            true,
+            false,
+            false,
+            Duration::from_millis(33),
+            Duration::from_millis(100),
+            Duration::from_millis(1_000),
+        );
+
+        assert_eq!(cadence, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn screensaver_keeps_its_own_frame_cadence() {
+        let cadence = render_cadence(
+            true,
+            true,
+            false,
+            false,
+            Duration::from_millis(33),
+            Duration::from_millis(100),
+            Duration::from_millis(1_000),
+        );
+
+        assert_eq!(cadence, Duration::from_millis(33));
     }
 
     #[cfg(target_os = "macos")]

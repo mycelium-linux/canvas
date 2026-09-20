@@ -1,0 +1,29 @@
+[package]
+name = "canvas-media-edge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Headless Unibus media-plane adapter for native Canvas camera surfaces"
+
+[dependencies]
+anyhow.workspace = true
+canvas = { workspace = true }
+canvas-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+unibus-media = { path = "../../../unibus/crates/unibus-media" }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lib]
+name = "canvas_media_edge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "canvas-media-edge"
+path = "src/main.rs"
+
+[[bin]]
+name = "canvas-media-announce"
+path = "src/bin/announce.rs"

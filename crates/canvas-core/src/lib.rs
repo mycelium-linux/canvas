@@ -93,6 +93,31 @@ pub fn frame_file(root: &Path, source_id: &str) -> Option<PathBuf> {
     is_safe_frame_id(source_id).then(|| root.join("frames").join(format!("{source_id}.jpg")))
 }
 
+/// Volatile native-video frame exchange. Unlike `live_image`, these RGBA
+/// frames update many times per second and must never churn the SD-backed
+/// configuration directory. The producer atomically replaces one fixed-size
+/// frame in the per-user runtime directory; Canvas uploads it into its own
+/// wgpu surface.
+#[cfg(unix)]
+pub fn video_frame_file(source_id: &str) -> Option<PathBuf> {
+    if !is_safe_frame_id(source_id) {
+        return None;
+    }
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")?;
+    Some(
+        PathBuf::from(runtime)
+            .join("dock/canvas/video-frames")
+            .join(format!("{source_id}.rgba")),
+    )
+}
+
+/// Where a media edge publishes the current canonical
+/// `camera.detections.v1` snapshot for a named camera. The document is a
+/// complete latest-value replacement and carries its own expiry timestamp.
+pub fn detection_file(root: &Path, source_id: &str) -> Option<PathBuf> {
+    is_safe_frame_id(source_id).then(|| root.join("detections").join(format!("{source_id}.json")))
+}
+
 /// Land bytes at `path` by sibling-write + rename: a reader either sees the
 /// previous complete file or the new one, never a truncated hybrid. A live
 /// frame read mid-write would decode as garbage and the host would reject
@@ -115,9 +140,9 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// fail loud rather than silently sending to the wrong file.
 #[cfg(unix)]
 pub fn stream_socket_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
     #[cfg(target_os = "macos")]
     {
+        let home = std::env::var_os("HOME").map(PathBuf::from)?;
         Some(home.join("Library/Application Support/Dock/canvas/stream.sock"))
     }
     #[cfg(not(target_os = "macos"))]
@@ -359,6 +384,9 @@ pub struct VisualTheme {
     pub surface_accent: [u8; 3],
     pub surface_accent_strong: [u8; 3],
     pub focus: [u8; 3],
+    /// Optional categorical identity palette for charts. Semantic status
+    /// colours remain separate; renderers derive a safe ramp when absent.
+    pub categorical: Option<[[u8; 3]; 6]>,
     pub metrics: ThemeMetrics,
     pub panel_opacity: f32,
     pub muted_opacity: f32,
@@ -419,6 +447,7 @@ impl ThemeSelection {
             surface_accent,
             surface_accent_strong,
             focus,
+            categorical: None,
             metrics: self.metrics(),
             panel_opacity: 0.92,
             muted_opacity: 0.68,

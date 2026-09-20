@@ -147,6 +147,12 @@ pub enum Command {
         surface_id: String,
         url: String,
     },
+    OpenLiveVideo {
+        surface_id: String,
+        source_id: String,
+        width: u32,
+        height: u32,
+    },
     OpenWidget {
         surface_id: String,
         spec_path: PathBuf,
@@ -1062,6 +1068,23 @@ impl ControlRequest {
             Command::OpenOperationalView { view_id } => {
                 crate::operational_views::load(view_id).map_err(|error| error.to_string())?;
             }
+            Command::OpenLiveVideo {
+                surface_id,
+                source_id,
+                width,
+                height,
+            } => {
+                if !identifier(surface_id) || !canvas_core::is_safe_frame_id(source_id) {
+                    return Err("invalid live video surface or source id".into());
+                }
+                if !(16..=4096).contains(width) || !(16..=4096).contains(height) {
+                    return Err("live video dimensions must be 16..=4096".into());
+                }
+                let bytes = u64::from(*width) * u64::from(*height) * 4;
+                if bytes > 64 * 1024 * 1024 {
+                    return Err("live video frame exceeds 64 MiB".into());
+                }
+            }
             Command::ApplyDocument { .. }
             | Command::ApplyPatch { .. }
             | Command::Inspect
@@ -1372,6 +1395,19 @@ pub mod text {
                 Ok(Command::OpenStream {
                     surface_id: tokens[2].clone(),
                     url: tokens[1].clone(),
+                })
+            }
+            "open_live_video" | "live_video" => {
+                req(
+                    tokens,
+                    5,
+                    "live_video <source_id> <width> <height> <surface_id>",
+                )?;
+                Ok(Command::OpenLiveVideo {
+                    source_id: tokens[1].clone(),
+                    width: tokens[2].parse().map_err(|_| "width must be an integer")?,
+                    height: tokens[3].parse().map_err(|_| "height must be an integer")?,
+                    surface_id: tokens[4].clone(),
                 })
             }
             "open_widget" | "widget" => {

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/canvas-feeds", "crates/canvas-alfalfa", "crates/canvas-frigate", "crates/canvas-metrics", "crates/canvas-sse", "crates/canvas", "crates/canvas-core", "crates/canvas-linux", "crates/canvas-mac", "crates/canvas-control", "crates/canvas-widgets", "crates/canvas-survey", "crates/canvas-agents"]
+members = ["crates/canvas-feeds", "crates/canvas-alfalfa", "crates/canvas-bifrost", "crates/canvas-fab", "crates/canvas-shroud", "crates/canvas-frigate", "crates/canvas-media-edge", "crates/canvas-metrics", "crates/canvas-sse", "crates/canvas", "crates/canvas-core", "crates/canvas-linux", "crates/canvas-mac", "crates/canvas-control", "crates/canvas-widgets", "crates/canvas-survey", "crates/canvas-agents"]
 default-members = ["crates/canvas-core", "crates/canvas-linux", "crates/canvas-mac"]
 exclude = ["vendor/coherence-tokens"]
 resolver = "2"
