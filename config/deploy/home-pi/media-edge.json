@@ -1,0 +1,16 @@
+{
+  "bus": {
+    "installation_id": "home",
+    "producer_id": "home-pi-media",
+    "hub_endpoint": "127.0.0.1:18790",
+    "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+    "zones": ["living-room"],
+    "capabilities": ["canvas.media"],
+    "screen_anchors": ["screen-tv"],
+    "schema_version": 1
+  },
+  "gst_launch": "/usr/bin/gst-launch-1.0",
+  "max_height": 480,
+  "max_fps": 10.0,
+  "hardware_decoder": "v4l2m2m"
+}

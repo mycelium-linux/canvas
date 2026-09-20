@@ -1,0 +1,15 @@
+{
+  "installation_id": "home",
+  "listen": "127.0.0.1:18790",
+  "state_dir": "/home/ajm/.local/state/unibus-router",
+  "routes": [
+    {"kind":"audio_level","target":{"mode":"any_holder","name":"canvas.audio_level"}},
+    {"kind":"camera.stream.v1","target":{"mode":"any_holder","name":"canvas.media"}}
+  ],
+  "nodes": [
+    {"producer_id":"home-pi-audio","token_file":"/home/ajm/.config/unibus/tokens/home-pi-audio.token","zones":["living-room"],"capabilities":["audio_output","audio_input"]},
+    {"producer_id":"home-pi-display","token_file":"/home/ajm/.config/canvas/home-pi-display.token","zones":["living-room"],"capabilities":["display","canvas.audio_level"],"screen_anchors":["screen-tv"]},
+    {"producer_id":"home-pi-media","token_file":"/home/ajm/.config/canvas/home-pi-display.token","zones":["living-room"],"capabilities":["canvas.media"],"screen_anchors":["screen-tv"]},
+    {"producer_id":"home-pi-media-announce","token_file":"/home/ajm/.config/canvas/home-pi-display.token","zones":["living-room"],"capabilities":["camera.stream.source"]}
+  ]
+}

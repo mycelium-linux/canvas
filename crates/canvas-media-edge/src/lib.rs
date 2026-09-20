@@ -50,50 +50,64 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
         stream.codec == VideoCodec::H264,
         "raw edge currently requires H.264"
     );
-    ensure!(
-        stream.transport == VideoTransport::UdpMpegTs,
-        "raw edge currently requires UDP MPEG-TS"
-    );
-
-    let endpoint = stream
-        .endpoint
-        .strip_prefix("udp://")
-        .context("invalid UDP endpoint")?;
-    let (_host, port) = endpoint
-        .rsplit_once(':')
-        .context("UDP endpoint must include a port")?;
-    let port: u16 = port.parse().context("invalid UDP port")?;
     let height = stream.height.min(policy.max_height).max(16) & !1;
     let width = ((u64::from(stream.width) * u64::from(height) / u64::from(stream.height)) as u32)
         .max(16)
         & !1;
     let fps = (f64::from(stream.frame_rate_millihz) / 1_000.0).min(policy.max_fps);
     let fps_numerator = (fps * 1_000.0).round() as u32;
+    let mut argv = vec!["-q".into()];
+    match stream.transport {
+        VideoTransport::UdpMpegTs => {
+            let endpoint = stream
+                .endpoint
+                .strip_prefix("udp://")
+                .context("invalid UDP endpoint")?;
+            let (_host, port) = endpoint
+                .rsplit_once(':')
+                .context("UDP endpoint must include a port")?;
+            let port: u16 = port.parse().context("invalid UDP port")?;
+            argv.extend([
+                "udpsrc".into(),
+                format!("port={port}"),
+                "caps=video/mpegts,systemstream=(boolean)true,packetsize=(int)188".into(),
+                "!".into(),
+                "tsdemux".into(),
+                "!".into(),
+                "h264parse".into(),
+            ]);
+        }
+        VideoTransport::Rtsp => argv.extend([
+            "rtspsrc".into(),
+            format!("location={}", stream.endpoint),
+            "protocols=tcp".into(),
+            "latency=120".into(),
+            "drop-on-latency=true".into(),
+            "!".into(),
+            "rtph264depay".into(),
+            "!".into(),
+            "h264parse".into(),
+        ]),
+        VideoTransport::Srt => bail!("raw edge does not yet support SRT"),
+    }
+    argv.extend([
+        "!".into(),
+        "v4l2h264dec".into(),
+        "!".into(),
+        "v4l2convert".into(),
+        "!".into(),
+        format!(
+            "video/x-raw,format=RGBA,width={width},height={height},framerate={fps_numerator}/1000"
+        ),
+        "!".into(),
+        "fdsink".into(),
+        "fd=1".into(),
+        "sync=false".into(),
+    ]);
     Ok(RawVideoPlan {
         width,
         height,
-        argv: vec![
-            "-q".into(),
-            "udpsrc".into(),
-            format!("port={port}"),
-            "caps=video/mpegts,systemstream=(boolean)true,packetsize=(int)188".into(),
-            "!".into(),
-            "tsdemux".into(),
-            "!".into(),
-            "h264parse".into(),
-            "!".into(),
-            "v4l2h264dec".into(),
-            "!".into(),
-            "v4l2convert".into(),
-            "!".into(),
-            format!(
-                "video/x-raw,format=RGBA,width={width},height={height},framerate={fps_numerator}/1000"
-            ),
-            "!".into(),
-            "fdsink".into(),
-            "fd=1".into(),
-            "sync=false".into(),
-        ],
+        argv,
     })
 }
 
@@ -410,6 +424,22 @@ mod tests {
         assert!(plan.argv.iter().any(|arg| arg == "v4l2convert"));
         assert!(!plan.argv.iter().any(|arg| arg.contains("avdec")));
         assert!(!plan.argv.iter().any(|arg| arg == "sh" || arg == "-c"));
+
+        let rtsp = gstreamer_raw_plan(
+            &stream(VideoTransport::Rtsp, "rtsp://nvr/birdseye"),
+            DecodePolicy {
+                max_height: 480,
+                max_fps: 10.0,
+                decoder: HardwareDecoder::V4l2M2m,
+            },
+        )
+        .unwrap();
+        assert!(rtsp.argv.iter().any(|arg| arg == "rtph264depay"));
+        assert!(
+            rtsp.argv
+                .iter()
+                .any(|arg| arg == "location=rtsp://nvr/birdseye")
+        );
     }
 
     #[test]

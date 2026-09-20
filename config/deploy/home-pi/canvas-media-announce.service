@@ -1,0 +1,16 @@
+[Unit]
+Description=Publish the Birdseye media endpoint over Unibus
+After=network-online.target unibus-router.service canvas-media-edge.service
+Wants=network-online.target
+Requires=unibus-router.service canvas-media-edge.service
+
+[Service]
+Type=simple
+User=ajm
+Environment=HOME=/home/ajm
+ExecStart=/usr/local/bin/canvas-media-announce /home/ajm/.config/canvas/media-birdseye.json
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
