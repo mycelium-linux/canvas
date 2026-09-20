@@ -62,6 +62,7 @@ use std::sync::{
     mpsc::{self, Receiver, SyncSender, TryRecvError},
 };
 use std::time::{Duration, Instant};
+use unibus_media::{CameraDetections, Detection};
 
 mod fpl_mark;
 mod indicator;
@@ -275,6 +276,13 @@ struct PreparedFrame {
 }
 
 type LiveFrameResult = Result<PreparedFrame, String>;
+
+fn canvas_media_edge_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
 
 struct PresencePreviewVisual {
     value: PresencePreview,
@@ -503,6 +511,8 @@ struct App {
     /// Prepared live frames survive workspace switches. The disk JPEG is the
     /// producer cache; this is the decode/upload cache keyed by source id.
     live_frame_cache: BTreeMap<String, ((std::time::SystemTime, u64), PreparedFrame)>,
+    camera_detections: BTreeMap<String, CameraDetections>,
+    camera_detection_stamps: BTreeMap<String, (std::time::SystemTime, u64)>,
     /// This screen's position in the retained stream log. Held rather than
     /// implied by consumption, so a gap can be named instead of looking like a
     /// quiet producer.
@@ -864,6 +874,8 @@ impl App {
             stream_last_applied: BTreeMap::new(),
             live_pending: BTreeMap::new(),
             live_frame_cache: BTreeMap::new(),
+            camera_detections: BTreeMap::new(),
+            camera_detection_stamps: BTreeMap::new(),
             #[cfg(feature = "lua-scenes")]
             stream_position: 0,
             windows: BTreeMap::new(),
@@ -1292,6 +1304,7 @@ impl App {
                     self.bump();
                 }
                 self.refresh_terminal();
+                self.refresh_camera_detections();
                 #[cfg(feature = "lua-scenes")]
                 {
                     self.drain_stream_events();
@@ -5769,12 +5782,28 @@ impl App {
                     image = image.crop(view_crop_pixels(view.viewport, surface.source_pixels));
                 }
                 let picture: Element<'_, Message> = image.into();
+                let mut layers = vec![picture];
+                if let ContentSource::LiveVideo { source_id, .. } = &surface.source
+                    && let Some(detections) = self.camera_detections.get(source_id)
+                    && !detections.detections.is_empty()
+                {
+                    let palette = self.presented_palette();
+                    layers.push(
+                        Canvas::new(DetectionOverlayProgram {
+                            detections: detections.detections.clone(),
+                            source_pixels: surface.source_pixels,
+                            color: color(palette.primary),
+                        })
+                        .width(width)
+                        .height(height)
+                        .into(),
+                    );
+                }
                 if let Some(view) = view
                     && let Some(attention) = &view.attention
                 {
                     let palette = self.presented_palette();
-                    stack![
-                        picture,
+                    layers.push(
                         Canvas::new(AttentionProgram {
                             viewport: view.viewport,
                             attention: attention.region,
@@ -5784,11 +5813,10 @@ impl App {
                         })
                         .width(width)
                         .height(height)
-                    ]
-                    .into()
-                } else {
-                    picture
+                        .into(),
+                    );
                 }
+                stack(layers).into()
             }
         }
     }
@@ -6081,6 +6109,61 @@ impl App {
                 ContentSource::LiveImage { .. } | ContentSource::LiveVideo { .. }
             )
         })
+    }
+
+    fn refresh_camera_detections(&mut self) {
+        let Some(root) = ::canvas::runtime_config::root() else {
+            return;
+        };
+        let sources = self
+            .decoded
+            .values()
+            .filter_map(|surface| match &surface.source {
+                ContentSource::LiveVideo { source_id, .. } => Some(source_id.clone()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let now = canvas_media_edge_time_ms();
+        for source_id in sources {
+            let Some(path) = canvas_core::detection_file(&root, &source_id) else {
+                continue;
+            };
+            let Ok(metadata) = std::fs::metadata(&path) else {
+                self.camera_detections.remove(&source_id);
+                self.camera_detection_stamps.remove(&source_id);
+                continue;
+            };
+            let stamp = (
+                metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+                metadata.len(),
+            );
+            if self.camera_detection_stamps.get(&source_id) == Some(&stamp) {
+                if self
+                    .camera_detections
+                    .get(&source_id)
+                    .is_some_and(|value| value.valid_until_unix_ms <= now)
+                {
+                    self.camera_detections.remove(&source_id);
+                    self.bump();
+                }
+                continue;
+            }
+            self.camera_detection_stamps
+                .insert(source_id.clone(), stamp);
+            let parsed = std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<CameraDetections>(&bytes).ok())
+                .filter(|value| value.camera_id == source_id && value.valid_until_unix_ms > now);
+            match parsed {
+                Some(value) => {
+                    self.camera_detections.insert(source_id, value);
+                    self.bump();
+                }
+                None => {
+                    self.camera_detections.remove(&source_id);
+                }
+            }
+        }
     }
 
     /// Notice changed `frames/<source_id>.jpg` files and dispatch their decode
@@ -7588,6 +7671,73 @@ fn attention_geometry(
         width: ((right - left) / viewport.width) * drawn_width,
         height: ((bottom - top) / viewport.height) * drawn_height,
     })
+}
+
+struct DetectionOverlayProgram {
+    detections: Vec<Detection>,
+    source_pixels: [u32; 2],
+    color: Color,
+}
+
+impl<Message> canvas::Program<Message> for DetectionOverlayProgram {
+    type State = canvas_widgets::live::CacheState;
+
+    fn draw(
+        &self,
+        state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut key = canvas_widgets::live::Key::new()
+            .add_u64(self.source_pixels[0] as u64)
+            .add_u64(self.source_pixels[1] as u64)
+            .add_color(self.color);
+        for detection in &self.detections {
+            key = key
+                .add_str(&detection.tracking_id)
+                .add_str(&detection.label)
+                .add_f32(detection.confidence)
+                .add_f32(detection.bounds.x)
+                .add_f32(detection.bounds.y)
+                .add_f32(detection.bounds.width)
+                .add_f32(detection.bounds.height);
+        }
+        let key = key.build();
+        state.draw_cached(renderer, bounds.size(), key, |frame| {
+            let source_width = self.source_pixels[0].max(1) as f32;
+            let source_height = self.source_pixels[1].max(1) as f32;
+            let scale = (bounds.width / source_width).min(bounds.height / source_height);
+            let drawn_width = source_width * scale;
+            let drawn_height = source_height * scale;
+            let offset_x = (bounds.width - drawn_width) * 0.5;
+            let offset_y = (bounds.height - drawn_height) * 0.5;
+            for detection in &self.detections {
+                let region = Rectangle {
+                    x: offset_x + detection.bounds.x * drawn_width,
+                    y: offset_y + detection.bounds.y * drawn_height,
+                    width: detection.bounds.width * drawn_width,
+                    height: detection.bounds.height * drawn_height,
+                };
+                let path = canvas::Path::rectangle(region.position(), region.size());
+                frame.stroke(
+                    &path,
+                    canvas::Stroke::default()
+                        .with_width(2.0)
+                        .with_color(self.color),
+                );
+                chart_text(
+                    frame,
+                    &format!("{} {:.0}%", detection.label, detection.confidence * 100.0),
+                    Point::new(region.x + 4.0, (region.y - 17.0).max(3.0)),
+                    12.0,
+                    self.color,
+                    iced::alignment::Horizontal::Left,
+                );
+            }
+        })
+    }
 }
 
 struct AttentionProgram {

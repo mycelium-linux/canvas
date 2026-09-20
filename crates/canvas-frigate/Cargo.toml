@@ -7,6 +7,12 @@ description = "Surface Frigate NVR camera streams as Canvas live_image frames (G
 
 [dependencies]
 canvas-core = { workspace = true }
+canvas = { workspace = true }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+unibus-media = { path = "../../../unibus/crates/unibus-media" }
 
 [lib]
 name = "canvas_frigate"
@@ -15,3 +21,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "canvas-frigate"
 path = "src/main.rs"
+
+[[bin]]
+name = "canvas-frigate-observer"
+path = "src/bin/observer.rs"
