@@ -1,0 +1,39 @@
+{
+  "schema_version": 2,
+  "id": "ops-spatial-tracks",
+  "kind": "spatial_tracks",
+  "title": "Studio occupancy",
+  "bounds": { "min_x": 0, "max_x": 8, "min_z": 0, "max_z": 5 },
+  "tracks": [
+    {
+      "id": 7,
+      "position": { "x": 5.9, "z": 3.4 },
+      "trail": [
+        { "x": 1.2, "z": 1.0 },
+        { "x": 2.6, "z": 1.4 },
+        { "x": 4.1, "z": 2.3 },
+        { "x": 5.9, "z": 3.4 }
+      ],
+      "confidence": 0.93,
+      "motion": 68
+    },
+    {
+      "id": 12,
+      "position": { "x": 2.1, "z": 4.0 },
+      "trail": [
+        { "x": 3.0, "z": 4.5 },
+        { "x": 2.5, "z": 4.2 },
+        { "x": 2.1, "z": 4.0 }
+      ],
+      "confidence": 0.81,
+      "motion": 24
+    }
+  ],
+  "data": {
+    "state": "ready",
+    "source": "demo/spatial-tracks",
+    "window": "latest",
+    "provenance": "fixture"
+  },
+  "chrome": "drag_only"
+}

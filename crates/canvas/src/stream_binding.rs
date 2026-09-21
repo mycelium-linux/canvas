@@ -443,6 +443,10 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/span-timeline-v1.lua"),
     ),
     (
+        "spatial-tracks-v1",
+        include_str!("../../../config/binders/spatial-tracks-v1.lua"),
+    ),
+    (
         "bifrost-requests-v1",
         include_str!("../../../config/binders/bifrost-requests-v1.lua"),
     ),
@@ -972,6 +976,49 @@ mod tests {
         assert_eq!(style, canvas_widgets::SpanTimelineStyle::Waterfall);
         assert_eq!(spans.len(), 2);
         assert_eq!(unit.as_deref(), Some("ms"));
+    }
+
+    #[test]
+    fn spatial_tracks_binder_keeps_tracking_out_of_the_renderer() {
+        let mut target = test_spec(WidgetKind::SpatialTracks {
+            title: "Waiting".into(),
+            tracks: Vec::new(),
+            bounds: canvas_widgets::SpatialBounds {
+                min_x: 0.0,
+                max_x: 1.0,
+                min_z: 0.0,
+                max_z: 1.0,
+            },
+        });
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "ruview".into(),
+            stream: "tracks".into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            project_id: Some("dock".into()),
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "title":"Studio occupancy",
+                "bounds":{"min_x":0,"max_x":8,"min_z":0,"max_z":5},
+                "tracks":[{
+                    "id":7,
+                    "position":{"x":5.9,"z":3.4},
+                    "trail":[{"x":4.1,"z":2.3},{"x":5.9,"z":3.4}],
+                    "confidence":0.93,
+                    "motion":68
+                }]
+            }),
+        };
+        apply_named_adapter("spatial-tracks-v1", &event, &mut target)
+            .expect("spatial snapshot renders");
+        let WidgetKind::SpatialTracks { tracks, bounds, .. } = target.kind else {
+            panic!("spatial binder changed widget family")
+        };
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id, 7);
+        assert_eq!(tracks[0].trail.len(), 2);
+        assert_eq!(bounds.max_x, 8.0);
     }
 
     #[test]

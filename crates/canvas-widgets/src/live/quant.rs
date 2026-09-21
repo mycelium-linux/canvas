@@ -7,6 +7,8 @@ use iced::mouse;
 use iced::widget::{Canvas, canvas, column, row, space, text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
+use super::{CacheState, Key};
+
 pub(super) fn element<'a, Message: 'a>(
     spec: &'a WidgetSpec,
     widget: &'a QuantWidget,
@@ -71,11 +73,11 @@ struct CandlestickProgram<'a> {
 }
 
 impl<Message> canvas::Program<Message> for CandlestickProgram<'_> {
-    type State = ();
+    type State = CacheState;
 
     fn draw(
         &self,
-        _state: &(),
+        state: &Self::State,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
@@ -84,117 +86,139 @@ impl<Message> canvas::Program<Message> for CandlestickProgram<'_> {
         if bounds.width < 80.0 || bounds.height < 80.0 {
             return Vec::new();
         }
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let layout = ChartLayout::for_bounds(bounds.size(), self.show_volume);
-        let low = self
-            .candles
-            .iter()
-            .map(|c| c.low)
-            .fold(f64::INFINITY, f64::min);
-        let high = self
-            .candles
-            .iter()
-            .map(|c| c.high)
-            .fold(f64::NEG_INFINITY, f64::max);
-        let span = (high - low).max(f64::EPSILON);
-        let y = |price: f64| layout.top + ((high - price) / span) as f32 * layout.price_height;
+        let key = self.candles.iter().fold(
+            Key::new()
+                .add_usize(self.candles.len())
+                .add_color(self.rising)
+                .add_color(self.falling)
+                .add_color(self.grid)
+                .add_color(self.label)
+                .add_color(self.volume)
+                .add_f32(self.label_size)
+                .add_u64(self.show_volume as u64),
+            |key, candle| {
+                key.add_u64(candle.time as u64)
+                    .add_f64(candle.open)
+                    .add_f64(candle.high)
+                    .add_f64(candle.low)
+                    .add_f64(candle.close)
+                    .add_f64(candle.volume)
+            },
+        );
+        state.draw_cached(renderer, bounds.size(), key.build(), |frame| {
+            let layout = ChartLayout::for_bounds(bounds.size(), self.show_volume);
+            let low = self
+                .candles
+                .iter()
+                .map(|c| c.low)
+                .fold(f64::INFINITY, f64::min);
+            let high = self
+                .candles
+                .iter()
+                .map(|c| c.high)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let span = (high - low).max(f64::EPSILON);
+            let y = |price: f64| layout.top + ((high - price) / span) as f32 * layout.price_height;
 
-        for index in 0..=4 {
-            let fraction = index as f32 / 4.0;
-            let line_y = layout.top + fraction * layout.price_height;
+            for index in 0..=4 {
+                let fraction = index as f32 / 4.0;
+                let line_y = layout.top + fraction * layout.price_height;
+                frame.stroke(
+                    &canvas::Path::line(
+                        Point::new(layout.left, line_y),
+                        Point::new(layout.left + layout.plot_width, line_y),
+                    ),
+                    canvas::Stroke::default()
+                        .with_width(1.0)
+                        .with_color(self.grid),
+                );
+                let price = high - span * f64::from(fraction);
+                frame.fill_text(canvas::Text {
+                    content: format!("{price:.2}"),
+                    position: Point::new(
+                        layout.left + layout.plot_width + layout.label_gap,
+                        line_y - 6.0,
+                    ),
+                    color: self.label,
+                    size: iced::Pixels(self.label_size),
+                    ..Default::default()
+                });
+            }
+
+            let slot = layout.plot_width / self.candles.len() as f32;
+            // Scale candle bodies with their allocation. A fixed maximum made a
+            // sparse series look lost when a widget snapped to a large tile.
+            let body_width = (slot * 0.62).clamp(1.0, 48.0).min(slot.max(1.0));
+            let max_volume = self
+                .candles
+                .iter()
+                .map(|c| c.volume)
+                .fold(0.0, f64::max)
+                .max(f64::EPSILON);
+            for (index, candle) in self.candles.iter().enumerate() {
+                let x = layout.left + slot * (index as f32 + 0.5);
+                let color = if candle.close >= candle.open {
+                    self.rising
+                } else {
+                    self.falling
+                };
+                frame.stroke(
+                    &canvas::Path::line(
+                        Point::new(x, y(candle.high)),
+                        Point::new(x, y(candle.low)),
+                    ),
+                    canvas::Stroke::default().with_width(1.0).with_color(color),
+                );
+                let open_y = y(candle.open);
+                let close_y = y(candle.close);
+                frame.fill(
+                    &canvas::Path::rectangle(
+                        Point::new(x - body_width / 2.0, open_y.min(close_y)),
+                        Size::new(body_width, (open_y - close_y).abs().max(1.5)),
+                    ),
+                    color,
+                );
+                if self.show_volume {
+                    let height =
+                        (candle.volume / max_volume) as f32 * (layout.volume_height - 6.0).max(1.0);
+                    frame.fill(
+                        &canvas::Path::rectangle(
+                            Point::new(x - body_width / 2.0, bounds.height - height),
+                            Size::new(body_width, height),
+                        ),
+                        alpha(color, self.volume.a),
+                    );
+                }
+            }
+
+            let last = self.candles.last().unwrap().close;
+            let last_y = y(last);
             frame.stroke(
                 &canvas::Path::line(
-                    Point::new(layout.left, line_y),
-                    Point::new(layout.left + layout.plot_width, line_y),
+                    Point::new(layout.left, last_y),
+                    Point::new(layout.left + layout.plot_width, last_y),
                 ),
-                canvas::Stroke::default()
-                    .with_width(1.0)
-                    .with_color(self.grid),
+                canvas::Stroke {
+                    style: canvas::Style::Solid(self.label),
+                    width: 1.0,
+                    line_dash: canvas::LineDash {
+                        segments: &[4.0, 4.0],
+                        offset: 0,
+                    },
+                    ..Default::default()
+                },
             );
-            let price = high - span * f64::from(fraction);
             frame.fill_text(canvas::Text {
-                content: format!("{price:.2}"),
+                content: format!("{last:.2}"),
                 position: Point::new(
                     layout.left + layout.plot_width + layout.label_gap,
-                    line_y - 6.0,
+                    last_y - 6.0,
                 ),
                 color: self.label,
                 size: iced::Pixels(self.label_size),
                 ..Default::default()
             });
-        }
-
-        let slot = layout.plot_width / self.candles.len() as f32;
-        // Scale candle bodies with their allocation. A fixed maximum made a
-        // sparse series look lost when a widget snapped to a large tile.
-        let body_width = (slot * 0.62).clamp(1.0, 48.0).min(slot.max(1.0));
-        let max_volume = self
-            .candles
-            .iter()
-            .map(|c| c.volume)
-            .fold(0.0, f64::max)
-            .max(f64::EPSILON);
-        for (index, candle) in self.candles.iter().enumerate() {
-            let x = layout.left + slot * (index as f32 + 0.5);
-            let color = if candle.close >= candle.open {
-                self.rising
-            } else {
-                self.falling
-            };
-            frame.stroke(
-                &canvas::Path::line(Point::new(x, y(candle.high)), Point::new(x, y(candle.low))),
-                canvas::Stroke::default().with_width(1.0).with_color(color),
-            );
-            let open_y = y(candle.open);
-            let close_y = y(candle.close);
-            frame.fill(
-                &canvas::Path::rectangle(
-                    Point::new(x - body_width / 2.0, open_y.min(close_y)),
-                    Size::new(body_width, (open_y - close_y).abs().max(1.5)),
-                ),
-                color,
-            );
-            if self.show_volume {
-                let height =
-                    (candle.volume / max_volume) as f32 * (layout.volume_height - 6.0).max(1.0);
-                frame.fill(
-                    &canvas::Path::rectangle(
-                        Point::new(x - body_width / 2.0, bounds.height - height),
-                        Size::new(body_width, height),
-                    ),
-                    alpha(color, self.volume.a),
-                );
-            }
-        }
-
-        let last = self.candles.last().unwrap().close;
-        let last_y = y(last);
-        frame.stroke(
-            &canvas::Path::line(
-                Point::new(layout.left, last_y),
-                Point::new(layout.left + layout.plot_width, last_y),
-            ),
-            canvas::Stroke {
-                style: canvas::Style::Solid(self.label),
-                width: 1.0,
-                line_dash: canvas::LineDash {
-                    segments: &[4.0, 4.0],
-                    offset: 0,
-                },
-                ..Default::default()
-            },
-        );
-        frame.fill_text(canvas::Text {
-            content: format!("{last:.2}"),
-            position: Point::new(
-                layout.left + layout.plot_width + layout.label_gap,
-                last_y - 6.0,
-            ),
-            color: self.label,
-            size: iced::Pixels(self.label_size),
-            ..Default::default()
-        });
-        vec![frame.into_geometry()]
+        })
     }
 }
 
