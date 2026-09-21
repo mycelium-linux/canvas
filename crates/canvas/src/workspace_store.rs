@@ -870,8 +870,8 @@ mod tests {
         store.sync(vec![definition("fab", "Fab")], &base).unwrap();
 
         let fab = store.get("fab").unwrap();
-        assert_eq!(fab.surfaces.len(), 4);
-        assert_eq!(fab.bindings.len(), 4);
+        assert_eq!(fab.surfaces.len(), 5);
+        assert_eq!(fab.bindings.len(), 5);
         assert!(
             fab.bindings
                 .iter()
@@ -887,6 +887,7 @@ mod tests {
                 canvas_fab::METRICS_STREAM,
                 canvas_fab::PROJECTS_STREAM,
                 canvas_fab::RUNS_STREAM,
+                canvas_fab::TRENDS_STREAM,
             ])
         );
     }
