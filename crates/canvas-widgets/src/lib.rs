@@ -7,7 +7,7 @@
 //! client of this crate.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 #[cfg(test)]
 use std::path::PathBuf;
 
@@ -191,6 +191,7 @@ pub const KNOWN_WIDGET_KINDS: &[&str] = &[
     "ranked_bar",
     "stacked_bar",
     "pie_chart",
+    "sankey",
     "state_timeline",
     "rate_bars",
     "table",
@@ -329,6 +330,15 @@ pub enum WidgetKind {
         unit: Option<String>,
         #[serde(default)]
         period: Option<String>,
+    },
+    /// Weighted directed flows. Node placement is inferred by the retained
+    /// renderer so Lua producers only describe identity and magnitude.
+    Sankey {
+        title: String,
+        nodes: Vec<FlowNode>,
+        links: Vec<FlowLink>,
+        #[serde(default)]
+        unit: Option<String>,
     },
     /// Bounded state intervals grouped into named lanes.
     StateTimeline {
@@ -948,6 +958,27 @@ pub struct StackedBarValue {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct FlowNode {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub state: Option<StatusLevel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct FlowLink {
+    pub from: String,
+    pub to: String,
+    pub value: f64,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct StateLane {
     pub label: String,
     pub segments: Vec<StateSegment>,
@@ -1457,6 +1488,45 @@ impl WidgetSpec {
                     )?;
                 }
             }
+            WidgetKind::Sankey {
+                title,
+                nodes,
+                links,
+                unit,
+            } => {
+                bounded_label(title, "sankey title")?;
+                optional_label(unit, "sankey unit")?;
+                check(
+                    !nodes.is_empty() && nodes.len() <= 64,
+                    "sankey requires 1-64 nodes",
+                )?;
+                check(
+                    !links.is_empty() && links.len() <= 128,
+                    "sankey requires 1-128 links",
+                )?;
+                let mut ids = HashSet::new();
+                for node in nodes {
+                    bounded_label(&node.id, "sankey node id")?;
+                    bounded_label(&node.label, "sankey node label")?;
+                    check(
+                        ids.insert(node.id.as_str()),
+                        "sankey node ids must be unique",
+                    )?;
+                }
+                let mut pairs = HashSet::new();
+                for link in links {
+                    optional_label(&link.label, "sankey link label")?;
+                    check(
+                        link.from != link.to
+                            && ids.contains(link.from.as_str())
+                            && ids.contains(link.to.as_str())
+                            && link.value.is_finite()
+                            && link.value > 0.0
+                            && pairs.insert((link.from.as_str(), link.to.as_str())),
+                        "sankey links require distinct known nodes, unique pairs, and positive finite values",
+                    )?;
+                }
+            }
             WidgetKind::StateTimeline { title, lanes } => {
                 bounded_label(title, "state timeline title")?;
                 check(
@@ -1908,6 +1978,7 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
             let row = metrics.small * 2.0;
             SizeHint::new(220.0, row * 3.0 + chrome, 360.0, row * 6.0 + chrome, 2.0)
         }
+        WidgetKind::Sankey { .. } => SizeHint::new(300.0, 180.0, 560.0, 300.0, 2.2),
         // A cell smaller than this is a colour with no shape; four rows is the
         // fewest that reads as a matrix rather than a bar chart.
         WidgetKind::Heatmap { .. } => {
@@ -2025,6 +2096,28 @@ mod tests {
                 }],
                 unit: None,
                 period: None,
+            },
+            WidgetKind::Sankey {
+                title: "t".into(),
+                nodes: vec![
+                    FlowNode {
+                        id: "a".into(),
+                        label: "A".into(),
+                        state: None,
+                    },
+                    FlowNode {
+                        id: "b".into(),
+                        label: "B".into(),
+                        state: None,
+                    },
+                ],
+                links: vec![FlowLink {
+                    from: "a".into(),
+                    to: "b".into(),
+                    value: 1.0,
+                    label: None,
+                }],
+                unit: None,
             },
             WidgetKind::Heatmap {
                 title: "t".into(),
@@ -2439,6 +2532,7 @@ mod tests {
             r#"{"id":"activity","kind":"heatmap","style":"activity","title":"Contributions","rows":["Mon","Tue"],"columns":["W1","W2"],"values":[[0,3],[1,8]],"unit":"events"}"#,
             r#"{"id":"rank","kind":"ranked_bar","title":"Tokens","bars":[{"label":"agent-a","value":42}]}"#,
             r#"{"id":"stack","kind":"stacked_bar","title":"Outcomes","series":["ok","error"],"bars":[{"label":"run","values":[9,1]}]}"#,
+            r#"{"id":"flow","kind":"sankey","title":"Requests","nodes":[{"id":"edge","label":"Edge"},{"id":"api","label":"API"}],"links":[{"from":"edge","to":"api","value":42}],"unit":"req/s"}"#,
             r#"{"id":"states","kind":"state_timeline","title":"Health","lanes":[{"label":"api","segments":[{"start":0,"end":10,"state":"good"}]}]}"#,
             r#"{"id":"burn","kind":"rate_bars","title":"Budget","objective":99.9,"windows":[{"label":"5m","burn_rate":0.7}]}"#,
         ] {
@@ -2453,6 +2547,7 @@ mod tests {
             r#"{"id":"heat","kind":"heatmap","title":"Latency","rows":["api"],"columns":["p50"],"values":[[1,2]]}"#,
             r#"{"id":"activity","kind":"heatmap","style":"activity","title":"Activity","rows":["1","2","3","4","5","6","7","8"],"columns":["W1"],"values":[[1],[1],[1],[1],[1],[1],[1],[1]]}"#,
             r#"{"id":"stack","kind":"stacked_bar","title":"Outcomes","series":["ok"],"bars":[{"label":"run","values":[1,2]}]}"#,
+            r#"{"id":"flow","kind":"sankey","title":"Bad","nodes":[{"id":"a","label":"A"}],"links":[{"from":"a","to":"missing","value":1}]}"#,
             r#"{"id":"states","kind":"state_timeline","title":"Health","lanes":[{"label":"api","segments":[{"start":4,"end":2,"state":"critical"}]}]}"#,
         ] {
             assert!(

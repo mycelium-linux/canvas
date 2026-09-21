@@ -764,6 +764,46 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
             .into(),
             visual,
         ),
+        WidgetKind::Sankey {
+            title,
+            nodes,
+            links,
+            unit,
+        } => panel(
+            spec,
+            column![
+                row![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    space::horizontal(),
+                    text(unit.clone().unwrap_or_default())
+                        .size(metrics.small)
+                        .color(color(palette.text_muted)),
+                ],
+                Canvas::new(SankeyProgram {
+                    nodes: nodes
+                        .iter()
+                        .map(|node| (
+                            node.id.clone(),
+                            node.label.clone(),
+                            node.state.map(|state| status_color(state, palette))
+                        ))
+                        .collect(),
+                    links: links
+                        .iter()
+                        .map(|link| (link.from.clone(), link.to.clone(), link.value as f32))
+                        .collect(),
+                    colors: series_colors(visual),
+                    label: color(palette.text_muted),
+                    surface: color(palette.surface_muted),
+                    label_size: metrics.micro,
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .spacing(metrics.space_2)
+            .into(),
+            visual,
+        ),
         WidgetKind::StateTimeline { title, lanes } => panel(
             spec,
             column![
@@ -2261,6 +2301,110 @@ impl<Message> canvas::Program<Message> for StackedBarProgram {
                     );
                     x += width;
                 }
+            }
+        })
+    }
+}
+
+struct SankeyProgram {
+    nodes: Vec<(String, String, Option<Color>)>,
+    links: Vec<(String, String, f32)>,
+    colors: Vec<Color>,
+    label: Color,
+    surface: Color,
+    label_size: f32,
+}
+
+impl<Message> canvas::Program<Message> for SankeyProgram {
+    type State = CacheState;
+
+    fn draw(
+        &self,
+        state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let key = self
+            .links
+            .iter()
+            .fold(
+                self.colors.iter().fold(
+                    Key::new()
+                        .add_usize(self.nodes.len())
+                        .add_color(self.label)
+                        .add_color(self.surface),
+                    |key, color| key.add_color(*color),
+                ),
+                |key, (from, to, value)| key.add_str(from).add_str(to).add_f32(*value),
+            )
+            .build();
+        state.draw_cached(renderer, bounds.size(), key, |frame| {
+            let count = self.nodes.len().max(1);
+            let max_link = self
+                .links
+                .iter()
+                .map(|link| link.2)
+                .fold(0.0, f32::max)
+                .max(f32::EPSILON);
+            let mut positions = std::collections::HashMap::new();
+            for (index, (id, _, _)) in self.nodes.iter().enumerate() {
+                let incoming = self.links.iter().any(|(_, to, _)| to == id);
+                let outgoing = self.links.iter().any(|(from, _, _)| from == id);
+                let x = match (incoming, outgoing) {
+                    (false, true) => bounds.width * 0.08,
+                    (true, false) => bounds.width * 0.92,
+                    _ => bounds.width * 0.5,
+                };
+                let y = bounds.height * (index as f32 + 0.5) / count as f32;
+                positions.insert(id.as_str(), Point::new(x, y));
+            }
+            for (index, (from, to, value)) in self.links.iter().enumerate() {
+                let (Some(start), Some(end)) =
+                    (positions.get(from.as_str()), positions.get(to.as_str()))
+                else {
+                    continue;
+                };
+                frame.stroke(
+                    &Path::line(*start, *end),
+                    canvas::Stroke::default()
+                        .with_width(2.0 + 14.0 * (*value / max_link).sqrt())
+                        .with_color(with_alpha(self.colors[index % self.colors.len()], 0.46)),
+                );
+            }
+            for (index, (id, label, semantic)) in self.nodes.iter().enumerate() {
+                let position = positions[id.as_str()];
+                let fill = semantic.unwrap_or(self.colors[index % self.colors.len()]);
+                frame.fill(
+                    &Path::rounded_rectangle(
+                        Point::new(position.x - 5.0, position.y - 15.0),
+                        Size::new(10.0, 30.0),
+                        3.0.into(),
+                    ),
+                    fill,
+                );
+                let right = position.x < bounds.width * 0.7;
+                frame.fill_text(canvas::Text {
+                    content: label.clone(),
+                    position: Point::new(
+                        if right {
+                            position.x + 10.0
+                        } else {
+                            position.x - 10.0
+                        },
+                        position.y + self.label_size * 0.35,
+                    ),
+                    color: self.label,
+                    size: iced::Pixels(self.label_size),
+                    align_x: if right {
+                        iced::alignment::Horizontal::Left
+                    } else {
+                        iced::alignment::Horizontal::Right
+                    }
+                    .into(),
+                    ..Default::default()
+                });
             }
         })
     }

@@ -224,6 +224,7 @@ fn appetite(kind: &WidgetKind) -> f32 {
         | WidgetKind::RankedBar { .. }
         | WidgetKind::StackedBar { .. }
         | WidgetKind::PieChart { .. }
+        | WidgetKind::Sankey { .. }
         | WidgetKind::StateTimeline { .. }
         | WidgetKind::RateBars { .. }
         | WidgetKind::Table { .. }
@@ -237,6 +238,7 @@ fn appetite(kind: &WidgetKind) -> f32 {
         | WidgetKind::Module { .. }
         | WidgetKind::Launcher { .. } => 1.0,
         WidgetKind::Stat { .. }
+        | WidgetKind::MediaCard { .. }
         | WidgetKind::Gauge { .. }
         | WidgetKind::Meter { .. }
         | WidgetKind::Clock { .. }
@@ -558,6 +560,7 @@ fn widget_title(spec: &canvas_widgets::WidgetSpec) -> String {
         | WidgetKind::Heatmap { title, .. }
         | WidgetKind::RankedBar { title, .. }
         | WidgetKind::StackedBar { title, .. }
+        | WidgetKind::Sankey { title, .. }
         | WidgetKind::StateTimeline { title, .. }
         | WidgetKind::RateBars { title, .. }
         | WidgetKind::Table { title, .. }

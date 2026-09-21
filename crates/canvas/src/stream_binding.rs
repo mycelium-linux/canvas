@@ -431,6 +431,10 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/activity-grid-v1.lua"),
     ),
     (
+        "sankey-v1",
+        include_str!("../../../config/binders/sankey-v1.lua"),
+    ),
+    (
         "bifrost-requests-v1",
         include_str!("../../../config/binders/bifrost-requests-v1.lua"),
     ),
