@@ -64,7 +64,6 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use unibus_media::{CameraDetections, Detection};
 
-mod fpl_mark;
 mod indicator;
 mod presence;
 mod retained_video;
@@ -444,6 +443,7 @@ fn undersized_note(undersized: &[String]) -> String {
 fn surface_title_visible(mode: SurfaceTitleMode, focused: bool) -> bool {
     match mode {
         SurfaceTitleMode::Hidden => false,
+        SurfaceTitleMode::Presentation => true,
         SurfaceTitleMode::Focused => focused,
         SurfaceTitleMode::Always => true,
     }
@@ -5985,25 +5985,31 @@ impl App {
                 .align_y(iced::alignment::Vertical::Center)
                 .into();
         }
-        let controls = row![
-            control(
-                palette.danger,
-                "×",
-                window_action_label(WindowAction::Close, maximized)
-            ),
-            control(
-                palette.warning,
-                "−",
-                window_action_label(WindowAction::Minimize, maximized)
-            ),
-            control(
-                palette.success,
-                if maximized { "◇" } else { "□" },
-                window_action_label(WindowAction::Maximize, maximized)
-            ),
-        ]
-        .spacing(0)
-        .align_y(iced::alignment::Vertical::Center);
+        let controls: Element<'_, Message> =
+            if self.document.chrome.title == SurfaceTitleMode::Presentation {
+                space::horizontal().width(Length::Fixed(0.0)).into()
+            } else {
+                row![
+                    control(
+                        palette.danger,
+                        "×",
+                        window_action_label(WindowAction::Close, maximized)
+                    ),
+                    control(
+                        palette.warning,
+                        "−",
+                        window_action_label(WindowAction::Minimize, maximized)
+                    ),
+                    control(
+                        palette.success,
+                        if maximized { "◇" } else { "□" },
+                        window_action_label(WindowAction::Maximize, maximized)
+                    ),
+                ]
+                .spacing(0)
+                .align_y(iced::alignment::Vertical::Center)
+                .into()
+            };
         let show_title = surface_title_visible(self.document.chrome.title, focused);
         let title = if chrome.uppercase_titles {
             title.to_uppercase()
@@ -6053,14 +6059,12 @@ impl App {
                     .into(),
                 ),
                 border: iced::Border {
-                    color: Color::from_rgba8(
-                        palette.border[0],
-                        palette.border[1],
-                        palette.border[2],
-                        if focused { 0.92 } else { 0.62 },
-                    ),
-                    width: chrome.border_width,
-                    radius: chrome.border_radius.into(),
+                    // The outer surface is the sole owner of window shape.
+                    // Giving the header its own rounded border makes it read
+                    // as a detached card floating above the content.
+                    color: Color::TRANSPARENT,
+                    width: 0.0,
+                    radius: 0.0.into(),
                 },
                 ..Default::default()
             })
@@ -6518,6 +6522,14 @@ impl App {
         let border_color = color(palette.border);
         let muted = color(palette.text_muted);
         let text_color = color(palette.text);
+        let shell_bar_height = self
+            .overlay_on_viewport(self.overlays.fpl_mark, viewport)
+            .then_some(40_u32)
+            .unwrap_or_default();
+        let content_frame = Rect {
+            height: self.frame.height.saturating_sub(shell_bar_height).max(1),
+            ..self.frame
+        };
 
         let content: Element<'_, Message> = match &self.document.layout {
             Layout::Canvas { placements } => {
@@ -6548,16 +6560,18 @@ impl App {
                                 placement.bounds
                             };
                             let animated = self.presented_bounds(&placement.surface_id, target);
-                            visible_surface_bounds(
+                            let mut bounds = visible_surface_bounds(
                                 NormalizedRect {
                                     x: animated[0],
                                     y: animated[1],
                                     width: animated[2],
                                     height: animated[3],
                                 },
-                                self.frame,
+                                content_frame,
                                 self.document.chrome,
-                            )
+                            );
+                            bounds.y += f64::from(shell_bar_height);
+                            bounds
                         };
                         let bounds = LogicalRect {
                             x: bounds.x - viewport_x,
@@ -6616,6 +6630,7 @@ impl App {
                         ])
                         .width(Length::Fixed(bounds.width as f32))
                         .height(Length::Fixed(bounds.height as f32))
+                        .clip(true)
                         .style(move |_| container::Style {
                             border: iced::Border {
                                 color: Color {
@@ -6639,8 +6654,12 @@ impl App {
                                 } else {
                                     chrome_style.border_width
                                 },
-                                radius: if chrome_hidden {
-                                    4.0
+                                // The shell owns one corner language. Hidden
+                                // title bars used to silently force 4px while
+                                // visible chrome followed the selected theme,
+                                // producing a visibly unrelated set of tiles.
+                                radius: if frameless {
+                                    0.0
                                 } else {
                                     chrome_style.border_radius
                                 }
@@ -6925,48 +6944,68 @@ impl App {
 
         if self.overlay_on_viewport(self.overlays.fpl_mark, viewport) {
             let workspace_name = workspace_identity_name(&self.catalog, &self.document.project_id);
-            let mark = fpl_mark::view(
-                color(palette.primary),
-                color(visual_theme.surface_raised),
-                color(palette.text),
-            );
+            let primary = color(palette.primary);
+            // A wall is an appliance, not a tiny Mac. Present stable shell
+            // identity and health instead of advertising a keyboard shortcut
+            // that does not exist on the target device.
             let project_label = workspace_name.to_uppercase();
+            let live_sources = self
+                .decoded
+                .values()
+                .filter(|surface| matches!(surface.source, ContentSource::LiveVideo { .. }))
+                .count();
+            let now = canvas_widgets::live::chrono_now();
+            let clock = format!("{:02}:{:02}:{:02}", now.hour, now.minute, now.second);
             let identity = row![
-                container(mark).padding([0, 2]),
-                column![
-                    text("WORKSPACE").size(8).color(Color { a: 0.56, ..muted }),
-                    text(project_label).size(12).color(Color {
-                        a: 0.92,
-                        ..text_color
-                    })
-                ]
-                .spacing(1),
-                text("⌘K").size(9).color(Color { a: 0.42, ..muted })
+                text("FPL").size(12).color(Color { a: 0.90, ..primary }),
+                text(project_label).size(12).color(Color {
+                    a: 0.94,
+                    ..text_color
+                }),
+                text("CANVAS").size(10).color(Color { a: 0.52, ..muted }),
             ]
-            .spacing(11)
+            .spacing(14)
             .align_y(iced::Alignment::Center);
-            let signature = container(identity)
-                .padding([8, 11])
+            let health = row![
+                text(format!("{live_sources} LIVE"))
+                    .size(10)
+                    .color(Color { a: 0.72, ..primary }),
+                text("●").size(8).color(Color {
+                    a: 0.88,
+                    ..color(palette.success)
+                }),
+                text(clock).size(12).color(Color {
+                    a: 0.94,
+                    ..text_color
+                }),
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center);
+            let bar = row![identity, space::horizontal(), health].align_y(iced::Alignment::Center);
+            let signature = container(bar)
+                .width(Length::Fill)
+                .height(Length::Fixed(shell_bar_height as f32))
+                .padding([0, 20])
                 .style(move |_| container::Style {
                     background: Some(
                         Color {
-                            a: 0.92,
+                            a: 0.94,
                             ..color(visual_theme.surface_raised)
                         }
                         .into(),
                     ),
                     border: iced::Border {
                         color: Color {
-                            a: 0.58,
+                            a: 0.64,
                             ..border_color
                         },
                         width: 1.0,
-                        radius: 7.0.into(),
+                        radius: 0.0.into(),
                     },
                     shadow: iced::Shadow {
-                        color: Color::from_rgba8(0, 0, 0, visual_theme.shadow_opacity * 0.45),
-                        offset: iced::Vector::new(0.0, 3.0),
-                        blur_radius: 10.0,
+                        color: Color::from_rgba8(0, 0, 0, visual_theme.shadow_opacity * 0.35),
+                        offset: iced::Vector::new(0.0, 2.0),
+                        blur_radius: 8.0,
                     },
                     ..Default::default()
                 });
@@ -6974,9 +7013,8 @@ impl App {
                 container(signature)
                     .width(Length::Fill)
                     .height(Length::Fill)
-                    .padding(18)
-                    .align_x(iced::alignment::Horizontal::Left)
-                    .align_y(iced::alignment::Vertical::Bottom)
+                    .align_x(iced::alignment::Horizontal::Center)
+                    .align_y(iced::alignment::Vertical::Top)
                     .into(),
             );
         }
@@ -12294,6 +12332,8 @@ mod tests {
     fn surface_title_modes_cover_hidden_focused_and_always() {
         assert!(!surface_title_visible(SurfaceTitleMode::Hidden, false));
         assert!(!surface_title_visible(SurfaceTitleMode::Hidden, true));
+        assert!(surface_title_visible(SurfaceTitleMode::Presentation, false));
+        assert!(surface_title_visible(SurfaceTitleMode::Presentation, true));
         assert!(!surface_title_visible(SurfaceTitleMode::Focused, false));
         assert!(surface_title_visible(SurfaceTitleMode::Focused, true));
         assert!(surface_title_visible(SurfaceTitleMode::Always, false));

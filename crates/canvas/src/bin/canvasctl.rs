@@ -158,10 +158,11 @@ fn handle_line(line: &str) -> Result<(), String> {
 
 fn handle_titles(tokens: &[String]) -> Result<(), String> {
     if tokens.len() != 2 {
-        return Err("usage: titles <hidden|focused|always>".into());
+        return Err("usage: titles <hidden|presentation|focused|always>".into());
     }
     let title = match tokens[1].as_str() {
         "hidden" => SurfaceTitleMode::Hidden,
+        "presentation" => SurfaceTitleMode::Presentation,
         "focused" => SurfaceTitleMode::Focused,
         "always" => SurfaceTitleMode::Always,
         value => return Err(format!("unknown title mode: {value}")),

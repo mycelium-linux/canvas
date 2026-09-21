@@ -153,6 +153,9 @@ impl Default for SurfaceChrome {
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum SurfaceTitleMode {
     Hidden,
+    /// Read-only shell chrome: retain surface identity without advertising
+    /// pointer actions that make no sense on a wall or kiosk display.
+    Presentation,
     #[default]
     Focused,
     Always,
