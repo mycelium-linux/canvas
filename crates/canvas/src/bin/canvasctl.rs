@@ -6,8 +6,8 @@ use canvas::control::{
     self, CONTROL_VERSION, Command, ControlReply, ControlRequest, ErrorCode, Outcome, Receipt, text,
 };
 use canvas::{
-    Background, Layout, NormalizedRect, Placement, SCHEMA_VERSION, Surface, SurfaceChrome,
-    SurfaceContent, SurfaceTitleMode, ThemeRef, WorkspaceDocument, WorkspacePatch,
+    Background, Layout, SCHEMA_VERSION, Surface, SurfaceChrome, SurfaceContent, SurfaceTitleMode,
+    ThemeRef, WorkspaceDocument, WorkspacePatch,
     compose::{self, LayoutMode},
 };
 
@@ -206,10 +206,8 @@ fn catalog_document(directory: &str, page: usize) -> Result<WorkspaceDocument, S
             "catalog page {page} does not exist; choose 1..={page_count}"
         ));
     }
-    let first = (page - 1) * CATALOG_PAGE_SIZE;
-    let last = (first + CATALOG_PAGE_SIZE).min(paths.len());
-    let mut surfaces = Vec::with_capacity(last - first);
-    for path in &paths[first..last] {
+    let mut surfaces = Vec::with_capacity(paths.len());
+    for path in &paths {
         let spec = canvas_widgets::WidgetSpec::from_file(&path)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         surfaces.push(Surface {
@@ -219,15 +217,20 @@ fn catalog_document(directory: &str, page: usize) -> Result<WorkspaceDocument, S
             inputs: Vec::new(),
         });
     }
-    let ids = surfaces
+    // Keep every fixture resident so Canvas can switch pages synchronously;
+    // only the six visible page members participate in the layout.
+    let all_ids = surfaces
         .iter()
         .map(|surface| surface.id.clone())
         .collect::<Vec<_>>();
+    let first = (page - 1) * CATALOG_PAGE_SIZE;
+    let last = (first + CATALOG_PAGE_SIZE).min(all_ids.len());
+    let ids = &all_ids[first..last];
     let columns = if ids.len() <= 2 { ids.len() as u32 } else { 3 };
     let rows = (ids.len() as u32).div_ceil(columns.max(1));
     Ok(WorkspaceDocument {
         schema_version: SCHEMA_VERSION,
-        id: format!("widget-catalog-{page}-of-{page_count}"),
+        id: "widget-catalog-all".into(),
         project_id: "dock".into(),
         revision: 1,
         theme: ThemeRef::Project,
@@ -239,7 +242,7 @@ fn catalog_document(directory: &str, page: usize) -> Result<WorkspaceDocument, S
         },
         surfaces,
         layout: Layout::Canvas {
-            placements: tile_grid(&ids, rows, columns),
+            placements: compose::grid(ids, rows, columns),
         },
         bindings: Vec::new(),
         focused_surface_id: None,
@@ -395,7 +398,7 @@ fn handle_tile(tokens: &[String]) -> Result<(), String> {
             } else {
                 surfaces.len() as u32
             };
-            let placements = tile_grid(&surfaces, rows, cols);
+            let placements = compose::grid(&surfaces, rows, cols);
             canvas::PatchOperation::SetLayout {
                 layout: Layout::Canvas { placements },
             }
@@ -454,7 +457,7 @@ fn handle_window_control(tokens: &[String]) -> Result<(), String> {
             surface_id: tokens[1].clone(),
         },
         "restore" => {
-            let placements = tile_grid(&state.surfaces, 2, 2);
+            let placements = compose::grid(&state.surfaces, 2, 2);
             Layout::Canvas { placements }
         }
         _ => return Err(format!("unknown window control: {}", tokens[0])),
@@ -476,32 +479,6 @@ fn handle_window_control(tokens: &[String]) -> Result<(), String> {
     let reply = send_with_retry(&request)?;
     println!("{}", text::format_reply(&reply));
     Ok(())
-}
-
-fn tile_grid(surfaces: &[String], rows: u32, cols: u32) -> Vec<Placement> {
-    let cols = cols.max(1);
-    let total = surfaces.len() as u32;
-    let rows = rows.max(1).max(total.div_ceil(cols));
-    let width = 1.0 / cols as f32;
-    let height = 1.0 / rows as f32;
-    surfaces
-        .iter()
-        .enumerate()
-        .map(|(i, surface_id)| {
-            let row = i as u32 / cols;
-            let col = i as u32 % cols;
-            Placement {
-                surface_id: surface_id.clone(),
-                bounds: NormalizedRect {
-                    x: col as f32 * width,
-                    y: row as f32 * height,
-                    width,
-                    height,
-                },
-                layer: i as i32,
-            }
-        })
-        .collect()
 }
 
 struct DocumentState {
@@ -762,16 +739,16 @@ mod catalog_tests {
         let mut ids = std::collections::BTreeSet::new();
         for page in 1..=page_count {
             let document = catalog_document(&directory, page).expect("catalog page builds");
-            assert!(document.surfaces.len() <= CATALOG_PAGE_SIZE);
+            assert_eq!(document.surfaces.len(), fixture_count);
             let Layout::Canvas { placements } = document.layout else {
                 panic!("catalog must tile")
             };
-            assert_eq!(placements.len(), document.surfaces.len());
-            for placement in placements {
+            assert!(placements.len() <= CATALOG_PAGE_SIZE);
+            for placement in &placements {
                 assert!(placement.bounds.width >= 1.0 / 3.0);
                 assert!(placement.bounds.height >= 0.5);
             }
-            ids.extend(document.surfaces.into_iter().map(|surface| surface.id));
+            ids.extend(placements.into_iter().map(|placement| placement.surface_id));
         }
         assert_eq!(ids.len(), fixture_count);
         assert!(catalog_document(&directory, 0).is_err());

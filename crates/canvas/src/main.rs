@@ -1100,6 +1100,57 @@ impl App {
         self.restore_snapped_layout();
     }
 
+    /// Move between readable pages of the generated widget catalog.
+    ///
+    /// Every catalog surface remains resident; paging only replaces the six
+    /// placements. That makes navigation synchronous and keeps filesystem
+    /// knowledge in `canvasctl`, where the catalog is originally assembled.
+    fn cycle_widget_catalog_page(&mut self, direction: i32) -> bool {
+        if self.document.id != "widget-catalog-all" {
+            return false;
+        }
+        let Layout::Canvas { placements } = &self.document.layout else {
+            return false;
+        };
+        let page_size = placements.len().max(1);
+        let page_count = self.document.surfaces.len().div_ceil(page_size);
+        if page_count <= 1 {
+            return true;
+        }
+        let current_first = placements
+            .first()
+            .and_then(|placement| {
+                self.document
+                    .surfaces
+                    .iter()
+                    .position(|surface| surface.id == placement.surface_id)
+            })
+            .unwrap_or(0);
+        let current_page = current_first / page_size;
+        let next_page = (current_page as i32 + direction).rem_euclid(page_count as i32) as usize;
+        let first = next_page * page_size;
+        let last = (first + page_size).min(self.document.surfaces.len());
+        let ids = self.document.surfaces[first..last]
+            .iter()
+            .map(|surface| surface.id.clone())
+            .collect::<Vec<_>>();
+        let columns = if ids.len() <= 2 { ids.len() as u32 } else { 3 };
+        self.start_transition();
+        self.document.layout = Layout::Canvas {
+            placements: ::canvas::compose::grid(&ids, 1, columns),
+        };
+        self.document.revision = self.document.revision.saturating_add(1);
+        self.free_layout = None;
+        self.bump();
+        self.status = format!("Widget catalog page {} / {}.", next_page + 1, page_count);
+        self.emit_event(format!(
+            "widget_catalog_page {} {}",
+            next_page + 1,
+            page_count
+        ));
+        true
+    }
+
     /// Return to the active view's canonical layout without acting as a
     /// toggle. This is the button-safe form: repeated clicks are idempotent.
     fn restore_snapped_layout(&mut self) {
@@ -1601,6 +1652,11 @@ impl App {
                 }
                 if snap_layout_requested(&kbd_event) {
                     self.toggle_snapped_layout();
+                    return Task::none();
+                }
+                if let Some(direction) = widget_catalog_page_direction(&kbd_event)
+                    && self.cycle_widget_catalog_page(direction)
+                {
                     return Task::none();
                 }
                 if background_picker_requested(&kbd_event) {
@@ -7453,19 +7509,48 @@ fn display_shortcut(event: &iced::keyboard::Event) -> Option<usize> {
 }
 
 fn snap_layout_requested(event: &iced::keyboard::Event) -> bool {
-    use iced::keyboard::{Event, Key};
+    use iced::keyboard::Event;
     matches!(
         event,
         Event::KeyPressed {
-            key: Key::Character(character),
+            key,
+            modified_key,
             modifiers,
             repeat: false,
             ..
-        } if character.eq_ignore_ascii_case("l")
+        } if (matches_character(key, "l") || matches_character(modified_key, "l"))
             && modifiers.control()
             && modifiers.alt()
             && !modifiers.logo()
     )
+}
+
+fn matches_character(key: &iced::keyboard::Key, expected: &str) -> bool {
+    matches!(key, iced::keyboard::Key::Character(value) if value.eq_ignore_ascii_case(expected))
+}
+
+fn widget_catalog_page_direction(event: &iced::keyboard::Event) -> Option<i32> {
+    use iced::keyboard::Event;
+    let Event::KeyPressed {
+        key,
+        modified_key,
+        modifiers,
+        repeat: false,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    if modifiers.control() || modifiers.alt() || modifiers.logo() {
+        return None;
+    }
+    if matches_character(key, "[") || matches_character(modified_key, "[") {
+        Some(-1)
+    } else if matches_character(key, "]") || matches_character(modified_key, "]") {
+        Some(1)
+    } else {
+        None
+    }
 }
 
 fn shortcut_help_requested(event: &iced::keyboard::Event) -> bool {
@@ -11706,6 +11791,52 @@ mod tests {
         assert!(!snap_layout_requested(&pressed(
             Modifiers::CTRL | Modifiers::ALT | Modifiers::LOGO
         )));
+        let option_translated = Event::KeyPressed {
+            key: Key::Character("¬".into()),
+            modified_key: Key::Character("l".into()),
+            physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+            location: Location::Standard,
+            modifiers: Modifiers::CTRL | Modifiers::ALT,
+            text: Some("¬".into()),
+            repeat: false,
+        };
+        assert!(snap_layout_requested(&option_translated));
+    }
+
+    #[test]
+    fn brackets_page_the_resident_widget_catalog_and_wrap() {
+        let mut app = test_app();
+        app.document.id = "widget-catalog-all".into();
+        app.document.surfaces = (0..13)
+            .map(|index| Surface {
+                id: format!("widget-{index}"),
+                title: format!("Widget {index}"),
+                content: SurfaceContent::Unsupported(serde_json::json!({
+                    "kind": "test_widget"
+                })),
+                inputs: Vec::new(),
+            })
+            .collect();
+        let first = app.document.surfaces[..6]
+            .iter()
+            .map(|surface| surface.id.clone())
+            .collect::<Vec<_>>();
+        app.document.layout = Layout::Canvas {
+            placements: ::canvas::compose::grid(&first, 2, 3),
+        };
+
+        assert!(app.cycle_widget_catalog_page(1));
+        let Layout::Canvas { placements } = &app.document.layout else {
+            panic!("catalog stays on a canvas")
+        };
+        assert_eq!(placements[0].surface_id, "widget-6");
+        assert_eq!(placements.len(), 6);
+
+        assert!(app.cycle_widget_catalog_page(-1));
+        let Layout::Canvas { placements } = &app.document.layout else {
+            panic!("catalog stays on a canvas")
+        };
+        assert_eq!(placements[0].surface_id, "widget-0");
     }
 
     #[test]

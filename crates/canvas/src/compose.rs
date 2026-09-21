@@ -25,6 +25,38 @@ pub enum LayoutMode {
     Golden,
 }
 
+/// Place surfaces in a deterministic row-major grid filling the wall.
+///
+/// Callers choose the column count; rows grow when necessary so no surface is
+/// silently omitted. Keeping this here gives catalog paging, window restore,
+/// and future layout controls one geometry implementation.
+pub fn grid(ids: &[String], minimum_rows: u32, columns: u32) -> Vec<Placement> {
+    let columns = columns.max(1);
+    let rows = (ids.len() as u32)
+        .div_ceil(columns)
+        .max(minimum_rows)
+        .max(1);
+    let width = 1.0 / columns as f32;
+    let height = 1.0 / rows as f32;
+    ids.iter()
+        .enumerate()
+        .map(|(index, surface_id)| {
+            let row = index as u32 / columns;
+            let column = index as u32 % columns;
+            Placement {
+                surface_id: surface_id.clone(),
+                bounds: NormalizedRect {
+                    x: column as f32 * width,
+                    y: row as f32 * height,
+                    width,
+                    height,
+                },
+                layer: index as i32,
+            }
+        })
+        .collect()
+}
+
 /// Compose surfaces, in order, into placements filling the unit square.
 ///
 /// `aspect` is the wall's physical width/height ratio. Splitting chooses the
@@ -176,6 +208,19 @@ mod tests {
             "the first surface earns the 0.618 column on a wide wall"
         );
         assert!((placements[1].bounds.width - (1.0 - GOLDEN_PART)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn grid_is_row_major_and_honors_a_minimum_row_count() {
+        let ids = (0..5).map(|index| format!("s{index}")).collect::<Vec<_>>();
+        let placements = grid(&ids, 2, 3);
+        assert_eq!(placements.len(), ids.len());
+        assert_eq!(placements[0].bounds.x, 0.0);
+        assert_eq!(placements[2].bounds.x, 2.0 / 3.0);
+        assert_eq!(placements[3].bounds.y, 0.5);
+        assert!(placements.iter().all(|placement| {
+            placement.bounds.width == 1.0 / 3.0 && placement.bounds.height == 0.5
+        }));
     }
 
     #[test]

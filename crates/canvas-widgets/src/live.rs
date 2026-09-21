@@ -20,7 +20,8 @@ use canvas_core::{ThemeMetrics, ThemePalette, VisualTheme};
 use iced::mouse;
 use iced::widget::canvas::{Cache, Geometry, Path};
 use iced::widget::{
-    Canvas, canvas, column, container, image, progress_bar, row, scrollable, space, text,
+    Canvas, canvas, column, container, image, progress_bar, responsive, row, scrollable, space,
+    text,
 };
 use iced::{Color, ContentFit, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
@@ -314,22 +315,12 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
             unit,
         } => {
             let colors = series_colors(visual);
-            let legend = row(series
-                .iter()
-                .enumerate()
-                .map(|(index, item)| {
-                    let c = colors[index % colors.len()];
-                    row![
-                        status_dot(c, 7.0),
-                        text(&item.label)
-                            .size(metrics.small)
-                            .color(color(palette.text_muted))
-                    ]
-                    .spacing(metrics.space_1)
-                    .into()
-                })
-                .collect::<Vec<Element<'_, Message>>>())
-            .spacing(metrics.space_3);
+            let legend = responsive_series_legend(
+                series.iter().map(|item| item.label.clone()).collect(),
+                colors.clone(),
+                metrics,
+                color(palette.text_muted),
+            );
             let body = column![
                 row![
                     text(title).size(metrics.body).color(color(palette.text)),
@@ -2417,6 +2408,54 @@ fn status_dot<'a, Message: 'a>(fill: Color, size: f32) -> Element<'a, Message> {
         .into()
 }
 
+/// Lay chart legends out from the width they actually receive.
+///
+/// A fixed horizontal row either steals plot height on a narrow surface or
+/// leaves a tiny orphaned label beside a large plot. Greedy rows keep the
+/// swatch and label together while using theme typography for the estimate.
+fn responsive_series_legend<'a, Message: 'a>(
+    labels: Vec<String>,
+    colors: Vec<Color>,
+    metrics: ThemeMetrics,
+    muted: Color,
+) -> Element<'a, Message> {
+    responsive(move |bounds| {
+        let mut rows: Vec<Vec<(String, Color)>> = vec![Vec::new()];
+        let mut used = 0.0;
+        for (index, label) in labels.iter().enumerate() {
+            let estimated = 7.0
+                + metrics.space_1
+                + label.chars().count() as f32 * metrics.small * 0.58
+                + metrics.space_3;
+            if used > 0.0 && used + estimated > bounds.width {
+                rows.push(Vec::new());
+                used = 0.0;
+            }
+            rows.last_mut()
+                .expect("legend always has one row")
+                .push((label.clone(), colors[index % colors.len()]));
+            used += estimated;
+        }
+        let mut layout = column![].spacing(metrics.space_1);
+        for items in rows {
+            let mut line = row![].spacing(metrics.space_3);
+            for (label, swatch) in items {
+                line = line.push(
+                    row![
+                        status_dot(swatch, 7.0),
+                        text(label).size(metrics.small).color(muted)
+                    ]
+                    .spacing(metrics.space_1),
+                );
+            }
+            layout = layout.push(line);
+        }
+        layout.into()
+    })
+    .height(Length::Shrink)
+    .into()
+}
+
 fn metric_pair<'a, Message: 'a>(
     label: &'static str,
     value: String,
@@ -2696,6 +2735,25 @@ struct SpectralWaterfallProgram {
     unit: String,
 }
 
+fn sample_spectrum(rows: &[Vec<f32>], x: f32, y: f32) -> f32 {
+    let source_y = y.clamp(0.0, 1.0) * (rows.len().saturating_sub(1)) as f32;
+    let y0 = source_y.floor() as usize;
+    let y1 = (y0 + 1).min(rows.len().saturating_sub(1));
+    let fy = source_y.fract();
+    let sample_row = |row: &[f32]| {
+        if row.is_empty() {
+            return 0.0;
+        }
+        let source_x = x.clamp(0.0, 1.0) * (row.len().saturating_sub(1)) as f32;
+        let x0 = source_x.floor() as usize;
+        let x1 = (x0 + 1).min(row.len().saturating_sub(1));
+        row[x0] + (row[x1] - row[x0]) * source_x.fract()
+    };
+    let top = sample_row(&rows[y0]);
+    let bottom = sample_row(&rows[y1]);
+    top + (bottom - top) * fy
+}
+
 impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
     type State = CacheState;
 
@@ -2733,21 +2791,30 @@ impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
                 });
                 return;
             }
-            let bins = self.rows[0].len();
-            let plot_height = (bounds.height - self.label_size * 1.8).max(1.0);
-            let cell_w = bounds.width / bins as f32;
-            let cell_h = plot_height / self.rows.len() as f32;
-            for (row_index, row) in self.rows.iter().enumerate() {
-                let y = row_index as f32 * cell_h;
-                for (bin, value) in row.iter().enumerate() {
+            let layout = PlotFrame::bottom_axis(bounds.size(), self.label_size);
+            // Source frames are intentionally bounded and may be sparse. The
+            // retained renderer resamples them into a dense field so a dozen
+            // bins do not become a dozen giant boxes on a large wall.
+            let columns = ((layout.plot.width / 3.0).ceil() as usize).clamp(24, 384);
+            let display_rows = ((layout.plot.height / 2.5).ceil() as usize).clamp(16, 192);
+            let cell_w = layout.plot.width / columns as f32;
+            let cell_h = layout.plot.height / display_rows as f32;
+            for row_index in 0..display_rows {
+                let y = layout.plot.y + row_index as f32 * cell_h;
+                for column in 0..columns {
+                    let value = sample_spectrum(
+                        &self.rows,
+                        (column as f32 + 0.5) / columns as f32,
+                        (row_index as f32 + 0.5) / display_rows as f32,
+                    );
                     let scaled = value.clamp(0.0, 1.0) * (self.ramp.len() - 1) as f32;
                     let index = scaled.floor() as usize;
                     let next = (index + 1).min(self.ramp.len() - 1);
                     let fill = lerp_oklch(self.ramp[index], self.ramp[next], scaled.fract());
                     frame.fill(
                         &Path::rectangle(
-                            Point::new(bin as f32 * cell_w, y),
-                            Size::new(cell_w.max(1.0), cell_h.max(1.0)),
+                            Point::new(layout.plot.x + column as f32 * cell_w, y),
+                            Size::new(cell_w + 0.35, cell_h + 0.35),
                         ),
                         fill,
                     );
@@ -2763,8 +2830,8 @@ impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
                 frame.fill_text(canvas::Text {
                     content: label,
                     position: Point::new(
-                        fraction * bounds.width - fraction * width,
-                        bounds.height - 2.0,
+                        layout.plot.x + fraction * layout.plot.width - fraction * width,
+                        layout.axis_baseline,
                     ),
                     color: self.label,
                     size: iced::Pixels(self.label_size),
@@ -2780,9 +2847,13 @@ impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
                 .rem_euclid(3.0)
                 / 3.0;
             let mut overlay = canvas::Frame::new(renderer, bounds.size());
-            let y = phase * (bounds.height - self.label_size * 1.8).max(1.0);
+            let layout = PlotFrame::bottom_axis(bounds.size(), self.label_size);
+            let y = layout.plot.y + phase * layout.plot.height;
             overlay.stroke(
-                &Path::line(Point::new(0.0, y), Point::new(bounds.width, y)),
+                &Path::line(
+                    Point::new(layout.plot.x, y),
+                    Point::new(layout.plot.x + layout.plot.width, y),
+                ),
                 canvas::Stroke::default()
                     .with_width(1.0)
                     .with_color(with_alpha(self.scan, 0.28)),
@@ -4482,16 +4553,20 @@ fn annotate_plot(
     for tick in nice_ticks(min, max, 3) {
         let frac = ((tick - min) / span) as f32;
         let label = format_quantity(tick, unit);
+        let label_width = text_width(&label, size);
         frame.fill_text(canvas::Text {
             content: label,
-            position: Point::new(x, y + height * (1.0 - frac) - size * 0.4),
+            position: Point::new(
+                (x - label_width - size * 0.55).max(0.0),
+                y + height * (1.0 - frac) - size * 0.4,
+            ),
             color,
             size: iced::Pixels(size),
             ..Default::default()
         });
     }
     let legend = format_quantity(value, unit);
-    let legend_w = legend.chars().count() as f32 * 4.8;
+    let legend_w = text_width(&legend, size);
     frame.fill_text(canvas::Text {
         content: legend,
         position: Point::new(x + width - legend_w, y + 1.0),
@@ -4499,6 +4574,56 @@ fn annotate_plot(
         size: iced::Pixels(size),
         ..Default::default()
     });
+}
+
+fn text_width(value: &str, size: f32) -> f32 {
+    value.chars().count() as f32 * size * 0.58
+}
+
+/// Shared placement for plot marks and their typography.
+///
+/// Renderers ask this primitive for a plot rectangle instead of independently
+/// guessing gutters, which keeps labels, legends, grids, and data marks from
+/// occupying the same pixels as surfaces resize.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PlotFrame {
+    plot: Rectangle,
+    axis_baseline: f32,
+}
+
+impl PlotFrame {
+    fn cartesian(bounds: Size, label_size: f32, min: f64, max: f64, unit: Option<&str>) -> Self {
+        let widest_tick = nice_ticks(min, max, 3)
+            .into_iter()
+            .map(|tick| text_width(&format_quantity(tick, unit), label_size))
+            .fold(0.0, f32::max);
+        let left = widest_tick + label_size * 0.75;
+        let top = label_size * 1.65;
+        let right = label_size * 0.4;
+        let bottom = label_size * 0.5;
+        Self {
+            plot: Rectangle {
+                x: left,
+                y: top,
+                width: (bounds.width - left - right).max(1.0),
+                height: (bounds.height - top - bottom).max(1.0),
+            },
+            axis_baseline: bounds.height - 1.0,
+        }
+    }
+
+    fn bottom_axis(bounds: Size, label_size: f32) -> Self {
+        let bottom = label_size * 1.55;
+        Self {
+            plot: Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: bounds.width.max(1.0),
+                height: (bounds.height - bottom).max(1.0),
+            },
+            axis_baseline: bounds.height - 1.0,
+        }
+    }
 }
 
 /// The value window a plot maps onto its bounds, so a mapping is stated once
@@ -4953,11 +5078,18 @@ impl<Message> canvas::Program<Message> for TimeSeriesProgram {
             // One range over every series: two series on their own scales share an
             // axis that means nothing.
             let range = PlotRange::over(displayed.iter().flatten());
-            let area = plot_area(bounds.size());
+            let layout = PlotFrame::cartesian(
+                bounds.size(),
+                self.label_size,
+                range.min_y as f64,
+                range.max_y as f64,
+                self.unit.as_deref(),
+            );
+            let area = layout.plot;
             for row in 0..=4 {
-                let y = bounds.height * row as f32 / 4.0;
+                let y = area.y + area.height * row as f32 / 4.0;
                 frame.stroke(
-                    &Path::line(Point::new(0.0, y), Point::new(bounds.width, y)),
+                    &Path::line(Point::new(area.x, y), Point::new(area.x + area.width, y)),
                     canvas::Stroke::default()
                         .with_width(1.0)
                         .with_color(self.grid),
@@ -4974,7 +5106,7 @@ impl<Message> canvas::Program<Message> for TimeSeriesProgram {
                 draw_series_line(
                     frame,
                     &points,
-                    bounds.height,
+                    area.y + area.height,
                     self.colors[index % self.colors.len()],
                     area_alpha,
                 );
@@ -5225,6 +5357,26 @@ impl<Message> canvas::Program<Message> for ChartProgram {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spectral_sampling_interpolates_between_bins_and_frames() {
+        let rows = vec![vec![0.0, 1.0], vec![1.0, 0.0]];
+        assert!((sample_spectrum(&rows, 0.5, 0.0) - 0.5).abs() < 0.001);
+        assert!((sample_spectrum(&rows, 0.0, 0.5) - 0.5).abs() < 0.001);
+        assert!((sample_spectrum(&rows, 0.5, 0.5) - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn plot_frame_reserves_typography_outside_the_data_marks() {
+        let layout = PlotFrame::cartesian(Size::new(420.0, 220.0), 11.0, 0.0, 10_000.0, Some("ms"));
+        assert!(layout.plot.x > 40.0, "wide labels need a real gutter");
+        assert!(
+            layout.plot.y >= 11.0,
+            "the current-value legend needs a top row"
+        );
+        assert!(layout.plot.x + layout.plot.width <= 420.0);
+        assert!(layout.plot.y + layout.plot.height <= 220.0);
+    }
 
     #[test]
     fn series_interpolation_eases_values_and_new_points_from_the_previous_head() {
