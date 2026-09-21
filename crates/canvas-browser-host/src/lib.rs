@@ -550,6 +550,7 @@ fn run_stream(
     let bus_config = profile.bus.clone();
     let destination = profile.destination.clone();
     let ttl = profile.ttl_ms;
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
     let announcer = thread::Builder::new()
         .name(format!("browser-announce-{id}"))
         .spawn(move || {
@@ -557,6 +558,7 @@ fn run_stream(
                 let result = Client::connect(bus_config.clone()).and_then(|bus| {
                     while !announce_flag.load(Ordering::Acquire) {
                         announce(&bus, destination.as_deref(), &stream, ttl)?;
+                        let _ = ready_tx.try_send(());
                         thread::sleep(Duration::from_millis(ttl / 3));
                     }
                     Ok(())
@@ -567,6 +569,17 @@ fn run_stream(
                 }
             }
         })?;
+    if let Err(error) = ready_rx.recv_timeout(Duration::from_secs(5)) {
+        announce_stop.store(true, Ordering::Release);
+        drop(input);
+        let _ = encoder.kill();
+        let _ = encoder.wait();
+        let _ = announcer.join();
+        return Err(error).context("media receiver announcement was not accepted");
+    }
+    // Delivery is synchronous, but the edge still needs a scheduling turn to
+    // spawn and bind its hardware decoder before FFmpeg opens the media plane.
+    thread::sleep(Duration::from_millis(250));
     let interval = Duration::from_secs_f64(1.0 / f64::from(profile.fps));
     let url = format!("http://127.0.0.1:{port}/session/{webdriver_id}/screenshot");
     let mut capture_failures = 0_u64;
