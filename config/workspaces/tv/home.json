@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "id": "home-workspace",
+  "project_id": "home",
+  "revision": 4,
+  "theme": { "source": "project" },
+  "background": { "kind": "shader", "shader_id": "smoke-rings", "speed": 0.6 },
+  "chrome": { "title": "hidden", "canvas_padding": 24, "surface_gap": 14 },
+  "surfaces": [
+    {
+      "id": "clock",
+      "title": "Clock",
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "clock",
+          "kind": "clock",
+          "format": "%H:%M:%S",
+          "mode": "analog",
+          "theme": null,
+          "refresh_ms": 16,
+          "chrome": "frameless",
+          "data": { "state": "ready", "source": null, "observed_at": null, "window": null, "detail": null, "provenance": "live" }
+        }
+      },
+      "inputs": []
+    },
+    {
+      "id": "hyperspace",
+      "title": "Hyperspace",
+      "content": { "kind": "live_video", "source_id": "hyperspace", "width": 480, "height": 270 },
+      "inputs": []
+    }
+  ],
+  "layout": {
+    "kind": "canvas",
+    "placements": [
+      { "surface_id": "clock", "bounds": { "x": 0.03, "y": 0.10, "width": 0.34, "height": 0.80 }, "layer": 0 },
+      { "surface_id": "hyperspace", "bounds": { "x": 0.39, "y": 0.16, "width": 0.58, "height": 0.68 }, "layer": 0 }
+    ]
+  },
+  "bindings": [],
+  "focused_surface_id": null
+}

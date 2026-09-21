@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "id": "browser-workspace",
+  "project_id": "browser",
+  "revision": 2,
+  "theme": { "source": "project" },
+  "background": { "kind": "shader", "shader_id": "smoke-rings", "speed": 0.6 },
+  "chrome": { "title": "hidden", "canvas_padding": 24, "surface_gap": 14 },
+  "surfaces": [
+    {
+      "id": "browser",
+      "title": "Browser",
+      "content": { "kind": "live_video", "source_id": "browser-tv-servo", "width": 720, "height": 568 },
+      "inputs": []
+    }
+  ],
+  "layout": {
+    "kind": "canvas",
+    "placements": [
+      { "surface_id": "browser", "bounds": { "x": 0.04, "y": 0.06, "width": 0.92, "height": 0.88 }, "layer": 0 }
+    ]
+  },
+  "bindings": [],
+  "focused_surface_id": "browser"
+}
