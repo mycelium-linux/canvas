@@ -1,7 +1,7 @@
 //! Visual selection of the bounded Coherence themes Canvas can persist.
 
-use canvas_core::{Accent, ThemeMode, ThemeSelection};
 use crate::theme_pack::ThemePack;
+use canvas_core::{Accent, ThemeMode, ThemeSelection};
 use iced::widget::{column, container, mouse_area, row, text};
 use iced::{Color, Element, Length};
 
@@ -57,15 +57,30 @@ struct Choice {
 
 impl ThemePicker {
     pub fn opened_from(theme: ThemeSelection, packs: &[ThemePack]) -> Self {
-        let mut choices = packs.iter().map(|pack| Choice {
-            theme: ThemeSelection::Palette { palette: pack.palette },
-            mode: "Personal".into(), accent: pack.name.clone(), pack_id: Some(pack.id.clone()),
-        }).collect::<Vec<_>>();
+        let mut choices = packs
+            .iter()
+            .map(|pack| Choice {
+                theme: ThemeSelection::Palette {
+                    palette: pack.palette,
+                },
+                mode: "Personal".into(),
+                accent: pack.name.clone(),
+                pack_id: Some(pack.id.clone()),
+            })
+            .collect::<Vec<_>>();
         choices.extend(CHOICES.into_iter().map(|theme| {
             let (mode, accent) = labels(theme);
-            Choice { theme, mode: mode.into(), accent: accent.into(), pack_id: None }
+            Choice {
+                theme,
+                mode: mode.into(),
+                accent: accent.into(),
+                pack_id: None,
+            }
         }));
-        let index = choices.iter().position(|choice| choice.theme == theme).unwrap_or(0);
+        let index = choices
+            .iter()
+            .position(|choice| choice.theme == theme)
+            .unwrap_or(0);
         Self { index, choices }
     }
 

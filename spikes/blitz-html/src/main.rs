@@ -14,11 +14,12 @@ use blitz_dom::DocumentConfig;
 use blitz_html::HtmlDocument;
 use blitz_traits::shell::{ColorScheme, Viewport};
 use mlua::{Lua, LuaOptions, LuaSerdeExt, StdLib, Value as LuaValue};
-use serde::Deserialize;
-use std::io::Read;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::io::{BufRead, Read, Write};
 use std::sync::{
-    Arc,
     atomic::{AtomicUsize, Ordering},
+    Arc,
 };
 
 const DOC_FORGE: &str = "/Users/ajmwagar/src/fpl/doc-forge";
@@ -26,10 +27,11 @@ const OUT: &str = "out";
 
 /// CSS px per mm at the 96dpi CSS reference: 96 / 25.4.
 const PX_PER_MM: f32 = 96.0 / 25.4;
+const MAX_CACHED_DASHBOARDS: usize = 16;
 
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "render".into());
-    if mode != "dashboard" {
+    if mode != "dashboard" && mode != "dashboard-server" {
         std::fs::create_dir_all(OUT).expect("create renderer output directory");
     }
     match mode.as_str() {
@@ -48,6 +50,7 @@ fn main() {
             let a: Vec<String> = std::env::args().collect();
             render_dashboard(&a[2], &a[3], &a[4], &a[5], a.get(6));
         }
+        "dashboard-server" => render_dashboard_server(),
         // `file <in.html> <out.png> <css_width> <scale>` - render any HTML file.
         "file" => {
             let a: Vec<String> = std::env::args().collect();
@@ -78,6 +81,101 @@ struct HtmlView {
     css: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DashboardRequest {
+    template: String,
+    source_id: String,
+    width: u32,
+    height: u32,
+    scale: f32,
+    payload: serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct DashboardResponse {
+    ok: bool,
+    elapsed_ms: u128,
+    mode: &'static str,
+}
+
+struct CachedDashboard {
+    html: String,
+    css: String,
+    width: u32,
+    height: u32,
+    scale: f32,
+    document: HtmlDocument,
+    renderer: VelloCpuImageRenderer,
+}
+
+fn render_dashboard_server() {
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::BufWriter::new(std::io::stdout().lock());
+    let mut dashboards: BTreeMap<String, CachedDashboard> = BTreeMap::new();
+    for line in stdin.lock().lines() {
+        let line = line.expect("read dashboard request");
+        assert!(line.len() <= 4 * 1024 * 1024, "dashboard request too large");
+        let request: DashboardRequest = serde_json::from_str(&line).expect("dashboard request");
+        let started = std::time::Instant::now();
+        let view = evaluate_dashboard(&request.template, request.payload);
+        let can_restyle = dashboards.get(&request.source_id).is_some_and(|cached| {
+            cached.html == view.html
+                && cached.width == request.width
+                && cached.height == request.height
+                && cached.scale == request.scale
+        });
+        let mode = if can_restyle {
+            let cached = dashboards
+                .get_mut(&request.source_id)
+                .expect("checked dashboard cache");
+            if cached.css != view.css {
+                replace_dashboard_css(&mut cached.document, &view.css);
+                cached.css = view.css;
+                cached.document.resolve(0.0);
+                paint_dashboard(
+                    &mut cached.document,
+                    &mut cached.renderer,
+                    &request.source_id,
+                    request.scale,
+                );
+                "restyle"
+            } else {
+                "unchanged"
+            }
+        } else {
+            let mut cached =
+                build_cached_dashboard(view, request.width, request.height, request.scale);
+            paint_dashboard(
+                &mut cached.document,
+                &mut cached.renderer,
+                &request.source_id,
+                request.scale,
+            );
+            if !dashboards.contains_key(&request.source_id)
+                && dashboards.len() >= MAX_CACHED_DASHBOARDS
+            {
+                if let Some(oldest) = dashboards.keys().next().cloned() {
+                    dashboards.remove(&oldest);
+                }
+            }
+            dashboards.insert(request.source_id.clone(), cached);
+            "rebuild"
+        };
+        serde_json::to_writer(
+            &mut stdout,
+            &DashboardResponse {
+                ok: true,
+                elapsed_ms: started.elapsed().as_millis(),
+                mode,
+            },
+        )
+        .expect("write dashboard response");
+        stdout.write_all(b"\n").expect("finish dashboard response");
+        stdout.flush().expect("flush dashboard response");
+    }
+}
+
 fn render_dashboard(
     template: &str,
     source_id: &str,
@@ -94,8 +192,6 @@ fn render_dashboard(
     let scale: f32 = scale.and_then(|value| value.parse().ok()).unwrap_or(1.0);
     assert!((320..=4096).contains(&width) && (240..=2160).contains(&height));
     assert!((1.0..=3.0).contains(&scale));
-    let source = std::fs::read_to_string(template).expect("read Lua template");
-    assert!(!source.is_empty() && source.len() <= 32 * 1024);
     let mut input = Vec::new();
     std::io::stdin()
         .take(4 * 1024 * 1024 + 1)
@@ -103,6 +199,31 @@ fn render_dashboard(
         .expect("read dashboard JSON");
     assert!(input.len() <= 4 * 1024 * 1024);
     let data: serde_json::Value = serde_json::from_slice(&input).expect("dashboard JSON");
+    render_dashboard_value(template, source_id, width, height, scale, data);
+}
+
+fn render_dashboard_value(
+    template: &str,
+    source_id: &str,
+    width: u32,
+    height: u32,
+    scale: f32,
+    data: serde_json::Value,
+) {
+    assert!(
+        canvas_core::is_safe_frame_id(source_id),
+        "unsafe frame source id"
+    );
+    assert!((320..=4096).contains(&width) && (240..=2160).contains(&height));
+    assert!((1.0..=3.0).contains(&scale));
+    let view = evaluate_dashboard(template, data);
+    let mut cached = build_cached_dashboard(view, width, height, scale);
+    paint_dashboard(&mut cached.document, &mut cached.renderer, source_id, scale);
+}
+
+fn evaluate_dashboard(template: &str, data: serde_json::Value) -> HtmlView {
+    let source = std::fs::read_to_string(template).expect("read Lua template");
+    assert!(!source.is_empty() && source.len() <= 32 * 1024);
     let lua = Lua::new_with(
         StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8,
         LuaOptions::default(),
@@ -147,13 +268,63 @@ fn render_dashboard(
         .expect("run Lua template");
     let view: HtmlView = lua.from_value(value).expect("Lua HTML view");
     assert!(view.html.len() <= 128 * 1024 && view.css.len() <= 64 * 1024);
+    view
+}
+
+fn build_cached_dashboard(view: HtmlView, width: u32, height: u32, scale: f32) -> CachedDashboard {
     let document = format!(
-        "<!doctype html><meta charset=utf-8><style>{}</style>{}",
+        "<!doctype html><meta charset=utf-8><style id=canvas-dashboard-style>{}</style>{}",
         view.css, view.html
     );
-    let rendered = render_html(&document, width as f32, scale, height as f32, false);
-    let image = image::RgbaImage::from_raw(rendered.width, rendered.height, rendered.rgba)
-        .expect("Blitz RGBA dimensions");
+    let physical_width = (width as f32 * scale).round() as u32;
+    let physical_height = (height as f32 * scale).round() as u32;
+    let vp = Viewport::new(physical_width, physical_height, scale, ColorScheme::Light);
+    let mut document = HtmlDocument::from_html(
+        &document,
+        DocumentConfig {
+            viewport: Some(vp),
+            ..Default::default()
+        },
+    );
+    document.resolve(0.0);
+    CachedDashboard {
+        html: view.html,
+        css: view.css,
+        width,
+        height,
+        scale,
+        document,
+        renderer: VelloCpuImageRenderer::new(physical_width, physical_height),
+    }
+}
+
+fn replace_dashboard_css(document: &mut HtmlDocument, css: &str) {
+    let style = document
+        .get_element_by_id("canvas-dashboard-style")
+        .expect("dashboard style node");
+    let text = document
+        .get_node(style)
+        .and_then(|node| node.children.first().copied())
+        .expect("dashboard style text node");
+    let mut mutator = document.mutate();
+    mutator.set_node_text(text, css);
+}
+
+fn paint_dashboard(
+    document: &mut HtmlDocument,
+    renderer: &mut VelloCpuImageRenderer,
+    source_id: &str,
+    scale: f32,
+) {
+    let width = (document.viewport().window_size.0 as f32).round() as u32;
+    let height = (document.viewport().window_size.1 as f32).round() as u32;
+    let mut rgba = Vec::new();
+    let base = &mut **document;
+    renderer.render_to_vec(
+        |scene| blitz_paint::paint_scene(scene, base, scale as f64, width, height, 0, 0),
+        &mut rgba,
+    );
+    let image = image::RgbaImage::from_raw(width, height, rgba).expect("Blitz RGBA dimensions");
     let mut jpeg = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 94)
         .encode_image(&image)
@@ -161,7 +332,6 @@ fn render_dashboard(
     let root = canvas_core::runtime_root().expect("Canvas runtime root");
     let path = canvas_core::frame_file(&root, source_id).expect("frame path");
     canvas_core::write_atomic(&path, &jpeg).expect("write dashboard frame");
-    println!("{}", path.display());
 }
 
 // ---------------------------------------------------------------------------
@@ -759,5 +929,34 @@ fn compare_outputs() {
     for i in (0..BANDS).step_by(4) {
         let bar = |v: f32| "#".repeat((v * 40.0).round() as usize);
         println!("{i:>4}  {:<24} {}", bar(pa[i]), bar(pb[i]));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stylesheet_text_is_replaced_without_rebuilding_the_document() {
+        let view = HtmlView {
+            html: "<main>hello</main>".into(),
+            css: "main { color: red; }".into(),
+        };
+        let mut cached = build_cached_dashboard(view, 320, 240, 1.0);
+        let root_before = cached.document.root_node().id;
+
+        replace_dashboard_css(&mut cached.document, "main { color: blue; }");
+        cached.document.resolve(0.0);
+
+        let style = cached
+            .document
+            .get_element_by_id("canvas-dashboard-style")
+            .unwrap();
+        assert_eq!(
+            cached.document.get_node(style).unwrap().text_content(),
+            "main { color: blue; }"
+        );
+        assert_eq!(cached.document.root_node().id, root_before);
+        assert_eq!(cached.html, "<main>hello</main>");
     }
 }

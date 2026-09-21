@@ -427,6 +427,82 @@ pub fn apply_named_adapter_batch(
 /// added without registering it here too.
 const BUILT_IN_BINDERS: &[(&str, &str)] = &[
     (
+        "bifrost-requests-v1",
+        include_str!("../../../config/binders/bifrost-requests-v1.lua"),
+    ),
+    (
+        "bifrost-tokens-v1",
+        include_str!("../../../config/binders/bifrost-tokens-v1.lua"),
+    ),
+    (
+        "bifrost-cost-v1",
+        include_str!("../../../config/binders/bifrost-cost-v1.lua"),
+    ),
+    (
+        "bifrost-health-v1",
+        include_str!("../../../config/binders/bifrost-health-v1.lua"),
+    ),
+    (
+        "bifrost-backends-v1",
+        include_str!("../../../config/binders/bifrost-backends-v1.lua"),
+    ),
+    (
+        "bifrost-mesh-v1",
+        include_str!("../../../config/binders/bifrost-mesh-v1.lua"),
+    ),
+    (
+        "bifrost-models-v1",
+        include_str!("../../../config/binders/bifrost-models-v1.lua"),
+    ),
+    (
+        "shroud-regions-v1",
+        include_str!("../../../config/binders/shroud-regions-v1.lua"),
+    ),
+    (
+        "shroud-summary-v1",
+        include_str!("../../../config/binders/shroud-summary-v1.lua"),
+    ),
+    (
+        "shroud-fleet-stat-v1",
+        include_str!("../../../config/binders/shroud-fleet-stat-v1.lua"),
+    ),
+    (
+        "shroud-memory-gauge-v1",
+        include_str!("../../../config/binders/shroud-memory-gauge-v1.lua"),
+    ),
+    (
+        "shroud-disk-gauge-v1",
+        include_str!("../../../config/binders/shroud-disk-gauge-v1.lua"),
+    ),
+    (
+        "shroud-load-stat-v1",
+        include_str!("../../../config/binders/shroud-load-stat-v1.lua"),
+    ),
+    (
+        "shroud-vms-v1",
+        include_str!("../../../config/binders/shroud-vms-v1.lua"),
+    ),
+    (
+        "shroud-network-v1",
+        include_str!("../../../config/binders/shroud-network-v1.lua"),
+    ),
+    (
+        "fab-projects-v1",
+        include_str!("../../../config/binders/fab-projects-v1.lua"),
+    ),
+    (
+        "fab-runs-v1",
+        include_str!("../../../config/binders/fab-runs-v1.lua"),
+    ),
+    (
+        "fab-deliveries-v1",
+        include_str!("../../../config/binders/fab-deliveries-v1.lua"),
+    ),
+    (
+        "fab-metrics-v1",
+        include_str!("../../../config/binders/fab-metrics-v1.lua"),
+    ),
+    (
         "lockout-v1",
         include_str!("../../../config/binders/lockout-v1.lua"),
     ),
@@ -1157,6 +1233,130 @@ mod tests {
         apply_named_adapter("alfalfa-agent-dag-v1", &lineage_event, &mut lineage)
             .expect("empty agent lineage renders an honest data state");
         assert_eq!(lineage.data.state, canvas_widgets::WidgetDataState::Partial);
+    }
+
+    #[test]
+    fn fab_binders_render_owner_streams() {
+        let cases = [
+            (
+                "fab-projects-v1",
+                serde_json::json!({"projects":[{"id":"fab","name":"Fab","status":"active"}]}),
+            ),
+            (
+                "fab-metrics-v1",
+                serde_json::json!({"totals":{"projects":1,"recentRuns":2},"worker":{"concurrency":4}}),
+            ),
+            (
+                "fab-runs-v1",
+                serde_json::json!({"recent_runs":[{"project":"fab","status":"succeeded"}]}),
+            ),
+            (
+                "fab-deliveries-v1",
+                serde_json::json!({"recent_deliveries":[{"repository":"fab","status":"succeeded"}]}),
+            ),
+        ];
+        for (adapter, payload) in cases {
+            let event = StreamEnvelope {
+                schema_version: STREAM_SCHEMA_VERSION,
+                owner: "fab".into(),
+                stream: "test".into(),
+                contract: "canvas.widget.snapshot.v1".into(),
+                project_id: Some("fab".into()),
+                sequence: 1,
+                emitted_at_ms: now_ms(),
+                payload,
+            };
+            let mut target = test_spec(
+                if adapter.contains("runs") || adapter.contains("deliveries") {
+                    WidgetKind::EventLog {
+                        title: "loading".into(),
+                        entries: Vec::new(),
+                    }
+                } else {
+                    WidgetKind::StatusList {
+                        title: "loading".into(),
+                        nodes: Vec::new(),
+                    }
+                },
+            );
+            apply_named_adapter(adapter, &event, &mut target).unwrap_or_else(|error| {
+                panic!("{adapter} failed: {error}");
+            });
+            assert_eq!(target.data.state, canvas_widgets::WidgetDataState::Ready);
+        }
+    }
+
+    #[test]
+    fn bifrost_binders_render_aggregate_production_streams() {
+        let cases = [
+            ("bifrost-requests-v1", serde_json::json!({"requests":12})),
+            ("bifrost-tokens-v1", serde_json::json!({"tokens":3400})),
+            ("bifrost-cost-v1", serde_json::json!({"cost_usd":1.25})),
+            (
+                "bifrost-health-v1",
+                serde_json::json!({"failures":0,"throttled":1,"mean_duration_seconds":0.8}),
+            ),
+            (
+                "bifrost-backends-v1",
+                serde_json::json!({"backends":[{"backend":"openai","up":1,"models":3,"circuit_open":0}]}),
+            ),
+            (
+                "bifrost-mesh-v1",
+                serde_json::json!({"nodes":[{"node":"agora-one","up":1,"utilization_pct":25,"memory_used_bytes":1024,"memory_bytes":2048,"power_watts":90}]}),
+            ),
+            (
+                "bifrost-models-v1",
+                serde_json::json!({"period":"Since gateway restart","models":[{"model":"fpl/llm","value":1200}]}),
+            ),
+        ];
+        for (adapter, payload) in cases {
+            let event = StreamEnvelope {
+                schema_version: STREAM_SCHEMA_VERSION,
+                owner: "bifrost".into(),
+                stream: "test".into(),
+                contract: "canvas.widget.snapshot.v1".into(),
+                project_id: Some("bifrost".into()),
+                sequence: 1,
+                emitted_at_ms: now_ms(),
+                payload,
+            };
+            let kind = if adapter.contains("models") {
+                WidgetKind::PieChart {
+                    title: "loading".into(),
+                    values: vec![canvas_widgets::BarValue {
+                        label: "waiting".into(),
+                        value: 1.0,
+                        state: None,
+                    }],
+                    unit: None,
+                    period: None,
+                }
+            } else if adapter.contains("backends") || adapter.contains("mesh") {
+                WidgetKind::Table {
+                    title: "loading".into(),
+                    columns: Vec::new(),
+                    rows: Vec::new(),
+                }
+            } else if adapter.contains("health") {
+                WidgetKind::StatusList {
+                    title: "loading".into(),
+                    nodes: Vec::new(),
+                }
+            } else {
+                WidgetKind::Stat {
+                    label: "loading".into(),
+                    value: 0.0,
+                    unit: None,
+                    change: None,
+                    history: Vec::new(),
+                    state: None,
+                }
+            };
+            let mut target = test_spec(kind);
+            apply_named_adapter(adapter, &event, &mut target)
+                .unwrap_or_else(|error| panic!("{adapter} failed: {error}"));
+            assert_eq!(target.data.state, canvas_widgets::WidgetDataState::Ready);
+        }
     }
     #[test]
     fn feed_headlines_survives_an_emoji_splitting_the_clip_boundary() {

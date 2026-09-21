@@ -1,3 +1,4 @@
+-- Live Canvas dashboard; Lua owns structure and the theme snapshot owns appearance.
 local function esc(value)
   return tostring(value or ""):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"):gsub('"', "&quot;")
 end
@@ -86,7 +87,7 @@ return {
     .. esc(data.project_count or #projects) .. ' projects</span><span>' .. (live and "Realtime activity connected" or "Waiting for activity snapshot")
     .. '</span></footer></main>',
   css = theme_css .. [[
-    /* Runtime-watched: editing this template never requires a Canvas rebuild. */
+    /* Runtime-watched CSS restyles without rebuilding the Canvas DOM. */
     * { box-sizing: border-box; }
     html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: var(--co-background); color: var(--co-text); font-family: var(--theme-font); letter-spacing: var(--theme-tracking); }
     body { border-top: 3px solid var(--co-primary); }

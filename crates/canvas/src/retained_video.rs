@@ -1,0 +1,379 @@
+//! Retained WGPU video surface.
+//!
+//! The portable producer contract remains an atomically replaced RGBA frame.
+//! Unlike iced's immutable image handles, this widget allocates one GPU texture
+//! and updates it in place. Platform-native imports (DMA-BUF on Linux, IOSurface
+//! on macOS, shared handles on Windows) can implement the same source boundary
+//! later without changing Canvas documents or layout code.
+
+use iced::widget::shader::{self, Shader};
+use iced::{Element, Length, Rectangle};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const REDRAW_INTERVAL: std::time::Duration = std::time::Duration::from_millis(42);
+
+const SHADER: &str = r#"
+struct Uniforms {
+    viewport: vec2<f32>,
+    source: vec2<f32>,
+};
+
+@group(0) @binding(0) var frame: texture_2d<f32>;
+@group(0) @binding(1) var frame_sampler: sampler;
+@group(0) @binding(2) var<uniform> u: Uniforms;
+
+struct VertexOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) index: u32) -> VertexOut {
+    var positions = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>(3.0, -1.0),
+        vec2<f32>(-1.0, 3.0),
+    );
+    var uvs = array<vec2<f32>, 3>(
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(2.0, 1.0),
+        vec2<f32>(0.0, -1.0),
+    );
+    var out: VertexOut;
+    out.position = vec4<f32>(positions[index], 0.0, 1.0);
+    out.uv = uvs[index];
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    let viewport_aspect = u.viewport.x / max(u.viewport.y, 1.0);
+    let source_aspect = u.source.x / max(u.source.y, 1.0);
+    var uv = in.uv;
+    if viewport_aspect > source_aspect {
+        let width = source_aspect / viewport_aspect;
+        if abs(uv.x - 0.5) > width * 0.5 { return vec4<f32>(0.0); }
+        uv.x = (uv.x - 0.5) / width + 0.5;
+    } else {
+        let height = viewport_aspect / source_aspect;
+        if abs(uv.y - 0.5) > height * 0.5 { return vec4<f32>(0.0); }
+        uv.y = (uv.y - 0.5) / height + 0.5;
+    }
+    return textureSample(frame, frame_sampler, uv);
+}
+"#;
+
+#[derive(Debug, Clone)]
+struct Program {
+    path: PathBuf,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug)]
+struct State {
+    ticket: u64,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self {
+            ticket: NEXT.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Primitive {
+    ticket: u64,
+    path: PathBuf,
+    width: u32,
+    height: u32,
+}
+
+struct TextureState {
+    texture: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
+    uniform: wgpu::Buffer,
+    stamp: Option<(SystemTime, u64)>,
+    generation: u64,
+}
+
+struct Pipeline {
+    render_pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    textures: BTreeMap<u64, TextureState>,
+    generation: u64,
+}
+
+impl Pipeline {
+    fn texture_state(&self, device: &wgpu::Device, width: u32, height: u32) -> TextureState {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Canvas retained video frame"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Canvas retained video uniforms"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Canvas retained video bind group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform.as_entire_binding(),
+                },
+            ],
+        });
+        TextureState {
+            texture,
+            bind_group,
+            uniform,
+            stamp: None,
+            generation: self.generation,
+        }
+    }
+}
+
+impl<Message> shader::Program<Message> for Program {
+    type State = State;
+    type Primitive = Primitive;
+
+    fn update(
+        &self,
+        _state: &mut Self::State,
+        event: &iced::Event,
+        _bounds: Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Option<iced::widget::Action<Message>> {
+        // A file changing does not itself wake iced. Let the presentation
+        // primitive own its redraw cadence, just like the animated background,
+        // without mutating the workspace revision on every video frame.
+        match event {
+            iced::Event::Window(iced::window::Event::RedrawRequested(now)) => Some(
+                iced::widget::Action::request_redraw_at(*now + REDRAW_INTERVAL),
+            ),
+            _ => None,
+        }
+    }
+
+    fn draw(
+        &self,
+        state: &Self::State,
+        _cursor: iced::mouse::Cursor,
+        _bounds: Rectangle,
+    ) -> Self::Primitive {
+        Primitive {
+            ticket: state.ticket,
+            path: self.path.clone(),
+            width: self.width,
+            height: self.height,
+        }
+    }
+}
+
+impl shader::Pipeline for Pipeline {
+    fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Canvas retained video layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(16),
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Canvas retained video pipeline layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Canvas retained video shader"),
+            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+        });
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Canvas retained video pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Canvas retained video linear sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            min_filter: wgpu::FilterMode::Linear,
+            mag_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        Self {
+            render_pipeline,
+            bind_group_layout,
+            sampler,
+            textures: BTreeMap::new(),
+            generation: 0,
+        }
+    }
+
+    fn trim(&mut self) {
+        self.generation = self.generation.saturating_add(1);
+        let oldest = self.generation.saturating_sub(2);
+        self.textures.retain(|_, value| value.generation >= oldest);
+    }
+}
+
+impl shader::Primitive for Primitive {
+    type Pipeline = Pipeline;
+
+    fn prepare(
+        &self,
+        pipeline: &mut Self::Pipeline,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        bounds: &Rectangle,
+        _viewport: &shader::Viewport,
+    ) {
+        if !pipeline.textures.contains_key(&self.ticket) {
+            let state = pipeline.texture_state(device, self.width, self.height);
+            pipeline.textures.insert(self.ticket, state);
+        }
+        let state = pipeline
+            .textures
+            .get_mut(&self.ticket)
+            .expect("retained video texture was inserted");
+        state.generation = pipeline.generation;
+        let uniforms = [
+            bounds.width,
+            bounds.height,
+            self.width as f32,
+            self.height as f32,
+        ];
+        queue.write_buffer(&state.uniform, 0, unsafe {
+            std::slice::from_raw_parts(uniforms.as_ptr().cast::<u8>(), 16)
+        });
+
+        let Ok(metadata) = std::fs::metadata(&self.path) else {
+            return;
+        };
+        let stamp = (metadata.modified().unwrap_or(UNIX_EPOCH), metadata.len());
+        if state.stamp == Some(stamp) {
+            return;
+        }
+        let expected = self.width as usize * self.height as usize * 4;
+        let Ok(bytes) = std::fs::read(&self.path) else {
+            return;
+        };
+        if bytes.len() != expected {
+            return;
+        }
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &state.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(self.width * 4),
+                rows_per_image: Some(self.height),
+            },
+            wgpu::Extent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        state.stamp = Some(stamp);
+    }
+
+    fn draw(&self, pipeline: &Self::Pipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
+        let Some(state) = pipeline.textures.get(&self.ticket) else {
+            return true;
+        };
+        render_pass.set_pipeline(&pipeline.render_pipeline);
+        render_pass.set_bind_group(0, &state.bind_group, &[]);
+        render_pass.draw(0..3, 0..1);
+        true
+    }
+}
+
+pub fn view<'a, Message: 'a>(path: PathBuf, width: u32, height: u32) -> Element<'a, Message> {
+    Shader::new(Program {
+        path,
+        width,
+        height,
+    })
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}

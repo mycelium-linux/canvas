@@ -17,9 +17,78 @@
 use canvas_core::stream_socket_path;
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     os::unix::net::UnixDatagram,
     time::{SystemTime, UNIX_EPOCH},
 };
+
+/// Minimal Prometheus text projection shared by owner-side Canvas connectors.
+/// It intentionally keeps only decoded samples; connectors decide which labels
+/// are safe to expose in their bounded Canvas contracts.
+#[derive(Default)]
+pub struct PrometheusSamples(pub Vec<PrometheusSample>);
+
+#[derive(Default)]
+pub struct PrometheusSample {
+    pub name: String,
+    pub labels: BTreeMap<String, String>,
+    pub value: f64,
+}
+
+impl PrometheusSamples {
+    pub fn parse(text: &str) -> Self {
+        Self(text.lines().filter_map(parse_prometheus_sample).collect())
+    }
+
+    pub fn scalar(&self, name: &str) -> Option<f64> {
+        self.0
+            .iter()
+            .find(|sample| sample.name == name && sample.labels.is_empty())
+            .map(|sample| sample.value)
+    }
+
+    pub fn labeled(&self, name: &str, key: &str, value: &str) -> Option<f64> {
+        self.0
+            .iter()
+            .find(|sample| {
+                sample.name == name && sample.labels.get(key).is_some_and(|label| label == value)
+            })
+            .map(|sample| sample.value)
+    }
+
+    pub fn named(&self, name: &str) -> impl Iterator<Item = &PrometheusSample> {
+        self.0.iter().filter(move |sample| sample.name == name)
+    }
+
+    pub fn sum(&self, name: &str) -> f64 {
+        self.named(name).map(|sample| sample.value).sum()
+    }
+}
+
+fn parse_prometheus_sample(line: &str) -> Option<PrometheusSample> {
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let (metric, value) = line.rsplit_once(char::is_whitespace)?;
+    let value = value.parse().ok()?;
+    let (name, labels) = metric
+        .split_once('{')
+        .map_or((metric, ""), |(name, labels)| {
+            (name, labels.trim_end_matches('}'))
+        });
+    let labels = labels
+        .split(',')
+        .filter_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            Some((key.to_string(), value.trim_matches('"').to_string()))
+        })
+        .collect();
+    Some(PrometheusSample {
+        name: name.into(),
+        labels,
+        value,
+    })
+}
 
 pub mod comics;
 

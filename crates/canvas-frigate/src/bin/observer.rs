@@ -14,6 +14,7 @@ struct Config {
     cameras: Vec<String>,
     poll_ms: u64,
     ttl_ms: u64,
+    source_max_age_ms: u64,
 }
 
 #[derive(Deserialize)]
@@ -21,6 +22,8 @@ struct Event {
     id: String,
     camera: String,
     label: String,
+    start_time: f64,
+    end_time: Option<f64>,
     data: EventData,
 }
 
@@ -28,6 +31,8 @@ struct Event {
 struct EventData {
     r#box: [f32; 4],
     score: f32,
+    #[serde(default)]
+    path_data: Vec<([f32; 2], f64)>,
 }
 
 fn now_ms() -> u64 {
@@ -35,6 +40,16 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn source_observed_at_ms(event: &Event) -> u64 {
+    let seconds = event
+        .data
+        .path_data
+        .last()
+        .map(|(_, observed_at)| *observed_at)
+        .unwrap_or(event.start_time);
+    (seconds.max(0.0) * 1_000.0) as u64
 }
 
 fn main() -> Result<()> {
@@ -57,6 +72,10 @@ fn main() -> Result<()> {
         (500..=30_000).contains(&config.ttl_ms),
         "ttl_ms must be 500..=30000"
     );
+    ensure!(
+        (500..=30_000).contains(&config.source_max_age_ms),
+        "source_max_age_ms must be 500..=30000"
+    );
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(3))
         .build()?;
@@ -76,10 +95,20 @@ fn main() -> Result<()> {
             .iter()
             .map(|camera| (camera.as_str(), Vec::new()))
             .collect();
+        let observed_at_unix_ms = now_ms();
         for event in events {
             let Some(detections) = grouped.get_mut(event.camera.as_str()) else {
                 continue;
             };
+            // Frigate can retain an in-progress event after its last box
+            // update. Do not mint a fresh Unibus TTL from a stale source
+            // observation; otherwise a ghost box can renew forever.
+            if event.end_time.is_some()
+                || observed_at_unix_ms.saturating_sub(source_observed_at_ms(&event))
+                    > config.source_max_age_ms
+            {
+                continue;
+            }
             let [x, y, width, height] = event.data.r#box;
             detections.push(Detection {
                 tracking_id: event.id,
@@ -93,7 +122,6 @@ fn main() -> Result<()> {
                 },
             });
         }
-        let observed_at_unix_ms = now_ms();
         for (camera_id, detections) in grouped {
             let value = CameraDetections {
                 schema_version: 1,
@@ -110,5 +138,27 @@ fn main() -> Result<()> {
             bus.send(&envelope, &[])?;
         }
         std::thread::sleep(Duration::from_millis(config.poll_ms));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_age_uses_latest_path_observation() {
+        let event = Event {
+            id: "track".into(),
+            camera: "cat".into(),
+            label: "person".into(),
+            start_time: 1.0,
+            end_time: None,
+            data: EventData {
+                r#box: [0.0, 0.0, 1.0, 1.0],
+                score: 0.9,
+                path_data: vec![([0.5, 0.5], 2.25)],
+            },
+        };
+        assert_eq!(source_observed_at_ms(&event), 2_250);
     }
 }

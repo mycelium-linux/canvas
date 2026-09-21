@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.fpl.hyperspace-tv</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/ajmwagar/.cache/hyperspace-target/release/examples/stream</string>
+    <string>scenes/vortex.toml</string>
+    <string>tcp://127.0.0.1:55004</string>
+    <string>720</string>
+    <string>405</string>
+    <string>24</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/ajmwagar/src/pedalkernel/hyperspace</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>RUST_LOG</key><string>info</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/ajmwagar/Library/Logs/hyperspace-tv.log</string>
+  <key>StandardErrorPath</key><string>/Users/ajmwagar/Library/Logs/hyperspace-tv.log</string>
+</dict>
+</plist>

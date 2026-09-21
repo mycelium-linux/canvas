@@ -1,0 +1,16 @@
+[Unit]
+Description=Publish the post-mix playback tap over Unibus
+After=sound.target jarvis-audio-sync.service unibus-router.service
+Requires=jarvis-audio-sync.service unibus-router.service
+
+[Service]
+Type=simple
+User=ajm
+Group=audio
+Environment=HOME=/home/ajm
+ExecStart=/usr/local/bin/unibus-audio-tap /home/ajm/.config/unibus/audio-tap.json
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

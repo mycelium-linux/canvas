@@ -7,7 +7,7 @@ use canvas_core::{
 use canvas_mac::reservation::{self, Desktop};
 use canvas_mac::workspace::Bindings;
 use canvas_mac::{Rect, RemoteAction, Window, WindowInventory};
-use iced::widget::{Column, button, column, container, row, scrollable, text, text_input};
+use iced::widget::{button, column, container, row, scrollable, text, text_input, Column};
 use iced::{Color, Element, Length, Task, Theme};
 use std::sync::{Arc, Mutex};
 use std::{collections::BTreeMap, path::PathBuf, process::Command};
@@ -182,7 +182,7 @@ impl App {
                 repeat: false,
                 ..
             }) => {
-                use iced::keyboard::{Key, key::Named};
+                use iced::keyboard::{key::Named, Key};
                 match key {
                     Key::Named(Named::Escape) => return self.update(Message::TakeControl),
                     Key::Named(Named::ArrowUp) if !self.diagnostics => {

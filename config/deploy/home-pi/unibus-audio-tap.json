@@ -1,0 +1,19 @@
+{
+  "bus": {
+    "installation_id": "home",
+    "producer_id": "home-pi-audio-tap",
+    "hub_endpoint": "192.168.2.3:18790",
+    "token_file": "/home/ajm/.config/unibus/tokens/home-pi-audio-tap.token",
+    "zones": ["living-room"],
+    "capabilities": ["audio.playback.source"],
+    "screen_anchors": [],
+    "schema_version": 1
+  },
+  "gst_launch": "/usr/bin/gst-launch-1.0",
+  "capture_device": "visualizer_capture",
+  "stream_id": "home-playback",
+  "sample_rate_hz": 48000,
+  "channels": 2,
+  "chunk_ms": 10,
+  "destination": "living-room"
+}

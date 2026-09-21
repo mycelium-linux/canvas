@@ -71,6 +71,27 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
                 "caps=video/mpegts,systemstream=(boolean)true,packetsize=(int)188".into(),
                 "!".into(),
                 "tsdemux".into(),
+                "latency=0".into(),
+                "!".into(),
+                "h264parse".into(),
+            ]);
+        }
+        VideoTransport::TcpMpegTs => {
+            let endpoint = stream
+                .endpoint
+                .strip_prefix("tcp://")
+                .context("invalid TCP endpoint")?;
+            let (host, port) = endpoint
+                .rsplit_once(':')
+                .context("TCP endpoint must include a port")?;
+            let port: u16 = port.parse().context("invalid TCP port")?;
+            argv.extend([
+                "tcpserversrc".into(),
+                format!("host={host}"),
+                format!("port={port}"),
+                "!".into(),
+                "tsdemux".into(),
+                "latency=0".into(),
                 "!".into(),
                 "h264parse".into(),
             ]);
@@ -233,6 +254,7 @@ fn validate_endpoint(stream: &CameraStream) -> Result<()> {
         VideoTransport::Rtsp => "rtsp://",
         VideoTransport::Srt => "srt://",
         VideoTransport::UdpMpegTs => "udp://",
+        VideoTransport::TcpMpegTs => "tcp://",
     };
     ensure!(
         stream.endpoint.starts_with(expected),
@@ -377,6 +399,7 @@ mod tests {
             (VideoTransport::Rtsp, "rtsp://nvr/door"),
             (VideoTransport::Srt, "srt://nvr:9000"),
             (VideoTransport::UdpMpegTs, "udp://239.0.0.1:5000"),
+            (VideoTransport::TcpMpegTs, "tcp://127.0.0.1:5004"),
         ] {
             let value = stream(transport, endpoint);
             let args = ffmpeg_args(
@@ -433,6 +456,19 @@ mod tests {
         )
         .unwrap();
         assert!(rtsp.argv.iter().any(|arg| arg == "rtph264depay"));
+
+        let tcp = gstreamer_raw_plan(
+            &stream(VideoTransport::TcpMpegTs, "tcp://127.0.0.1:5004"),
+            DecodePolicy {
+                max_height: 360,
+                max_fps: 24.0,
+                decoder: HardwareDecoder::V4l2M2m,
+            },
+        )
+        .unwrap();
+        assert!(tcp.argv.iter().any(|arg| arg == "tcpserversrc"));
+        assert!(tcp.argv.iter().any(|arg| arg == "host=127.0.0.1"));
+        assert!(tcp.argv.iter().any(|arg| arg == "port=5004"));
         assert!(
             rtsp.argv
                 .iter()

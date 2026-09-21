@@ -1,0 +1,18 @@
+[package]
+name = "canvas-bifrost"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Privacy-preserving Canvas producer for Bifrost operational metrics"
+
+[dependencies]
+canvas-feeds = { path = "../canvas-feeds" }
+serde_json = { workspace = true }
+
+[lib]
+name = "canvas_bifrost"
+path = "src/lib.rs"
+
+[[bin]]
+name = "canvas-bifrost"
+path = "src/main.rs"

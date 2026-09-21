@@ -18,6 +18,22 @@ info = "#9aeb78"
 border = "#254d28"
 border_strong = "#4da44d"
 
+[charts]
+categorical = ["#74ff57", "#b8ff5c", "#4ee8a1", "#d6d957", "#63c85b", "#f2f7a1"]
+
+[chrome]
+titlebar_height = 32.0
+control_style = "segments"
+title_alignment = "left"
+border_width = 2.0
+border_radius = 7.0
+shadow_blur = 12.0
+shadow_offset = 3.0
+shadow_opacity = 0.32
+header_opacity = 0.92
+uppercase_titles = true
+focus_edge = "border"
+
 [effects]
 glow = 0.24
 scanlines = 0.34

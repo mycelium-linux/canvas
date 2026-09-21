@@ -5,7 +5,7 @@ use iced::widget::{
     button, column, container, image, mouse_area, row, scrollable, text, text_editor, text_input,
 };
 use iced::{ContentFit, Element, Length, Point, Task};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Action {
@@ -534,19 +534,17 @@ impl Panel {
     pub fn view(&self) -> Element<'_, Message> {
         let idle = !self.busy;
         let controlled = self.controller.as_deref() == Some("agent");
-        let mut content = column![
-            row![
-                text("Project conversation").size(22),
-                button(if self.session_id.is_some() {
-                    "Recall project"
-                } else {
-                    "Open project session"
-                })
-                .on_press_maybe(idle.then_some(Message::Run(Action::Recall))),
-                button("Refresh").on_press_maybe(idle.then_some(Message::Run(Action::Status)))
-            ]
-            .spacing(8),
+        let mut content = column![row![
+            text("Project conversation").size(22),
+            button(if self.session_id.is_some() {
+                "Recall project"
+            } else {
+                "Open project session"
+            })
+            .on_press_maybe(idle.then_some(Message::Run(Action::Recall))),
+            button("Refresh").on_press_maybe(idle.then_some(Message::Run(Action::Status)))
         ]
+        .spacing(8),]
         .spacing(10);
         if let Some(state) = self.project_context["state"].as_str() {
             let detail = if state == "ready" {

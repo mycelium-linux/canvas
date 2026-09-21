@@ -13,5 +13,6 @@
   "destination": "living-room",
   "cameras": ["cat", "door"],
   "poll_ms": 500,
-  "ttl_ms": 2000
+  "ttl_ms": 2000,
+  "source_max_age_ms": 2000
 }

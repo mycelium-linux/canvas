@@ -20,12 +20,13 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     env,
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::Path,
-    process::{Command, ExitCode, Stdio},
+    process::{Child, ChildStdin, ChildStdout, Command, ExitCode, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
     sync::{Arc, Mutex},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const ARG_ERR: &str = "usage: canvas-alfalfa [--url URL] [--bridge-bin PATH] [--alfalfa-port PORT] [--blitz-bin PATH --blitz-template PATH --blitz-workspaces id,id --blitz-width PX --blitz-height PX --blitz-scale N] [--every SECS] [--marbles N] [--prs N] [--pulses id,id,...] [--runtime-dir PATH]";
@@ -266,8 +267,59 @@ fn fetch_dashboards(bridge: &str, port: u16) -> Result<Vec<Value>, String> {
     }
 }
 
+struct BlitzRenderer {
+    binary: String,
+    child: Option<BlitzChild>,
+}
+
+struct BlitzChild {
+    process: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl BlitzRenderer {
+    fn new(binary: String) -> Self {
+        Self {
+            binary,
+            child: None,
+        }
+    }
+
+    fn child(&mut self) -> Result<&mut BlitzChild, String> {
+        if let Some(child) = self.child.as_mut()
+            && child
+                .process
+                .try_wait()
+                .map_err(|error| format!("inspect Blitz renderer: {error}"))?
+                .is_some()
+        {
+            self.child = None;
+        }
+        if self.child.is_none() {
+            let mut process = Command::new(&self.binary)
+                .arg("dashboard-server")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .map_err(|error| format!("start persistent Blitz renderer: {error}"))?;
+            let stdin = process.stdin.take().ok_or("Blitz stdin unavailable")?;
+            let stdout = process.stdout.take().ok_or("Blitz stdout unavailable")?;
+            self.child = Some(BlitzChild {
+                process,
+                stdin,
+                stdout: BufReader::new(stdout),
+            });
+        }
+        self.child
+            .as_mut()
+            .ok_or("Blitz renderer unavailable".into())
+    }
+}
+
 fn render_blitz(
-    binary: &str,
+    renderer: &Arc<Mutex<BlitzRenderer>>,
     template: &str,
     workspace_id: &str,
     payload: &Value,
@@ -275,37 +327,49 @@ fn render_blitz(
     height: u32,
     scale: f32,
 ) -> Result<(), String> {
+    let started = Instant::now();
     let source_id = blitz_source_id(workspace_id);
-    let mut child = Command::new(binary)
-        .args([
-            "dashboard",
-            template,
-            &source_id,
-            &width.to_string(),
-            &height.to_string(),
-            &scale.to_string(),
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("start Blitz renderer: {error}"))?;
-    let bytes = serde_json::to_vec(payload).map_err(|error| error.to_string())?;
+    let request = json!({
+        "template": template,
+        "source_id": source_id,
+        "width": width,
+        "height": height,
+        "scale": scale,
+        "payload": payload,
+    });
+    let mut renderer = renderer
+        .lock()
+        .map_err(|_| "Blitz renderer lock poisoned".to_string())?;
+    let child = renderer.child()?;
+    serde_json::to_writer(&mut child.stdin, &request)
+        .map_err(|error| format!("write Blitz request: {error}"))?;
     child
         .stdin
-        .take()
-        .ok_or("Blitz stdin unavailable")?
-        .write_all(&bytes)
-        .map_err(|error| format!("write Blitz snapshot: {error}"))?;
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!("wait for Blitz renderer: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "Blitz renderer failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        .write_all(b"\n")
+        .and_then(|()| child.stdin.flush())
+        .map_err(|error| format!("flush Blitz request: {error}"))?;
+    let mut response = String::new();
+    child
+        .stdout
+        .read_line(&mut response)
+        .map_err(|error| format!("read Blitz response: {error}"))?;
+    let response: Value = serde_json::from_str(&response)
+        .map_err(|error| format!("parse Blitz response: {error}"))?;
+    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err("Blitz renderer rejected the frame".into());
     }
+    eprintln!(
+        "canvas-alfalfa: {workspace_id} HTML rendered at {scale:.1}x in {}ms (engine {}ms, {})",
+        started.elapsed().as_millis(),
+        response
+            .get("elapsed_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        response
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown"),
+    );
     Ok(())
 }
 
@@ -357,6 +421,13 @@ fn record_blitz_cache(root: &Path, workspace_id: &str, signature: &str) -> Resul
         .map_err(|error| format!("persist {workspace_id} Blitz cache: {error}"))
 }
 
+fn active_project(root: &Path) -> Option<String> {
+    std::fs::read_to_string(root.join("state/active-project"))
+        .ok()
+        .map(|id| id.trim().to_string())
+        .filter(|id| canvas_core::is_safe_frame_id(id))
+}
+
 fn attach_canvas_theme(workspace_id: &str, workspace: &mut Value) -> Result<(), String> {
     let root = canvas_core::runtime_root().ok_or("Canvas runtime root unavailable")?;
     attach_canvas_theme_from(&root, workspace_id, workspace)
@@ -367,6 +438,12 @@ fn attach_canvas_theme_from(
     workspace_id: &str,
     workspace: &mut Value,
 ) -> Result<(), String> {
+    let (theme, _) = canvas_theme_snapshot(root, workspace_id)?;
+    workspace["theme"] = theme;
+    Ok(())
+}
+
+fn canvas_theme_snapshot(root: &Path, workspace_id: &str) -> Result<(Value, String), String> {
     if !canvas_core::is_safe_frame_id(workspace_id) {
         return Err("unsafe workspace id for theme snapshot".into());
     }
@@ -380,9 +457,12 @@ fn attach_canvas_theme_from(
     if bytes.len() as u64 > MAX_THEME_BYTES {
         return Err("Canvas theme snapshot exceeds 64 KiB".into());
     }
-    workspace["theme"] =
+    let theme =
         serde_json::from_slice(&bytes).map_err(|error| format!("parse Canvas theme: {error}"))?;
-    Ok(())
+    let mut digest = Sha256::new();
+    digest.update(b"canvas.theme.snapshot.v1\0");
+    digest.update(&bytes);
+    Ok((theme, format!("{:x}", digest.finalize())))
 }
 
 fn fetch_repos(http: &dyn Http, url: &str) -> Result<Vec<Value>, String> {
@@ -454,82 +534,99 @@ fn main() -> ExitCode {
     });
     let http = ReqwestHttp::default();
     let mut sequence: u64 = now_ms();
-    let mut rendered_dashboards: BTreeMap<String, String> = BTreeMap::new();
     let latest_blitz_payloads: Arc<Mutex<BTreeMap<String, Value>>> = Default::default();
-    if let Some((binary, template)) = blitz.clone() {
+    let render_generation = Arc::new(AtomicU64::new(0));
+    let blitz_renderer = blitz
+        .as_ref()
+        .map(|(binary, _)| Arc::new(Mutex::new(BlitzRenderer::new(binary.clone()))));
+    if let (Some((_, template)), Some(renderer)) = (blitz.clone(), blitz_renderer.clone()) {
         let payloads = Arc::clone(&latest_blitz_payloads);
+        let generation = Arc::clone(&render_generation);
         let allowed = blitz_workspaces.clone();
         thread::spawn(move || {
-            let mut seen = file_signature(&template).ok();
+            // Force one active render after the first payload arrives. Besides
+            // validating the persisted cache, this pays Blitz/Stylo's lazy
+            // font and engine initialization before the human edits CSS.
+            let mut seen_template = None;
+            let mut seen_active = None;
+            let mut seen_theme = None;
+            let mut seen_generation = 0;
             loop {
-                thread::sleep(Duration::from_millis(250));
-                let Ok(signature) = file_signature(&template) else {
+                thread::sleep(Duration::from_millis(16));
+                let Ok(template_signature) = file_signature(&template) else {
                     continue;
                 };
-                if seen.as_ref() == Some(&signature) {
+                let root = canvas_core::runtime_root();
+                let active = root.as_deref().and_then(active_project);
+                let current_generation = generation.load(Ordering::Acquire);
+                let theme_snapshot = root
+                    .as_deref()
+                    .zip(active.as_deref())
+                    .and_then(|(root, id)| canvas_theme_snapshot(root, id).ok());
+                let theme_signature = theme_snapshot
+                    .as_ref()
+                    .map(|(_, signature)| signature.clone());
+                if seen_template.as_ref() == Some(&template_signature)
+                    && seen_active == active
+                    && seen_theme == theme_signature
+                    && seen_generation == current_generation
+                {
                     continue;
                 }
-                seen = Some(signature);
-                let snapshot = payloads
-                    .lock()
-                    .map(|payloads| payloads.clone())
-                    .unwrap_or_else(|_| {
-                        eprintln!("canvas-alfalfa: Blitz live-reload payload cache poisoned");
-                        BTreeMap::new()
-                    });
-                let active = canvas_core::runtime_root()
-                    .and_then(|root| {
-                        std::fs::read_to_string(root.join("state/active-project")).ok()
-                    })
-                    .map(|id| id.trim().to_string());
-                let mut snapshot = snapshot.into_iter().collect::<Vec<_>>();
-                snapshot.sort_by_key(|(id, _)| active.as_ref().is_none_or(|active| active != id));
-                if blitz_scale > 1.0
-                    && let Some((id, payload)) = snapshot.first()
-                    && (allowed.is_empty() || allowed.iter().any(|wanted| wanted == id))
-                    && let Err(error) = render_blitz(
-                        &binary,
-                        &template,
-                        id,
-                        payload,
-                        blitz_width,
-                        blitz_height,
-                        1.0,
-                    )
-                {
-                    eprintln!("canvas-alfalfa: {id} HTML preview reload failed: {error}");
+                let Some(id) = active else { continue };
+                if !allowed.is_empty() && !allowed.iter().any(|wanted| wanted == &id) {
+                    continue;
                 }
-                for (id, payload) in snapshot {
-                    if !allowed.is_empty() && !allowed.iter().any(|wanted| wanted == &id) {
-                        continue;
+                let payload = payloads
+                    .lock()
+                    .ok()
+                    .and_then(|payloads| payloads.get(&id).cloned());
+                let Some(mut payload) = payload else { continue };
+                if let Some((theme, _)) = theme_snapshot {
+                    payload["theme"] = theme;
+                }
+                let warming = seen_template.is_none();
+                let Ok(signature) =
+                    blitz_signature(&template, &payload, blitz_width, blitz_height, blitz_scale)
+                else {
+                    continue;
+                };
+                if root
+                    .as_ref()
+                    .is_some_and(|root| blitz_cache_hit(root, &id, &signature))
+                    && !warming
+                {
+                    seen_template = Some(template_signature);
+                    seen_active = Some(id);
+                    seen_theme = theme_signature;
+                    seen_generation = current_generation;
+                    continue;
+                }
+                eprintln!("canvas-alfalfa: {id} HTML reload scheduled");
+                match render_blitz(
+                    &renderer,
+                    &template,
+                    &id,
+                    &payload,
+                    blitz_width,
+                    blitz_height,
+                    blitz_scale,
+                ) {
+                    Ok(()) => {
+                        // Consume all inputs together only after a successful
+                        // render. A failed render remains eligible for retry.
+                        seen_template = Some(template_signature);
+                        seen_active = Some(id.clone());
+                        seen_theme = theme_signature;
+                        seen_generation = current_generation;
+                        if let Some(root) = root
+                            && let Err(error) = record_blitz_cache(&root, &id, &signature)
+                        {
+                            eprintln!("canvas-alfalfa: {error}");
+                        }
                     }
-                    match render_blitz(
-                        &binary,
-                        &template,
-                        &id,
-                        &payload,
-                        blitz_width,
-                        blitz_height,
-                        blitz_scale,
-                    ) {
-                        Ok(()) => {
-                            if let (Some(root), Ok(key)) = (
-                                canvas_core::runtime_root(),
-                                blitz_signature(
-                                    &template,
-                                    &payload,
-                                    blitz_width,
-                                    blitz_height,
-                                    blitz_scale,
-                                ),
-                            ) && let Err(error) = record_blitz_cache(&root, &id, &key)
-                            {
-                                eprintln!("canvas-alfalfa: {error}");
-                            }
-                        }
-                        Err(error) => {
-                            eprintln!("canvas-alfalfa: {id} HTML live reload failed: {error}")
-                        }
+                    Err(error) => {
+                        eprintln!("canvas-alfalfa: {id} HTML live reload failed: {error}")
                     }
                 }
             }
@@ -541,6 +638,9 @@ fn main() -> ExitCode {
         sequence += 1;
         match fetch_dashboards(&bridge, alfalfa_port) {
             Ok(workspaces) => {
+                let active = canvas_core::runtime_root()
+                    .as_deref()
+                    .and_then(active_project);
                 for mut workspace in workspaces {
                     let Some(id) = workspace.get("workspace_id").and_then(Value::as_str) else {
                         eprintln!("canvas-alfalfa: dashboard omitted workspace_id");
@@ -553,60 +653,14 @@ fn main() -> ExitCode {
                     if let Ok(mut payloads) = latest_blitz_payloads.lock() {
                         payloads.insert(id.clone(), workspace.clone());
                     }
+                    if active.as_deref() == Some(id.as_str()) {
+                        render_generation.fetch_add(1, Ordering::Release);
+                    }
                     let event =
                         dashboard_envelope(&id, dashboard_stream_payload(&workspace), sequence);
                     let (fitted, _) = fit(event, MAX_DATAGRAM.saturating_sub(ENVELOPE_OVERHEAD));
                     if let Err(error) = send_raw(&fitted) {
                         eprintln!("canvas-alfalfa: {id} dashboard send failed: {error}");
-                    }
-                    if let Some((binary, template)) = &blitz
-                        && (blitz_workspaces.is_empty()
-                            || blitz_workspaces.iter().any(|wanted| wanted == &id))
-                    {
-                        match blitz_signature(
-                            template,
-                            &workspace,
-                            blitz_width,
-                            blitz_height,
-                            blitz_scale,
-                        ) {
-                            Ok(signature) => {
-                                let root = canvas_core::runtime_root();
-                                let cached = rendered_dashboards.get(&id) == Some(&signature)
-                                    || root
-                                        .as_ref()
-                                        .is_some_and(|root| blitz_cache_hit(root, &id, &signature));
-                                if cached {
-                                    rendered_dashboards.insert(id, signature);
-                                } else {
-                                    match render_blitz(
-                                        binary,
-                                        template,
-                                        &id,
-                                        &workspace,
-                                        blitz_width,
-                                        blitz_height,
-                                        blitz_scale,
-                                    ) {
-                                        Ok(()) => {
-                                            if let Some(root) = &root
-                                                && let Err(error) =
-                                                    record_blitz_cache(root, &id, &signature)
-                                            {
-                                                eprintln!("canvas-alfalfa: {error}");
-                                            }
-                                            rendered_dashboards.insert(id, signature);
-                                        }
-                                        Err(error) => eprintln!(
-                                            "canvas-alfalfa: {id} HTML render failed: {error}"
-                                        ),
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                eprintln!("canvas-alfalfa: {id} cache key failed: {error}")
-                            }
-                        }
                     }
                 }
             }
@@ -686,6 +740,30 @@ mod tests {
 
         assert_eq!(workspace["theme"]["project_id"], "ohm");
         assert_eq!(workspace["theme"]["palette"]["primary"], "#9aafff");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn theme_snapshot_signature_changes_with_theme_content() {
+        let root = std::env::temp_dir().join(format!(
+            "canvas-alfalfa-theme-signature-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("themes")).unwrap();
+        let path = root.join("themes/ohm.json");
+        std::fs::write(&path, br##"{"palette":{"primary":"#00ff00"}}"##).unwrap();
+        let (first, first_signature) = canvas_theme_snapshot(&root, "ohm").unwrap();
+
+        std::fs::write(&path, br##"{"palette":{"primary":"#ff8000"}}"##).unwrap();
+        let (second, second_signature) = canvas_theme_snapshot(&root, "ohm").unwrap();
+
+        assert_eq!(first["palette"]["primary"], "#00ff00");
+        assert_eq!(second["palette"]["primary"], "#ff8000");
+        assert_ne!(first_signature, second_signature);
         std::fs::remove_dir_all(root).unwrap();
     }
 

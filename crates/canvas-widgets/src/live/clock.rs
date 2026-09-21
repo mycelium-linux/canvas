@@ -1,4 +1,4 @@
-use super::{CacheState, Key};
+use super::{CacheState, Key, quality::soft_round_stroke};
 use iced::mouse;
 use iced::widget::canvas::{self, Geometry, Path};
 use iced::{Color, Point, Rectangle, Renderer, Theme};
@@ -78,20 +78,7 @@ impl<Message> canvas::Program<Message> for AnalogClockProgram {
                     center.x + angle.cos() * radius * length,
                     center.y + angle.sin() * radius * length,
                 );
-                frame.stroke(
-                    &Path::line(center, end),
-                    canvas::Stroke::default()
-                        .with_width(width + 1.5)
-                        .with_line_cap(canvas::LineCap::Round)
-                        .with_color(Color { a: 0.18, ..color }),
-                );
-                frame.stroke(
-                    &Path::line(center, end),
-                    canvas::Stroke::default()
-                        .with_width(width)
-                        .with_line_cap(canvas::LineCap::Round)
-                        .with_color(color),
-                );
+                soft_round_stroke(frame, &Path::line(center, end), width, color);
             }
             frame.fill(&Path::circle(center, 4.0), self.accent);
         })

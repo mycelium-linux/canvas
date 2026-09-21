@@ -67,6 +67,7 @@ use unibus_media::{CameraDetections, Detection};
 mod fpl_mark;
 mod indicator;
 mod presence;
+mod retained_video;
 use ::canvas::screensaver;
 mod terminal;
 mod transition;
@@ -1265,7 +1266,6 @@ impl App {
                     })
                 {
                     self.last_clock_second = clock_second;
-                    self.bump();
                 }
                 let clock_millis = now_unix_ms();
                 if clock_millis.saturating_sub(self.last_clock_millis) >= 40
@@ -1285,7 +1285,6 @@ impl App {
                     })
                 {
                     self.last_clock_millis = clock_millis;
-                    self.bump();
                 }
                 let toggle_visibility = self
                     .visibility_hotkey
@@ -2345,7 +2344,11 @@ impl App {
                 // longer exist, so snapping back to it would restore geometry
                 // for a topology that is gone.
                 self.free_layout = None;
-                self.bump();
+                // A decoded video frame is presentation state, not a document
+                // mutation. Advancing the optimistic workspace revision here
+                // made saved layouts race 24 fps video and analog-clock ticks.
+                // The Tick update already schedules a redraw after this handle
+                // swap; reserve `runtime_revision` for control-plane changes.
                 self.status = format!(
                     "Re-fitted {view_id} to {} display(s).{}",
                     self.selected_display_ids.len().max(1),
@@ -4911,7 +4914,11 @@ impl App {
     fn widget_chrome(&self, surface_id: &str) -> Option<canvas_widgets::WidgetChrome> {
         let surface = self.decoded.get(surface_id)?;
         match &surface.source {
-            ContentSource::Widget { spec } => Some(spec.chrome),
+            ContentSource::Widget { spec } => Some(spec.effective_chrome()),
+            // Native video is already a complete visual frame. Treating it as
+            // an application window wastes pixels and makes a letterboxed
+            // 16:9 stream look like content inside a differently-shaped card.
+            ContentSource::LiveVideo { .. } => Some(canvas_widgets::WidgetChrome::Frameless),
             _ => None,
         }
     }
@@ -4934,9 +4941,13 @@ impl App {
             ))
         });
         for placement in placements {
-            if self.widget_chrome(&placement.surface_id)
-                == Some(canvas_widgets::WidgetChrome::DragOnly)
-            {
+            if matches!(
+                self.widget_chrome(&placement.surface_id),
+                Some(
+                    canvas_widgets::WidgetChrome::DragOnly
+                        | canvas_widgets::WidgetChrome::Frameless
+                )
+            ) {
                 continue;
             }
             let bounds = visible_surface_bounds(
@@ -5813,14 +5824,25 @@ impl App {
             | ContentSource::LiveImage { .. }
             | ContentSource::LiveVideo { .. } => {
                 let view = self.shared_views.get(&surface.snapshot.id);
-                let mut image = image_widget(surface.handle.clone())
-                    .content_fit(ContentFit::Contain)
-                    .width(width)
-                    .height(height);
-                if let Some(view) = view {
-                    image = image.crop(view_crop_pixels(view.viewport, surface.source_pixels));
-                }
-                let picture: Element<'_, Message> = image.into();
+                let picture: Element<'_, Message> = match &surface.source {
+                    ContentSource::LiveVideo {
+                        path,
+                        width: frame_width,
+                        height: frame_height,
+                        ..
+                    } => retained_video::view(path.clone(), *frame_width, *frame_height),
+                    _ => {
+                        let mut image = image_widget(surface.handle.clone())
+                            .content_fit(ContentFit::Contain)
+                            .width(width)
+                            .height(height);
+                        if let Some(view) = view {
+                            image =
+                                image.crop(view_crop_pixels(view.viewport, surface.source_pixels));
+                        }
+                        image.into()
+                    }
+                };
                 let mut layers = vec![picture];
                 if let ContentSource::LiveVideo { source_id, .. } = &surface.source
                     && let Some(detections) = self.camera_detections.get(source_id)
@@ -5867,7 +5889,9 @@ impl App {
         maximized: bool,
         widget_chrome: Option<canvas_widgets::WidgetChrome>,
     ) -> Element<'a, Message> {
-        if self.document.chrome.title == SurfaceTitleMode::Hidden {
+        if self.document.chrome.title == SurfaceTitleMode::Hidden
+            || widget_chrome == Some(canvas_widgets::WidgetChrome::Frameless)
+        {
             return container(space::horizontal())
                 .width(Length::Fill)
                 .height(Length::Fixed(0.0))
@@ -6150,21 +6174,16 @@ impl App {
         })
     }
 
-    fn has_sweeping_clock(&self) -> bool {
-        self.document.surfaces.iter().any(|surface| {
-            matches!(
-                surface.content,
-                SurfaceContent::Widget {
-                    spec: canvas_widgets::WidgetSpec {
-                        kind: canvas_widgets::WidgetKind::Clock {
-                            mode: canvas_widgets::ClockMode::Analog,
-                            ..
-                        },
-                        ..
-                    }
-                }
-            )
-        })
+    fn widget_animation_interval(&self) -> Option<Duration> {
+        self.document
+            .surfaces
+            .iter()
+            .filter_map(|surface| match &surface.content {
+                SurfaceContent::Widget { spec } => spec.animation_interval_ms(),
+                _ => None,
+            })
+            .min()
+            .map(Duration::from_millis)
     }
 
     fn refresh_camera_detections(&mut self) {
@@ -6238,6 +6257,8 @@ impl App {
         let scale_factor = self.scale_factor;
         let mut notes: Vec<String> = Vec::new();
         let mut tasks: Vec<Task<Message>> = Vec::new();
+        let mut immediate: Vec<(String, (std::time::SystemTime, u64), LiveFrameResult)> =
+            Vec::new();
         for (surface_id, surface) in self.decoded.iter_mut() {
             let (source_id, path, seen, raw_size) = match &mut surface.source {
                 ContentSource::LiveImage {
@@ -6245,13 +6266,10 @@ impl App {
                     path,
                     seen,
                 } => (source_id, path, seen, None),
-                ContentSource::LiveVideo {
-                    source_id,
-                    path,
-                    width,
-                    height,
-                    seen,
-                } => (source_id, path, seen, Some((*width, *height))),
+                // Raw video is uploaded by `retained_video` directly into a
+                // stable WGPU texture. It must never enter iced's immutable
+                // image-handle cache, which allocates a new texture per frame.
+                ContentSource::LiveVideo { .. } => continue,
                 _ => continue,
             };
             let metadata = match std::fs::metadata(&*path) {
@@ -6272,6 +6290,48 @@ impl App {
                 continue;
             }
             *seen = Some(stamp);
+            if let Some((width, height)) = raw_size {
+                // Raw video is already decoded and lives on tmpfs. Scheduling
+                // this tiny read through iced's async task executor held the
+                // surface behind one `live_pending` job for ~150 ms, reducing a
+                // measured 24 fps producer to 6-7 visible fps. Claim the latest
+                // atomic file and prepare its handle in this tick; JPEG/PDF
+                // decode remains asynchronous below.
+                let expected = usize::try_from(width)
+                    .ok()
+                    .and_then(|value| value.checked_mul(height as usize))
+                    .and_then(|pixels| pixels.checked_mul(4));
+                let result = expected
+                    .ok_or_else(|| format!("invalid raw frame dimensions {width}x{height}"))
+                    .and_then(|expected| {
+                        let bytes = std::fs::read(&*path)
+                            .map_err(|error| format!("read {}: {error}", path.display()))?;
+                        if bytes.len() != expected {
+                            return Err(format!(
+                                "raw frame length {} does not match {width}x{height} RGBA ({expected})",
+                                bytes.len()
+                            ));
+                        }
+                        let source_pixels = [width, height];
+                        let media_plan = plan_raster(
+                            format!("live:{source_id}"),
+                            PixelSize { width, height },
+                            viewport,
+                            scale_factor,
+                            MediaLimits::default(),
+                        )
+                        .map_err(|error| error.to_string())?;
+                        Ok(PreparedFrame {
+                            handle: iced::widget::image::Handle::from_rgba(width, height, bytes),
+                            source_pixels,
+                            media_plan,
+                            upload_pixels: source_pixels,
+                            sha256: None,
+                        })
+                    });
+                immediate.push((surface_key, stamp, result));
+                continue;
+            }
             self.live_pending.insert(surface_key.clone(), stamp);
             let path = path.clone();
             let source = format!("live:{source_id}");
@@ -6331,6 +6391,9 @@ impl App {
                     result: Box::new(result),
                 },
             ));
+        }
+        for (surface_id, stamp, result) in immediate {
+            self.apply_live_frame(&surface_id, stamp, result);
         }
         for note in notes {
             self.emit_event(note);
@@ -6503,12 +6566,17 @@ impl App {
                         {
                             return None;
                         }
-                        let control_height =
-                            if self.document.chrome.title == SurfaceTitleMode::Hidden {
-                                0.0
-                            } else {
-                                f64::from(window_chrome.titlebar_height)
-                            };
+                        let widget_chrome = self.widget_chrome(&placement.surface_id);
+                        let frameless =
+                            widget_chrome == Some(canvas_widgets::WidgetChrome::Frameless);
+                        let control_height = if self.document.chrome.title
+                            == SurfaceTitleMode::Hidden
+                            || frameless
+                        {
+                            0.0
+                        } else {
+                            f64::from(window_chrome.titlebar_height)
+                        };
                         let content = self.surface_widget(
                             surface,
                             Length::Fill,
@@ -6522,7 +6590,7 @@ impl App {
                             == Some(placement.surface_id.as_str());
                         let maximized = self.maximized_surfaces.contains(&placement.surface_id);
                         let chrome_hidden = self.document.chrome.title == SurfaceTitleMode::Hidden;
-                        let edge = if focused && !chrome_hidden {
+                        let edge = if focused && !chrome_hidden && !frameless {
                             if window_chrome.focus_edge == "left" {
                                 color(palette.danger)
                             } else {
@@ -6537,7 +6605,7 @@ impl App {
                                 &surface.snapshot.title,
                                 focused,
                                 maximized,
-                                self.widget_chrome(&placement.surface_id),
+                                widget_chrome,
                             ),
                             content,
                         ])
@@ -6546,7 +6614,9 @@ impl App {
                         .style(move |_| container::Style {
                             border: iced::Border {
                                 color: Color {
-                                    a: if chrome_hidden {
+                                    a: if frameless {
+                                        0.0
+                                    } else if chrome_hidden {
                                         0.52
                                     } else if focused {
                                         0.88
@@ -6555,7 +6625,9 @@ impl App {
                                     },
                                     ..edge
                                 },
-                                width: if chrome_hidden {
+                                width: if frameless {
+                                    0.0
+                                } else if chrome_hidden {
                                     1.0
                                 } else if focused {
                                     chrome_style.border_width + 0.5
@@ -6574,7 +6646,9 @@ impl App {
                                     0,
                                     0,
                                     0,
-                                    if chrome_hidden {
+                                    if frameless {
+                                        0.0
+                                    } else if chrome_hidden {
                                         0.10
                                     } else if focused {
                                         chrome_style.shadow_opacity
@@ -6584,13 +6658,17 @@ impl App {
                                 ),
                                 offset: iced::Vector::new(
                                     0.0,
-                                    if chrome_hidden {
+                                    if frameless {
+                                        0.0
+                                    } else if chrome_hidden {
                                         2.0
                                     } else {
                                         chrome_style.shadow_offset
                                     },
                                 ),
-                                blur_radius: if chrome_hidden {
+                                blur_radius: if frameless {
+                                    0.0
+                                } else if chrome_hidden {
                                     8.0
                                 } else {
                                     chrome_style.shadow_blur
@@ -6679,7 +6757,10 @@ impl App {
                                 .into();
                         }
                         let mut viewport = self.media_viewport();
-                        if self.document.chrome.title != SurfaceTitleMode::Hidden {
+                        let widget_chrome = self.widget_chrome(&surface.snapshot.id);
+                        if self.document.chrome.title != SurfaceTitleMode::Hidden
+                            && widget_chrome != Some(canvas_widgets::WidgetChrome::Frameless)
+                        {
                             viewport.height = (viewport.height
                                 - f64::from(window_chrome.titlebar_height))
                             .max(1.0);
@@ -6691,7 +6772,7 @@ impl App {
                                 &surface.snapshot.title,
                                 true,
                                 true,
-                                self.widget_chrome(&surface.snapshot.id),
+                                widget_chrome,
                             ),
                             content,
                         ])
@@ -9607,8 +9688,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             cadence
         };
-        let cadence = if app.has_sweeping_clock() {
-            cadence.min(Duration::from_millis(40))
+        let cadence = if let Some(widget_interval) = app.widget_animation_interval() {
+            cadence.min(widget_interval)
         } else {
             cadence
         };
@@ -12186,6 +12267,22 @@ mod tests {
         );
         assert_eq!(app.hit_test_surface_control(), None);
         assert_eq!(app.interaction_surfaces()[0].surface_id, "sample");
+
+        // Instruments choose frameless chrome when the spec leaves the choice
+        // on auto, while an explicit standard override remains available to
+        // Lua and JSON authors.
+        let clock = canvas_widgets::WidgetSpec::from_json(
+            br#"{"id":"clock","kind":"clock","mode":"analog"}"#,
+        )
+        .unwrap();
+        app.document.surfaces[0].content = SurfaceContent::Widget { spec: clock };
+        app.decoded.clear();
+        app.ensure_scene_decoded();
+        assert_eq!(
+            app.widget_chrome("sample"),
+            Some(canvas_widgets::WidgetChrome::Frameless)
+        );
+        assert_eq!(app.hit_test_surface_control(), None);
     }
 
     #[test]

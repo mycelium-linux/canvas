@@ -5,13 +5,17 @@
   "routes": [
     {"kind":"audio_level","target":{"mode":"any_holder","name":"canvas.audio_level"}},
     {"kind":"camera.stream.v1","target":{"mode":"any_holder","name":"canvas.media"}},
-    {"kind":"camera.detections.v1","target":{"mode":"any_holder","name":"canvas.media"}}
+    {"kind":"media.video_stream.v1","target":{"mode":"any_holder","name":"canvas.media"}},
+    {"kind":"camera.detections.v1","target":{"mode":"any_holder","name":"canvas.media"}},
+    {"kind":"input.gamepad_state","target":{"mode":"any_holder","name":"game.input"}}
   ],
   "nodes": [
     {"producer_id":"home-pi-audio","token_file":"/home/ajm/.config/unibus/tokens/home-pi-audio.token","zones":["living-room"],"capabilities":["audio_output","audio_input"]},
     {"producer_id":"home-pi-display","token_file":"/home/ajm/.config/canvas/home-pi-display.token","zones":["living-room"],"capabilities":["display","canvas.audio_level"],"screen_anchors":["screen-tv"]},
     {"producer_id":"home-pi-media","token_file":"/home/ajm/.config/canvas/home-pi-display.token","zones":["living-room"],"capabilities":["canvas.media"],"screen_anchors":["screen-tv"]},
     {"producer_id":"home-pi-media-announce","token_file":"/home/ajm/.config/canvas/home-pi-display.token","zones":["living-room"],"capabilities":["camera.stream.source"]},
-    {"producer_id":"home-pi-frigate-observer","token_file":"/home/ajm/.config/canvas/home-pi-display.token","zones":["living-room"],"capabilities":["camera.detections.source"]}
+    {"producer_id":"home-pi-frigate-observer","token_file":"/home/ajm/.config/canvas/home-pi-display.token","zones":["living-room"],"capabilities":["camera.detections.source"]},
+    {"producer_id":"mac-studio-game","token_file":"/home/ajm/.config/canvas/home-pi-display.token","zones":["living-room"],"capabilities":["game.input"]},
+    {"producer_id":"mac-studio-controller","token_file":"/home/ajm/.config/canvas/home-pi-display.token","zones":["living-room"],"capabilities":["input.gamepad.source"]}
   ]
 }

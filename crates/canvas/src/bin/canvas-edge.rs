@@ -11,6 +11,7 @@
 //!   the central learns what *executed*, not just what was delivered.
 
 use std::collections::{BTreeSet, HashMap};
+use std::os::unix::net::UnixDatagram;
 use std::thread;
 use std::time::Duration;
 
@@ -20,6 +21,7 @@ use canvas::control::{
     Command, ControlRequest, PresenceOccupant, PresenceSignal, PresenceSignalState,
     PresenceSnapshot,
 };
+use canvas::stream_binding::{STREAM_SCHEMA_VERSION, StreamEnvelope};
 use canvas_core::unibus::{Envelope, envelope, kinds, result_message};
 use serde::Deserialize;
 
@@ -210,6 +212,8 @@ fn ingest(
             }
             receipt(bus, envelope, &request_id, outcome.0, outcome.1)
         }
+        "audio_level" | "audio.level" => publish_audio_level(envelope),
+        "spatial_tracks" | "spatial.tracks" => publish_spatial_tracks(envelope),
         kinds::V1_REPLY | kinds::REPLY => Ok(()),
         canvas_core::unibus::kinds::NODE_STATE => {
             let online = envelope.message.body["online"].as_bool().unwrap_or(true);
@@ -240,6 +244,119 @@ fn ingest(
             Ok(())
         }
     }
+}
+
+/// Adapt the transport-neutral audio observation into the local Canvas stream
+/// contract. The audio edge owns measurement; Canvas owns presentation.
+fn publish_audio_level(envelope: &Envelope) -> Result<()> {
+    let event = audio_level_event(envelope)?;
+    let bytes = serde_json::to_vec(&event).context("encode Canvas audio-level event")?;
+    let path = canvas_core::stream_socket_path().context("Canvas stream socket is unavailable")?;
+    let socket = UnixDatagram::unbound().context("open Canvas stream datagram")?;
+    socket
+        .send_to(&bytes, &path)
+        .with_context(|| format!("send audio level to {}", path.display()))?;
+    Ok(())
+}
+
+fn audio_level_event(envelope: &Envelope) -> Result<StreamEnvelope> {
+    let peak = envelope
+        .message
+        .body
+        .get("peak")
+        .and_then(|value| value.as_f64())
+        .context("audio level is missing peak")?
+        .clamp(0.0, 1.0);
+    let observed_at_ms = envelope
+        .message
+        .body
+        .get("observed_at_unix_ms")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(envelope.issued_at_unix_ms);
+    Ok(StreamEnvelope {
+        schema_version: STREAM_SCHEMA_VERSION,
+        owner: envelope.producer_id.clone(),
+        stream: "playback-level".into(),
+        contract: "canvas.widget.snapshot.v1".into(),
+        sequence: observed_at_ms,
+        emitted_at_ms: observed_at_ms,
+        project_id: None,
+        payload: serde_json::json!({
+            "widget": {"kind": "meter", "value": peak, "style": "vu"},
+            "data": {
+                "state": "ready",
+                "source": format!("unibus:{}:audio.level", envelope.producer_id),
+                "window": "live"
+            }
+        }),
+    })
+}
+
+/// Route transport-neutral tracked positions into the existing native widget
+/// stream. The producer owns sensing; Canvas owns presentation and never polls
+/// a vendor endpoint directly.
+fn publish_spatial_tracks(envelope: &Envelope) -> Result<()> {
+    let event = spatial_tracks_event(envelope)?;
+    let bytes = serde_json::to_vec(&event).context("encode Canvas spatial-tracks event")?;
+    let path = canvas_core::stream_socket_path().context("Canvas stream socket is unavailable")?;
+    let socket = UnixDatagram::unbound().context("open Canvas stream datagram")?;
+    socket
+        .send_to(&bytes, &path)
+        .with_context(|| format!("send spatial tracks to {}", path.display()))?;
+    Ok(())
+}
+
+fn spatial_tracks_event(envelope: &Envelope) -> Result<StreamEnvelope> {
+    let body = &envelope.message.body;
+    let observed_at_ms = body
+        .get("observed_at_unix_ms")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(envelope.issued_at_unix_ms);
+    let valid_until_ms = body
+        .get("valid_until_unix_ms")
+        .and_then(|value| value.as_u64())
+        .context("spatial tracks are missing valid_until_unix_ms")?;
+    ensure!(
+        valid_until_ms > observed_at_ms,
+        "spatial tracks are already expired"
+    );
+    let tracks = body
+        .get("tracks")
+        .cloned()
+        .context("spatial tracks are missing tracks")?;
+    let bounds = body
+        .get("bounds")
+        .cloned()
+        .context("spatial tracks are missing bounds")?;
+    let title = body
+        .get("title")
+        .and_then(|value| value.as_str())
+        .unwrap_or("Spatial tracks");
+    let event = StreamEnvelope {
+        schema_version: STREAM_SCHEMA_VERSION,
+        owner: envelope.producer_id.clone(),
+        stream: "spatial-tracks".into(),
+        contract: "canvas.widget.snapshot.v1".into(),
+        sequence: observed_at_ms,
+        emitted_at_ms: observed_at_ms,
+        project_id: None,
+        payload: serde_json::json!({
+            "widget": {
+                "kind": "spatial_tracks",
+                "title": title,
+                "tracks": tracks,
+                "bounds": bounds
+            },
+            "data": {
+                "state": "ready",
+                "source": format!("unibus:{}:spatial.tracks", envelope.producer_id),
+                "window": "live",
+                "valid_until_unix_ms": valid_until_ms
+            }
+        }),
+    };
+    event.validate().map_err(anyhow::Error::msg)?;
+    Ok(event)
 }
 
 /// Producer allowlist + per-command grant, then actor stamping.
@@ -519,5 +636,30 @@ mod tests {
             "tact": "Direct",
         });
         presence_snapshot(&summary).unwrap().validate().unwrap();
+    }
+
+    #[test]
+    fn audio_level_maps_to_the_existing_meter_binding_contract() {
+        let envelope = Envelope::new(
+            "home",
+            "home-pi-audio",
+            None,
+            "",
+            Message::new(
+                "audio_level",
+                serde_json::json!({
+                    "rms": 0.25,
+                    "peak": 0.75,
+                    "observed_at_unix_ms": 42,
+                }),
+            ),
+        );
+        let event = audio_level_event(&envelope).unwrap();
+        event.validate().unwrap();
+        assert_eq!(event.owner, "home-pi-audio");
+        assert_eq!(event.stream, "playback-level");
+        assert_eq!(event.sequence, 42);
+        assert_eq!(event.payload["widget"]["kind"], "meter");
+        assert_eq!(event.payload["widget"]["value"], 0.75);
     }
 }

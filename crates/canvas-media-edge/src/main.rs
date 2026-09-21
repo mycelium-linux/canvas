@@ -21,6 +21,7 @@ use std::{
 };
 use unibus_media::{
     CAMERA_DETECTIONS_CONTRACT, CAMERA_STREAM_CONTRACT, CameraDetections, CameraStream,
+    VIDEO_STREAM_CONTRACT, VideoStream,
 };
 
 #[derive(Debug, Deserialize)]
@@ -111,6 +112,26 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
                         .context("decode camera.stream.v1")?;
                 decoders.upsert(stream)?;
             }
+            Some((envelope, _payload)) if envelope.message.kind == VIDEO_STREAM_CONTRACT => {
+                let stream: VideoStream =
+                    serde_json::from_value(serde_json::Value::Object(envelope.message.body))
+                        .context("decode media.video_stream.v1")?;
+                stream.validate().map_err(anyhow::Error::msg)?;
+                decoders.upsert(CameraStream {
+                    schema_version: stream.schema_version,
+                    camera_id: stream.stream_id,
+                    display_name: stream.display_name,
+                    zone: stream.zone,
+                    transport: stream.transport,
+                    endpoint: stream.endpoint,
+                    codec: stream.codec,
+                    width: stream.width,
+                    height: stream.height,
+                    frame_rate_millihz: stream.frame_rate_millihz,
+                    announced_at_unix_ms: stream.announced_at_unix_ms,
+                    valid_until_unix_ms: stream.valid_until_unix_ms,
+                })?;
+            }
             Some((envelope, _payload)) if envelope.message.kind == CAMERA_DETECTIONS_CONTRACT => {
                 let detections: CameraDetections =
                     serde_json::from_value(serde_json::Value::Object(envelope.message.body))
@@ -149,7 +170,9 @@ impl DecoderSet {
             "stream announcement is expired"
         );
         if let Some(worker) = self.workers.get(&stream.camera_id) {
-            if worker.stream_identity == StreamIdentity::from(&stream) {
+            if worker.stream_identity == StreamIdentity::from(&stream)
+                && !worker.thread.is_finished()
+            {
                 worker
                     .valid_until
                     .store(stream.valid_until_unix_ms, Ordering::Release);

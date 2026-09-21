@@ -239,59 +239,21 @@ fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 // License: MIT
 // Source: https://www.shadertoy.com/view/M3XBz4
 const SMOKE_RINGS: &str = r#"
-fn hash(p: vec2<f32>) -> vec2<f32> {
-    let pp = vec2<f32>(dot(p, vec2<f32>(127.1, 311.7)), dot(p, vec2<f32>(269.5, 183.3)));
-    return -1.0 + 2.0 * fract(sin(pp) * 43758.5453123);
-}
-
-fn noise(p: vec2<f32>) -> f32 {
-    let K1: f32 = 0.366025404;
-    let K2: f32 = 0.211324865;
-    let i = floor(p + (p.x + p.y) * K1);
-    let a = p - i + (i.x + i.y) * K2;
-    let m = step(a.y, a.x);
-    let o = vec2<f32>(m, 1.0 - m);
-    let b = a - o + K2;
-    let c = a - 1.0 + 2.0 * K2;
-    let h = max(
-        vec3<f32>(0.5) - vec3<f32>(dot(a, a), dot(b, b), dot(c, c)),
-        vec3<f32>(0.0),
-    );
-    let n = h * h * h * h * vec3<f32>(dot(a, hash(i)), dot(b, hash(i + o)), dot(c, hash(i + vec2<f32>(1.0, 1.0))));
-    return dot(n, vec3<f32>(70.0));
-}
-
 @fragment
 fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let uv = (local(pos) - 0.5 * u.res) / u.res.y;
-    var col: vec3<f32> = vec3<f32>(0.0);
     let tt = 0.05 * u.time;
-    let pxAng = atan2(uv.y, uv.x);
-    let pxRad = length(uv);
-    let ringRad = 0.35;
-    let smokeFactor = 1.7;
-    let phase = pxAng - (6.2831853 * tt) + 3.14159265;
-    let dA = abs((phase - 6.2831853 * floor(phase / 6.2831853)) - 3.14159265);
-    let totalRingEnv = 1.0 - smoothstep(0.0, smokeFactor, dA);
-    let num_rings = 14.0;
-    for (var ii: i32 = 0; ii < 14; ii = ii + 1) {
-        let i = f32(ii);
-        let ringSpread = 0.01 + 0.06 * (i / 10.0);
-        let freq = 2.0 + (i - 5.0 * floor(i / 5.0));
-        let mainWave = ringSpread * sin((6.2831853 * tt + pxAng) * freq + i * 1.7);
-        let secWave = sin(pxRad * 70.0 + (6.2831853 * tt + pxAng) * 2.0 + i);
-        let cFlow = vec2<f32>(cos(6.2831853 * tt + pxAng), sin(6.2831853 * tt + pxAng));
-        let cTime = vec2<f32>(cos(6.2831853 * tt), sin(6.2831853 * tt));
-        let noiseInp = (2.0 + i * 0.2) * cFlow + 0.5 * cTime + vec2<f32>(i * 4.3, i * 9.1);
-        let turb = noise(noiseInp);
-        let mw = totalRingEnv * 1.0 * mainWave;
-        let sw = totalRingEnv * 0.015 * secWave;
-        let tb = totalRingEnv * 0.03 * turb;
-        let dist = abs(pxRad - (ringRad + mw + sw + tb));
-        let radialD = abs(pxRad - ringRad);
-        let radialFallOff = exp(-radialD * 9.0);
-        col = col + exp(-dist * dist * 1e4) * 0.14 * radialFallOff;
-    }
+    let angle = atan2(uv.y, uv.x);
+    let radius = length(uv);
+    let drift = 0.030 * sin(angle * 3.0 + tt * 8.0)
+        + 0.014 * sin(angle * 7.0 - tt * 5.0);
+    let ring_coord = (radius - 0.20 - drift) / 0.052;
+    let ring_distance = abs(fract(ring_coord + 0.5) - 0.5);
+    let rings = 1.0 - smoothstep(0.08, 0.30, ring_distance);
+    let envelope = smoothstep(0.16, 0.25, radius) * (1.0 - smoothstep(0.48, 0.62, radius));
+    let breath = 0.78 + 0.22 * sin(angle * 2.0 - tt * 6.0);
+    let smoke = rings * envelope * breath;
+    let col = vec3<f32>(0.035, 0.055, 0.070) + vec3<f32>(0.33, 0.42, 0.48) * smoke;
     return vec4<f32>(col, 1.0);
 }
 "#;
@@ -923,9 +885,55 @@ impl BackgroundPrimitive {
 }
 
 struct BackgroundPipeline {
-    pipelines: Vec<wgpu::RenderPipeline>,
+    /// Pipelines are deliberately compiled on first use. Compiling every
+    /// bundled shader when the first background appears blocks the renderer
+    /// for minutes on V3DV, even when the requested shader is inexpensive.
+    pipelines: Vec<Option<wgpu::RenderPipeline>>,
+    pipeline_layout: wgpu::PipelineLayout,
+    format: wgpu::TextureFormat,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+}
+
+impl BackgroundPipeline {
+    fn compile(&mut self, index: usize, device: &wgpu::Device) {
+        let index = index % SHADERS.len();
+        if self.pipelines[index].is_some() {
+            return;
+        }
+        let piece = &SHADERS[index];
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(piece.name),
+            source: wgpu::ShaderSource::Wgsl(format!("{UNIFORM_WGSL}\n{}", piece.wgsl).into()),
+        });
+        self.pipelines[index] = Some(device.create_render_pipeline(
+            &wgpu::RenderPipelineDescriptor {
+                label: Some(piece.name),
+                layout: Some(&self.pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: self.format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            },
+        ));
+    }
 }
 
 impl shader::Pipeline for BackgroundPipeline {
@@ -975,44 +983,10 @@ impl shader::Pipeline for BackgroundPipeline {
             bind_group_layouts: &[&bind_group_layout],
             push_constant_ranges: &[],
         });
-        let pipelines = SHADERS
-            .iter()
-            .map(|piece| {
-                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some(piece.name),
-                    source: wgpu::ShaderSource::Wgsl(
-                        format!("{UNIFORM_WGSL}\n{}", piece.wgsl).into(),
-                    ),
-                });
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(piece.name),
-                    layout: Some(&pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &module,
-                        entry_point: Some("vs_main"),
-                        compilation_options: Default::default(),
-                        buffers: &[],
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &module,
-                        entry_point: Some("main"),
-                        compilation_options: Default::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format,
-                            blend: Some(wgpu::BlendState::REPLACE),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    primitive: wgpu::PrimitiveState::default(),
-                    depth_stencil: None,
-                    multisample: wgpu::MultisampleState::default(),
-                    multiview: None,
-                    cache: None,
-                })
-            })
-            .collect();
         Self {
-            pipelines,
+            pipelines: (0..SHADERS.len()).map(|_| None).collect(),
+            pipeline_layout,
+            format,
             uniform_buffer,
             bind_group,
         }
@@ -1025,11 +999,12 @@ impl shader::Primitive for BackgroundPrimitive {
     fn prepare(
         &self,
         pipeline: &mut Self::Pipeline,
-        _device: &wgpu::Device,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         bounds: &Rectangle,
         viewport: &shader::Viewport,
     ) {
+        pipeline.compile(self.index, device);
         let uniforms = self.uniforms(bounds, viewport.scale_factor());
         queue.write_buffer(&pipeline.uniform_buffer, self.slot, unsafe {
             std::slice::from_raw_parts(uniforms.as_ptr().cast::<u8>(), 32)
@@ -1037,7 +1012,10 @@ impl shader::Primitive for BackgroundPrimitive {
     }
 
     fn draw(&self, pipeline: &Self::Pipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
-        render_pass.set_pipeline(&pipeline.pipelines[self.index % pipeline.pipelines.len()]);
+        let render_pipeline = pipeline.pipelines[self.index % pipeline.pipelines.len()]
+            .as_ref()
+            .expect("background pipeline must be prepared before drawing");
+        render_pass.set_pipeline(render_pipeline);
         render_pass.set_bind_group(0, &pipeline.bind_group, &[self.slot as u32]);
         render_pass.draw(0..3, 0..1);
         true

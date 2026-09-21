@@ -150,18 +150,18 @@ pub enum WidgetDataState {
 
 /// Window treatment for a widget opened as a Canvas surface.
 ///
-/// `Standard` is the default because the close and minimise dots are the only
-/// way a person standing at the wall can dismiss a surface: everything else
-/// goes through the control socket. `DragOnly` deliberately drops those dots
-/// for a quiet instrument-panel strip, so it is opt-in — a widget that never
-/// says `"chrome": "drag_only"` must not silently become unclosable.
+/// `Auto` chooses a kind-appropriate treatment: instruments such as clocks do
+/// not pretend to be app windows, while ordinary widgets retain visible window
+/// controls. Lua and JSON may override that decision per widget.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum WidgetChrome {
     #[default]
+    Auto,
     Standard,
     DragOnly,
+    Frameless,
 }
 
 fn default_schema_version() -> u32 {
@@ -189,6 +189,7 @@ pub const KNOWN_WIDGET_KINDS: &[&str] = &[
     "heatmap",
     "ranked_bar",
     "stacked_bar",
+    "pie_chart",
     "state_timeline",
     "rate_bars",
     "table",
@@ -196,6 +197,7 @@ pub const KNOWN_WIDGET_KINDS: &[&str] = &[
     "status_list",
     "neural_graph",
     "dag_graph",
+    "spatial_tracks",
     "chart",
     "status",
     "text",
@@ -246,6 +248,10 @@ pub enum WidgetKind {
     Clock {
         #[serde(default = "default_clock_format")]
         format: String,
+        /// Presentation mode is data-driven so Lua can restyle a clock without
+        /// exposing another control in the visible window chrome.
+        #[serde(default)]
+        mode: ClockMode,
     },
     /// Quote ticker. Entries carry explicit label, value, and optional status —
     /// resolved by a data stream or declared input, never invented by the widget.
@@ -292,6 +298,16 @@ pub enum WidgetKind {
         bars: Vec<StackedBarValue>,
         #[serde(default)]
         unit: Option<String>,
+    },
+    /// Part-to-whole categorical values. Labels are revealed on pointer hover
+    /// so dense model names do not turn the chart into a permanent legend.
+    PieChart {
+        title: String,
+        values: Vec<BarValue>,
+        #[serde(default)]
+        unit: Option<String>,
+        #[serde(default)]
+        period: Option<String>,
     },
     /// Bounded state intervals grouped into named lanes.
     StateTimeline {
@@ -345,6 +361,12 @@ pub enum WidgetKind {
         #[serde(default)]
         edges: Vec<NeuralEdge>,
     },
+    /// Top-down positions and bounded motion trails in room coordinates.
+    SpatialTracks {
+        title: String,
+        tracks: Vec<SpatialTrack>,
+        bounds: SpatialBounds,
+    },
     /// Data chart. `source` is a content-addressed asset identifier (sha256)
     /// resolved by the host; the widget itself never touches the filesystem.
     /// `renderer` selects the external pipeline for static output (plotters
@@ -390,6 +412,14 @@ pub enum WidgetKind {
         #[serde(default)]
         orientation: LauncherOrientation,
     },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClockMode {
+    #[default]
+    Digital,
+    Analog,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -575,6 +605,30 @@ impl BriefingBeat {
 }
 
 impl WidgetSpec {
+    /// Window treatment after applying the widget kind's sane default.
+    pub fn effective_chrome(&self) -> WidgetChrome {
+        match (self.chrome, &self.kind) {
+            (WidgetChrome::Auto, WidgetKind::Clock { .. }) => WidgetChrome::Frameless,
+            (WidgetChrome::Auto, _) => WidgetChrome::Standard,
+            (explicit, _) => explicit,
+        }
+    }
+
+    /// Fastest useful redraw interval for intrinsic widget animation.
+    ///
+    /// The host combines this demand with cameras, backgrounds, and other
+    /// animation sources. Keeping the policy beside the widget definition
+    /// prevents hosts from accumulating kind-specific cadence checks.
+    pub fn animation_interval_ms(&self) -> Option<u64> {
+        match self.kind {
+            WidgetKind::Clock {
+                mode: ClockMode::Analog,
+                ..
+            } => Some(40),
+            _ => None,
+        }
+    }
+
     pub fn apply_mutation(&mut self, mutation: WidgetMutation) -> Result<()> {
         match (&mut self.kind, mutation) {
             (WidgetKind::Quant { widget }, WidgetMutation::Quant { mutation }) => {
@@ -726,6 +780,32 @@ mod mutation_tests {
     }
 }
 
+#[cfg(test)]
+mod animation_tests {
+    use super::*;
+
+    fn clock(mode: ClockMode) -> WidgetSpec {
+        WidgetSpec {
+            schema_version: WIDGET_SCHEMA_VERSION,
+            id: "clock".into(),
+            kind: WidgetKind::Clock {
+                format: "%H:%M:%S".into(),
+                mode,
+            },
+            theme: None,
+            refresh_ms: None,
+            chrome: WidgetChrome::Standard,
+            data: WidgetData::default(),
+        }
+    }
+
+    #[test]
+    fn only_the_sweeping_clock_requests_animation_frames() {
+        assert_eq!(clock(ClockMode::Analog).animation_interval_ms(), Some(40));
+        assert_eq!(clock(ClockMode::Digital).animation_interval_ms(), None);
+    }
+}
+
 fn same_widget_kind(left: &WidgetKind, right: &WidgetKind) -> bool {
     std::mem::discriminant(left) == std::mem::discriminant(right)
 }
@@ -858,6 +938,36 @@ pub struct NeuralEdge {
     pub to: String,
     /// Host-computed recency, from idle (0) to just traversed (1).
     pub heat: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SpatialPoint {
+    pub x: f64,
+    pub z: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SpatialTrack {
+    pub id: u32,
+    pub position: SpatialPoint,
+    #[serde(default)]
+    pub trail: Vec<SpatialPoint>,
+    pub confidence: f64,
+    pub motion: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SpatialBounds {
+    pub min_x: f64,
+    pub max_x: f64,
+    pub min_z: f64,
+    pub max_z: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1206,6 +1316,27 @@ impl WidgetSpec {
                     )?;
                 }
             }
+            WidgetKind::PieChart {
+                title,
+                values,
+                unit,
+                period,
+            } => {
+                bounded_label(title, "pie chart title")?;
+                optional_label(unit, "pie chart unit")?;
+                optional_label(period, "pie chart period")?;
+                check(
+                    !values.is_empty() && values.len() <= 24,
+                    "pie chart requires 1-24 values",
+                )?;
+                for value in values {
+                    bounded_label(&value.label, "pie chart label")?;
+                    check(
+                        value.value.is_finite() && value.value >= 0.0,
+                        "pie chart values must be finite and non-negative",
+                    )?;
+                }
+            }
             WidgetKind::StateTimeline { title, lanes } => {
                 bounded_label(title, "state timeline title")?;
                 check(
@@ -1345,6 +1476,39 @@ impl WidgetSpec {
                 validate_graph(title, nodes, edges, "DAG")?;
                 check(is_acyclic(nodes, edges), "DAG graph contains a cycle")?;
             }
+            WidgetKind::SpatialTracks {
+                title,
+                tracks,
+                bounds,
+            } => {
+                bounded_label(title, "spatial tracks title")?;
+                check(tracks.len() <= 64, "spatial tracks exceeds 64 tracks")?;
+                check(
+                    bounds.min_x.is_finite()
+                        && bounds.max_x.is_finite()
+                        && bounds.min_x < bounds.max_x
+                        && bounds.min_z.is_finite()
+                        && bounds.max_z.is_finite()
+                        && bounds.min_z < bounds.max_z,
+                    "spatial tracks requires finite, ordered bounds",
+                )?;
+                for track in tracks {
+                    check(
+                        track.confidence.is_finite()
+                            && (0.0..=1.0).contains(&track.confidence)
+                            && track.motion.is_finite()
+                            && (0.0..=100.0).contains(&track.motion)
+                            && track.position.x.is_finite()
+                            && track.position.z.is_finite()
+                            && track.trail.len() <= 64
+                            && track
+                                .trail
+                                .iter()
+                                .all(|point| point.x.is_finite() && point.z.is_finite()),
+                        "spatial track values must be finite and bounded",
+                    )?;
+                }
+            }
             WidgetKind::Chart { source, .. } => check(
                 !source.is_empty() && source.len() <= 128,
                 "chart requires a non-empty content-addressed source identifier",
@@ -1353,7 +1517,7 @@ impl WidgetSpec {
                 check(!text.is_empty(), "text widget must not be empty")?;
                 check(text.len() <= 4096, "text widget exceeds 4096 bytes")?;
             }
-            WidgetKind::Clock { format } => check(
+            WidgetKind::Clock { format, .. } => check(
                 !format.is_empty() && format.len() <= 64,
                 "clock format must be 1-64 characters",
             )?,
@@ -1610,7 +1774,9 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
         }
         // Bars need a label gutter plus a readable bar; rows below `small` * 2
         // stop being separable.
-        WidgetKind::RankedBar { .. } | WidgetKind::StackedBar { .. } => {
+        WidgetKind::RankedBar { .. }
+        | WidgetKind::StackedBar { .. }
+        | WidgetKind::PieChart { .. } => {
             let row = metrics.small * 2.0;
             SizeHint::new(220.0, row * 3.0 + chrome, 360.0, row * 6.0 + chrome, 2.0)
         }
@@ -1636,9 +1802,9 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
             let row = metrics.small * 1.6;
             SizeHint::new(240.0, row * 4.0 + chrome, 420.0, row * 8.0 + chrome, 1.8)
         }
-        WidgetKind::NeuralGraph { .. } | WidgetKind::DagGraph { .. } => {
-            SizeHint::new(300.0, 180.0, 640.0, 380.0, 1.7)
-        }
+        WidgetKind::NeuralGraph { .. }
+        | WidgetKind::DagGraph { .. }
+        | WidgetKind::SpatialTracks { .. } => SizeHint::new(300.0, 180.0, 640.0, 380.0, 1.7),
         WidgetKind::Ticker { .. } => SizeHint::new(
             200.0,
             metrics.large * 3.0 + pad,
@@ -1699,6 +1865,7 @@ mod tests {
             },
             WidgetKind::Clock {
                 format: "%H".into(),
+                mode: ClockMode::Digital,
             },
             WidgetKind::TimeSeries {
                 title: "t".into(),
@@ -1720,6 +1887,16 @@ mod tests {
                 series: Vec::new(),
                 bars: Vec::new(),
                 unit: None,
+            },
+            WidgetKind::PieChart {
+                title: "t".into(),
+                values: vec![BarValue {
+                    label: "A".into(),
+                    value: 1.0,
+                    state: None,
+                }],
+                unit: None,
+                period: None,
             },
             WidgetKind::Heatmap {
                 title: "t".into(),
@@ -1872,6 +2049,7 @@ mod tests {
             },
             WidgetKind::Clock {
                 format: "%H".into(),
+                mode: ClockMode::Digital,
             },
         ] {
             let small = size_hint(&kind, &metrics());
@@ -1907,6 +2085,7 @@ mod tests {
             },
             WidgetKind::Clock {
                 format: "%H".into(),
+                mode: ClockMode::Digital,
             },
         ] {
             assert!(
@@ -2045,14 +2224,25 @@ mod tests {
     }
 
     #[test]
-    fn operational_inputs_are_bounded_and_closable_by_default() {
+    fn operational_inputs_are_bounded_and_chrome_defaults_by_kind() {
         let stat = WidgetSpec::from_json(
             br#"{"id":"cpu","kind":"stat","label":"CPU","value":42,"history":[1,2,3]}"#,
         )
         .unwrap();
-        // A widget that never asked for the quiet strip keeps its close and
-        // minimise dots; drag-only is opt-in and says so in the JSON.
-        assert_eq!(stat.chrome, WidgetChrome::Standard);
+        // Auto preserves controls for ordinary widgets.
+        assert_eq!(stat.chrome, WidgetChrome::Auto);
+        assert_eq!(stat.effective_chrome(), WidgetChrome::Standard);
+        let clock = WidgetSpec::from_json(
+            br#"{"id":"clock","kind":"clock","format":"%H:%M:%S","mode":"analog"}"#,
+        )
+        .unwrap();
+        assert_eq!(clock.chrome, WidgetChrome::Auto);
+        assert_eq!(clock.effective_chrome(), WidgetChrome::Frameless);
+        let framed_clock = WidgetSpec::from_json(
+            br#"{"id":"clock","kind":"clock","format":"%H:%M:%S","mode":"analog","chrome":"standard"}"#,
+        )
+        .unwrap();
+        assert_eq!(framed_clock.effective_chrome(), WidgetChrome::Standard);
         let quiet = WidgetSpec::from_json(
             br#"{"id":"cpu","kind":"stat","label":"CPU","value":42,"chrome":"drag_only"}"#,
         )

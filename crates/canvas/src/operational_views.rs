@@ -223,6 +223,7 @@ fn appetite(kind: &WidgetKind) -> f32 {
         | WidgetKind::Heatmap { .. }
         | WidgetKind::RankedBar { .. }
         | WidgetKind::StackedBar { .. }
+        | WidgetKind::PieChart { .. }
         | WidgetKind::StateTimeline { .. }
         | WidgetKind::RateBars { .. }
         | WidgetKind::Table { .. }
@@ -230,6 +231,7 @@ fn appetite(kind: &WidgetKind) -> f32 {
         | WidgetKind::StatusList { .. }
         | WidgetKind::NeuralGraph { .. }
         | WidgetKind::DagGraph { .. }
+        | WidgetKind::SpatialTracks { .. }
         | WidgetKind::Chart { .. }
         | WidgetKind::Quant { .. }
         | WidgetKind::Module { .. }

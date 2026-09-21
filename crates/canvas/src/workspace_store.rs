@@ -358,6 +358,15 @@ impl WorkspaceStore {
 }
 
 fn default_alfalfa_workspace(project_id: &str) -> Result<WorkspaceDocument, Error> {
+    if project_id.eq_ignore_ascii_case("fab") {
+        return default_fab_workspace(project_id);
+    }
+    if project_id.eq_ignore_ascii_case("bifrost") {
+        return default_bifrost_workspace(project_id);
+    }
+    if project_id.eq_ignore_ascii_case("shroud") {
+        return default_shroud_workspace(project_id);
+    }
     let stream = canvas_alfalfa::dashboard_stream(project_id);
     serde_json::from_value(serde_json::json!({
         "schema_version": SCHEMA_VERSION,
@@ -392,6 +401,130 @@ fn default_alfalfa_workspace(project_id: &str) -> Result<WorkspaceDocument, Erro
         ],
     }))
     .map_err(|error| Error(format!("Build default Alfalfa workspace: {error}")))
+}
+
+fn default_fab_workspace(project_id: &str) -> Result<WorkspaceDocument, Error> {
+    serde_json::from_value(serde_json::json!({
+        "schema_version": SCHEMA_VERSION,
+        "id": "fab-workspace", "project_id": project_id, "revision": 1,
+        "theme": {"source":"project"}, "background":{"kind":"theme"},
+        "chrome":{"title":"hidden","canvas_padding":16,"surface_gap":12},
+        "surfaces":[
+            owner_widget_surface(canvas_fab::OWNER,"fab-projects","Project lifecycle","status_list",serde_json::json!({"title":"Project lifecycle","nodes":[]})),
+            owner_widget_surface(canvas_fab::OWNER,"fab-metrics","Control plane","status_list",serde_json::json!({"title":"Fab control plane","nodes":[]})),
+            owner_widget_surface(canvas_fab::OWNER,"fab-runs","Build runs","event_log",serde_json::json!({"title":"Build runs","entries":[]})),
+            owner_widget_surface(canvas_fab::OWNER,"fab-deliveries","GitHub delivery","event_log",serde_json::json!({"title":"GitHub delivery","entries":[]})),
+        ],
+        "layout":{"kind":"canvas","placements":[
+            {"surface_id":"fab-projects","bounds":{"x":0.0,"y":0.0,"width":0.48,"height":1.0}},
+            {"surface_id":"fab-metrics","bounds":{"x":0.48,"y":0.0,"width":0.52,"height":0.27}},
+            {"surface_id":"fab-runs","bounds":{"x":0.48,"y":0.27,"width":0.52,"height":0.45}},
+            {"surface_id":"fab-deliveries","bounds":{"x":0.48,"y":0.72,"width":0.52,"height":0.28}},
+        ]},
+        "bindings":[
+            owner_binding(canvas_fab::OWNER,"fab-projects-bind","fab-projects",canvas_fab::PROJECTS_STREAM,"fab-projects-v1"),
+            owner_binding(canvas_fab::OWNER,"fab-metrics-bind","fab-metrics",canvas_fab::METRICS_STREAM,"fab-metrics-v1"),
+            owner_binding(canvas_fab::OWNER,"fab-runs-bind","fab-runs",canvas_fab::RUNS_STREAM,"fab-runs-v1"),
+            owner_binding(canvas_fab::OWNER,"fab-deliveries-bind","fab-deliveries",canvas_fab::DELIVERIES_STREAM,"fab-deliveries-v1"),
+        ],
+    })).map_err(|error| Error(format!("Build default Fab workspace: {error}")))
+}
+
+fn default_bifrost_workspace(project_id: &str) -> Result<WorkspaceDocument, Error> {
+    serde_json::from_value(serde_json::json!({
+        "schema_version":SCHEMA_VERSION,"id":"bifrost-workspace","project_id":project_id,"revision":1,
+        "theme":{"source":"project"},"background":{"kind":"theme"},"chrome":{"title":"hidden","canvas_padding":16,"surface_gap":12},
+        "surfaces":[
+            owner_widget_surface(canvas_bifrost::OWNER,"bifrost-requests","Requests","stat",serde_json::json!({"label":"Production requests","value":0})),
+            owner_widget_surface(canvas_bifrost::OWNER,"bifrost-tokens","Tokens","stat",serde_json::json!({"label":"Tokens routed","value":0})),
+            owner_widget_surface(canvas_bifrost::OWNER,"bifrost-cost","Cost","stat",serde_json::json!({"label":"Estimated provider cost","value":0,"unit":"$"})),
+            owner_widget_surface(canvas_bifrost::OWNER,"bifrost-health","Gateway health","status_list",serde_json::json!({"title":"Production gateway","nodes":[]})),
+            owner_widget_surface(canvas_bifrost::OWNER,"bifrost-backends","Backends","table",serde_json::json!({"title":"Backends","columns":["Backend","state","models","circuit"],"rows":[]})),
+            owner_widget_surface(canvas_bifrost::OWNER,"bifrost-models","Model usage","pie_chart",serde_json::json!({"title":"Token share by model","values":[{"label":"Waiting","value":1}],"unit":"tokens","period":"Since gateway restart"})),
+            owner_widget_surface(canvas_bifrost::OWNER,"bifrost-mesh","Accelerator mesh","table",serde_json::json!({"title":"Accelerator mesh","columns":["Node","state","GPU","VRAM","power"],"rows":[]}))
+        ],
+        "layout":{"kind":"canvas","placements":[
+            {"surface_id":"bifrost-requests","bounds":{"x":0.0,"y":0.0,"width":0.19,"height":0.27}},
+            {"surface_id":"bifrost-tokens","bounds":{"x":0.19,"y":0.0,"width":0.19,"height":0.27}},
+            {"surface_id":"bifrost-cost","bounds":{"x":0.38,"y":0.0,"width":0.19,"height":0.27}},
+            {"surface_id":"bifrost-health","bounds":{"x":0.57,"y":0.0,"width":0.43,"height":0.27}},
+            {"surface_id":"bifrost-backends","bounds":{"x":0.0,"y":0.27,"width":0.62,"height":0.73}},
+            {"surface_id":"bifrost-models","bounds":{"x":0.62,"y":0.27,"width":0.38,"height":0.45}},
+            {"surface_id":"bifrost-mesh","bounds":{"x":0.62,"y":0.72,"width":0.38,"height":0.28}}
+        ]},
+        "bindings":[
+            owner_binding(canvas_bifrost::OWNER,"bifrost-requests-bind","bifrost-requests",canvas_bifrost::SUMMARY_STREAM,"bifrost-requests-v1"),
+            owner_binding(canvas_bifrost::OWNER,"bifrost-tokens-bind","bifrost-tokens",canvas_bifrost::SUMMARY_STREAM,"bifrost-tokens-v1"),
+            owner_binding(canvas_bifrost::OWNER,"bifrost-cost-bind","bifrost-cost",canvas_bifrost::SUMMARY_STREAM,"bifrost-cost-v1"),
+            owner_binding(canvas_bifrost::OWNER,"bifrost-health-bind","bifrost-health",canvas_bifrost::TRAFFIC_STREAM,"bifrost-health-v1"),
+            owner_binding(canvas_bifrost::OWNER,"bifrost-backends-bind","bifrost-backends",canvas_bifrost::BACKENDS_STREAM,"bifrost-backends-v1"),
+            owner_binding(canvas_bifrost::OWNER,"bifrost-models-bind","bifrost-models",canvas_bifrost::MODELS_STREAM,"bifrost-models-v1"),
+            owner_binding(canvas_bifrost::OWNER,"bifrost-mesh-bind","bifrost-mesh",canvas_bifrost::MESH_STREAM,"bifrost-mesh-v1")
+        ]
+    })).map_err(|error| Error(format!("Build default Bifrost workspace: {error}")))
+}
+
+fn default_shroud_workspace(project_id: &str) -> Result<WorkspaceDocument, Error> {
+    serde_json::from_value(serde_json::json!({
+        "schema_version": SCHEMA_VERSION,
+        "id":"shroud-workspace","project_id":project_id,"revision":1,
+        "theme":{"source":"project"},"background":{"kind":"theme"},
+        "chrome":{"title":"hidden","canvas_padding":16,"surface_gap":12},
+        "surfaces":[
+            owner_widget_surface(canvas_shroud::OWNER,"shroud-regions","Region","status_list",serde_json::json!({"title":"Region","nodes":[]})),
+            owner_widget_surface(canvas_shroud::OWNER,"shroud-fleet","Fleet","stat",serde_json::json!({"label":"Running MicroVMs","value":0})),
+            owner_widget_surface(canvas_shroud::OWNER,"shroud-memory","Memory","gauge",serde_json::json!({"label":"Host memory","value":0})),
+            owner_widget_surface(canvas_shroud::OWNER,"shroud-disk","Disk","gauge",serde_json::json!({"label":"Runtime disk","value":0})),
+            owner_widget_surface(canvas_shroud::OWNER,"shroud-load","Load","stat",serde_json::json!({"label":"1 minute load","value":0})),
+            owner_widget_surface(canvas_shroud::OWNER,"shroud-vms","Virtual machines","table",serde_json::json!({"title":"Virtual machines","columns":["VM","health","IP","vCPU","memory"],"rows":[]})),
+            owner_widget_surface(canvas_shroud::OWNER,"shroud-network","Network + discovery","status_list",serde_json::json!({"title":"Network + discovery","nodes":[]})),
+        ],
+        "layout":{"kind":"canvas","placements":[
+            {"surface_id":"shroud-regions","bounds":{"x":0.0,"y":0.0,"width":0.24,"height":0.28}},
+            {"surface_id":"shroud-fleet","bounds":{"x":0.24,"y":0.0,"width":0.19,"height":0.28}},
+            {"surface_id":"shroud-memory","bounds":{"x":0.43,"y":0.0,"width":0.19,"height":0.28}},
+            {"surface_id":"shroud-disk","bounds":{"x":0.62,"y":0.0,"width":0.19,"height":0.28}},
+            {"surface_id":"shroud-load","bounds":{"x":0.81,"y":0.0,"width":0.19,"height":0.28}},
+            {"surface_id":"shroud-vms","bounds":{"x":0.0,"y":0.28,"width":0.72,"height":0.72}},
+            {"surface_id":"shroud-network","bounds":{"x":0.72,"y":0.28,"width":0.28,"height":0.72}},
+        ]},
+        "bindings":[
+            owner_binding(canvas_shroud::OWNER,"shroud-regions-bind","shroud-regions",canvas_shroud::REGIONS_STREAM,"shroud-regions-v1"),
+            owner_binding(canvas_shroud::OWNER,"shroud-fleet-bind","shroud-fleet",canvas_shroud::SUMMARY_STREAM,"shroud-fleet-stat-v1"),
+            owner_binding(canvas_shroud::OWNER,"shroud-memory-bind","shroud-memory",canvas_shroud::SUMMARY_STREAM,"shroud-memory-gauge-v1"),
+            owner_binding(canvas_shroud::OWNER,"shroud-disk-bind","shroud-disk",canvas_shroud::SUMMARY_STREAM,"shroud-disk-gauge-v1"),
+            owner_binding(canvas_shroud::OWNER,"shroud-load-bind","shroud-load",canvas_shroud::SUMMARY_STREAM,"shroud-load-stat-v1"),
+            owner_binding(canvas_shroud::OWNER,"shroud-vms-bind","shroud-vms",canvas_shroud::VMS_STREAM,"shroud-vms-v1"),
+            owner_binding(canvas_shroud::OWNER,"shroud-network-bind","shroud-network",canvas_shroud::NETWORK_STREAM,"shroud-network-v1"),
+        ]
+    })).map_err(|error| Error(format!("Build default Shroud workspace: {error}")))
+}
+
+fn owner_binding(
+    owner: &str,
+    id: &str,
+    surface_id: &str,
+    stream: &str,
+    adapter: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id":id,
+        "source":{"owner":owner,"stream":stream,"contract":"canvas.widget.snapshot.v1"},
+        "target":{"surface_id":surface_id,"input_id":"widget"},
+        "adapter":adapter,"delivery":{"mode":"latest"},
+    })
+}
+
+fn owner_widget_surface(
+    owner: &str,
+    id: &str,
+    title: &str,
+    kind: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let mut surface = widget_surface(id, title, kind, body);
+    surface["content"]["spec"]["data"]["source"] = serde_json::json!(owner);
+    surface
 }
 
 fn widget_surface(id: &str, title: &str, kind: &str, body: serde_json::Value) -> serde_json::Value {
@@ -724,6 +857,73 @@ mod tests {
         assert_eq!(report.created, 1);
         assert_eq!(report.preserved, 0);
         assert_eq!(store.get("ohm").unwrap().surfaces.len(), 6);
+    }
+
+    #[test]
+    fn fab_gets_owner_specific_operations_dashboard() {
+        let base = Catalog::bundled().unwrap();
+        let mut store = WorkspaceStore::default();
+
+        store.sync(vec![definition("fab", "Fab")], &base).unwrap();
+
+        let fab = store.get("fab").unwrap();
+        assert_eq!(fab.surfaces.len(), 4);
+        assert_eq!(fab.bindings.len(), 4);
+        assert!(
+            fab.bindings
+                .iter()
+                .all(|binding| binding.source.owner == canvas_fab::OWNER)
+        );
+        assert_eq!(
+            fab.bindings
+                .iter()
+                .map(|binding| binding.source.stream.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([
+                canvas_fab::DELIVERIES_STREAM,
+                canvas_fab::METRICS_STREAM,
+                canvas_fab::PROJECTS_STREAM,
+                canvas_fab::RUNS_STREAM,
+            ])
+        );
+    }
+
+    #[test]
+    fn bifrost_gets_production_inference_dashboard() {
+        let base = Catalog::bundled().unwrap();
+        let mut store = WorkspaceStore::default();
+        store
+            .sync(vec![definition("bifrost", "Bifrost")], &base)
+            .unwrap();
+        let bifrost = store.get("bifrost").unwrap();
+        assert_eq!(bifrost.surfaces.len(), 7);
+        assert_eq!(bifrost.bindings.len(), 7);
+        assert!(
+            bifrost
+                .bindings
+                .iter()
+                .all(|binding| binding.source.owner == canvas_bifrost::OWNER)
+        );
+    }
+
+    #[test]
+    fn shroud_gets_regional_runtime_dashboard() {
+        let base = Catalog::bundled().unwrap();
+        let mut store = WorkspaceStore::default();
+
+        store
+            .sync(vec![definition("shroud", "Shroud")], &base)
+            .unwrap();
+
+        let shroud = store.get("shroud").unwrap();
+        assert_eq!(shroud.surfaces.len(), 7);
+        assert_eq!(shroud.bindings.len(), 7);
+        assert!(
+            shroud
+                .bindings
+                .iter()
+                .all(|binding| binding.source.owner == canvas_shroud::OWNER)
+        );
     }
 
     #[test]

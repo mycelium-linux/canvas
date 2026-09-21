@@ -19,6 +19,7 @@ use iced::widget::{Canvas, canvas, column, container, row, scrollable, space, te
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 mod clock;
+mod quality;
 mod quant;
 use clock::AnalogClockProgram;
 
