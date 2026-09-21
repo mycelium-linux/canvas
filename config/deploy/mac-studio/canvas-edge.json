@@ -1,0 +1,23 @@
+{
+  "installation_id": "home",
+  "producer_id": "canvas-studio-display",
+  "hub_endpoint": "127.0.0.1:18791",
+  "token_file": "/Users/ajmwagar/.config/unibus/tokens/canvas-studio-display.token",
+  "zones": ["living-room"],
+  "capabilities": ["display", "canvas.display", "canvas.workspace_mirror"],
+  "screen_anchors": ["screen-studio"],
+  "schema_version": 1,
+  "mirror": {"enabled": true, "zone": "living-room"},
+  "actors": [
+    {
+      "producer": "canvas-central-studio",
+      "id": "alfalfa:workspace-presentation",
+      "commands": ["workspace_sync", "workspace_switch", "workspace_reset"]
+    },
+    {
+      "producer": "mac-studio-brain",
+      "id": "jarvis:brain",
+      "commands": ["upsert_indicator", "dismiss_indicator"]
+    }
+  ]
+}
