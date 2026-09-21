@@ -11,17 +11,24 @@
 //!   the central learns what *executed*, not just what was delivered.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::os::unix::net::UnixDatagram;
+use std::fs;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
 use canvas::bus::{Bus, BusConfig};
 use canvas::control::{
-    Command, ControlRequest, PresenceOccupant, PresenceSignal, PresenceSignalState,
+    Command, ControlRequest, Outcome, PresenceOccupant, PresenceSignal, PresenceSignalState,
     PresenceSnapshot,
 };
 use canvas::stream_binding::{STREAM_SCHEMA_VERSION, StreamEnvelope};
+use canvas::workspace_mirror::{
+    LocalWorkspaceSnapshot, MIRROR_KIND, MIRROR_SCHEMA_VERSION, WorkspaceState,
+};
 use canvas_core::unibus::{Envelope, envelope, kinds, result_message};
 use serde::Deserialize;
 
@@ -37,6 +44,24 @@ struct EdgeConfig {
     /// command names (control-protocol variant names, snake_case).
     #[serde(default)]
     actors: Vec<BusActor>,
+    /// Opt-in shared representation. Edges in the same zone exchange only
+    /// durable workspace documents; video and live data remain local.
+    #[serde(default)]
+    mirror: Option<MirrorConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MirrorConfig {
+    #[serde(default = "mirror_enabled")]
+    enabled: bool,
+    /// Destination zone. Defaults to the edge's first registered zone.
+    #[serde(default)]
+    zone: Option<String>,
+}
+
+fn mirror_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,8 +110,10 @@ impl EdgeConfig {
 }
 
 fn run(config: &EdgeConfig) -> Result<()> {
-    let bus = Bus::connect(config.bus.clone())
-        .with_context(|| format!("connect hub {}", config.bus.hub_endpoint))?;
+    let bus = Arc::new(
+        Bus::connect(config.bus.clone())
+            .with_context(|| format!("connect hub {}", config.bus.hub_endpoint))?,
+    );
     eprintln!(
         "canvas-edge: registered as '{}' via {} (anchors {:?}, actors {:?})",
         config.bus.producer_id,
@@ -99,10 +126,14 @@ fn run(config: &EdgeConfig) -> Result<()> {
             .collect::<Vec<_>>(),
     );
     let mut liveness = Liveness::default();
+    let mirror_suppression = Arc::new(Mutex::new(None));
+    let _mirror_socket =
+        start_workspace_mirror(config, Arc::clone(&bus), Arc::clone(&mirror_suppression))?;
     loop {
         match bus.try_read() {
             Ok(Some((envelope, _payload))) => {
-                if let Err(e) = ingest(&bus, config, &mut liveness, &envelope) {
+                if let Err(e) = ingest(&bus, config, &mut liveness, &mirror_suppression, &envelope)
+                {
                     eprintln!("canvas-edge: rejected {}: {e:#}", envelope.message.kind);
                 }
             }
@@ -119,6 +150,7 @@ fn run(config: &EdgeConfig) -> Result<()> {
 struct Liveness {
     by_producer: HashMap<String, BTreeSet<String>>,
     rlcd_by_session: HashMap<String, VecDeque<serde_json::Value>>,
+    mirror_sequences: HashMap<String, u64>,
 }
 
 impl Liveness {
@@ -147,6 +179,7 @@ fn ingest(
     bus: &Bus,
     config: &EdgeConfig,
     liveness: &mut Liveness,
+    mirror_suppression: &Arc<Mutex<Option<Vec<u8>>>>,
     envelope: &Envelope,
 ) -> Result<()> {
     match envelope.message.kind.as_str() {
@@ -216,6 +249,7 @@ fn ingest(
         "audio_level" | "audio.level" => publish_audio_level(envelope),
         "rlcd.decision.v1" => publish_rlcd_decision(liveness, envelope),
         "spatial_tracks" | "spatial.tracks" => publish_spatial_tracks(envelope),
+        MIRROR_KIND => apply_workspace_mirror(config, liveness, mirror_suppression, envelope),
         kinds::V1_REPLY | kinds::REPLY => Ok(()),
         canvas_core::unibus::kinds::NODE_STATE => {
             let online = envelope.message.body["online"].as_bool().unwrap_or(true);
@@ -244,6 +278,210 @@ fn ingest(
             // older edges. The log line is the loud part.
             eprintln!("canvas-edge: ignoring unrouted kind '{other}'");
             Ok(())
+        }
+    }
+}
+
+struct MirrorSocketGuard(std::path::PathBuf);
+
+impl Drop for MirrorSocketGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+fn start_workspace_mirror(
+    config: &EdgeConfig,
+    bus: Arc<Bus>,
+    suppression: Arc<Mutex<Option<Vec<u8>>>>,
+) -> Result<Option<MirrorSocketGuard>> {
+    let Some(mirror) = config.mirror.as_ref().filter(|mirror| mirror.enabled) else {
+        return Ok(None);
+    };
+    let path = canvas_core::workspace_mirror_socket_path()
+        .context("Canvas workspace mirror socket is unavailable")?;
+    let parent = path.parent().context("mirror socket has no parent")?;
+    fs::create_dir_all(parent).context("create mirror socket directory")?;
+    if path.exists() {
+        fs::remove_file(&path).context("remove stale mirror socket")?;
+    }
+    let listener = UnixListener::bind(&path).context("bind workspace mirror socket")?;
+    fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+        .context("secure workspace mirror socket")?;
+    let zone = mirror
+        .zone
+        .clone()
+        .or_else(|| config.bus.zones.first().cloned())
+        .context("mirror requires a destination zone")?;
+    let origin = config.bus.producer_id.clone();
+    let sequence = Arc::new(AtomicU64::new(0));
+    thread::Builder::new()
+        .name("canvas-workspace-mirror".into())
+        .spawn(move || {
+            for accepted in listener.incoming() {
+                let stream = match accepted {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        eprintln!("canvas-edge: mirror socket accept failed: {error}");
+                        continue;
+                    }
+                };
+                let mut reader = BufReader::new(stream);
+                let mut frame = Vec::new();
+                loop {
+                    frame.clear();
+                    match reader
+                        .by_ref()
+                        .take(canvas::control::MAX_CONTROL_MESSAGE + 1)
+                        .read_until(b'\n', &mut frame)
+                    {
+                        Ok(0) => break,
+                        Ok(_)
+                            if frame.len() as u64 <= canvas::control::MAX_CONTROL_MESSAGE
+                                && frame.last() == Some(&b'\n') => {}
+                        Ok(_) => {
+                            eprintln!("canvas-edge: rejected oversized mirror snapshot");
+                            break;
+                        }
+                        Err(error) => {
+                            eprintln!("canvas-edge: mirror socket receive failed: {error}");
+                            break;
+                        }
+                    }
+                    frame.pop();
+                    let local: LocalWorkspaceSnapshot = match serde_json::from_slice(&frame) {
+                        Ok(local) => local,
+                        Err(error) => {
+                            eprintln!("canvas-edge: rejected local mirror snapshot: {error}");
+                            continue;
+                        }
+                    };
+                    if local.schema_version != MIRROR_SCHEMA_VERSION {
+                        eprintln!("canvas-edge: rejected unsupported local mirror schema");
+                        continue;
+                    }
+                    let local_bytes = frame.clone();
+                    let suppressed = suppression
+                        .lock()
+                        .ok()
+                        .and_then(|mut value| {
+                            if value.as_ref() == Some(&local_bytes) {
+                                value.take()
+                            } else {
+                                None
+                            }
+                        })
+                        .is_some();
+                    if suppressed {
+                        continue;
+                    }
+                    let state = WorkspaceState {
+                        schema_version: MIRROR_SCHEMA_VERSION,
+                        workspace_key: local.document.id.clone(),
+                        origin: origin.clone(),
+                        sequence: sequence.fetch_add(1, Ordering::Relaxed) + 1,
+                        document: local.document,
+                    };
+                    let message = canvas_core::unibus::Message::new(
+                        MIRROR_KIND,
+                        serde_json::to_value(state).expect("mirror state serializes"),
+                    );
+                    let result = bus
+                        .to_destination(&zone, message)
+                        .and_then(|envelope| bus.send(&envelope, &[]));
+                    if let Err(error) = result {
+                        eprintln!("canvas-edge: publish workspace mirror failed: {error:#}");
+                    }
+                }
+            }
+        })
+        .context("start workspace mirror publisher")?;
+    // Publish the current representation immediately, even when Canvas was
+    // already running before its edge connected.
+    if let Ok(document) = read_document() {
+        let snapshot = LocalWorkspaceSnapshot {
+            schema_version: MIRROR_SCHEMA_VERSION,
+            document,
+        };
+        if let Ok(mut stream) = UnixStream::connect(&path) {
+            if let Ok(mut bytes) = serde_json::to_vec(&snapshot) {
+                bytes.push(b'\n');
+                let _ = stream.write_all(&bytes);
+            }
+        }
+    }
+    Ok(Some(MirrorSocketGuard(path)))
+}
+
+fn apply_workspace_mirror(
+    config: &EdgeConfig,
+    liveness: &mut Liveness,
+    suppression: &Arc<Mutex<Option<Vec<u8>>>>,
+    envelope: &Envelope,
+) -> Result<()> {
+    if !config.mirror.as_ref().is_some_and(|mirror| mirror.enabled) {
+        return Ok(());
+    }
+    let state: WorkspaceState =
+        serde_json::from_value(serde_json::Value::Object(envelope.message.body.clone()))
+            .context("decode workspace mirror state")?;
+    ensure!(
+        state.schema_version == MIRROR_SCHEMA_VERSION,
+        "unsupported mirror schema"
+    );
+    if state.origin == config.bus.producer_id {
+        return Ok(());
+    }
+    let previous = liveness
+        .mirror_sequences
+        .entry(state.origin.clone())
+        .or_default();
+    if state.sequence <= *previous {
+        return Ok(());
+    }
+    *previous = state.sequence;
+
+    let current = read_document()?;
+    // "Mirror" is intentionally opt-in by representation: two canvases only
+    // converge while they are displaying the same named workspace.
+    if current.id != state.workspace_key {
+        return Ok(());
+    }
+    let local = LocalWorkspaceSnapshot {
+        schema_version: MIRROR_SCHEMA_VERSION,
+        document: state.document.clone(),
+    };
+    *suppression
+        .lock()
+        .map_err(|_| anyhow::anyhow!("mirror suppression lock poisoned"))? =
+        Some(serde_json::to_vec(&local)?);
+    submit(ControlRequest {
+        schema_version: canvas::control::CONTROL_VERSION,
+        request_id: format!("mirror-{}-{}", state.origin, state.sequence),
+        expected_revision: None,
+        actor: None,
+        command: Command::ApplyDocument {
+            document: state.document,
+        },
+    })
+}
+
+fn read_document() -> Result<canvas::WorkspaceDocument> {
+    let request = ControlRequest {
+        schema_version: canvas::control::CONTROL_VERSION,
+        request_id: format!("mirror-inspect-{}", canvas_core::unibus::envelope::now_ms()),
+        expected_revision: None,
+        actor: None,
+        command: Command::ReadDocument,
+    };
+    let reply = canvas::control::send(&request).map_err(anyhow::Error::msg)?;
+    match reply.outcome {
+        Outcome::Ok {
+            receipt: canvas::control::Receipt::DocumentSnapshot { document, .. },
+        } => Ok(*document),
+        Outcome::Ok { .. } => bail!("Canvas returned the wrong receipt for ReadDocument"),
+        Outcome::Error { code, message } => {
+            bail!("Canvas rejected ReadDocument ({code:?}): {message}")
         }
     }
 }
@@ -303,7 +541,10 @@ fn rlcd_probability_event(envelope: &Envelope) -> Result<Option<StreamEnvelope>>
             .unwrap_or_default()
             .total_cmp(&left["value"].as_f64().unwrap_or_default())
     });
-    ensure!(!bars.is_empty(), "completed RLCD event has no probabilities");
+    ensure!(
+        !bars.is_empty(),
+        "completed RLCD event has no probabilities"
+    );
     Ok(Some(StreamEnvelope {
         schema_version: STREAM_SCHEMA_VERSION,
         owner: envelope.producer_id.clone(),
@@ -720,6 +961,7 @@ mod tests {
                 schema_version: 1,
             },
             actors,
+            mirror: None,
         }
     }
 

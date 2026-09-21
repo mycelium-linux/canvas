@@ -4,9 +4,10 @@
   "hub_endpoint": "127.0.0.1:18790",
   "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
   "zones": ["living-room"],
-  "capabilities": ["display", "canvas.audio_level", "canvas.rlcd"],
+  "capabilities": ["display", "canvas.audio_level", "canvas.rlcd", "canvas.workspace_mirror"],
   "screen_anchors": ["screen-tv"],
   "schema_version": 1,
+  "mirror": {"enabled": true, "zone": "living-room"},
   "actors": [
     {
       "producer": "canvas-central-studio",

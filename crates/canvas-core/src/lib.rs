@@ -157,6 +157,25 @@ pub fn stream_socket_path() -> Option<PathBuf> {
     }
 }
 
+/// Filesystem location of the local workspace-mirror publisher socket.
+///
+/// Canvas only emits renderer-independent workspace documents here. The
+/// edge owns authentication and transport, keeping the renderer unaware of
+/// Unibus and making the same contract usable on macOS and Linux.
+#[cfg(unix)]
+pub fn workspace_mirror_socket_path() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME").map(PathBuf::from)?;
+        Some(home.join("Library/Application Support/Dock/canvas/workspace-mirror.sock"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")?;
+        Some(PathBuf::from(runtime).join("dock/canvas/workspace-mirror.sock"))
+    }
+}
+
 #[derive(Debug)]
 pub struct Error(pub String);
 impl fmt::Display for Error {

@@ -4,9 +4,10 @@
   "hub_endpoint": "127.0.0.1:18794",
   "token_file": "/Users/ajmwagar/.config/canvas/macbook-neo-display.token",
   "zones": ["living-room"],
-  "capabilities": ["display", "canvas.display", "canvas.rlcd"],
+  "capabilities": ["display", "canvas.display", "canvas.rlcd", "canvas.workspace_mirror"],
   "screen_anchors": ["screen-neo"],
   "schema_version": 1,
+  "mirror": {"enabled": true, "zone": "living-room"},
   "actors": [
     {
       "producer": "canvas-central-studio",

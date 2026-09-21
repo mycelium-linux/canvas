@@ -577,6 +577,8 @@ struct App {
     theme_packs: Vec<::canvas::theme_pack::ThemePack>,
     theme_pack_ids: BTreeMap<String, String>,
     theme_pack_last_check: Instant,
+    #[cfg(unix)]
+    workspace_mirror: ::canvas::workspace_mirror::Publisher,
 }
 
 impl App {
@@ -956,6 +958,8 @@ impl App {
             theme_packs,
             theme_pack_ids,
             theme_pack_last_check: Instant::now(),
+            #[cfg(unix)]
+            workspace_mirror: ::canvas::workspace_mirror::Publisher::new(),
         };
         app.publish_web_themes();
         app.publish_active_project();
@@ -5211,6 +5215,8 @@ impl App {
 
     fn bump(&mut self) {
         self.runtime_revision = self.runtime_revision.saturating_add(1);
+        #[cfg(unix)]
+        self.workspace_mirror.publish_if_changed(&self.document);
     }
 
     /// Open a Canvas-native text input overlay for JARVIS. Unlike the
