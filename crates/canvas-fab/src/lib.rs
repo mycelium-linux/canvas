@@ -1,11 +1,80 @@
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 pub const OWNER: &str = "fab";
 pub const PROJECTS_STREAM: &str = "operations-projects";
 pub const METRICS_STREAM: &str = "operations-metrics";
 pub const RUNS_STREAM: &str = "operations-runs";
 pub const DELIVERIES_STREAM: &str = "operations-deliveries";
+pub const TRENDS_STREAM: &str = "operations-trends";
+
+const TREND_POINTS: usize = 48;
+
+/// Producer-owned rolling observations. Canvas receives a complete bounded
+/// snapshot, Lua describes it once, and Rust animates between snapshots.
+#[derive(Debug, Default)]
+pub struct TrendHistory {
+    active_runs: VecDeque<(u64, u64)>,
+    failed_runs: VecDeque<(u64, u64)>,
+    queued_deliveries: VecDeque<(u64, u64)>,
+}
+
+impl TrendHistory {
+    pub fn observe(&mut self, overview: &Value, observed_at_ms: u64) -> Value {
+        let count_status = |rows: Option<&Vec<Value>>, wanted: &[&str]| {
+            rows.into_iter()
+                .flatten()
+                .filter(|row| {
+                    row.get("status")
+                        .and_then(Value::as_str)
+                        .is_some_and(|status| wanted.contains(&status))
+                })
+                .count() as u64
+        };
+        let runs = overview.get("recentRuns").and_then(Value::as_array);
+        let deliveries = overview.get("recentDeliveries").and_then(Value::as_array);
+        push_sample(
+            &mut self.active_runs,
+            observed_at_ms,
+            count_status(runs, &["queued", "running", "publishing"]),
+        );
+        push_sample(
+            &mut self.failed_runs,
+            observed_at_ms,
+            count_status(runs, &["failed", "timed_out"]),
+        );
+        push_sample(
+            &mut self.queued_deliveries,
+            observed_at_ms,
+            count_status(deliveries, &["queued", "processing"]),
+        );
+        json!({
+            "period": "Rolling 4 minutes · 5s samples",
+            "series": [
+                trend_series("Active runs", &self.active_runs),
+                trend_series("Failed runs", &self.failed_runs),
+                trend_series("Queued deliveries", &self.queued_deliveries),
+            ]
+        })
+    }
+}
+
+fn push_sample(history: &mut VecDeque<(u64, u64)>, x: u64, y: u64) {
+    history.push_back((x, y));
+    while history.len() > TREND_POINTS {
+        history.pop_front();
+    }
+}
+
+fn trend_series(label: &str, history: &VecDeque<(u64, u64)>) -> Value {
+    let origin = history.front().map_or(0, |(x, _)| *x);
+    json!({
+        "label": label,
+        // Relative seconds are both meaningful to the plot and dramatically
+        // smaller than repeating 13-digit epoch milliseconds in a datagram.
+        "points": history.iter().map(|(x, y)| json!([x.saturating_sub(origin) / 1_000, *y])).collect::<Vec<_>>()
+    })
+}
 
 /// Keep the owner response useful while fitting Canvas's datagram transport.
 /// Fab remains the source of lifecycle truth; this only bounds and flattens it.
@@ -185,5 +254,29 @@ mod tests {
         assert_eq!(compact["projects"][0]["id"], "fab");
         assert_eq!(compact["projects"][0]["runs_by_status"]["running"], 1);
         assert_eq!(compact["projects"][0]["runs_by_status"]["succeeded"], 1);
+    }
+
+    #[test]
+    fn trend_history_is_bounded_compact_and_semantic() {
+        let overview = json!({
+            "recentRuns": [
+                {"status":"running"}, {"status":"publishing"}, {"status":"failed"}
+            ],
+            "recentDeliveries": [{"status":"queued"}, {"status":"succeeded"}]
+        });
+        let mut history = TrendHistory::default();
+        for index in 0..80 {
+            history.observe(&overview, 1_000_000 + index * 5_000);
+        }
+        let payload = history.observe(&overview, 1_400_000);
+        assert_eq!(
+            payload["series"][0]["points"].as_array().unwrap().len(),
+            TREND_POINTS
+        );
+        assert_eq!(payload["series"][0]["points"][47][1], 2);
+        assert_eq!(payload["series"][1]["points"][47][1], 1);
+        assert_eq!(payload["series"][2]["points"][47][1], 1);
+        let event = json!({"owner":OWNER,"stream":TRENDS_STREAM,"payload":payload});
+        assert!(serde_json::to_vec(&event).unwrap().len() <= 1848);
     }
 }
