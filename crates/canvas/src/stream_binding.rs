@@ -459,6 +459,14 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/command-palette-v1.lua"),
     ),
     (
+        "media-transport-v1",
+        include_str!("../../../config/binders/media-transport-v1.lua"),
+    ),
+    (
+        "model-telemetry-v1",
+        include_str!("../../../config/binders/model-telemetry-v1.lua"),
+    ),
+    (
         "log-stream-v1",
         include_str!("../../../config/binders/log-stream-v1.lua"),
     ),
@@ -1153,6 +1161,63 @@ mod tests {
             panic!("wrong family")
         };
         assert_eq!(results[0].id, "ohm");
+    }
+
+    #[test]
+    fn media_and_model_binders_preserve_transport_and_annotation_semantics() {
+        let base = |stream: &str, payload| StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "edge".into(),
+            stream: stream.into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            project_id: Some("dock".into()),
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload,
+        };
+        let mut media = test_spec(WidgetKind::MediaTransport {
+            title: "Waiting".into(),
+            source: "x".into(),
+            codec: "x".into(),
+            width: 1,
+            height: 1,
+            fps: 0.0,
+            bitrate_kbps: 0.0,
+            buffer_ms: 0.0,
+            delay_ms: 0.0,
+            route: vec!["x".into()],
+            state: None,
+        });
+        apply_named_adapter("media-transport-v1",&base("media",serde_json::json!({"source":"studio","codec":"h264","width":1280,"height":720,"fps":24,"bitrate_kbps":3200,"buffer_ms":72,"delay_ms":118,"route":["studio","pi"]})),&mut media).unwrap();
+        let WidgetKind::MediaTransport {
+            route, delay_ms, ..
+        } = media.kind
+        else {
+            panic!("wrong family")
+        };
+        assert_eq!(route.len(), 2);
+        assert_eq!(delay_ms, 118.0);
+
+        let mut model = test_spec(WidgetKind::ModelTelemetry {
+            title: "Waiting".into(),
+            model: "m".into(),
+            view: canvas_widgets::ModelView::Isometric,
+            annotations: Vec::new(),
+            exploded: 0.0,
+        });
+        apply_named_adapter("model-telemetry-v1",&base("model",serde_json::json!({"model":"benchy.glb","view":"top","exploded":0.2,"annotations":[{"id":"bow","position":[-0.6,0.1,0.4],"value":"2mm"}]})),&mut model).unwrap();
+        let WidgetKind::ModelTelemetry {
+            view,
+            annotations,
+            exploded,
+            ..
+        } = model.kind
+        else {
+            panic!("wrong family")
+        };
+        assert_eq!(view, canvas_widgets::ModelView::Top);
+        assert_eq!(annotations.len(), 1);
+        assert_eq!(exploded, 0.2);
     }
 
     #[test]

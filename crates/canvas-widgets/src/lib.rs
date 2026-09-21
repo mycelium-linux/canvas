@@ -199,6 +199,8 @@ pub const KNOWN_WIDGET_KINDS: &[&str] = &[
     "rich_card",
     "approval_card",
     "command_palette",
+    "media_transport",
+    "model_telemetry",
     "span_timeline",
     "state_timeline",
     "rate_bars",
@@ -413,6 +415,28 @@ pub enum WidgetKind {
         results: Vec<CommandResult>,
         #[serde(default)]
         selected: usize,
+    },
+    MediaTransport {
+        title: String,
+        source: String,
+        codec: String,
+        width: u32,
+        height: u32,
+        fps: f32,
+        bitrate_kbps: f64,
+        buffer_ms: f64,
+        delay_ms: f64,
+        route: Vec<String>,
+        #[serde(default)]
+        state: Option<StatusLevel>,
+    },
+    ModelTelemetry {
+        title: String,
+        model: String,
+        view: ModelView,
+        annotations: Vec<ModelAnnotation>,
+        #[serde(default)]
+        exploded: f32,
     },
     /// Bounded timed spans rendered as a flame graph, request waterfall,
     /// execution Gantt, or event river from one shared retained primitive.
@@ -1226,6 +1250,32 @@ pub struct CommandResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum ModelView {
+    Orbit,
+    Front,
+    Back,
+    Left,
+    Right,
+    Top,
+    Bottom,
+    Isometric,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ModelAnnotation {
+    pub id: String,
+    pub label: String,
+    pub position: [f32; 3],
+    pub value: String,
+    #[serde(default)]
+    pub state: Option<StatusLevel>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum SpanTimelineStyle {
     Flame,
     Waterfall,
@@ -2031,6 +2081,76 @@ impl WidgetSpec {
                     )?;
                 }
             }
+            WidgetKind::MediaTransport {
+                title,
+                source,
+                codec,
+                width,
+                height,
+                fps,
+                bitrate_kbps,
+                buffer_ms,
+                delay_ms,
+                route,
+                ..
+            } => {
+                for (value, name) in [
+                    (title, "media transport title"),
+                    (source, "media transport source"),
+                    (codec, "media transport codec"),
+                ] {
+                    bounded_label(value, name)?;
+                }
+                check(
+                    *width > 0 && *width <= 16384 && *height > 0 && *height <= 16384,
+                    "media transport dimensions must be within 1-16384",
+                )?;
+                check(
+                    fps.is_finite()
+                        && *fps >= 0.0
+                        && *fps <= 240.0
+                        && bitrate_kbps.is_finite()
+                        && *bitrate_kbps >= 0.0
+                        && buffer_ms.is_finite()
+                        && *buffer_ms >= 0.0
+                        && delay_ms.is_finite()
+                        && *delay_ms >= 0.0,
+                    "media transport rates and latency must be finite and non-negative",
+                )?;
+                validate_labels(route, "media route", 16)?;
+            }
+            WidgetKind::ModelTelemetry {
+                title,
+                model,
+                annotations,
+                exploded,
+                ..
+            } => {
+                bounded_label(title, "model telemetry title")?;
+                bounded_label(model, "model telemetry model")?;
+                check(
+                    exploded.is_finite() && (0.0..=1.0).contains(exploded),
+                    "model exploded amount must be within 0-1",
+                )?;
+                check(
+                    annotations.len() <= 64,
+                    "model telemetry exceeds 64 annotations",
+                )?;
+                let mut ids = HashSet::new();
+                for annotation in annotations {
+                    bounded_label(&annotation.id, "model annotation id")?;
+                    bounded_label(&annotation.label, "model annotation label")?;
+                    bounded_label(&annotation.value, "model annotation value")?;
+                    check(
+                        ids.insert(annotation.id.as_str())
+                            && annotation
+                                .position
+                                .iter()
+                                .all(|value| value.is_finite() && (-1.0..=1.0).contains(value)),
+                        "model annotations require unique ids and normalized positions",
+                    )?;
+                }
+            }
             WidgetKind::SpanTimeline {
                 title, spans, unit, ..
             } => {
@@ -2528,6 +2648,9 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
         WidgetKind::RichCard { .. }
         | WidgetKind::ApprovalCard { .. }
         | WidgetKind::CommandPalette { .. } => SizeHint::new(280.0, 180.0, 520.0, 360.0, 1.5),
+        WidgetKind::MediaTransport { .. } | WidgetKind::ModelTelemetry { .. } => {
+            SizeHint::new(280.0, 180.0, 540.0, 340.0, 1.8)
+        }
         WidgetKind::SpanTimeline { .. } => SizeHint::new(300.0, 160.0, 600.0, 320.0, 2.4),
         // A cell smaller than this is a colour with no shape; four rows is the
         // fewest that reads as a matrix rather than a bar chart.
@@ -2733,6 +2856,26 @@ mod tests {
                 query: String::new(),
                 results: Vec::new(),
                 selected: 0,
+            },
+            WidgetKind::MediaTransport {
+                title: "Stream".into(),
+                source: "studio".into(),
+                codec: "h264".into(),
+                width: 1280,
+                height: 720,
+                fps: 24.0,
+                bitrate_kbps: 2500.0,
+                buffer_ms: 80.0,
+                delay_ms: 120.0,
+                route: vec!["studio".into(), "home-pi".into()],
+                state: Some(StatusLevel::Good),
+            },
+            WidgetKind::ModelTelemetry {
+                title: "Model".into(),
+                model: "benchy.glb".into(),
+                view: ModelView::Isometric,
+                annotations: Vec::new(),
+                exploded: 0.0,
             },
             WidgetKind::SpanTimeline {
                 title: "t".into(),

@@ -1,0 +1,5 @@
+{"schema_version":2,"id":"ops-model-telemetry","kind":"model_telemetry","title":"Benchy telemetry","model":"3DBenchy.glb","view":"isometric","exploded":0.18,"annotations":[
+{"id":"bow","label":"Bow","position":[-0.65,0.05,0.42],"value":"2.1 mm","state":"good"},
+{"id":"cabin","label":"Cabin temp","position":[0.12,0.58,0.08],"value":"42 °C","state":"warning"},
+{"id":"stern","label":"Stern","position":[0.66,-0.12,-0.35],"value":"nominal","state":"good"}
+],"data":{"state":"ready","source":"demo/model","provenance":"demo"},"chrome":"drag_only"}

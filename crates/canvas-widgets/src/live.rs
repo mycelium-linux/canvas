@@ -8,15 +8,15 @@
 use crate::{
     ApprovalStatus, BurnRateWindow, ChartType, ClockMode, DistributionGroup, DistributionStyle,
     EventEntry, HeatmapStyle, HierarchyNode, HierarchyStyle, MeterStyle, MetricBoardStyle,
-    NeuralEdge, NeuralNode, RichCardFormat, SpanTimelineStyle, SpatialBounds, SpatialTrack,
-    StateLane, StatusLevel, StatusState, TargetMetric, TimedSpan, WidgetDataState, WidgetKind,
-    WidgetSpec,
+    ModelAnnotation, ModelView, NeuralEdge, NeuralNode, RichCardFormat, SpanTimelineStyle,
+    SpatialBounds, SpatialTrack, StateLane, StatusLevel, StatusState, TargetMetric, TimedSpan,
+    WidgetDataState, WidgetKind, WidgetSpec,
 };
 use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use canvas_core::{ThemePalette, VisualTheme};
+use canvas_core::{ThemeMetrics, ThemePalette, VisualTheme};
 use iced::mouse;
 use iced::widget::canvas::{Cache, Geometry, Path};
 use iced::widget::{
@@ -1367,6 +1367,128 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                 visual,
             )
         }
+        WidgetKind::MediaTransport {
+            title,
+            source,
+            codec,
+            width,
+            height,
+            fps,
+            bitrate_kbps,
+            buffer_ms,
+            delay_ms,
+            route,
+            state,
+        } => {
+            let media_surface = with_alpha(color(palette.surface_muted), 0.8);
+            let media_radius = metrics.radius_sm;
+            let route_items = route
+                .iter()
+                .enumerate()
+                .flat_map(|(index, hop)| {
+                    let mut items: Vec<Element<'_, Message>> = Vec::new();
+                    if index > 0 {
+                        items.push(
+                            text("→")
+                                .size(metrics.small)
+                                .color(color(palette.text_muted))
+                                .into(),
+                        );
+                    }
+                    items.push(
+                        container(text(hop).size(metrics.micro).color(color(palette.text)))
+                            .padding([4, 7])
+                            .style(move |_| container::Style {
+                                background: Some(media_surface.into()),
+                                border: iced::Border {
+                                    radius: media_radius.into(),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            })
+                            .into(),
+                    );
+                    items
+                })
+                .collect::<Vec<_>>();
+            let health = state.map_or(palette.info, |level| match level {
+                StatusLevel::Neutral => palette.info,
+                StatusLevel::Good => palette.success,
+                StatusLevel::Warning => palette.warning,
+                StatusLevel::Critical => palette.danger,
+            });
+            panel(
+                spec,
+                column![
+                    row![
+                        text(title).size(metrics.body).color(color(palette.text)),
+                        space::horizontal(),
+                        status_dot(color(health), 8.0),
+                        text(source)
+                            .size(metrics.small)
+                            .color(color(palette.text_muted))
+                    ]
+                    .spacing(metrics.space_2)
+                    .align_y(iced::Alignment::Center),
+                    row(route_items).spacing(metrics.space_1),
+                    row![
+                        metric_pair("Codec", codec.clone(), metrics, palette),
+                        metric_pair(
+                            "Frame",
+                            format!("{width}×{height} @ {fps:.1}"),
+                            metrics,
+                            palette
+                        )
+                    ]
+                    .spacing(metrics.space_5),
+                    row![
+                        metric_pair(
+                            "Bitrate",
+                            format!("{bitrate_kbps:.0} kbps"),
+                            metrics,
+                            palette
+                        ),
+                        metric_pair("Buffer", format!("{buffer_ms:.0} ms"), metrics, palette),
+                        metric_pair("A/V delay", format!("{delay_ms:.0} ms"), metrics, palette)
+                    ]
+                    .spacing(metrics.space_5)
+                ]
+                .spacing(metrics.space_3)
+                .into(),
+                visual,
+            )
+        }
+        WidgetKind::ModelTelemetry {
+            title,
+            model,
+            view,
+            annotations,
+            exploded,
+        } => panel(
+            spec,
+            column![
+                row![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    space::horizontal(),
+                    text(format!("{view:?} · explode {:.0}%", *exploded * 100.0))
+                        .size(metrics.micro)
+                        .color(color(palette.text_muted))
+                ],
+                Canvas::new(ModelTelemetryProgram {
+                    model: model.clone(),
+                    view: *view,
+                    annotations: annotations.clone(),
+                    exploded: *exploded,
+                    palette: *palette,
+                    label_size: metrics.micro
+                })
+                .width(Length::Fill)
+                .height(Length::Fill)
+            ]
+            .spacing(metrics.space_2)
+            .into(),
+            visual,
+        ),
         WidgetKind::StatusList { title, nodes } => {
             let lines =
                 nodes
@@ -1513,6 +1635,114 @@ struct SpatialTracksProgram {
     bounds: SpatialBounds,
     palette: ThemePalette,
     label_size: f32,
+}
+
+struct ModelTelemetryProgram {
+    model: String,
+    view: ModelView,
+    annotations: Vec<ModelAnnotation>,
+    exploded: f32,
+    palette: ThemePalette,
+    label_size: f32,
+}
+
+impl<Message> canvas::Program<Message> for ModelTelemetryProgram {
+    type State = CacheState;
+    fn draw(
+        &self,
+        state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let key = self
+            .annotations
+            .iter()
+            .fold(
+                Key::new()
+                    .add_str(&self.model)
+                    .add_usize(self.view as usize)
+                    .add_f32(self.exploded)
+                    .add_f32(self.label_size)
+                    .add_color(color(self.palette.primary)),
+                |key, item| {
+                    key.add_str(&item.id)
+                        .add_str(&item.label)
+                        .add_str(&item.value)
+                        .add_f32(item.position[0])
+                        .add_f32(item.position[1])
+                        .add_f32(item.position[2])
+                        .add_usize(item.state.map_or(usize::MAX, |state| state as usize))
+                },
+            )
+            .build();
+        state.draw_cached(renderer, bounds.size(), key, |frame| {
+            let center = Point::new(bounds.width * 0.48, bounds.height * 0.5);
+            let size = bounds.width.min(bounds.height) * 0.28;
+            let offset = size * (0.35 + self.exploded * 0.35);
+            let front = [
+                Point::new(center.x - size, center.y - size),
+                Point::new(center.x + size, center.y - size),
+                Point::new(center.x + size, center.y + size),
+                Point::new(center.x - size, center.y + size),
+            ];
+            let back = front.map(|point| Point::new(point.x + offset, point.y - offset));
+            let wire = with_alpha(color(self.palette.primary), 0.72);
+            for face in [front, back] {
+                for index in 0..4 {
+                    frame.stroke(
+                        &Path::line(face[index], face[(index + 1) % 4]),
+                        canvas::Stroke::default().with_width(1.5).with_color(wire),
+                    );
+                }
+            }
+            for index in 0..4 {
+                frame.stroke(
+                    &Path::line(front[index], back[index]),
+                    canvas::Stroke::default().with_width(1.0).with_color(wire),
+                );
+            }
+            frame.fill_text(canvas::Text {
+                content: self.model.clone(),
+                position: Point::new(8.0, bounds.height - 5.0),
+                color: color(self.palette.text_muted),
+                size: iced::Pixels(self.label_size),
+                ..Default::default()
+            });
+            for annotation in &self.annotations {
+                let [a, b, _c] = match self.view {
+                    ModelView::Top | ModelView::Bottom => [
+                        annotation.position[0],
+                        annotation.position[2],
+                        annotation.position[1],
+                    ],
+                    ModelView::Left | ModelView::Right => [
+                        annotation.position[2],
+                        annotation.position[1],
+                        annotation.position[0],
+                    ],
+                    _ => annotation.position,
+                };
+                let point = Point::new(center.x + a * size, center.y - b * size);
+                let mark = annotation.state.map_or(color(self.palette.info), |state| {
+                    status_color(state, &self.palette)
+                });
+                frame.fill(&Path::circle(point, 4.0), mark);
+                frame.stroke(
+                    &Path::line(point, Point::new(point.x + 18.0, point.y - 14.0)),
+                    canvas::Stroke::default().with_width(1.0).with_color(mark),
+                );
+                frame.fill_text(canvas::Text {
+                    content: format!("{} · {}", annotation.label, annotation.value),
+                    position: Point::new(point.x + 21.0, point.y - 15.0),
+                    color: color(self.palette.text),
+                    size: iced::Pixels(self.label_size),
+                    ..Default::default()
+                });
+            }
+        })
+    }
 }
 
 impl<Message> canvas::Program<Message> for SpatialTracksProgram {
@@ -2185,6 +2415,22 @@ fn status_dot<'a, Message: 'a>(fill: Color, size: f32) -> Element<'a, Message> {
             ..Default::default()
         })
         .into()
+}
+
+fn metric_pair<'a, Message: 'a>(
+    label: &'static str,
+    value: String,
+    metrics: ThemeMetrics,
+    palette: &ThemePalette,
+) -> Element<'a, Message> {
+    column![
+        text(label)
+            .size(metrics.micro)
+            .color(color(palette.text_muted)),
+        text(value).size(metrics.small).color(color(palette.text)),
+    ]
+    .spacing(metrics.space_1)
+    .into()
 }
 
 fn status_color(level: StatusLevel, palette: &ThemePalette) -> Color {

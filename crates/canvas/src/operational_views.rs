@@ -232,6 +232,8 @@ fn appetite(kind: &WidgetKind) -> f32 {
         | WidgetKind::RichCard { .. }
         | WidgetKind::ApprovalCard { .. }
         | WidgetKind::CommandPalette { .. }
+        | WidgetKind::MediaTransport { .. }
+        | WidgetKind::ModelTelemetry { .. }
         | WidgetKind::SpanTimeline { .. }
         | WidgetKind::StateTimeline { .. }
         | WidgetKind::RateBars { .. }
@@ -575,6 +577,8 @@ fn widget_title(spec: &canvas_widgets::WidgetSpec) -> String {
         | WidgetKind::Distribution { title, .. }
         | WidgetKind::RichCard { title, .. }
         | WidgetKind::ApprovalCard { title, .. }
+        | WidgetKind::MediaTransport { title, .. }
+        | WidgetKind::ModelTelemetry { title, .. }
         | WidgetKind::SpanTimeline { title, .. }
         | WidgetKind::StateTimeline { title, .. }
         | WidgetKind::RateBars { title, .. }
