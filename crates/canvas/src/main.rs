@@ -6524,7 +6524,7 @@ impl App {
         let text_color = color(palette.text);
         let shell_bar_height = self
             .overlay_on_viewport(self.overlays.fpl_mark, viewport)
-            .then_some(40_u32)
+            .then_some(44_u32)
             .unwrap_or_default();
         let content_frame = Rect {
             height: self.frame.height.saturating_sub(shell_bar_height).max(1),
@@ -6986,6 +6986,7 @@ impl App {
                 .width(Length::Fill)
                 .height(Length::Fixed(shell_bar_height as f32))
                 .padding([0, 20])
+                .align_y(iced::alignment::Vertical::Center)
                 .style(move |_| container::Style {
                     background: Some(
                         Color {
