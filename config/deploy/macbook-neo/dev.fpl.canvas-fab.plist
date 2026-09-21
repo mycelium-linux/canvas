@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.fpl.canvas-fab</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/ajmwagar/.local/bin/canvas-fab</string>
+    <string>--url</string>
+    <string>http://agora-one.tail5ba253.ts.net:7788/api/overview</string>
+    <string>--every</string>
+    <string>5</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/ajmwagar/Library/Logs/Canvas/fab.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/ajmwagar/Library/Logs/Canvas/fab.log</string>
+</dict>
+</plist>
