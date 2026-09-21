@@ -139,10 +139,11 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
     Ok(RawVideoPlan {
         width,
         height,
-        // v4l2convert exposes one allocation sized for a 32-pixel-aligned
-        // coded width. Its visible RGBA plane is packed at the start; fdsink
-        // then appends the unused allocation tail to each atomic write.
-        allocation_bytes: (((width as usize + 31) & !31) * 4) * height as usize,
+        // fdsink serializes the negotiated visible RGBA plane. V4L2 may use
+        // an aligned allocation internally, but that padding is not part of
+        // the byte stream; reading it here would consume the next frame and
+        // permanently destroy frame boundaries.
+        allocation_bytes: width as usize * height as usize * 4,
         argv,
     })
 }
@@ -546,7 +547,7 @@ mod tests {
         .unwrap();
         assert_eq!((plan.width, plan.height), (852, 480));
         assert_eq!(plan.frame_bytes().unwrap(), 852 * 480 * 4);
-        assert_eq!(plan.allocation_bytes, 864 * 480 * 4);
+        assert_eq!(plan.allocation_bytes, plan.frame_bytes().unwrap());
         let mut allocation = vec![7_u8; plan.allocation_bytes];
         allocation[plan.frame_bytes().unwrap()..].fill(99);
         let visible = plan.visible_frame(&allocation).unwrap();
