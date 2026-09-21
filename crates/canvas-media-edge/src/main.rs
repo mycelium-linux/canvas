@@ -3,8 +3,8 @@
 use anyhow::{Context, Result, ensure};
 use canvas::bus::{Bus, BusConfig};
 use canvas_media_edge::{
-    DecodePolicy, HardwareDecoder, gstreamer_raw_plan, now_unix_ms, write_detections,
-    write_raw_frame,
+    DecodePolicy, HardwareDecoder, ffmpeg_raw_plan, gstreamer_raw_plan, now_unix_ms,
+    write_detections, write_raw_frame,
 };
 use serde::Deserialize;
 use std::{
@@ -32,6 +32,8 @@ struct EdgeConfig {
     runtime_dir: Option<PathBuf>,
     #[serde(default = "default_gst_launch")]
     gst_launch: PathBuf,
+    #[serde(default = "default_ffmpeg")]
+    ffmpeg: PathBuf,
     #[serde(default = "default_max_height")]
     max_height: u32,
     #[serde(default = "default_max_fps")]
@@ -42,6 +44,9 @@ struct EdgeConfig {
 
 fn default_gst_launch() -> PathBuf {
     PathBuf::from("gst-launch-1.0")
+}
+fn default_ffmpeg() -> PathBuf {
+    PathBuf::from("ffmpeg")
 }
 fn default_max_height() -> u32 {
     720
@@ -102,7 +107,7 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
         "canvas-media-edge: registered '{}' via {}; decoder={:?}",
         config.bus.producer_id, config.bus.hub_endpoint, policy.decoder
     );
-    let mut decoders = DecoderSet::new(config.gst_launch.clone(), policy);
+    let mut decoders = DecoderSet::new(config.gst_launch.clone(), config.ffmpeg.clone(), policy);
     loop {
         decoders.expire(now_unix_ms());
         match bus.try_read()? {
@@ -150,14 +155,16 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
 
 struct DecoderSet {
     gst_launch: PathBuf,
+    ffmpeg: PathBuf,
     policy: DecodePolicy,
     workers: HashMap<String, DecoderWorker>,
 }
 
 impl DecoderSet {
-    fn new(gst_launch: PathBuf, policy: DecodePolicy) -> Self {
+    fn new(gst_launch: PathBuf, ffmpeg: PathBuf, policy: DecodePolicy) -> Self {
         Self {
             gst_launch,
+            ffmpeg,
             policy,
             workers: HashMap::new(),
         }
@@ -183,7 +190,16 @@ impl DecoderSet {
             worker.stop();
         }
         let id = stream.camera_id.clone();
-        let worker = DecoderWorker::spawn(stream, self.gst_launch.clone(), self.policy)?;
+        let (program, plan) = match self.policy.decoder {
+            HardwareDecoder::VideoToolbox => {
+                (self.ffmpeg.clone(), ffmpeg_raw_plan(&stream, self.policy)?)
+            }
+            HardwareDecoder::V4l2M2m => (
+                self.gst_launch.clone(),
+                gstreamer_raw_plan(&stream, self.policy)?,
+            ),
+        };
+        let worker = DecoderWorker::spawn(stream, program, plan)?;
         self.workers.insert(id.clone(), worker);
         eprintln!("canvas-media-edge: started native camera source '{id}'");
         Ok(())
@@ -239,16 +255,19 @@ struct DecoderWorker {
 }
 
 impl DecoderWorker {
-    fn spawn(stream: CameraStream, gst_launch: PathBuf, policy: DecodePolicy) -> Result<Self> {
-        let plan = gstreamer_raw_plan(&stream, policy)?;
+    fn spawn(
+        stream: CameraStream,
+        program: PathBuf,
+        plan: canvas_media_edge::RawVideoPlan,
+    ) -> Result<Self> {
         let frame_bytes = plan.frame_bytes()?;
-        let mut process = Command::new(&gst_launch)
+        let mut process = Command::new(&program)
             .args(&plan.argv)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .with_context(|| format!("spawn hardware decoder {}", gst_launch.display()))?;
+            .with_context(|| format!("spawn hardware decoder {}", program.display()))?;
         let stdout = process
             .stdout
             .take()

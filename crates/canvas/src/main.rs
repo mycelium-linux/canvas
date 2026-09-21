@@ -4030,6 +4030,11 @@ impl App {
                 } else {
                     self.document.surfaces.push(surface);
                 }
+                // A native video is a real Canvas surface, not merely a
+                // decoder subscription. Ensure a newly opened source has
+                // geometry immediately, while preserving every existing
+                // hand-arranged placement.
+                self.rebuild_stack();
                 self.decoded.remove(&surface_id);
                 self.ensure_scene_decoded();
                 self.start_transition();

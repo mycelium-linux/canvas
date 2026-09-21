@@ -103,9 +103,14 @@ pub fn video_frame_file(source_id: &str) -> Option<PathBuf> {
     if !is_safe_frame_id(source_id) {
         return None;
     }
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR")?;
+    #[cfg(target_os = "macos")]
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    #[cfg(not(target_os = "macos"))]
+    let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?);
     Some(
-        PathBuf::from(runtime)
+        runtime
             .join("dock/canvas/video-frames")
             .join(format!("{source_id}.rgba")),
     )
@@ -998,6 +1003,12 @@ mod tests {
     use super::*;
     fn catalog() -> Catalog {
         Catalog::bundled().unwrap()
+    }
+    #[test]
+    fn native_video_frame_paths_are_available_and_bounded() {
+        assert!(video_frame_file("browser-agent-one").is_some());
+        assert!(video_frame_file("../escape").is_none());
+        assert!(video_frame_file("Browser Mixed Case").is_none());
     }
     #[test]
     fn themes_are_upstream_and_visually_distinct() {

@@ -73,7 +73,11 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
             let (_host, port) = endpoint
                 .rsplit_once(':')
                 .context("UDP endpoint must include a port")?;
-            let port: u16 = port.parse().context("invalid UDP port")?;
+            let port: u16 = port
+                .split_once('?')
+                .map_or(port, |(port, _query)| port)
+                .parse()
+                .context("invalid UDP port")?;
             argv.extend([
                 "udpsrc".into(),
                 format!("port={port}"),
@@ -140,6 +144,69 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
         // then appends the unused allocation tail to each atomic write.
         allocation_bytes: (((width as usize + 31) & !31) * 4) * height as usize,
         argv,
+    })
+}
+
+/// Build a shell-free FFmpeg raw-frame pipeline for macOS VideoToolbox.
+/// The output is tightly packed RGBA, so unlike the Pi V4L2 allocation there
+/// is no coded-width tail to strip before publishing the frame.
+pub fn ffmpeg_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result<RawVideoPlan> {
+    stream.validate().map_err(anyhow::Error::msg)?;
+    policy.validate()?;
+    validate_endpoint(stream)?;
+    ensure!(
+        policy.decoder == HardwareDecoder::VideoToolbox,
+        "FFmpeg raw edge currently requires VideoToolbox"
+    );
+    ensure!(
+        stream.codec == VideoCodec::H264,
+        "FFmpeg raw edge currently requires H.264"
+    );
+    let height = stream.height.min(policy.max_height).max(16) & !1;
+    let width = ((u64::from(stream.width) * u64::from(height) / u64::from(stream.height)) as u32)
+        .max(16)
+        & !1;
+    let source_fps = f64::from(stream.frame_rate_millihz) / 1_000.0;
+    let fps = source_fps.min(policy.max_fps);
+    let mut argv = vec![
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-nostdin".into(),
+        "-fflags".into(),
+        "+nobuffer+discardcorrupt".into(),
+        "-flags".into(),
+        "low_delay".into(),
+        "-hwaccel".into(),
+        "videotoolbox".into(),
+    ];
+    if stream.transport == VideoTransport::Rtsp {
+        argv.extend(["-rtsp_transport".into(), "tcp".into()]);
+    }
+    argv.extend([
+        "-i".into(),
+        stream.endpoint.clone(),
+        "-map".into(),
+        "0:v:0".into(),
+        "-an".into(),
+        "-vf".into(),
+        format!("fps={fps},scale={width}:{height}"),
+        "-pix_fmt".into(),
+        "rgba".into(),
+        "-f".into(),
+        "rawvideo".into(),
+        "pipe:1".into(),
+    ]);
+    let frame_bytes = usize::try_from(width)
+        .ok()
+        .and_then(|width| width.checked_mul(height as usize))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .context("RGBA frame dimensions overflow")?;
+    Ok(RawVideoPlan {
+        argv,
+        width,
+        height,
+        allocation_bytes: frame_bytes,
     })
 }
 
@@ -442,9 +509,34 @@ mod tests {
     }
 
     #[test]
+    fn videotoolbox_raw_plan_is_packed_and_shell_free() {
+        let value = stream(VideoTransport::UdpMpegTs, "udp://127.0.0.1:5600");
+        let plan = ffmpeg_raw_plan(
+            &value,
+            DecodePolicy {
+                max_height: 720,
+                max_fps: 24.0,
+                decoder: HardwareDecoder::VideoToolbox,
+            },
+        )
+        .unwrap();
+        assert_eq!(plan.allocation_bytes, plan.frame_bytes().unwrap());
+        assert!(
+            plan.argv
+                .windows(2)
+                .any(|args| args == ["-hwaccel", "videotoolbox"])
+        );
+        assert!(plan.argv.iter().any(|arg| arg == "rawvideo"));
+        assert!(!plan.argv.iter().any(|arg| arg == "sh" || arg == "-c"));
+    }
+
+    #[test]
     fn raw_plan_is_fixed_size_and_hardware_only() {
         let plan = gstreamer_raw_plan(
-            &stream(VideoTransport::UdpMpegTs, "udp://192.168.10.74:5004"),
+            &stream(
+                VideoTransport::UdpMpegTs,
+                "udp://192.168.10.74:5004?fifo_size=1000000&overrun_nonfatal=1",
+            ),
             DecodePolicy {
                 max_height: 480,
                 max_fps: 24.0,
