@@ -7,8 +7,9 @@
 
 use crate::{
     BurnRateWindow, ChartType, ClockMode, EventEntry, HeatmapStyle, HierarchyNode, HierarchyStyle,
-    MeterStyle, NeuralEdge, NeuralNode, SpanTimelineStyle, SpatialBounds, SpatialTrack, StateLane,
-    StatusLevel, StatusState, TimedSpan, WidgetDataState, WidgetKind, WidgetSpec,
+    MeterStyle, MetricBoardStyle, NeuralEdge, NeuralNode, SpanTimelineStyle, SpatialBounds,
+    SpatialTrack, StateLane, StatusLevel, StatusState, TargetMetric, TimedSpan, WidgetDataState,
+    WidgetKind, WidgetSpec,
 };
 use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
@@ -872,6 +873,35 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                     colors: series_colors(visual),
                     text: color(palette.text),
                     border: color(palette.border),
+                    label_size: metrics.micro,
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .spacing(metrics.space_2)
+            .into(),
+            visual,
+        ),
+        WidgetKind::MetricBoard {
+            title,
+            style,
+            metrics: values,
+            unit,
+        } => panel(
+            spec,
+            column![
+                row![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    space::horizontal(),
+                    text(unit.clone().unwrap_or_default())
+                        .size(metrics.small)
+                        .color(color(palette.text_muted)),
+                ],
+                Canvas::new(MetricBoardProgram {
+                    style: *style,
+                    metrics: values.clone(),
+                    palette: *palette,
+                    colors: series_colors(visual),
                     label_size: metrics.micro,
                 })
                 .width(Length::Fill)
@@ -2990,6 +3020,202 @@ fn draw_sunburst_node(
             program,
         );
         child_start += child_sweep;
+    }
+}
+
+struct MetricBoardProgram {
+    style: MetricBoardStyle,
+    metrics: Vec<TargetMetric>,
+    palette: ThemePalette,
+    colors: Vec<Color>,
+    label_size: f32,
+}
+
+impl<Message> canvas::Program<Message> for MetricBoardProgram {
+    type State = CacheState;
+
+    fn draw(
+        &self,
+        state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let key = self.metrics.iter().fold(
+            Key::new()
+                .add_usize(self.style as usize)
+                .add_f32(self.label_size)
+                .add_color(color(self.palette.text))
+                .add_color(color(self.palette.surface_muted)),
+            |key, metric| {
+                key.add_str(&metric.label)
+                    .add_f64(metric.value)
+                    .add_f64(metric.max)
+                    .add_f64(metric.target.unwrap_or(-1.0))
+                    .add_f64(metric.forecast.unwrap_or(-1.0))
+                    .add_usize(metric.state.map_or(usize::MAX, |state| state as usize))
+            },
+        );
+        let key = self
+            .colors
+            .iter()
+            .fold(key, |key, value| key.add_color(*value))
+            .build();
+        state.draw_cached(renderer, bounds.size(), key, |frame| match self.style {
+            MetricBoardStyle::Radial => self.draw_radial(frame, bounds),
+            MetricBoardStyle::Bullet => self.draw_bullets(frame, bounds),
+        })
+    }
+}
+
+impl MetricBoardProgram {
+    fn draw_radial(&self, frame: &mut canvas::Frame, bounds: Rectangle) {
+        let columns = (self.metrics.len() as f32).sqrt().ceil() as usize;
+        let rows = self.metrics.len().div_ceil(columns.max(1));
+        let cell_w = bounds.width / columns.max(1) as f32;
+        let cell_h = bounds.height / rows.max(1) as f32;
+        for (index, metric) in self.metrics.iter().enumerate() {
+            let center = Point::new(
+                (index % columns) as f32 * cell_w + cell_w * 0.5,
+                (index / columns) as f32 * cell_h + cell_h * 0.48,
+            );
+            let radius = cell_w.min(cell_h) * 0.31;
+            let fraction = (metric.value / metric.max).clamp(0.0, 1.0) as f32;
+            let start = std::f32::consts::PI * 0.75;
+            let sweep = std::f32::consts::PI * 1.5;
+            let stroke_arc = |frame: &mut canvas::Frame, end: f32, color: Color, width: f32| {
+                let steps = 40usize;
+                let path = Path::new(|builder| {
+                    for step in 0..=steps {
+                        let angle = start + end * step as f32 / steps as f32;
+                        let point = Point::new(
+                            center.x + radius * angle.cos(),
+                            center.y + radius * angle.sin(),
+                        );
+                        if step == 0 {
+                            builder.move_to(point)
+                        } else {
+                            builder.line_to(point)
+                        }
+                    }
+                });
+                frame.stroke(
+                    &path,
+                    canvas::Stroke::default()
+                        .with_width(width)
+                        .with_color(color),
+                );
+            };
+            stroke_arc(frame, sweep, color(self.palette.surface_muted), 7.0);
+            let fill = metric
+                .state
+                .map_or(self.colors[index % self.colors.len()], |state| {
+                    status_color(state, &self.palette)
+                });
+            stroke_arc(frame, sweep * fraction, fill, 7.0);
+            if let Some(target) = metric.target {
+                let angle = start + sweep * (target / metric.max) as f32;
+                frame.stroke(
+                    &Path::line(
+                        Point::new(
+                            center.x + (radius - 7.0) * angle.cos(),
+                            center.y + (radius - 7.0) * angle.sin(),
+                        ),
+                        Point::new(
+                            center.x + (radius + 7.0) * angle.cos(),
+                            center.y + (radius + 7.0) * angle.sin(),
+                        ),
+                    ),
+                    canvas::Stroke::default()
+                        .with_width(2.0)
+                        .with_color(color(self.palette.text)),
+                );
+            }
+            frame.fill_text(canvas::Text {
+                content: format_metric(metric.value),
+                position: Point::new(center.x, center.y + 4.0),
+                color: color(self.palette.text),
+                size: iced::Pixels(self.label_size * 1.45),
+                align_x: iced::alignment::Horizontal::Center.into(),
+                ..Default::default()
+            });
+            frame.fill_text(canvas::Text {
+                content: metric.label.clone(),
+                position: Point::new(center.x, center.y + radius + self.label_size + 5.0),
+                color: color(self.palette.text_muted),
+                size: iced::Pixels(self.label_size),
+                align_x: iced::alignment::Horizontal::Center.into(),
+                ..Default::default()
+            });
+        }
+    }
+
+    fn draw_bullets(&self, frame: &mut canvas::Frame, bounds: Rectangle) {
+        let label_w = (bounds.width * 0.23).clamp(54.0, 120.0);
+        let row_h = bounds.height / self.metrics.len().max(1) as f32;
+        for (index, metric) in self.metrics.iter().enumerate() {
+            let y = index as f32 * row_h;
+            let plot_x = label_w;
+            let plot_w = (bounds.width - label_w - 8.0).max(1.0);
+            frame.fill_text(canvas::Text {
+                content: metric.label.clone(),
+                position: Point::new(0.0, y + row_h * 0.58),
+                color: color(self.palette.text_muted),
+                size: iced::Pixels(self.label_size),
+                ..Default::default()
+            });
+            for (share, fill) in [
+                (1.0, self.palette.surface_muted),
+                (0.75, self.palette.border),
+                (0.5, self.palette.border_strong),
+            ] {
+                frame.fill(
+                    &Path::rectangle(
+                        Point::new(plot_x, y + row_h * 0.23),
+                        Size::new(plot_w * share, row_h * 0.54),
+                    ),
+                    with_alpha(color(fill), 0.55),
+                );
+            }
+            let actual = (metric.value / metric.max).clamp(0.0, 1.0) as f32;
+            let fill = metric
+                .state
+                .map_or(self.colors[index % self.colors.len()], |state| {
+                    status_color(state, &self.palette)
+                });
+            frame.fill(
+                &Path::rectangle(
+                    Point::new(plot_x, y + row_h * 0.38),
+                    Size::new(plot_w * actual, row_h * 0.24),
+                ),
+                fill,
+            );
+            if let Some(forecast) = metric.forecast {
+                let x = plot_x + plot_w * (forecast / metric.max) as f32;
+                frame.stroke(
+                    &Path::line(
+                        Point::new(x, y + row_h * 0.31),
+                        Point::new(x, y + row_h * 0.69),
+                    ),
+                    canvas::Stroke::default()
+                        .with_width(2.0)
+                        .with_color(color(self.palette.info)),
+                );
+            }
+            if let Some(target) = metric.target {
+                let x = plot_x + plot_w * (target / metric.max) as f32;
+                frame.stroke(
+                    &Path::line(
+                        Point::new(x, y + row_h * 0.18),
+                        Point::new(x, y + row_h * 0.82),
+                    ),
+                    canvas::Stroke::default()
+                        .with_width(2.0)
+                        .with_color(color(self.palette.text)),
+                );
+            }
+        }
     }
 }
 

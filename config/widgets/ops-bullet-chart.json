@@ -1,0 +1,9 @@
+{
+  "schema_version":2,"id":"ops-bullet-chart","kind":"metric_board","title":"Quarter targets","style":"bullet","unit":"%",
+  "metrics":[
+    {"label":"Reliability","value":92,"max":100,"target":99,"forecast":96,"state":"warning"},
+    {"label":"Coverage","value":84,"max":100,"target":90,"forecast":91,"state":"good"},
+    {"label":"Delivery","value":76,"max":100,"target":85,"forecast":82,"state":"warning"},
+    {"label":"Budget","value":61,"max":100,"target":75,"forecast":70,"state":"good"}
+  ],"data":{"state":"ready","source":"demo/targets","provenance":"demo"},"chrome":"drag_only"
+}

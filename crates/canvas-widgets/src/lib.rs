@@ -194,6 +194,7 @@ pub const KNOWN_WIDGET_KINDS: &[&str] = &[
     "pie_chart",
     "sankey",
     "hierarchy",
+    "metric_board",
     "span_timeline",
     "state_timeline",
     "rate_bars",
@@ -365,6 +366,15 @@ pub enum WidgetKind {
         unit: Option<String>,
         #[serde(default)]
         focus: Option<String>,
+    },
+    /// Related target-bearing measures rendered as radial instruments or
+    /// compact bullet comparisons from one semantic contract.
+    MetricBoard {
+        title: String,
+        style: MetricBoardStyle,
+        metrics: Vec<TargetMetric>,
+        #[serde(default)]
+        unit: Option<String>,
     },
     /// Bounded timed spans rendered as a flame graph, request waterfall,
     /// execution Gantt, or event river from one shared retained primitive.
@@ -1098,6 +1108,29 @@ pub struct HierarchyNode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum MetricBoardStyle {
+    Radial,
+    Bullet,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TargetMetric {
+    pub label: String,
+    pub value: f64,
+    pub max: f64,
+    #[serde(default)]
+    pub target: Option<f64>,
+    #[serde(default)]
+    pub forecast: Option<f64>,
+    #[serde(default)]
+    pub state: Option<StatusLevel>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum SpanTimelineStyle {
     Flame,
     Waterfall,
@@ -1769,6 +1802,36 @@ impl WidgetSpec {
                     "hierarchy focus must name a known node",
                 )?;
             }
+            WidgetKind::MetricBoard {
+                title,
+                metrics,
+                unit,
+                ..
+            } => {
+                bounded_label(title, "metric board title")?;
+                optional_label(unit, "metric board unit")?;
+                check(
+                    !metrics.is_empty() && metrics.len() <= 12,
+                    "metric board requires 1-12 metrics",
+                )?;
+                for metric in metrics {
+                    bounded_label(&metric.label, "metric board label")?;
+                    check(
+                        metric.value.is_finite()
+                            && metric.max.is_finite()
+                            && metric.max > 0.0
+                            && metric.value >= 0.0
+                            && metric.value <= metric.max
+                            && metric.target.is_none_or(|value| {
+                                value.is_finite() && value >= 0.0 && value <= metric.max
+                            })
+                            && metric.forecast.is_none_or(|value| {
+                                value.is_finite() && value >= 0.0 && value <= metric.max
+                            }),
+                        "metric board values, targets, and forecasts must fit a positive finite scale",
+                    )?;
+                }
+            }
             WidgetKind::SpanTimeline {
                 title, spans, unit, ..
             } => {
@@ -2261,6 +2324,7 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
         }
         WidgetKind::Sankey { .. } => SizeHint::new(300.0, 180.0, 560.0, 300.0, 2.2),
         WidgetKind::Hierarchy { .. } => SizeHint::new(260.0, 200.0, 520.0, 360.0, 1.5),
+        WidgetKind::MetricBoard { .. } => SizeHint::new(240.0, 160.0, 480.0, 300.0, 1.8),
         WidgetKind::SpanTimeline { .. } => SizeHint::new(300.0, 160.0, 600.0, 320.0, 2.4),
         // A cell smaller than this is a colour with no shape; four rows is the
         // fewest that reads as a matrix rather than a bar chart.
@@ -2421,6 +2485,19 @@ mod tests {
                 }],
                 unit: None,
                 focus: None,
+            },
+            WidgetKind::MetricBoard {
+                title: "t".into(),
+                style: MetricBoardStyle::Radial,
+                metrics: vec![TargetMetric {
+                    label: "CPU".into(),
+                    value: 42.0,
+                    max: 100.0,
+                    target: Some(80.0),
+                    forecast: None,
+                    state: None,
+                }],
+                unit: Some("%".into()),
             },
             WidgetKind::SpanTimeline {
                 title: "t".into(),
@@ -2855,6 +2932,7 @@ mod tests {
             r#"{"id":"stack","kind":"stacked_bar","title":"Outcomes","series":["ok","error"],"bars":[{"label":"run","values":[9,1]}]}"#,
             r#"{"id":"flow","kind":"sankey","title":"Requests","nodes":[{"id":"edge","label":"Edge"},{"id":"api","label":"API"}],"links":[{"from":"edge","to":"api","value":42}],"unit":"req/s"}"#,
             r#"{"id":"tree","kind":"hierarchy","title":"Deps","style":"treemap","nodes":[{"id":"root","label":"Root","value":10},{"id":"leaf","label":"Leaf","parent":"root","value":10}]}"#,
+            r#"{"id":"targets","kind":"metric_board","title":"Targets","style":"bullet","metrics":[{"label":"CPU","value":67,"max":100,"target":80}]}"#,
             r#"{"id":"states","kind":"state_timeline","title":"Health","lanes":[{"label":"api","segments":[{"start":0,"end":10,"state":"good"}]}]}"#,
             r#"{"id":"burn","kind":"rate_bars","title":"Budget","objective":99.9,"windows":[{"label":"5m","burn_rate":0.7}]}"#,
         ] {
@@ -2871,6 +2949,7 @@ mod tests {
             r#"{"id":"stack","kind":"stacked_bar","title":"Outcomes","series":["ok"],"bars":[{"label":"run","values":[1,2]}]}"#,
             r#"{"id":"flow","kind":"sankey","title":"Bad","nodes":[{"id":"a","label":"A"}],"links":[{"from":"a","to":"missing","value":1}]}"#,
             r#"{"id":"tree","kind":"hierarchy","title":"Cycle","style":"sunburst","nodes":[{"id":"root","label":"Root","value":1},{"id":"a","label":"A","parent":"b","value":1},{"id":"b","label":"B","parent":"a","value":1}]}"#,
+            r#"{"id":"targets","kind":"metric_board","title":"Bad","style":"radial","metrics":[{"label":"CPU","value":120,"max":100}]}"#,
             r#"{"id":"states","kind":"state_timeline","title":"Health","lanes":[{"label":"api","segments":[{"start":4,"end":2,"state":"critical"}]}]}"#,
         ] {
             assert!(

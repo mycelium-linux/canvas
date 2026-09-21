@@ -439,6 +439,10 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/hierarchy-v1.lua"),
     ),
     (
+        "metric-board-v1",
+        include_str!("../../../config/binders/metric-board-v1.lua"),
+    ),
+    (
         "log-stream-v1",
         include_str!("../../../config/binders/log-stream-v1.lua"),
     ),
@@ -996,6 +1000,50 @@ mod tests {
             assert_eq!(
                 actual == canvas_widgets::HierarchyStyle::Sunburst,
                 style == "sunburst"
+            );
+        }
+    }
+
+    #[test]
+    fn metric_board_binder_shares_targets_across_radial_and_bullet_views() {
+        for style in ["radial", "bullet"] {
+            let mut target = test_spec(WidgetKind::MetricBoard {
+                title: "Waiting".into(),
+                style: canvas_widgets::MetricBoardStyle::Radial,
+                metrics: vec![canvas_widgets::TargetMetric {
+                    label: "CPU".into(),
+                    value: 1.0,
+                    max: 100.0,
+                    target: None,
+                    forecast: None,
+                    state: None,
+                }],
+                unit: None,
+            });
+            let event = StreamEnvelope {
+                schema_version: STREAM_SCHEMA_VERSION,
+                owner: "metrics".into(),
+                stream: "targets".into(),
+                contract: "canvas.widget.snapshot.v1".into(),
+                project_id: Some("dock".into()),
+                sequence: 1,
+                emitted_at_ms: now_ms(),
+                payload: serde_json::json!({"style":style,"metrics":[{"label":"CPU","value":67,"max":100,"target":80,"forecast":74,"state":"good"}]}),
+            };
+            apply_named_adapter("metric-board-v1", &event, &mut target)
+                .expect("metric board renders");
+            let WidgetKind::MetricBoard {
+                style: actual,
+                metrics,
+                ..
+            } = target.kind
+            else {
+                panic!("wrong family")
+            };
+            assert_eq!(metrics[0].target, Some(80.0));
+            assert_eq!(
+                actual == canvas_widgets::MetricBoardStyle::Bullet,
+                style == "bullet"
             );
         }
     }

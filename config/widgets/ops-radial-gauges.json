@@ -1,0 +1,9 @@
+{
+  "schema_version":2,"id":"ops-radial-gauges","kind":"metric_board","title":"Node pressure","style":"radial","unit":"%",
+  "metrics":[
+    {"label":"CPU","value":67,"max":100,"target":80,"state":"good"},
+    {"label":"Memory","value":82,"max":100,"target":85,"state":"warning"},
+    {"label":"GPU","value":54,"max":100,"target":90,"state":"good"},
+    {"label":"Thermal","value":71,"max":100,"target":78,"state":"warning"}
+  ],"data":{"state":"ready","source":"demo/metrics","provenance":"demo"},"chrome":"drag_only"
+}
