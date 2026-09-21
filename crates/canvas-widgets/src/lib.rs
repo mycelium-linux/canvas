@@ -181,6 +181,7 @@ pub const KNOWN_WIDGET_KINDS: &[&str] = &[
     "quant",
     "stat",
     "time_series",
+    "media_card",
     "clock",
     "ticker",
     "gauge",
@@ -238,6 +239,24 @@ pub enum WidgetKind {
         #[serde(default)]
         unit: Option<String>,
     },
+    /// Retained media metadata with host-resolved artwork and smooth progress.
+    /// Producers replace this snapshot on state changes; Rust extrapolates the
+    /// progress rail between observations without invoking Lua per frame.
+    MediaCard {
+        title: String,
+        artist: String,
+        #[serde(default)]
+        album: Option<String>,
+        #[serde(default)]
+        source: Option<String>,
+        #[serde(default)]
+        artwork_source: Option<String>,
+        elapsed_seconds: f64,
+        duration_seconds: f64,
+        observed_at_ms: i64,
+        #[serde(default)]
+        playing: bool,
+    },
     /// Local time. `format` uses strftime-style tokens.
     ///
     /// The one documented intrinsic exception to "widgets must not source their
@@ -281,6 +300,8 @@ pub enum WidgetKind {
         rows: Vec<String>,
         columns: Vec<String>,
         values: Vec<Vec<f64>>,
+        #[serde(default)]
+        style: HeatmapStyle,
         #[serde(default)]
         unit: Option<String>,
     },
@@ -608,7 +629,9 @@ impl WidgetSpec {
     /// Window treatment after applying the widget kind's sane default.
     pub fn effective_chrome(&self) -> WidgetChrome {
         match (self.chrome, &self.kind) {
-            (WidgetChrome::Auto, WidgetKind::Clock { .. }) => WidgetChrome::Frameless,
+            (WidgetChrome::Auto, WidgetKind::Clock { .. } | WidgetKind::MediaCard { .. }) => {
+                WidgetChrome::Frameless
+            }
             (WidgetChrome::Auto, _) => WidgetChrome::Standard,
             (explicit, _) => explicit,
         }
@@ -625,6 +648,11 @@ impl WidgetSpec {
                 mode: ClockMode::Analog,
                 ..
             } => Some(40),
+            WidgetKind::MediaCard { playing: true, .. } => Some(40),
+            // Lua only replaces the retained samples when data changes. Rust
+            // owns the short interpolation window between snapshots, using the
+            // same 25 fps cadence as the analog clock.
+            WidgetKind::TimeSeries { .. } => Some(40),
             _ => None,
         }
     }
@@ -799,10 +827,57 @@ mod animation_tests {
         }
     }
 
+    fn media_card(playing: bool) -> WidgetSpec {
+        WidgetSpec {
+            schema_version: WIDGET_SCHEMA_VERSION,
+            id: "now-playing".into(),
+            kind: WidgetKind::MediaCard {
+                title: "Everything In Its Right Place".into(),
+                artist: "Radiohead".into(),
+                album: Some("Kid A".into()),
+                source: Some("Spotify".into()),
+                artwork_source: Some("now-playing-art".into()),
+                elapsed_seconds: 42.0,
+                duration_seconds: 251.0,
+                observed_at_ms: 1_000,
+                playing,
+            },
+            theme: None,
+            refresh_ms: None,
+            chrome: WidgetChrome::Auto,
+            data: WidgetData::default(),
+        }
+    }
+
     #[test]
     fn only_the_sweeping_clock_requests_animation_frames() {
         assert_eq!(clock(ClockMode::Analog).animation_interval_ms(), Some(40));
         assert_eq!(clock(ClockMode::Digital).animation_interval_ms(), None);
+    }
+
+    #[test]
+    fn only_playing_media_requests_animation_frames() {
+        assert_eq!(media_card(true).animation_interval_ms(), Some(40));
+        assert_eq!(media_card(false).animation_interval_ms(), None);
+        assert_eq!(media_card(true).effective_chrome(), WidgetChrome::Frameless);
+    }
+
+    #[test]
+    fn time_series_uses_the_clock_quality_cadence() {
+        let spec = WidgetSpec {
+            schema_version: WIDGET_SCHEMA_VERSION,
+            id: "trend".into(),
+            kind: WidgetKind::TimeSeries {
+                title: "Trend".into(),
+                series: Vec::new(),
+                unit: None,
+            },
+            theme: None,
+            refresh_ms: None,
+            chrome: WidgetChrome::Auto,
+            data: WidgetData::default(),
+        };
+        assert_eq!(spec.animation_interval_ms(), Some(40));
     }
 }
 
@@ -1085,6 +1160,15 @@ pub enum MeterStyle {
     Vu,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum HeatmapStyle {
+    #[default]
+    Matrix,
+    Activity,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1219,6 +1303,35 @@ impl WidgetSpec {
                     )?;
                 }
             }
+            WidgetKind::MediaCard {
+                title,
+                artist,
+                album,
+                source,
+                artwork_source,
+                elapsed_seconds,
+                duration_seconds,
+                observed_at_ms,
+                ..
+            } => {
+                bounded_label(title, "media title")?;
+                bounded_label(artist, "media artist")?;
+                optional_label(album, "media album")?;
+                optional_label(source, "media source")?;
+                optional_label(artwork_source, "media artwork source")?;
+                check(
+                    elapsed_seconds.is_finite() && *elapsed_seconds >= 0.0,
+                    "media elapsed seconds must be finite and non-negative",
+                )?;
+                check(
+                    duration_seconds.is_finite() && *duration_seconds >= 0.0,
+                    "media duration seconds must be finite and non-negative",
+                )?;
+                check(
+                    *observed_at_ms >= 0,
+                    "media observation time must be non-negative",
+                )?;
+            }
             WidgetKind::Ticker { entries } => {
                 check(!entries.is_empty(), "ticker requires at least one entry")?;
                 for entry in entries {
@@ -1262,6 +1375,7 @@ impl WidgetSpec {
                 rows,
                 columns,
                 values,
+                style,
                 unit,
             } => {
                 bounded_label(title, "heatmap title")?;
@@ -1275,6 +1389,12 @@ impl WidgetSpec {
                     }),
                     "heatmap rows must match columns and contain finite values",
                 )?;
+                if *style == HeatmapStyle::Activity {
+                    check(
+                        (1..=7).contains(&rows.len()),
+                        "activity heatmap requires 1-7 day rows",
+                    )?;
+                }
             }
             WidgetKind::RankedBar { title, bars, unit } => {
                 bounded_label(title, "ranked bar title")?;
@@ -1754,6 +1874,14 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
             hero + metrics.small * 2.0 + gap * 3.0 + pad,
             1.6,
         ),
+        // Artwork plus two compact metadata rows and a thin progress rail.
+        WidgetKind::MediaCard { .. } => SizeHint::new(
+            metrics.body * 14.0,
+            metrics.body * 5.0 + pad,
+            metrics.body * 24.0,
+            metrics.body * 7.0 + pad,
+            2.4,
+        ),
         // A dial reads as a dial only while it is roughly square.
         WidgetKind::Gauge { .. } | WidgetKind::Meter { .. } => {
             let side = hero + metrics.small + pad;
@@ -1903,6 +2031,7 @@ mod tests {
                 rows: Vec::new(),
                 columns: Vec::new(),
                 values: Vec::new(),
+                style: HeatmapStyle::Matrix,
                 unit: None,
             },
             WidgetKind::StateTimeline {
@@ -2307,6 +2436,7 @@ mod tests {
     fn operational_chart_families_validate() {
         for json in [
             r#"{"id":"heat","kind":"heatmap","title":"Latency","rows":["api"],"columns":["p50","p99"],"values":[[12,48]],"unit":"ms"}"#,
+            r#"{"id":"activity","kind":"heatmap","style":"activity","title":"Contributions","rows":["Mon","Tue"],"columns":["W1","W2"],"values":[[0,3],[1,8]],"unit":"events"}"#,
             r#"{"id":"rank","kind":"ranked_bar","title":"Tokens","bars":[{"label":"agent-a","value":42}]}"#,
             r#"{"id":"stack","kind":"stacked_bar","title":"Outcomes","series":["ok","error"],"bars":[{"label":"run","values":[9,1]}]}"#,
             r#"{"id":"states","kind":"state_timeline","title":"Health","lanes":[{"label":"api","segments":[{"start":0,"end":10,"state":"good"}]}]}"#,
@@ -2321,6 +2451,7 @@ mod tests {
     fn malformed_operational_charts_fail_loudly() {
         for json in [
             r#"{"id":"heat","kind":"heatmap","title":"Latency","rows":["api"],"columns":["p50"],"values":[[1,2]]}"#,
+            r#"{"id":"activity","kind":"heatmap","style":"activity","title":"Activity","rows":["1","2","3","4","5","6","7","8"],"columns":["W1"],"values":[[1],[1],[1],[1],[1],[1],[1],[1]]}"#,
             r#"{"id":"stack","kind":"stacked_bar","title":"Outcomes","series":["ok"],"bars":[{"label":"run","values":[1,2]}]}"#,
             r#"{"id":"states","kind":"state_timeline","title":"Health","lanes":[{"label":"api","segments":[{"start":4,"end":2,"state":"critical"}]}]}"#,
         ] {

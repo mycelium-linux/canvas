@@ -6,17 +6,21 @@
 //! all render through one library.
 
 use crate::{
-    BurnRateWindow, ChartType, ClockMode, MeterStyle, NeuralEdge, NeuralNode, SpatialBounds,
-    SpatialTrack, StateLane, StatusLevel, StatusState, WidgetDataState, WidgetKind, WidgetSpec,
+    BurnRateWindow, ChartType, ClockMode, HeatmapStyle, MeterStyle, NeuralEdge, NeuralNode,
+    SpatialBounds, SpatialTrack, StateLane, StatusLevel, StatusState, WidgetDataState, WidgetKind,
+    WidgetSpec,
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
+use std::time::{Duration, Instant};
 
 use canvas_core::{ThemePalette, VisualTheme};
 use iced::mouse;
 use iced::widget::canvas::{Cache, Geometry, Path};
-use iced::widget::{Canvas, canvas, column, container, row, scrollable, space, text};
-use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
+use iced::widget::{
+    Canvas, canvas, column, container, image, progress_bar, row, scrollable, space, text,
+};
+use iced::{Color, ContentFit, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 mod clock;
 mod quality;
@@ -125,6 +129,16 @@ pub fn element_at<'a, Message: 'a>(
     visual: &VisualTheme,
     now: EpochParts,
 ) -> Element<'a, Message> {
+    element_at_with_artwork(spec, visual, now, None)
+}
+
+/// Render with an artwork handle resolved by the host's bounded asset loader.
+pub fn element_at_with_artwork<'a, Message: 'a>(
+    spec: &'a WidgetSpec,
+    visual: &VisualTheme,
+    now: EpochParts,
+    artwork: Option<image::Handle>,
+) -> Element<'a, Message> {
     // Freshness is carried by the value, so the body draws from a palette the
     // data state has already been applied to. `panel` is handed the true theme:
     // the provenance badge, the state dot and the footer have to stay legible
@@ -200,6 +214,97 @@ pub fn element_at<'a, Message: 'a>(
             ]
             .spacing(metrics.space_2);
             panel(spec, body.into(), visual)
+        }
+        WidgetKind::MediaCard {
+            title,
+            artist,
+            album,
+            source,
+            elapsed_seconds,
+            duration_seconds,
+            observed_at_ms,
+            playing,
+            ..
+        } => {
+            let advanced = if *playing {
+                (now.epoch_millis - observed_at_ms).max(0) as f64 / 1_000.0
+            } else {
+                0.0
+            };
+            let elapsed = (elapsed_seconds + advanced).clamp(0.0, duration_seconds.max(0.0));
+            let ratio = if *duration_seconds > 0.0 {
+                (elapsed / duration_seconds).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let primary = color(palette.primary);
+            let track = with_alpha(color(palette.text_muted), 0.22);
+            // Keep progress as a float all the way to layout. Splitting the
+            // rail into integer FillPortions quantized a four-minute song to
+            // roughly quarter-second visual jumps despite a 40 ms host tick.
+            let rail = progress_bar(0.0..=1.0, ratio as f32)
+                .girth(4.0)
+                .style(move |_| progress_bar::Style {
+                    background: track.into(),
+                    bar: primary.into(),
+                    border: iced::Border {
+                        radius: 2.0.into(),
+                        ..Default::default()
+                    },
+                });
+            let time = row![
+                text(format_media_time(elapsed))
+                    .size(metrics.micro)
+                    .color(color(palette.text_muted)),
+                space().width(Length::Fill),
+                text(format_media_time(*duration_seconds))
+                    .size(metrics.micro)
+                    .color(color(palette.text_muted)),
+            ];
+            let detail = album
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .map_or_else(|| artist.clone(), |value| format!("{artist} · {value}"));
+            let state = if *playing { "PLAYING" } else { "PAUSED" };
+            let copy = column![
+                text(title).size(metrics.title).color(color(palette.text)),
+                text(detail)
+                    .size(metrics.small)
+                    .color(color(palette.text_muted)),
+                space().height(Length::Fill),
+                rail,
+                time,
+                text(format!(
+                    "{}  ·  {}",
+                    source.as_deref().unwrap_or("MEDIA"),
+                    state
+                ))
+                .size(metrics.micro)
+                .color(color(palette.text_muted)),
+            ]
+            .spacing(metrics.space_2)
+            .width(Length::FillPortion(7));
+            let art: Element<'a, Message> = if let Some(handle) = artwork {
+                image(handle)
+                    .content_fit(ContentFit::Cover)
+                    .width(Length::FillPortion(4))
+                    .height(Length::Fill)
+                    .into()
+            } else {
+                container(text("♪").size(metrics.display).color(primary))
+                    .center(Length::Fill)
+                    .width(Length::FillPortion(4))
+                    .height(Length::Fill)
+                    .into()
+            };
+            panel(
+                spec,
+                row![art, copy]
+                    .spacing(metrics.space_3)
+                    .height(Length::Fill)
+                    .into(),
+                visual,
+            )
         }
         WidgetKind::TimeSeries {
             title,
@@ -516,6 +621,7 @@ pub fn element_at<'a, Message: 'a>(
             rows,
             columns,
             values,
+            style,
             unit,
         } => panel(
             spec,
@@ -531,6 +637,7 @@ pub fn element_at<'a, Message: 'a>(
                     rows: rows.clone(),
                     columns: columns.clone(),
                     values: values.clone(),
+                    style: *style,
                     low: color(palette.surface_muted),
                     high: color(palette.primary),
                     label: color(palette.text_muted),
@@ -1864,6 +1971,7 @@ struct HeatmapProgram {
     rows: Vec<String>,
     columns: Vec<String>,
     values: Vec<Vec<f64>>,
+    style: HeatmapStyle,
     low: Color,
     high: Color,
     label: Color,
@@ -1888,8 +1996,17 @@ impl<Message> canvas::Program<Message> for HeatmapProgram {
             .add_usize(self.rows.len())
             .add_usize(self.values.iter().flatten().count())
             .add_u64(val_sum)
+            .add_usize(self.style as usize)
+            .add_color(self.low)
+            .add_color(self.high)
+            .add_color(self.label)
+            .add_f32(self.label_size)
             .build();
         state.draw_cached(renderer, bounds.size(), key, |frame| {
+            if self.style == HeatmapStyle::Activity {
+                self.draw_activity(frame, bounds);
+                return;
+            }
             let label_width = (bounds.width * 0.18).clamp(42.0, 110.0);
             let top = 18.0;
             // A color scale lives at the bottom so a cell's colour reads back
@@ -1973,6 +2090,63 @@ impl<Message> canvas::Program<Message> for HeatmapProgram {
                 });
             }
         })
+    }
+}
+
+impl HeatmapProgram {
+    fn draw_activity(&self, frame: &mut canvas::Frame, bounds: Rectangle) {
+        let rows = self.rows.len().max(1);
+        let columns = self.columns.len().max(1);
+        let label_width = (bounds.width * 0.12).clamp(28.0, 62.0);
+        let gap = 3.0;
+        let cell = ((bounds.width - label_width - gap * columns.saturating_sub(1) as f32)
+            / columns as f32)
+            .min((bounds.height - 22.0 - gap * rows.saturating_sub(1) as f32) / rows as f32)
+            .max(2.0);
+        let min = self
+            .values
+            .iter()
+            .flatten()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        let max = self
+            .values
+            .iter()
+            .flatten()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        for (row, (label, values)) in self.rows.iter().zip(&self.values).enumerate() {
+            let y = 18.0 + row as f32 * (cell + gap);
+            frame.fill_text(canvas::Text {
+                content: label.clone(),
+                position: Point::new(0.0, y + cell * 0.72),
+                color: self.label,
+                size: iced::Pixels(self.label_size),
+                ..Default::default()
+            });
+            for (column, value) in values.iter().enumerate() {
+                let raw = ((*value - min) / (max - min).max(f64::EPSILON)) as f32;
+                let level = (raw.clamp(0.0, 1.0) * 4.0).ceil() / 4.0;
+                frame.fill(
+                    &Path::rounded_rectangle(
+                        Point::new(label_width + column as f32 * (cell + gap), y),
+                        Size::new(cell, cell),
+                        (cell * 0.16).into(),
+                    ),
+                    lerp_oklch(self.low, self.high, level),
+                );
+            }
+        }
+        let stride = (columns / 5).max(1);
+        for (column, label) in self.columns.iter().enumerate().step_by(stride) {
+            frame.fill_text(canvas::Text {
+                content: label.clone(),
+                position: Point::new(label_width + column as f32 * (cell + gap), 10.0),
+                color: self.label,
+                size: iced::Pixels(self.label_size),
+                ..Default::default()
+            });
+        }
     }
 }
 
@@ -2129,6 +2303,14 @@ impl<Message> canvas::Program<Message> for PieChartProgram {
             .fold(Key::new(), |key, (label, value)| {
                 key.add_str(label).add_f64(*value)
             })
+            .add_color(self.text)
+            .add_color(self.surface)
+            .add_f32(self.label_size)
+            .add_usize(self.colors.len());
+        let key = self
+            .colors
+            .iter()
+            .fold(key, |key, color| key.add_color(*color))
             .build();
         let mut output = state.draw_cached(renderer, bounds.size(), key, |frame| {
             let mut start = -std::f32::consts::FRAC_PI_2;
@@ -2837,8 +3019,69 @@ struct TimeSeriesProgram {
     unit: Option<String>,
 }
 
+#[derive(Default)]
+struct TimeSeriesState {
+    cache: Cache,
+    visual_key: Cell<u64>,
+    motion: RefCell<SeriesMotion>,
+}
+
+#[derive(Default)]
+struct SeriesMotion {
+    target_key: u64,
+    from: Vec<Vec<(f32, f32)>>,
+    target: Vec<Vec<(f32, f32)>>,
+    started: Option<Instant>,
+}
+
+const SERIES_TRANSITION: Duration = Duration::from_millis(520);
+
+fn series_key(series: &[Vec<(f32, f32)>]) -> u64 {
+    series
+        .iter()
+        .fold(Key::new().add_usize(series.len()), |key, line| {
+            line.iter().fold(key.add_usize(line.len()), |key, (x, y)| {
+                key.add_f32(*x).add_f32(*y)
+            })
+        })
+        .build()
+}
+
+fn ease_out_cubic(progress: f32) -> f32 {
+    1.0 - (1.0 - progress.clamp(0.0, 1.0)).powi(3)
+}
+
+fn interpolate_line(from: &[(f32, f32)], target: &[(f32, f32)], progress: f32) -> Vec<(f32, f32)> {
+    if target.is_empty() {
+        return Vec::new();
+    }
+    let fallback = from.last().copied().unwrap_or(target[0]);
+    target
+        .iter()
+        .enumerate()
+        .map(|(index, &(tx, ty))| {
+            let (fx, fy) = from.get(index).copied().unwrap_or(fallback);
+            (fx + (tx - fx) * progress, fy + (ty - fy) * progress)
+        })
+        .collect()
+}
+
+fn interpolate_series(
+    from: &[Vec<(f32, f32)>],
+    target: &[Vec<(f32, f32)>],
+    progress: f32,
+) -> Vec<Vec<(f32, f32)>> {
+    target
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            interpolate_line(from.get(index).map_or(&[], Vec::as_slice), line, progress)
+        })
+        .collect()
+}
+
 impl<Message> canvas::Program<Message> for TimeSeriesProgram {
-    type State = CacheState;
+    type State = TimeSeriesState;
     fn draw(
         &self,
         state: &Self::State,
@@ -2850,13 +3093,64 @@ impl<Message> canvas::Program<Message> for TimeSeriesProgram {
         if self.series.iter().flatten().count() < 2 {
             return Vec::new();
         }
-        let pts: usize = self.series.iter().flatten().count();
-        let val: f32 = self.series.iter().flatten().map(|(_, y)| *y).sum();
-        let key = Key::new().add_usize(pts).add_f32(val).build();
-        state.draw_cached(renderer, bounds.size(), key, |frame| {
+        let target_key = series_key(&self.series);
+        let now = Instant::now();
+        let (displayed, animating) = {
+            let mut motion = state.motion.borrow_mut();
+            if motion.target_key != target_key {
+                let current = motion.started.map_or_else(
+                    || motion.target.clone(),
+                    |started| {
+                        let progress = ease_out_cubic(
+                            now.saturating_duration_since(started).as_secs_f32()
+                                / SERIES_TRANSITION.as_secs_f32(),
+                        );
+                        interpolate_series(&motion.from, &motion.target, progress)
+                    },
+                );
+                motion.from = if current.is_empty() {
+                    self.series.clone()
+                } else {
+                    current
+                };
+                motion.target = self.series.clone();
+                motion.target_key = target_key;
+                motion.started = Some(now);
+                state.cache.clear();
+            }
+            let elapsed = motion.started.map_or(SERIES_TRANSITION, |started| {
+                now.saturating_duration_since(started)
+            });
+            if elapsed >= SERIES_TRANSITION {
+                motion.started = None;
+                (motion.target.clone(), false)
+            } else {
+                let progress =
+                    ease_out_cubic(elapsed.as_secs_f32() / SERIES_TRANSITION.as_secs_f32());
+                (
+                    interpolate_series(&motion.from, &motion.target, progress),
+                    true,
+                )
+            }
+        };
+        let visual_key = self
+            .colors
+            .iter()
+            .fold(
+                Key::new()
+                    .add_u64(target_key)
+                    .add_color(self.grid)
+                    .add_color(self.label),
+                |key, color| key.add_color(*color),
+            )
+            .build();
+        if state.visual_key.replace(visual_key) != visual_key {
+            state.cache.clear();
+        }
+        let draw = |frame: &mut canvas::Frame| {
             // One range over every series: two series on their own scales share an
             // axis that means nothing.
-            let range = PlotRange::over(self.series.iter().flatten());
+            let range = PlotRange::over(displayed.iter().flatten());
             let area = plot_area(bounds.size());
             for row in 0..=4 {
                 let y = bounds.height * row as f32 / 4.0;
@@ -2869,8 +3163,8 @@ impl<Message> canvas::Program<Message> for TimeSeriesProgram {
             }
             // The fills stack, so each is worth a share of the budget rather than
             // all of it.
-            let area_alpha = AREA_ALPHA / self.series.len().max(1) as f32;
-            for (index, series) in self.series.iter().enumerate() {
+            let area_alpha = AREA_ALPHA / displayed.len().max(1) as f32;
+            for (index, series) in displayed.iter().enumerate() {
                 let points: Vec<Point> = series
                     .iter()
                     .map(|value| range.project(*value, area))
@@ -2896,7 +3190,14 @@ impl<Message> canvas::Program<Message> for TimeSeriesProgram {
                 self.label,
                 self.label_size,
             );
-        })
+        };
+        if animating {
+            let mut frame = canvas::Frame::new(renderer, bounds.size());
+            draw(&mut frame);
+            vec![frame.into_geometry()]
+        } else {
+            vec![state.cache.draw(renderer, bounds.size(), draw)]
+        }
     }
 }
 
@@ -2910,6 +3211,11 @@ fn with_alpha(color: Color, alpha: f32) -> Color {
 
 /// Minimal strftime subset — enough for clock formats without pulling a
 /// chrono dependency into the spec model.
+fn format_media_time(seconds: f64) -> String {
+    let total = seconds.max(0.0).floor() as u64;
+    format!("{}:{:02}", total / 60, total % 60)
+}
+
 fn strftime(now: &EpochParts, format: &str) -> String {
     let mut out = String::new();
     let mut chars = format.chars().peekable();
@@ -2934,6 +3240,7 @@ fn strftime(now: &EpochParts, format: &str) -> String {
 }
 
 pub struct EpochParts {
+    pub epoch_millis: i64,
     pub hour: u64,
     pub minute: u64,
     pub second: u64,
@@ -2949,6 +3256,7 @@ pub fn chrono_now() -> EpochParts {
 
 pub fn chrono_now_at_millis(epoch_millis: i64) -> EpochParts {
     let mut parts = chrono_now_at(epoch_millis.div_euclid(1_000));
+    parts.epoch_millis = epoch_millis;
     parts.millisecond = epoch_millis.rem_euclid(1_000) as u16;
     parts
 }
@@ -2964,6 +3272,7 @@ pub fn chrono_now_at(epoch: i64) -> EpochParts {
         libc::localtime_r(&epoch, &mut tm);
     }
     EpochParts {
+        epoch_millis: epoch.saturating_mul(1_000),
         hour: tm.tm_hour as u64,
         minute: tm.tm_min as u64,
         second: tm.tm_sec as u64,
@@ -3114,6 +3423,14 @@ impl<Message> canvas::Program<Message> for ChartProgram {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn series_interpolation_eases_values_and_new_points_from_the_previous_head() {
+        let from = vec![(0.0, 2.0), (1.0, 4.0)];
+        let target = vec![(0.0, 4.0), (1.0, 8.0), (2.0, 10.0)];
+        let halfway = interpolate_line(&from, &target, 0.5);
+        assert_eq!(halfway, vec![(0.0, 3.0), (1.0, 6.0), (1.5, 7.0)]);
+    }
 
     #[test]
     fn neural_layout_is_stable_and_groups_columns() {

@@ -427,6 +427,10 @@ pub fn apply_named_adapter_batch(
 /// added without registering it here too.
 const BUILT_IN_BINDERS: &[(&str, &str)] = &[
     (
+        "activity-grid-v1",
+        include_str!("../../../config/binders/activity-grid-v1.lua"),
+    ),
+    (
         "bifrost-requests-v1",
         include_str!("../../../config/binders/bifrost-requests-v1.lua"),
     ),
@@ -503,6 +507,10 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/fab-metrics-v1.lua"),
     ),
     (
+        "fab-trends-v1",
+        include_str!("../../../config/binders/fab-trends-v1.lua"),
+    ),
+    (
         "lockout-v1",
         include_str!("../../../config/binders/lockout-v1.lua"),
     ),
@@ -568,6 +576,8 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
     ),
     (
         "music-nowplaying-v1",
+        // Retained construction: Lua runs only when media state changes; the
+        // resulting media card is rendered by Rust until the next snapshot.
         include_str!("../../../config/binders/music-nowplaying-v1.lua"),
     ),
 ];
@@ -671,10 +681,18 @@ pub fn apply_lua_adapter_batch(
         .map_err(lua_error)?;
     let mut next = target.clone();
     for event in events {
-        let value = binder
+        let value: mlua::Value = binder
             .call(lua.to_value(*event).map_err(lua_error)?)
             .map_err(lua_error)?;
-        let mutation: WidgetMutation = lua.from_value(value).map_err(lua_error)?;
+        let diagnostic = lua.from_value::<serde_json::Value>(value.clone()).ok();
+        let mutation: WidgetMutation = lua.from_value(value).map_err(|error| {
+            Error(format!(
+                "Canvas Lua adapter output is invalid: {error}; output={}",
+                diagnostic
+                    .as_ref()
+                    .map_or_else(|| "<unavailable>".into(), serde_json::Value::to_string)
+            ))
+        })?;
         next.apply_mutation(mutation)
             .map_err(|error| Error(error.to_string()))?;
     }
@@ -831,6 +849,95 @@ mod tests {
             files, registered,
             "config/binders and BUILT_IN_BINDERS drifted"
         );
+    }
+
+    #[test]
+    fn activity_grid_binder_builds_a_retained_themed_heatmap() {
+        let mut target = test_spec(WidgetKind::Heatmap {
+            title: "Waiting".into(),
+            rows: vec!["Mon".into()],
+            columns: vec!["W1".into()],
+            values: vec![vec![0.0]],
+            style: canvas_widgets::HeatmapStyle::Activity,
+            unit: None,
+        });
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "github".into(),
+            stream: "activity".into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            project_id: Some("dock".into()),
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "title": "Project activity",
+                "rows": ["Mon", "Tue"],
+                "columns": ["W1", "W2"],
+                "values": [[0, 3], [1, 8]],
+                "unit": "events"
+            }),
+        };
+        apply_named_adapter("activity-grid-v1", &event, &mut target).expect("activity renders");
+        let WidgetKind::Heatmap { style, values, .. } = target.kind else {
+            panic!("activity binder changed widget family")
+        };
+        assert_eq!(style, canvas_widgets::HeatmapStyle::Activity);
+        assert_eq!(values[1][1], 8.0);
+    }
+
+    #[test]
+    fn music_binder_constructs_a_retained_media_card_on_event_only() {
+        let mut target = test_spec(WidgetKind::MediaCard {
+            title: "Waiting for playback".into(),
+            artist: String::new(),
+            album: None,
+            source: None,
+            artwork_source: Some("now-playing-art".into()),
+            elapsed_seconds: 0.0,
+            duration_seconds: 0.0,
+            observed_at_ms: 0,
+            playing: false,
+        });
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "home-pi-media".into(),
+            stream: "now-playing".into(),
+            contract: "canvas.music.nowplaying.v1".into(),
+            project_id: Some("home".into()),
+            sequence: 7,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "project":"home", "track":"Everything In Its Right Place",
+                "artist":"Radiohead", "album":"Kid A", "source":"Spotify",
+                "elapsed_sec":42, "duration_sec":251, "is_playing":true
+            }),
+        };
+        apply_lua_adapter(
+            include_str!("../../../config/binders/music-nowplaying-v1.lua"),
+            &event,
+            &mut target,
+        )
+        .unwrap();
+        let WidgetKind::MediaCard {
+            title,
+            artist,
+            elapsed_seconds,
+            duration_seconds,
+            observed_at_ms,
+            playing,
+            ..
+        } = target.kind
+        else {
+            panic!("music binder changed widget family")
+        };
+        assert_eq!(title, "Everything In Its Right Place");
+        assert_eq!(artist, "Radiohead");
+        assert_eq!(elapsed_seconds, 42.0);
+        assert_eq!(duration_seconds, 251.0);
+        assert_eq!(observed_at_ms, event.emitted_at_ms as i64);
+        assert!(playing);
+        assert_eq!(target.data.state, canvas_widgets::WidgetDataState::Ready);
+        assert!(target.data.source.as_deref().unwrap().contains("Spotify"));
     }
 
     fn event(time: i64, close: f64) -> StreamEnvelope {
@@ -1130,6 +1237,7 @@ mod tests {
             rows: Vec::new(),
             columns: Vec::new(),
             values: Vec::new(),
+            style: canvas_widgets::HeatmapStyle::Matrix,
             unit: None,
         });
         apply_named_adapter("alfalfa-fleet-heatmap-v1", &overview_event, &mut heat)
@@ -1254,6 +1362,10 @@ mod tests {
                 "fab-deliveries-v1",
                 serde_json::json!({"recent_deliveries":[{"repository":"fab","status":"succeeded"}]}),
             ),
+            (
+                "fab-trends-v1",
+                serde_json::json!({"period":"4m","series":[{"label":"Active runs","points":[[0,1],[5,2]]}]}),
+            ),
         ];
         for (adapter, payload) in cases {
             let event = StreamEnvelope {
@@ -1266,19 +1378,23 @@ mod tests {
                 emitted_at_ms: now_ms(),
                 payload,
             };
-            let mut target = test_spec(
-                if adapter.contains("runs") || adapter.contains("deliveries") {
-                    WidgetKind::EventLog {
-                        title: "loading".into(),
-                        entries: Vec::new(),
-                    }
-                } else {
-                    WidgetKind::StatusList {
-                        title: "loading".into(),
-                        nodes: Vec::new(),
-                    }
-                },
-            );
+            let mut target = test_spec(if adapter.contains("trends") {
+                WidgetKind::TimeSeries {
+                    title: "loading".into(),
+                    series: Vec::new(),
+                    unit: None,
+                }
+            } else if adapter.contains("runs") || adapter.contains("deliveries") {
+                WidgetKind::EventLog {
+                    title: "loading".into(),
+                    entries: Vec::new(),
+                }
+            } else {
+                WidgetKind::StatusList {
+                    title: "loading".into(),
+                    nodes: Vec::new(),
+                }
+            });
             apply_named_adapter(adapter, &event, &mut target).unwrap_or_else(|error| {
                 panic!("{adapter} failed: {error}");
             });
