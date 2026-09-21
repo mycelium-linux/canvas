@@ -187,6 +187,7 @@ pub const KNOWN_WIDGET_KINDS: &[&str] = &[
     "gauge",
     "meter",
     "histogram",
+    "spectral_waterfall",
     "heatmap",
     "ranked_bar",
     "stacked_bar",
@@ -295,6 +296,18 @@ pub enum WidgetKind {
         buckets: Vec<HistogramBucket>,
         #[serde(default)]
         unit: Option<String>,
+    },
+    /// Rolling frequency-by-time intensity history. Stream binders append one
+    /// normalized FFT row at a time; Rust retains the bounded history.
+    SpectralWaterfall {
+        title: String,
+        rows: Vec<Vec<f32>>,
+        min_frequency: f64,
+        max_frequency: f64,
+        #[serde(default)]
+        unit: Option<String>,
+        #[serde(default = "default_waterfall_history")]
+        history: usize,
     },
     /// Dense row/column intensity matrix for latency, load, and correlation.
     Heatmap {
@@ -500,6 +513,9 @@ pub enum WidgetMutation {
     Quant {
         mutation: quant::QuantMutation,
     },
+    SpectralFrame {
+        bins: Vec<f32>,
+    },
     /// Replace only a widget's bounded, typed data payload. Layout, identity,
     /// theme and chrome remain owned by the saved Canvas view.
     Snapshot {
@@ -679,6 +695,10 @@ impl WidgetSpec {
             // owns the short interpolation window between snapshots, using the
             // same 25 fps cadence as the analog clock.
             WidgetKind::TimeSeries { .. } => Some(40),
+            // Incoming FFT rows move independently of clocks and other widgets.
+            // A modest cadence keeps the waterfall flowing without asking the
+            // host for display-rate frames.
+            WidgetKind::SpectralWaterfall { .. } => Some(80),
             _ => None,
         }
     }
@@ -687,6 +707,26 @@ impl WidgetSpec {
         match (&mut self.kind, mutation) {
             (WidgetKind::Quant { widget }, WidgetMutation::Quant { mutation }) => {
                 widget.apply(mutation)?;
+            }
+            (
+                WidgetKind::SpectralWaterfall { rows, history, .. },
+                WidgetMutation::SpectralFrame { bins },
+            ) => {
+                check(
+                    (8..=1024).contains(&bins.len())
+                        && bins
+                            .iter()
+                            .all(|value| value.is_finite() && (0.0..=1.0).contains(value)),
+                    "spectral frame requires 8-1024 normalized bins",
+                )?;
+                check(
+                    rows.first().is_none_or(|row| row.len() == bins.len()),
+                    "spectral frame width changed",
+                )?;
+                rows.push(bins);
+                if rows.len() > *history {
+                    rows.drain(..rows.len() - *history);
+                }
             }
             (current, WidgetMutation::Snapshot { widget, data })
                 if same_widget_kind(current, &widget) =>
@@ -761,6 +801,38 @@ mod mutation_tests {
             .is_err()
         );
         assert_eq!(spec, before);
+    }
+
+    #[test]
+    fn spectral_frames_append_and_evict_inside_rust() {
+        let mut spec = WidgetSpec {
+            schema_version: WIDGET_SCHEMA_VERSION,
+            id: "sdr".into(),
+            kind: WidgetKind::SpectralWaterfall {
+                title: "SDR".into(),
+                rows: Vec::new(),
+                min_frequency: 88.0,
+                max_frequency: 108.0,
+                unit: Some("MHz".into()),
+                history: 8,
+            },
+            theme: None,
+            refresh_ms: None,
+            chrome: WidgetChrome::Auto,
+            data: WidgetData::default(),
+        };
+        for frame in 0..10 {
+            spec.apply_mutation(WidgetMutation::SpectralFrame {
+                bins: vec![frame as f32 / 10.0; 8],
+            })
+            .unwrap();
+        }
+        let WidgetKind::SpectralWaterfall { rows, .. } = spec.kind else {
+            panic!("spectral mutation changed widget family")
+        };
+        assert_eq!(rows.len(), 8);
+        assert_eq!(rows[0][0], 0.2);
+        assert_eq!(rows[7][0], 0.9);
     }
 
     #[test]
@@ -1231,6 +1303,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_waterfall_history() -> usize {
+    96
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1448,6 +1524,43 @@ impl WidgetSpec {
                     }),
                     "histogram buckets must be finite and non-negative",
                 )?;
+            }
+            WidgetKind::SpectralWaterfall {
+                title,
+                rows,
+                min_frequency,
+                max_frequency,
+                unit,
+                history,
+            } => {
+                bounded_label(title, "spectral waterfall title")?;
+                optional_label(unit, "spectral waterfall unit")?;
+                check(
+                    min_frequency.is_finite()
+                        && max_frequency.is_finite()
+                        && min_frequency < max_frequency,
+                    "spectral waterfall requires finite increasing frequency bounds",
+                )?;
+                check(
+                    (8..=256).contains(history),
+                    "spectral waterfall history must be within 8-256 rows",
+                )?;
+                check(
+                    rows.len() <= *history,
+                    "spectral waterfall rows exceed retained history",
+                )?;
+                if let Some(width) = rows.first().map(Vec::len) {
+                    check(
+                        (8..=1024).contains(&width)
+                            && rows.iter().all(|row| {
+                                row.len() == width
+                                    && row.iter().all(|value| {
+                                        value.is_finite() && (0.0..=1.0).contains(value)
+                                    })
+                            }),
+                        "spectral waterfall rows require 8-1024 equal normalized bins",
+                    )?;
+                }
             }
             WidgetKind::Heatmap {
                 title,
@@ -2052,7 +2165,9 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
         // Below roughly 48px of plot area a line is a smear rather than a shape,
         // and 180 is the point budget a snapshot is thinned to, so a pixel per
         // point is the width at which detail stops being thrown away.
-        WidgetKind::TimeSeries { .. } | WidgetKind::Histogram { .. } => {
+        WidgetKind::TimeSeries { .. }
+        | WidgetKind::Histogram { .. }
+        | WidgetKind::SpectralWaterfall { .. } => {
             SizeHint::new(180.0, 48.0 + chrome, 320.0, 140.0 + chrome, 2.4)
         }
         // Bars need a label gutter plus a readable bar; rows below `small` * 2
@@ -2161,6 +2276,14 @@ mod tests {
                 title: "t".into(),
                 buckets: Vec::new(),
                 unit: None,
+            },
+            WidgetKind::SpectralWaterfall {
+                title: "t".into(),
+                rows: vec![vec![0.0; 8]],
+                min_frequency: 88.0,
+                max_frequency: 108.0,
+                unit: Some("MHz".into()),
+                history: 96,
             },
             WidgetKind::RankedBar {
                 title: "t".into(),

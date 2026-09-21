@@ -12,7 +12,7 @@ use crate::{
 };
 use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use canvas_core::{ThemePalette, VisualTheme};
 use iced::mouse;
@@ -608,6 +608,51 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                     label: color(palette.text_muted),
                     label_size: metrics.micro,
                     unit: unit.clone(),
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .spacing(metrics.space_2)
+            .into(),
+            visual,
+        ),
+        WidgetKind::SpectralWaterfall {
+            title,
+            rows,
+            min_frequency,
+            max_frequency,
+            unit,
+            ..
+        } => panel(
+            spec,
+            column![
+                row![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    space::horizontal(),
+                    text(format!(
+                        "{}–{} {}",
+                        short_value(*min_frequency),
+                        short_value(*max_frequency),
+                        unit.as_deref().unwrap_or("Hz")
+                    ))
+                    .size(metrics.small)
+                    .color(color(palette.text_muted)),
+                ],
+                Canvas::new(SpectralWaterfallProgram {
+                    rows: rows.clone(),
+                    ramp: vec![
+                        color(palette.background_strong),
+                        color(palette.info),
+                        color(palette.primary),
+                        color(palette.warning),
+                        color(palette.danger),
+                    ],
+                    label: color(palette.text_muted),
+                    scan: color(palette.text),
+                    label_size: metrics.micro,
+                    min_frequency: *min_frequency,
+                    max_frequency: *max_frequency,
+                    unit: unit.clone().unwrap_or_else(|| "Hz".into()),
                 })
                 .width(Length::Fill)
                 .height(Length::Fill),
@@ -2060,6 +2105,114 @@ fn format_metric(value: f64) -> String {
         format!("{value:.0}")
     } else {
         format!("{value:.2}")
+    }
+}
+
+struct SpectralWaterfallProgram {
+    rows: Vec<Vec<f32>>,
+    ramp: Vec<Color>,
+    label: Color,
+    scan: Color,
+    label_size: f32,
+    min_frequency: f64,
+    max_frequency: f64,
+    unit: String,
+}
+
+impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
+    type State = CacheState;
+
+    fn draw(
+        &self,
+        state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let key = self.rows.iter().flatten().fold(
+            Key::new()
+                .add_usize(self.rows.len())
+                .add_f64(self.min_frequency)
+                .add_f64(self.max_frequency)
+                .add_str(&self.unit)
+                .add_color(self.label)
+                .add_f32(self.label_size),
+            |key, value| key.add_f32(*value),
+        );
+        let key = self
+            .ramp
+            .iter()
+            .fold(key, |key, color| key.add_color(*color))
+            .build();
+        let mut output = state.draw_cached(renderer, bounds.size(), key, |frame| {
+            if self.rows.is_empty() || self.ramp.len() < 2 {
+                frame.fill_text(canvas::Text {
+                    content: "Waiting for spectrum frames".into(),
+                    position: Point::new(8.0, bounds.height * 0.5),
+                    color: self.label,
+                    size: iced::Pixels(self.label_size),
+                    ..Default::default()
+                });
+                return;
+            }
+            let bins = self.rows[0].len();
+            let plot_height = (bounds.height - self.label_size * 1.8).max(1.0);
+            let cell_w = bounds.width / bins as f32;
+            let cell_h = plot_height / self.rows.len() as f32;
+            for (row_index, row) in self.rows.iter().enumerate() {
+                let y = row_index as f32 * cell_h;
+                for (bin, value) in row.iter().enumerate() {
+                    let scaled = value.clamp(0.0, 1.0) * (self.ramp.len() - 1) as f32;
+                    let index = scaled.floor() as usize;
+                    let next = (index + 1).min(self.ramp.len() - 1);
+                    let fill = lerp_oklch(self.ramp[index], self.ramp[next], scaled.fract());
+                    frame.fill(
+                        &Path::rectangle(
+                            Point::new(bin as f32 * cell_w, y),
+                            Size::new(cell_w.max(1.0), cell_h.max(1.0)),
+                        ),
+                        fill,
+                    );
+                }
+            }
+            for (fraction, frequency) in [
+                (0.0, self.min_frequency),
+                (0.5, (self.min_frequency + self.max_frequency) * 0.5),
+                (1.0, self.max_frequency),
+            ] {
+                let label = format!("{} {}", short_value(frequency), self.unit);
+                let width = label.chars().count() as f32 * self.label_size * 0.52;
+                frame.fill_text(canvas::Text {
+                    content: label,
+                    position: Point::new(
+                        fraction * bounds.width - fraction * width,
+                        bounds.height - 2.0,
+                    ),
+                    color: self.label,
+                    size: iced::Pixels(self.label_size),
+                    ..Default::default()
+                });
+            }
+        });
+        if !self.rows.is_empty() {
+            let phase = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f32()
+                .rem_euclid(3.0)
+                / 3.0;
+            let mut overlay = canvas::Frame::new(renderer, bounds.size());
+            let y = phase * (bounds.height - self.label_size * 1.8).max(1.0);
+            overlay.stroke(
+                &Path::line(Point::new(0.0, y), Point::new(bounds.width, y)),
+                canvas::Stroke::default()
+                    .with_width(1.0)
+                    .with_color(with_alpha(self.scan, 0.28)),
+            );
+            output.push(overlay.into_geometry());
+        }
+        output
     }
 }
 

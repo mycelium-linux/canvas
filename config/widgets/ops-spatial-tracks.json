@@ -33,7 +33,7 @@
     "state": "ready",
     "source": "demo/spatial-tracks",
     "window": "latest",
-    "provenance": "fixture"
+    "provenance": "demo"
   },
   "chrome": "drag_only"
 }

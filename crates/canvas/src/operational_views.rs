@@ -220,6 +220,7 @@ fn appetite(kind: &WidgetKind) -> f32 {
     match kind {
         WidgetKind::TimeSeries { .. }
         | WidgetKind::Histogram { .. }
+        | WidgetKind::SpectralWaterfall { .. }
         | WidgetKind::Heatmap { .. }
         | WidgetKind::RankedBar { .. }
         | WidgetKind::StackedBar { .. }
@@ -558,6 +559,7 @@ fn widget_title(spec: &canvas_widgets::WidgetSpec) -> String {
         WidgetKind::Stat { label, .. } => label.clone(),
         WidgetKind::TimeSeries { title, .. }
         | WidgetKind::Histogram { title, .. }
+        | WidgetKind::SpectralWaterfall { title, .. }
         | WidgetKind::Heatmap { title, .. }
         | WidgetKind::RankedBar { title, .. }
         | WidgetKind::StackedBar { title, .. }

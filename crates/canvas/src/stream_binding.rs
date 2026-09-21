@@ -451,6 +451,10 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/span-timeline-v1.lua"),
     ),
     (
+        "spectral-frame-v1",
+        include_str!("../../../config/binders/spectral-frame-v1.lua"),
+    ),
+    (
         "spatial-tracks-v1",
         include_str!("../../../config/binders/spatial-tracks-v1.lua"),
     ),
@@ -1061,6 +1065,35 @@ mod tests {
         assert_eq!(style, canvas_widgets::SpanTimelineStyle::Waterfall);
         assert_eq!(spans.len(), 2);
         assert_eq!(unit.as_deref(), Some("ms"));
+    }
+
+    #[test]
+    fn spectral_binder_appends_frames_without_running_lua_per_tick() {
+        let mut target = test_spec(WidgetKind::SpectralWaterfall {
+            title: "FM spectrum".into(),
+            rows: Vec::new(),
+            min_frequency: 88.0,
+            max_frequency: 108.0,
+            unit: Some("MHz".into()),
+            history: 8,
+        });
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "sdr".into(),
+            stream: "fft".into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            project_id: Some("dock".into()),
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({"bins":[0.0,0.1,0.2,0.9,0.4,0.2,0.1,0.0]}),
+        };
+        apply_named_adapter("spectral-frame-v1", &event, &mut target)
+            .expect("spectrum frame appends");
+        let WidgetKind::SpectralWaterfall { rows, .. } = target.kind else {
+            panic!("spectral binder changed widget family")
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][3], 0.9);
     }
 
     #[test]

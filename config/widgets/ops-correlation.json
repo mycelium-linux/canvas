@@ -17,7 +17,7 @@
     "state": "ready",
     "source": "demo/correlation",
     "window": "15m",
-    "provenance": "fixture"
+    "provenance": "demo"
   },
   "chrome": "drag_only"
 }
