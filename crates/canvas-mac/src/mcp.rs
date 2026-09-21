@@ -607,12 +607,16 @@ fn activate_workspace(project: &str, target: Target) -> Result<Value, String> {
 
 fn recall(project: &str, target: Target) -> Result<Value, String> {
     let entries = super::resources::project_entries(project)?;
-    let project_name = entries
+    let project_home = entries
         .first()
         .filter(|entry| entry.id == "@home")
-        .map(|entry| entry.project_name.clone())
         .ok_or("Alfalfa project home is missing")?;
-    let canvas = switch_canvas_workspace(&super::alfalfa::list()?, project)?;
+    let project_name = project_home.project_name.clone();
+    let workspace_id = project_home
+        .company_id
+        .as_deref()
+        .ok_or("Alfalfa project is not assigned to a portfolio workspace")?;
+    let canvas = switch_canvas_workspace(&super::alfalfa::workspaces()?, workspace_id)?;
     let recalled = super::remote::rpc(project, "desktop-recall", &[], None)?;
     let status = super::remote::rpc(project, "desktop-status", &[], None)?;
     let window_count = workspace_window_count(&status, project)?;
@@ -621,6 +625,7 @@ fn recall(project: &str, target: Target) -> Result<Value, String> {
     let local = super::workspace::activate_saved_if_bound_at(project, area)?;
     Ok(json!({
         "project_id":project,
+        "workspace_id":workspace_id,
         "name":project_name,
         "presented":true,
         "output":recalled["active_workspace"]["output"],
