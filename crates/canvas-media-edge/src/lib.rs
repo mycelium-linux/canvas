@@ -129,7 +129,11 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
             "!".into(),
             "v4l2h264dec".into(),
             "!".into(),
-            "v4l2convert".into(),
+            // The Pi exposes fewer V4L2 converter contexts than decoder
+            // contexts. Four tiny game streams can decode concurrently but
+            // deadlock when each reserves a converter. Keep H.264 in hardware
+            // and perform only the inexpensive pixel-format conversion here.
+            "videoconvert".into(),
         ]),
         HardwareDecoder::VideoToolbox => argv.extend([
             "!".into(),
@@ -585,7 +589,8 @@ mod tests {
         assert_eq!(visible.len(), 852 * 480 * 4);
         assert!(visible.iter().all(|byte| *byte == 7));
         assert!(plan.argv.iter().any(|arg| arg == "v4l2h264dec"));
-        assert!(plan.argv.iter().any(|arg| arg == "v4l2convert"));
+        assert!(plan.argv.iter().any(|arg| arg == "videoconvert"));
+        assert!(!plan.argv.iter().any(|arg| arg == "v4l2convert"));
         assert!(!plan.argv.iter().any(|arg| arg.contains("avdec")));
         assert!(!plan.argv.iter().any(|arg| arg == "sh" || arg == "-c"));
 

@@ -10,7 +10,7 @@
     {
       "id": "umk3-game",
       "title": "Ultimate Mortal Kombat 3",
-      "content": { "kind": "live_video", "source_id": "retro-umk3", "width": 256, "height": 224 },
+      "content": { "kind": "live_video", "source_id": "retro-umk3", "width": 298, "height": 224 },
       "inputs": []
     },
     {
@@ -41,7 +41,7 @@
     {
       "id": "smk-game",
       "title": "Super Mario Kart",
-      "content": { "kind": "live_video", "source_id": "retro-smk", "width": 256, "height": 224 },
+      "content": { "kind": "live_video", "source_id": "retro-smk", "width": 298, "height": 224 },
       "inputs": []
     },
     {
@@ -59,7 +59,7 @@
     {
       "id": "smb-game",
       "title": "Super Mario Bros.",
-      "content": { "kind": "live_video", "source_id": "retro-smb", "width": 256, "height": 240 },
+      "content": { "kind": "live_video", "source_id": "retro-smb", "width": 292, "height": 240 },
       "inputs": []
     },
     {
