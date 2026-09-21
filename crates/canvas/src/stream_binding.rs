@@ -443,6 +443,10 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/metric-board-v1.lua"),
     ),
     (
+        "distribution-v1",
+        include_str!("../../../config/binders/distribution-v1.lua"),
+    ),
+    (
         "log-stream-v1",
         include_str!("../../../config/binders/log-stream-v1.lua"),
     ),
@@ -1046,6 +1050,35 @@ mod tests {
                 style == "bullet"
             );
         }
+    }
+
+    #[test]
+    fn distribution_binder_preserves_samples_for_box_and_violin_views() {
+        let mut target = test_spec(WidgetKind::Distribution {
+            title: "Waiting".into(),
+            style: canvas_widgets::DistributionStyle::Box,
+            groups: vec![canvas_widgets::DistributionGroup {
+                label: "api".into(),
+                samples: vec![1.0, 2.0, 3.0, 4.0, 5.0],
+            }],
+            unit: None,
+        });
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "metrics".into(),
+            stream: "latency".into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            project_id: Some("dock".into()),
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({"style":"violin","groups":[{"label":"api","samples":[1,2,3,4,5,8]}]}),
+        };
+        apply_named_adapter("distribution-v1", &event, &mut target).expect("distribution renders");
+        let WidgetKind::Distribution { style, groups, .. } = target.kind else {
+            panic!("wrong family")
+        };
+        assert_eq!(style, canvas_widgets::DistributionStyle::Violin);
+        assert_eq!(groups[0].samples.len(), 6);
     }
 
     #[test]

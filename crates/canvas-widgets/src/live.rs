@@ -6,10 +6,10 @@
 //! all render through one library.
 
 use crate::{
-    BurnRateWindow, ChartType, ClockMode, EventEntry, HeatmapStyle, HierarchyNode, HierarchyStyle,
-    MeterStyle, MetricBoardStyle, NeuralEdge, NeuralNode, SpanTimelineStyle, SpatialBounds,
-    SpatialTrack, StateLane, StatusLevel, StatusState, TargetMetric, TimedSpan, WidgetDataState,
-    WidgetKind, WidgetSpec,
+    BurnRateWindow, ChartType, ClockMode, DistributionGroup, DistributionStyle, EventEntry,
+    HeatmapStyle, HierarchyNode, HierarchyStyle, MeterStyle, MetricBoardStyle, NeuralEdge,
+    NeuralNode, SpanTimelineStyle, SpatialBounds, SpatialTrack, StateLane, StatusLevel,
+    StatusState, TargetMetric, TimedSpan, WidgetDataState, WidgetKind, WidgetSpec,
 };
 use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
@@ -902,6 +902,36 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                     metrics: values.clone(),
                     palette: *palette,
                     colors: series_colors(visual),
+                    label_size: metrics.micro,
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .spacing(metrics.space_2)
+            .into(),
+            visual,
+        ),
+        WidgetKind::Distribution {
+            title,
+            style,
+            groups,
+            unit,
+        } => panel(
+            spec,
+            column![
+                row![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    space::horizontal(),
+                    text(unit.clone().unwrap_or_default())
+                        .size(metrics.small)
+                        .color(color(palette.text_muted)),
+                ],
+                Canvas::new(DistributionProgram {
+                    style: *style,
+                    groups: groups.clone(),
+                    colors: series_colors(visual),
+                    text: color(palette.text_muted),
+                    grid: with_alpha(color(palette.border), visual.grid_opacity),
                     label_size: metrics.micro,
                 })
                 .width(Length::Fill)
@@ -3216,6 +3246,161 @@ impl MetricBoardProgram {
                 );
             }
         }
+    }
+}
+
+struct DistributionProgram {
+    style: DistributionStyle,
+    groups: Vec<DistributionGroup>,
+    colors: Vec<Color>,
+    text: Color,
+    grid: Color,
+    label_size: f32,
+}
+
+impl<Message> canvas::Program<Message> for DistributionProgram {
+    type State = CacheState;
+
+    fn draw(
+        &self,
+        state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let key = self.groups.iter().fold(
+            Key::new()
+                .add_usize(self.style as usize)
+                .add_color(self.text)
+                .add_color(self.grid)
+                .add_f32(self.label_size),
+            |key, group| {
+                group
+                    .samples
+                    .iter()
+                    .fold(key.add_str(&group.label), |key, value| key.add_f64(*value))
+            },
+        );
+        let key = self
+            .colors
+            .iter()
+            .fold(key, |key, value| key.add_color(*value))
+            .build();
+        state.draw_cached(renderer, bounds.size(), key, |frame| {
+            let min = self
+                .groups
+                .iter()
+                .flat_map(|group| &group.samples)
+                .copied()
+                .fold(f64::INFINITY, f64::min);
+            let max = self
+                .groups
+                .iter()
+                .flat_map(|group| &group.samples)
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max);
+            let span = (max - min).max(f64::EPSILON);
+            let label_w = (bounds.width * 0.18).clamp(48.0, 110.0);
+            let plot_w = (bounds.width - label_w - 8.0).max(1.0);
+            let row_h = bounds.height / self.groups.len().max(1) as f32;
+            let x = |value: f64| label_w + ((value - min) / span) as f32 * plot_w;
+            for tick in 0..=4 {
+                let tx = label_w + plot_w * tick as f32 / 4.0;
+                frame.stroke(
+                    &Path::line(Point::new(tx, 0.0), Point::new(tx, bounds.height)),
+                    canvas::Stroke::default()
+                        .with_width(1.0)
+                        .with_color(self.grid),
+                );
+            }
+            for (index, group) in self.groups.iter().enumerate() {
+                let center = index as f32 * row_h + row_h * 0.5;
+                frame.fill_text(canvas::Text {
+                    content: group.label.clone(),
+                    position: Point::new(0.0, center + self.label_size * 0.35),
+                    color: self.text,
+                    size: iced::Pixels(self.label_size),
+                    ..Default::default()
+                });
+                let mut samples = group.samples.clone();
+                samples.sort_by(f64::total_cmp);
+                let quantile = |q: f64| samples[((samples.len() - 1) as f64 * q).round() as usize];
+                let color = self.colors[index % self.colors.len()];
+                match self.style {
+                    DistributionStyle::Box => {
+                        let (lo, q1, median, q3, hi) = (
+                            samples[0],
+                            quantile(0.25),
+                            quantile(0.5),
+                            quantile(0.75),
+                            samples[samples.len() - 1],
+                        );
+                        frame.stroke(
+                            &Path::line(Point::new(x(lo), center), Point::new(x(hi), center)),
+                            canvas::Stroke::default().with_width(2.0).with_color(color),
+                        );
+                        let box_h = row_h * 0.48;
+                        let rect = Path::rectangle(
+                            Point::new(x(q1), center - box_h * 0.5),
+                            Size::new((x(q3) - x(q1)).max(1.0), box_h),
+                        );
+                        frame.fill(&rect, with_alpha(color, 0.42));
+                        frame.stroke(
+                            &rect,
+                            canvas::Stroke::default().with_width(1.5).with_color(color),
+                        );
+                        frame.stroke(
+                            &Path::line(
+                                Point::new(x(median), center - box_h * 0.5),
+                                Point::new(x(median), center + box_h * 0.5),
+                            ),
+                            canvas::Stroke::default().with_width(2.0).with_color(color),
+                        );
+                    }
+                    DistributionStyle::Violin => {
+                        const BINS: usize = 20;
+                        let mut density = [0usize; BINS];
+                        for value in &samples {
+                            let bin =
+                                (((*value - min) / span) * (BINS - 1) as f64).round() as usize;
+                            density[bin.min(BINS - 1)] += 1;
+                        }
+                        let peak = density.iter().copied().max().unwrap_or(1).max(1) as f32;
+                        let half = row_h * 0.36;
+                        let path = Path::new(|builder| {
+                            for (bin, count) in density.iter().enumerate() {
+                                let px = label_w + plot_w * bin as f32 / (BINS - 1) as f32;
+                                let py = center - half * *count as f32 / peak;
+                                if bin == 0 {
+                                    builder.move_to(Point::new(px, py))
+                                } else {
+                                    builder.line_to(Point::new(px, py))
+                                }
+                            }
+                            for (bin, count) in density.iter().enumerate().rev() {
+                                let px = label_w + plot_w * bin as f32 / (BINS - 1) as f32;
+                                builder
+                                    .line_to(Point::new(px, center + half * *count as f32 / peak));
+                            }
+                            builder.close();
+                        });
+                        frame.fill(&path, with_alpha(color, 0.45));
+                        frame.stroke(
+                            &path,
+                            canvas::Stroke::default().with_width(1.5).with_color(color),
+                        );
+                        frame.stroke(
+                            &Path::line(
+                                Point::new(x(quantile(0.5)), center - half),
+                                Point::new(x(quantile(0.5)), center + half),
+                            ),
+                            canvas::Stroke::default().with_width(1.5).with_color(color),
+                        );
+                    }
+                }
+            }
+        })
     }
 }
 

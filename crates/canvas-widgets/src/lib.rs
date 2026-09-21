@@ -195,6 +195,7 @@ pub const KNOWN_WIDGET_KINDS: &[&str] = &[
     "sankey",
     "hierarchy",
     "metric_board",
+    "distribution",
     "span_timeline",
     "state_timeline",
     "rate_bars",
@@ -373,6 +374,13 @@ pub enum WidgetKind {
         title: String,
         style: MetricBoardStyle,
         metrics: Vec<TargetMetric>,
+        #[serde(default)]
+        unit: Option<String>,
+    },
+    Distribution {
+        title: String,
+        style: DistributionStyle,
+        groups: Vec<DistributionGroup>,
         #[serde(default)]
         unit: Option<String>,
     },
@@ -1131,6 +1139,22 @@ pub struct TargetMetric {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum DistributionStyle {
+    Box,
+    Violin,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DistributionGroup {
+    pub label: String,
+    pub samples: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum SpanTimelineStyle {
     Flame,
     Waterfall,
@@ -1832,6 +1856,27 @@ impl WidgetSpec {
                     )?;
                 }
             }
+            WidgetKind::Distribution {
+                title,
+                groups,
+                unit,
+                ..
+            } => {
+                bounded_label(title, "distribution title")?;
+                optional_label(unit, "distribution unit")?;
+                check(
+                    !groups.is_empty() && groups.len() <= 12,
+                    "distribution requires 1-12 groups",
+                )?;
+                for group in groups {
+                    bounded_label(&group.label, "distribution label")?;
+                    check(
+                        (5..=1024).contains(&group.samples.len())
+                            && group.samples.iter().all(|value| value.is_finite()),
+                        "distribution groups require 5-1024 finite samples",
+                    )?;
+                }
+            }
             WidgetKind::SpanTimeline {
                 title, spans, unit, ..
             } => {
@@ -2325,6 +2370,7 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
         WidgetKind::Sankey { .. } => SizeHint::new(300.0, 180.0, 560.0, 300.0, 2.2),
         WidgetKind::Hierarchy { .. } => SizeHint::new(260.0, 200.0, 520.0, 360.0, 1.5),
         WidgetKind::MetricBoard { .. } => SizeHint::new(240.0, 160.0, 480.0, 300.0, 1.8),
+        WidgetKind::Distribution { .. } => SizeHint::new(260.0, 170.0, 520.0, 300.0, 1.8),
         WidgetKind::SpanTimeline { .. } => SizeHint::new(300.0, 160.0, 600.0, 320.0, 2.4),
         // A cell smaller than this is a colour with no shape; four rows is the
         // fewest that reads as a matrix rather than a bar chart.
@@ -2498,6 +2544,15 @@ mod tests {
                     state: None,
                 }],
                 unit: Some("%".into()),
+            },
+            WidgetKind::Distribution {
+                title: "t".into(),
+                style: DistributionStyle::Box,
+                groups: vec![DistributionGroup {
+                    label: "api".into(),
+                    samples: vec![1.0, 2.0, 3.0, 4.0, 5.0],
+                }],
+                unit: Some("ms".into()),
             },
             WidgetKind::SpanTimeline {
                 title: "t".into(),
@@ -2933,6 +2988,7 @@ mod tests {
             r#"{"id":"flow","kind":"sankey","title":"Requests","nodes":[{"id":"edge","label":"Edge"},{"id":"api","label":"API"}],"links":[{"from":"edge","to":"api","value":42}],"unit":"req/s"}"#,
             r#"{"id":"tree","kind":"hierarchy","title":"Deps","style":"treemap","nodes":[{"id":"root","label":"Root","value":10},{"id":"leaf","label":"Leaf","parent":"root","value":10}]}"#,
             r#"{"id":"targets","kind":"metric_board","title":"Targets","style":"bullet","metrics":[{"label":"CPU","value":67,"max":100,"target":80}]}"#,
+            r#"{"id":"dist","kind":"distribution","title":"Latency","style":"box","groups":[{"label":"api","samples":[1,2,3,4,5]}]}"#,
             r#"{"id":"states","kind":"state_timeline","title":"Health","lanes":[{"label":"api","segments":[{"start":0,"end":10,"state":"good"}]}]}"#,
             r#"{"id":"burn","kind":"rate_bars","title":"Budget","objective":99.9,"windows":[{"label":"5m","burn_rate":0.7}]}"#,
         ] {
@@ -2950,6 +3006,7 @@ mod tests {
             r#"{"id":"flow","kind":"sankey","title":"Bad","nodes":[{"id":"a","label":"A"}],"links":[{"from":"a","to":"missing","value":1}]}"#,
             r#"{"id":"tree","kind":"hierarchy","title":"Cycle","style":"sunburst","nodes":[{"id":"root","label":"Root","value":1},{"id":"a","label":"A","parent":"b","value":1},{"id":"b","label":"B","parent":"a","value":1}]}"#,
             r#"{"id":"targets","kind":"metric_board","title":"Bad","style":"radial","metrics":[{"label":"CPU","value":120,"max":100}]}"#,
+            r#"{"id":"dist","kind":"distribution","title":"Bad","style":"violin","groups":[{"label":"api","samples":[1,2,3,4]}]}"#,
             r#"{"id":"states","kind":"state_timeline","title":"Health","lanes":[{"label":"api","segments":[{"start":4,"end":2,"state":"critical"}]}]}"#,
         ] {
             assert!(
