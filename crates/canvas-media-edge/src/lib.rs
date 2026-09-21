@@ -23,6 +23,7 @@ pub struct RawVideoPlan {
     pub argv: Vec<String>,
     pub width: u32,
     pub height: u32,
+    pub allocation_bytes: usize,
 }
 
 impl RawVideoPlan {
@@ -32,6 +33,14 @@ impl RawVideoPlan {
             .and_then(|width| width.checked_mul(self.height as usize))
             .and_then(|pixels| pixels.checked_mul(4))
             .context("RGBA frame dimensions overflow")
+    }
+
+    pub fn visible_frame<'a>(&self, allocation: &'a [u8]) -> Result<&'a [u8]> {
+        ensure!(
+            allocation.len() == self.allocation_bytes,
+            "invalid decoder allocation size"
+        );
+        Ok(&allocation[..self.frame_bytes()?])
     }
 }
 
@@ -126,6 +135,10 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
     Ok(RawVideoPlan {
         width,
         height,
+        // v4l2convert exposes one allocation sized for a 32-pixel-aligned
+        // coded width. Its visible RGBA plane is packed at the start; fdsink
+        // then appends the unused allocation tail to each atomic write.
+        allocation_bytes: (((width as usize + 31) & !31) * 4) * height as usize,
         argv,
     })
 }
@@ -441,6 +454,12 @@ mod tests {
         .unwrap();
         assert_eq!((plan.width, plan.height), (852, 480));
         assert_eq!(plan.frame_bytes().unwrap(), 852 * 480 * 4);
+        assert_eq!(plan.allocation_bytes, 864 * 480 * 4);
+        let mut allocation = vec![7_u8; plan.allocation_bytes];
+        allocation[plan.frame_bytes().unwrap()..].fill(99);
+        let visible = plan.visible_frame(&allocation).unwrap();
+        assert_eq!(visible.len(), 852 * 480 * 4);
+        assert!(visible.iter().all(|byte| *byte == 7));
         assert!(plan.argv.iter().any(|arg| arg == "v4l2h264dec"));
         assert!(plan.argv.iter().any(|arg| arg == "v4l2convert"));
         assert!(!plan.argv.iter().any(|arg| arg.contains("avdec")));

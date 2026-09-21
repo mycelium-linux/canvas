@@ -264,13 +264,16 @@ impl DecoderWorker {
             .name(format!("media-{id}"))
             .spawn(move || {
                 let mut reader = BufReader::new(stdout);
-                let mut frame = vec![0_u8; frame_bytes];
+                let mut allocation = vec![0_u8; plan.allocation_bytes];
                 while !stop_for_thread.load(Ordering::Acquire)
                     && valid_for_thread.load(Ordering::Acquire) > now_unix_ms()
                 {
-                    match reader.read_exact(&mut frame) {
+                    match reader.read_exact(&mut allocation) {
                         Ok(()) => {
-                            if let Err(error) = write_raw_frame(&id, frame_bytes, &frame) {
+                            let result = plan.visible_frame(&allocation).and_then(|frame| {
+                                write_raw_frame(&id, frame_bytes, frame).map(|_| ())
+                            });
+                            if let Err(error) = result {
                                 eprintln!("canvas-media-edge: {id} frame rejected: {error:#}");
                             }
                         }
