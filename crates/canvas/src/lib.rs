@@ -1540,6 +1540,20 @@ mod tests {
     }
 
     #[test]
+    fn widget_catalog_workspace_exercises_the_native_visual_primitives() {
+        let json = include_str!("../../../config/demo/widget-catalog.json");
+        let doc: WorkspaceDocument = serde_json::from_str(json)
+            .expect("widget-catalog.json must deserialize as a WorkspaceDocument");
+        doc.validate(&catalog())
+            .expect("widget-catalog.json must pass validation");
+        assert_eq!(doc.surfaces.len(), 9);
+        let Layout::Canvas { placements } = &doc.layout else {
+            panic!("widget catalog must use a tiled canvas layout")
+        };
+        assert_eq!(placements.len(), doc.surfaces.len());
+    }
+
+    #[test]
     fn alfalfa_fleet_workspace_is_valid_and_kind_locked() {
         let json = include_str!("../../../config/demo/alfalfa.json");
         let doc: WorkspaceDocument = serde_json::from_str(json)

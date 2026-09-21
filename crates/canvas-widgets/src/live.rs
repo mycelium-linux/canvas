@@ -2020,6 +2020,14 @@ struct HeatmapProgram {
     label_size: f32,
 }
 
+fn heatmap_value_key(values: &[Vec<f64>]) -> u64 {
+    values
+        .iter()
+        .flatten()
+        .map(|value| value.to_bits())
+        .fold(0u64, u64::wrapping_add)
+}
+
 impl<Message> canvas::Program<Message> for HeatmapProgram {
     type State = CacheState;
     fn draw(
@@ -2030,7 +2038,10 @@ impl<Message> canvas::Program<Message> for HeatmapProgram {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let val_sum: u64 = self.values.iter().flatten().map(|v| v.to_bits()).sum();
+        // Float bit patterns are fingerprint material, not arithmetic. Normal
+        // addition overflows quickly in debug builds for ordinary positive
+        // values (the catalog's activity grid caught this live).
+        let val_sum = heatmap_value_key(&self.values);
         let key = Key::new()
             .add_usize(self.columns.len())
             .add_usize(self.rows.len())
@@ -3768,6 +3779,14 @@ mod tests {
 
     fn visual(palette: ThemePalette) -> VisualTheme {
         canvas_core::ThemeSelection::Palette { palette }.visual_theme()
+    }
+
+    #[test]
+    fn heatmap_fingerprint_wraps_instead_of_panicking() {
+        let values = vec![vec![1.0, 2.0, 3.0, 4.0], vec![8.0, 16.0, 32.0, 64.0]];
+        let first = heatmap_value_key(&values);
+        assert_eq!(first, heatmap_value_key(&values));
+        assert_ne!(first, heatmap_value_key(&[vec![1.0, 2.0]]));
     }
 
     #[test]
