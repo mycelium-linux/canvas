@@ -196,6 +196,9 @@ pub const KNOWN_WIDGET_KINDS: &[&str] = &[
     "hierarchy",
     "metric_board",
     "distribution",
+    "rich_card",
+    "approval_card",
+    "command_palette",
     "span_timeline",
     "state_timeline",
     "rate_bars",
@@ -383,6 +386,33 @@ pub enum WidgetKind {
         groups: Vec<DistributionGroup>,
         #[serde(default)]
         unit: Option<String>,
+    },
+    RichCard {
+        title: String,
+        format: RichCardFormat,
+        body: String,
+        #[serde(default)]
+        language: Option<String>,
+        #[serde(default)]
+        citations: Vec<Citation>,
+    },
+    ApprovalCard {
+        request_id: String,
+        title: String,
+        summary: String,
+        scope: Vec<String>,
+        expires_at: String,
+        provenance: String,
+        approve_action: String,
+        deny_action: String,
+        #[serde(default)]
+        status: ApprovalStatus,
+    },
+    CommandPalette {
+        query: String,
+        results: Vec<CommandResult>,
+        #[serde(default)]
+        selected: usize,
     },
     /// Bounded timed spans rendered as a flame graph, request waterfall,
     /// execution Gantt, or event river from one shared retained primitive.
@@ -1155,6 +1185,47 @@ pub struct DistributionGroup {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum RichCardFormat {
+    Markdown,
+    Code,
+    Diff,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct Citation {
+    pub label: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum ApprovalStatus {
+    #[default]
+    Pending,
+    Approved,
+    Denied,
+    Expired,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct CommandResult {
+    pub id: String,
+    pub label: String,
+    pub kind: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub shortcut: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum SpanTimelineStyle {
     Flame,
     Waterfall,
@@ -1877,6 +1948,89 @@ impl WidgetSpec {
                     )?;
                 }
             }
+            WidgetKind::RichCard {
+                title,
+                body,
+                language,
+                citations,
+                ..
+            } => {
+                bounded_label(title, "rich card title")?;
+                optional_label(language, "rich card language")?;
+                check(
+                    !body.is_empty() && body.len() <= 65_536,
+                    "rich card body must contain 1-65536 bytes",
+                )?;
+                check(citations.len() <= 16, "rich card exceeds 16 citations")?;
+                for citation in citations {
+                    bounded_label(&citation.label, "citation label")?;
+                    check(
+                        citation.url.len() <= 2048
+                            && (citation.url.starts_with("https://")
+                                || citation.url.starts_with("fpl://")),
+                        "citation URL must use https or fpl and fit 2048 bytes",
+                    )?;
+                }
+            }
+            WidgetKind::ApprovalCard {
+                request_id,
+                title,
+                summary,
+                scope,
+                expires_at,
+                provenance,
+                approve_action,
+                deny_action,
+                ..
+            } => {
+                for (value, name) in [
+                    (request_id, "approval request id"),
+                    (title, "approval title"),
+                    (expires_at, "approval expiry"),
+                    (provenance, "approval provenance"),
+                    (approve_action, "approve action"),
+                    (deny_action, "deny action"),
+                ] {
+                    bounded_label(value, name)?;
+                }
+                check(
+                    !summary.is_empty() && summary.len() <= 4096,
+                    "approval summary must contain 1-4096 bytes",
+                )?;
+                validate_labels(scope, "approval scope", 32)?;
+                check(
+                    approve_action != deny_action,
+                    "approval actions must be distinct",
+                )?;
+            }
+            WidgetKind::CommandPalette {
+                query,
+                results,
+                selected,
+            } => {
+                check(query.len() <= 1024, "command query exceeds 1024 bytes")?;
+                check(results.len() <= 64, "command palette exceeds 64 results")?;
+                check(
+                    results.is_empty() || *selected < results.len(),
+                    "command selection is out of bounds",
+                )?;
+                let mut ids = HashSet::new();
+                for result in results {
+                    for (value, name) in [
+                        (&result.id, "command id"),
+                        (&result.label, "command label"),
+                        (&result.kind, "command kind"),
+                    ] {
+                        bounded_label(value, name)?;
+                    }
+                    optional_label(&result.detail, "command detail")?;
+                    optional_label(&result.shortcut, "command shortcut")?;
+                    check(
+                        ids.insert(result.id.as_str()),
+                        "command result ids must be unique",
+                    )?;
+                }
+            }
             WidgetKind::SpanTimeline {
                 title, spans, unit, ..
             } => {
@@ -2371,6 +2525,9 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
         WidgetKind::Hierarchy { .. } => SizeHint::new(260.0, 200.0, 520.0, 360.0, 1.5),
         WidgetKind::MetricBoard { .. } => SizeHint::new(240.0, 160.0, 480.0, 300.0, 1.8),
         WidgetKind::Distribution { .. } => SizeHint::new(260.0, 170.0, 520.0, 300.0, 1.8),
+        WidgetKind::RichCard { .. }
+        | WidgetKind::ApprovalCard { .. }
+        | WidgetKind::CommandPalette { .. } => SizeHint::new(280.0, 180.0, 520.0, 360.0, 1.5),
         WidgetKind::SpanTimeline { .. } => SizeHint::new(300.0, 160.0, 600.0, 320.0, 2.4),
         // A cell smaller than this is a colour with no shape; four rows is the
         // fewest that reads as a matrix rather than a bar chart.
@@ -2553,6 +2710,29 @@ mod tests {
                     samples: vec![1.0, 2.0, 3.0, 4.0, 5.0],
                 }],
                 unit: Some("ms".into()),
+            },
+            WidgetKind::RichCard {
+                title: "t".into(),
+                format: RichCardFormat::Markdown,
+                body: "body".into(),
+                language: None,
+                citations: Vec::new(),
+            },
+            WidgetKind::ApprovalCard {
+                request_id: "r".into(),
+                title: "t".into(),
+                summary: "summary".into(),
+                scope: vec!["read".into()],
+                expires_at: "soon".into(),
+                provenance: "agent".into(),
+                approve_action: "approve".into(),
+                deny_action: "deny".into(),
+                status: ApprovalStatus::Pending,
+            },
+            WidgetKind::CommandPalette {
+                query: String::new(),
+                results: Vec::new(),
+                selected: 0,
             },
             WidgetKind::SpanTimeline {
                 title: "t".into(),

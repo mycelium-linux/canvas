@@ -229,6 +229,9 @@ fn appetite(kind: &WidgetKind) -> f32 {
         | WidgetKind::Hierarchy { .. }
         | WidgetKind::MetricBoard { .. }
         | WidgetKind::Distribution { .. }
+        | WidgetKind::RichCard { .. }
+        | WidgetKind::ApprovalCard { .. }
+        | WidgetKind::CommandPalette { .. }
         | WidgetKind::SpanTimeline { .. }
         | WidgetKind::StateTimeline { .. }
         | WidgetKind::RateBars { .. }
@@ -570,6 +573,8 @@ fn widget_title(spec: &canvas_widgets::WidgetSpec) -> String {
         | WidgetKind::Hierarchy { title, .. }
         | WidgetKind::MetricBoard { title, .. }
         | WidgetKind::Distribution { title, .. }
+        | WidgetKind::RichCard { title, .. }
+        | WidgetKind::ApprovalCard { title, .. }
         | WidgetKind::SpanTimeline { title, .. }
         | WidgetKind::StateTimeline { title, .. }
         | WidgetKind::RateBars { title, .. }

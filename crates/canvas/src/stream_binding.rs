@@ -447,6 +447,18 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/distribution-v1.lua"),
     ),
     (
+        "rich-card-v1",
+        include_str!("../../../config/binders/rich-card-v1.lua"),
+    ),
+    (
+        "approval-card-v1",
+        include_str!("../../../config/binders/approval-card-v1.lua"),
+    ),
+    (
+        "command-palette-v1",
+        include_str!("../../../config/binders/command-palette-v1.lua"),
+    ),
+    (
         "log-stream-v1",
         include_str!("../../../config/binders/log-stream-v1.lua"),
     ),
@@ -1079,6 +1091,68 @@ mod tests {
         };
         assert_eq!(style, canvas_widgets::DistributionStyle::Violin);
         assert_eq!(groups[0].samples.len(), 6);
+    }
+
+    #[test]
+    fn interaction_card_binders_keep_actions_and_content_typed() {
+        let mut rich = test_spec(WidgetKind::RichCard {
+            title: "Waiting".into(),
+            format: canvas_widgets::RichCardFormat::Markdown,
+            body: "wait".into(),
+            language: None,
+            citations: Vec::new(),
+        });
+        let base = |stream: &str, payload| StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "jarvis".into(),
+            stream: stream.into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            project_id: Some("dock".into()),
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload,
+        };
+        apply_named_adapter("rich-card-v1",&base("briefing",serde_json::json!({"format":"code","title":"Example","body":"let x = 1;","language":"rust"})),&mut rich).unwrap();
+        assert!(matches!(
+            rich.kind,
+            WidgetKind::RichCard {
+                format: canvas_widgets::RichCardFormat::Code,
+                ..
+            }
+        ));
+
+        let mut approval = test_spec(WidgetKind::ApprovalCard {
+            request_id: "r".into(),
+            title: "Waiting".into(),
+            summary: "wait".into(),
+            scope: vec!["read".into()],
+            expires_at: "soon".into(),
+            provenance: "agent".into(),
+            approve_action: "yes".into(),
+            deny_action: "no".into(),
+            status: canvas_widgets::ApprovalStatus::Pending,
+        });
+        apply_named_adapter("approval-card-v1",&base("approval",serde_json::json!({"request_id":"deploy-1","summary":"Deploy","scope":["host:pi"],"approve_action":"deploy.approve","deny_action":"deploy.deny"})),&mut approval).unwrap();
+        let WidgetKind::ApprovalCard {
+            approve_action,
+            deny_action,
+            ..
+        } = &approval.kind
+        else {
+            panic!("wrong family")
+        };
+        assert_ne!(approve_action, deny_action);
+
+        let mut commands = test_spec(WidgetKind::CommandPalette {
+            query: String::new(),
+            results: Vec::new(),
+            selected: 0,
+        });
+        apply_named_adapter("command-palette-v1",&base("commands",serde_json::json!({"query":"open","results":[{"id":"ohm","label":"Ohm","kind":"project"}]})),&mut commands).unwrap();
+        let WidgetKind::CommandPalette { results, .. } = commands.kind else {
+            panic!("wrong family")
+        };
+        assert_eq!(results[0].id, "ohm");
     }
 
     #[test]

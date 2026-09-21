@@ -6,10 +6,11 @@
 //! all render through one library.
 
 use crate::{
-    BurnRateWindow, ChartType, ClockMode, DistributionGroup, DistributionStyle, EventEntry,
-    HeatmapStyle, HierarchyNode, HierarchyStyle, MeterStyle, MetricBoardStyle, NeuralEdge,
-    NeuralNode, SpanTimelineStyle, SpatialBounds, SpatialTrack, StateLane, StatusLevel,
-    StatusState, TargetMetric, TimedSpan, WidgetDataState, WidgetKind, WidgetSpec,
+    ApprovalStatus, BurnRateWindow, ChartType, ClockMode, DistributionGroup, DistributionStyle,
+    EventEntry, HeatmapStyle, HierarchyNode, HierarchyStyle, MeterStyle, MetricBoardStyle,
+    NeuralEdge, NeuralNode, RichCardFormat, SpanTimelineStyle, SpatialBounds, SpatialTrack,
+    StateLane, StatusLevel, StatusState, TargetMetric, TimedSpan, WidgetDataState, WidgetKind,
+    WidgetSpec,
 };
 use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
@@ -1122,6 +1123,244 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                         .size(metrics.micro)
                         .color(color(palette.info))),
                     scrollable(lines).height(Length::Fill)
+                ]
+                .spacing(metrics.space_2)
+                .into(),
+                visual,
+            )
+        }
+        WidgetKind::RichCard {
+            title,
+            format,
+            body,
+            language,
+            citations,
+        } => {
+            let rich_background = with_alpha(color(palette.background_strong), 0.72);
+            let rich_border = color(palette.border);
+            let rich_radius = metrics.radius_sm;
+            let body_color = match format {
+                RichCardFormat::Diff => color(palette.info),
+                _ => color(palette.text),
+            };
+            let body_text = text(body).size(metrics.small).color(body_color);
+            let body_text = match format {
+                RichCardFormat::Code | RichCardFormat::Diff => {
+                    body_text.font(iced::Font::MONOSPACE)
+                }
+                RichCardFormat::Markdown => body_text,
+            };
+            let mut content = column![
+                row![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    space::horizontal(),
+                    text(
+                        language
+                            .clone()
+                            .unwrap_or_else(|| format!("{format:?}").to_lowercase())
+                    )
+                    .size(metrics.micro)
+                    .color(color(palette.text_muted)),
+                ],
+                scrollable(
+                    container(body_text)
+                        .padding(metrics.space_2)
+                        .style(move |_| container::Style {
+                            background: Some(rich_background.into()),
+                            border: iced::Border {
+                                color: rich_border,
+                                width: 1.0,
+                                radius: rich_radius.into()
+                            },
+                            ..Default::default()
+                        })
+                )
+                .height(Length::Fill)
+            ]
+            .spacing(metrics.space_2);
+            if !citations.is_empty() {
+                content = content.push(
+                    row(citations
+                        .iter()
+                        .map(|citation| {
+                            text(format!("[{}]", citation.label))
+                                .size(metrics.micro)
+                                .color(color(palette.info))
+                                .into()
+                        })
+                        .collect::<Vec<Element<'_, Message>>>())
+                    .spacing(metrics.space_2),
+                );
+            }
+            panel(spec, content.into(), visual)
+        }
+        WidgetKind::ApprovalCard {
+            title,
+            summary,
+            scope,
+            expires_at,
+            provenance,
+            approve_action,
+            deny_action,
+            status,
+            ..
+        } => {
+            let approval_text = color(palette.text);
+            let approval_background = color(palette.background);
+            let approval_surface = with_alpha(color(palette.surface_muted), 0.8);
+            let approval_border = color(palette.border);
+            let approval_success = color(palette.success);
+            let approval_danger = color(palette.danger);
+            let approval_radius = metrics.radius_sm;
+            let status_color_value = match status {
+                ApprovalStatus::Pending => palette.warning,
+                ApprovalStatus::Approved => palette.success,
+                ApprovalStatus::Denied | ApprovalStatus::Expired => palette.danger,
+            };
+            let scopes = scope
+                .iter()
+                .map(|item| {
+                    container(text(item).size(metrics.micro).color(approval_text))
+                        .padding([3, 7])
+                        .style(move |_| container::Style {
+                            background: Some(approval_surface.into()),
+                            border: iced::Border {
+                                color: approval_border,
+                                width: 1.0,
+                                radius: approval_radius.into(),
+                            },
+                            ..Default::default()
+                        })
+                        .into()
+                })
+                .collect::<Vec<Element<'_, Message>>>();
+            panel(
+                spec,
+                column![
+                    row![
+                        text(title).size(metrics.body).color(color(palette.text)),
+                        space::horizontal(),
+                        text(format!("{status:?}").to_uppercase())
+                            .size(metrics.micro)
+                            .color(color(status_color_value))
+                    ],
+                    text(summary).size(metrics.small).color(color(palette.text)),
+                    row(scopes).spacing(metrics.space_1),
+                    row![
+                        text(format!("from {provenance}"))
+                            .size(metrics.micro)
+                            .color(color(palette.text_muted)),
+                        space::horizontal(),
+                        text(format!("expires {expires_at}"))
+                            .size(metrics.micro)
+                            .color(color(palette.text_muted))
+                    ],
+                    row![
+                        container(
+                            text(format!("Approve · {approve_action}"))
+                                .size(metrics.small)
+                                .color(approval_background)
+                        )
+                        .padding([7, 12])
+                        .style(move |_| container::Style {
+                            background: Some(approval_success.into()),
+                            border: iced::Border {
+                                radius: approval_radius.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }),
+                        container(
+                            text(format!("Deny · {deny_action}"))
+                                .size(metrics.small)
+                                .color(approval_text)
+                        )
+                        .padding([7, 12])
+                        .style(move |_| container::Style {
+                            background: Some(with_alpha(approval_danger, 0.22).into()),
+                            border: iced::Border {
+                                color: approval_danger,
+                                width: 1.0,
+                                radius: approval_radius.into()
+                            },
+                            ..Default::default()
+                        })
+                    ]
+                    .spacing(metrics.space_2)
+                ]
+                .spacing(metrics.space_2)
+                .into(),
+                visual,
+            )
+        }
+        WidgetKind::CommandPalette {
+            query,
+            results,
+            selected,
+        } => {
+            let command_text = color(palette.text);
+            let command_muted = color(palette.text_muted);
+            let command_info = color(palette.info);
+            let command_primary = color(palette.primary);
+            let command_background = color(palette.background_strong);
+            let command_border = color(palette.border);
+            let command_radius = metrics.radius_sm;
+            let rows = results.iter().enumerate().fold(
+                column![].spacing(metrics.space_1),
+                |column, (index, result)| {
+                    let is_selected = index == *selected;
+                    column.push(
+                        container(
+                            row![
+                                text(&result.label).size(metrics.small).color(command_text),
+                                text(&result.kind).size(metrics.micro).color(command_muted),
+                                space::horizontal(),
+                                text(result.shortcut.clone().unwrap_or_default())
+                                    .size(metrics.micro)
+                                    .color(command_info)
+                            ]
+                            .spacing(metrics.space_2)
+                            .align_y(iced::Alignment::Center),
+                        )
+                        .padding([6, 9])
+                        .style(move |_| container::Style {
+                            background: is_selected
+                                .then(|| with_alpha(command_primary, 0.18).into()),
+                            border: iced::Border {
+                                color: if is_selected {
+                                    command_primary
+                                } else {
+                                    Color::TRANSPARENT
+                                },
+                                width: 1.0,
+                                radius: command_radius.into(),
+                            },
+                            ..Default::default()
+                        }),
+                    )
+                },
+            );
+            panel(
+                spec,
+                column![
+                    container(
+                        row![
+                            text("⌕").size(metrics.body).color(command_info),
+                            text(query).size(metrics.body).color(command_text)
+                        ]
+                        .spacing(metrics.space_2)
+                    )
+                    .padding([7, 10])
+                    .style(move |_| container::Style {
+                        background: Some(command_background.into()),
+                        border: iced::Border {
+                            color: command_border,
+                            width: 1.0,
+                            radius: command_radius.into()
+                        },
+                        ..Default::default()
+                    }),
+                    scrollable(rows).height(Length::Fill)
                 ]
                 .spacing(metrics.space_2)
                 .into(),

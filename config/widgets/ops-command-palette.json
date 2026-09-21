@@ -1,0 +1,6 @@
+{"schema_version":2,"id":"ops-command-palette","kind":"command_palette","query":"open project","selected":0,"results":[
+{"id":"project-ohm","label":"Ohm","kind":"project","detail":"Electronics workspace","shortcut":"⌘1"},
+{"id":"project-fab","label":"Fab","kind":"project","detail":"Fabrication lifecycle","shortcut":"⌘2"},
+{"id":"view-security","label":"Security cameras","kind":"view","detail":"Home camera grid"},
+{"id":"tool-briefing","label":"Start briefing","kind":"tool","detail":"Present current project state"}
+],"data":{"state":"ready","source":"demo/commands","provenance":"demo"},"chrome":"drag_only"}
