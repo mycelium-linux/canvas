@@ -3650,6 +3650,7 @@ mod tests {
     #[test]
     fn clock_formats_hours_minutes_seconds() {
         let now = EpochParts {
+            epoch_millis: 0,
             hour: 14,
             minute: 3,
             second: 7,
