@@ -193,6 +193,7 @@ pub const KNOWN_WIDGET_KINDS: &[&str] = &[
     "stacked_bar",
     "pie_chart",
     "sankey",
+    "hierarchy",
     "span_timeline",
     "state_timeline",
     "rate_bars",
@@ -353,6 +354,17 @@ pub enum WidgetKind {
         links: Vec<FlowLink>,
         #[serde(default)]
         unit: Option<String>,
+    },
+    /// One validated hierarchy rendered as either area allocation or radial
+    /// dependency rings. The data contract stays identical across views.
+    Hierarchy {
+        title: String,
+        style: HierarchyStyle,
+        nodes: Vec<HierarchyNode>,
+        #[serde(default)]
+        unit: Option<String>,
+        #[serde(default)]
+        focus: Option<String>,
     },
     /// Bounded timed spans rendered as a flame graph, request waterfall,
     /// execution Gantt, or event river from one shared retained primitive.
@@ -1067,6 +1079,25 @@ pub struct FlowLink {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum HierarchyStyle {
+    Treemap,
+    Sunburst,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct HierarchyNode {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub parent: Option<String>,
+    pub value: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum SpanTimelineStyle {
     Flame,
     Waterfall,
@@ -1688,6 +1719,56 @@ impl WidgetSpec {
                     )?;
                 }
             }
+            WidgetKind::Hierarchy {
+                title,
+                nodes,
+                unit,
+                focus,
+                ..
+            } => {
+                bounded_label(title, "hierarchy title")?;
+                optional_label(unit, "hierarchy unit")?;
+                optional_label(focus, "hierarchy focus")?;
+                check(
+                    !nodes.is_empty() && nodes.len() <= 128,
+                    "hierarchy requires 1-128 nodes",
+                )?;
+                let mut ids = HashSet::new();
+                for node in nodes {
+                    bounded_label(&node.id, "hierarchy node id")?;
+                    bounded_label(&node.label, "hierarchy node label")?;
+                    check(
+                        node.value.is_finite() && node.value > 0.0,
+                        "hierarchy values must be positive and finite",
+                    )?;
+                    check(ids.insert(node.id.as_str()), "hierarchy ids must be unique")?;
+                }
+                check(
+                    nodes.iter().any(|node| node.parent.is_none()),
+                    "hierarchy requires a root",
+                )?;
+                for node in nodes {
+                    check(
+                        node.parent.as_ref().is_none_or(|parent| {
+                            parent != &node.id && ids.contains(parent.as_str())
+                        }),
+                        "hierarchy parents must name a distinct known node",
+                    )?;
+                    let mut seen = HashSet::new();
+                    let mut cursor = node.parent.as_deref();
+                    while let Some(parent) = cursor {
+                        check(seen.insert(parent), "hierarchy must be acyclic")?;
+                        cursor = nodes
+                            .iter()
+                            .find(|candidate| candidate.id == parent)
+                            .and_then(|candidate| candidate.parent.as_deref());
+                    }
+                }
+                check(
+                    focus.as_ref().is_none_or(|id| ids.contains(id.as_str())),
+                    "hierarchy focus must name a known node",
+                )?;
+            }
             WidgetKind::SpanTimeline {
                 title, spans, unit, ..
             } => {
@@ -2179,6 +2260,7 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
             SizeHint::new(220.0, row * 3.0 + chrome, 360.0, row * 6.0 + chrome, 2.0)
         }
         WidgetKind::Sankey { .. } => SizeHint::new(300.0, 180.0, 560.0, 300.0, 2.2),
+        WidgetKind::Hierarchy { .. } => SizeHint::new(260.0, 200.0, 520.0, 360.0, 1.5),
         WidgetKind::SpanTimeline { .. } => SizeHint::new(300.0, 160.0, 600.0, 320.0, 2.4),
         // A cell smaller than this is a colour with no shape; four rows is the
         // fewest that reads as a matrix rather than a bar chart.
@@ -2327,6 +2409,18 @@ mod tests {
                     label: None,
                 }],
                 unit: None,
+            },
+            WidgetKind::Hierarchy {
+                title: "t".into(),
+                style: HierarchyStyle::Treemap,
+                nodes: vec![HierarchyNode {
+                    id: "root".into(),
+                    label: "Root".into(),
+                    parent: None,
+                    value: 1.0,
+                }],
+                unit: None,
+                focus: None,
             },
             WidgetKind::SpanTimeline {
                 title: "t".into(),
@@ -2760,6 +2854,7 @@ mod tests {
             r#"{"id":"rank","kind":"ranked_bar","title":"Tokens","bars":[{"label":"agent-a","value":42}]}"#,
             r#"{"id":"stack","kind":"stacked_bar","title":"Outcomes","series":["ok","error"],"bars":[{"label":"run","values":[9,1]}]}"#,
             r#"{"id":"flow","kind":"sankey","title":"Requests","nodes":[{"id":"edge","label":"Edge"},{"id":"api","label":"API"}],"links":[{"from":"edge","to":"api","value":42}],"unit":"req/s"}"#,
+            r#"{"id":"tree","kind":"hierarchy","title":"Deps","style":"treemap","nodes":[{"id":"root","label":"Root","value":10},{"id":"leaf","label":"Leaf","parent":"root","value":10}]}"#,
             r#"{"id":"states","kind":"state_timeline","title":"Health","lanes":[{"label":"api","segments":[{"start":0,"end":10,"state":"good"}]}]}"#,
             r#"{"id":"burn","kind":"rate_bars","title":"Budget","objective":99.9,"windows":[{"label":"5m","burn_rate":0.7}]}"#,
         ] {
@@ -2775,6 +2870,7 @@ mod tests {
             r#"{"id":"activity","kind":"heatmap","style":"activity","title":"Activity","rows":["1","2","3","4","5","6","7","8"],"columns":["W1"],"values":[[1],[1],[1],[1],[1],[1],[1],[1]]}"#,
             r#"{"id":"stack","kind":"stacked_bar","title":"Outcomes","series":["ok"],"bars":[{"label":"run","values":[1,2]}]}"#,
             r#"{"id":"flow","kind":"sankey","title":"Bad","nodes":[{"id":"a","label":"A"}],"links":[{"from":"a","to":"missing","value":1}]}"#,
+            r#"{"id":"tree","kind":"hierarchy","title":"Cycle","style":"sunburst","nodes":[{"id":"root","label":"Root","value":1},{"id":"a","label":"A","parent":"b","value":1},{"id":"b","label":"B","parent":"a","value":1}]}"#,
             r#"{"id":"states","kind":"state_timeline","title":"Health","lanes":[{"label":"api","segments":[{"start":4,"end":2,"state":"critical"}]}]}"#,
         ] {
             assert!(

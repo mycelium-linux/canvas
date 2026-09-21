@@ -435,6 +435,10 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/correlation-matrix-v1.lua"),
     ),
     (
+        "hierarchy-v1",
+        include_str!("../../../config/binders/hierarchy-v1.lua"),
+    ),
+    (
         "log-stream-v1",
         include_str!("../../../config/binders/log-stream-v1.lua"),
     ),
@@ -949,6 +953,51 @@ mod tests {
         };
         assert_eq!(rows, columns);
         assert_eq!(values[0][1], 0.82);
+    }
+
+    #[test]
+    fn hierarchy_binder_switches_view_without_changing_the_data_contract() {
+        for style in ["treemap", "sunburst"] {
+            let mut target = test_spec(WidgetKind::Hierarchy {
+                title: "Waiting".into(),
+                style: canvas_widgets::HierarchyStyle::Treemap,
+                nodes: vec![canvas_widgets::HierarchyNode {
+                    id: "root".into(),
+                    label: "Root".into(),
+                    parent: None,
+                    value: 1.0,
+                }],
+                unit: None,
+                focus: None,
+            });
+            let event = StreamEnvelope {
+                schema_version: STREAM_SCHEMA_VERSION,
+                owner: "metrics".into(),
+                stream: "hierarchy".into(),
+                contract: "canvas.widget.snapshot.v1".into(),
+                project_id: Some("dock".into()),
+                sequence: 1,
+                emitted_at_ms: now_ms(),
+                payload: serde_json::json!({"style":style,"nodes":[
+                    {"id":"root","label":"Root","value":10},
+                    {"id":"leaf","label":"Leaf","parent":"root","value":10}
+                ]}),
+            };
+            apply_named_adapter("hierarchy-v1", &event, &mut target).expect("hierarchy renders");
+            let WidgetKind::Hierarchy {
+                style: actual,
+                nodes,
+                ..
+            } = target.kind
+            else {
+                panic!("wrong family")
+            };
+            assert_eq!(nodes.len(), 2);
+            assert_eq!(
+                actual == canvas_widgets::HierarchyStyle::Sunburst,
+                style == "sunburst"
+            );
+        }
     }
 
     #[test]

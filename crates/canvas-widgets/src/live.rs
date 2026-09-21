@@ -6,9 +6,9 @@
 //! all render through one library.
 
 use crate::{
-    BurnRateWindow, ChartType, ClockMode, EventEntry, HeatmapStyle, MeterStyle, NeuralEdge,
-    NeuralNode, SpanTimelineStyle, SpatialBounds, SpatialTrack, StateLane, StatusLevel,
-    StatusState, TimedSpan, WidgetDataState, WidgetKind, WidgetSpec,
+    BurnRateWindow, ChartType, ClockMode, EventEntry, HeatmapStyle, HierarchyNode, HierarchyStyle,
+    MeterStyle, NeuralEdge, NeuralNode, SpanTimelineStyle, SpatialBounds, SpatialTrack, StateLane,
+    StatusLevel, StatusState, TimedSpan, WidgetDataState, WidgetKind, WidgetSpec,
 };
 use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
@@ -840,6 +840,38 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                     colors: series_colors(visual),
                     label: color(palette.text_muted),
                     surface: color(palette.surface_muted),
+                    label_size: metrics.micro,
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .spacing(metrics.space_2)
+            .into(),
+            visual,
+        ),
+        WidgetKind::Hierarchy {
+            title,
+            style,
+            nodes,
+            unit,
+            focus,
+        } => panel(
+            spec,
+            column![
+                row![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    space::horizontal(),
+                    text(unit.clone().unwrap_or_default())
+                        .size(metrics.small)
+                        .color(color(palette.text_muted)),
+                ],
+                Canvas::new(HierarchyProgram {
+                    style: *style,
+                    nodes: nodes.clone(),
+                    focus: focus.clone(),
+                    colors: series_colors(visual),
+                    text: color(palette.text),
+                    border: color(palette.border),
                     label_size: metrics.micro,
                 })
                 .width(Length::Fill)
@@ -2671,6 +2703,293 @@ impl<Message> canvas::Program<Message> for SankeyProgram {
                 });
             }
         })
+    }
+}
+
+struct HierarchyProgram {
+    style: HierarchyStyle,
+    nodes: Vec<HierarchyNode>,
+    focus: Option<String>,
+    colors: Vec<Color>,
+    text: Color,
+    border: Color,
+    label_size: f32,
+}
+
+impl<Message> canvas::Program<Message> for HierarchyProgram {
+    type State = CacheState;
+
+    fn draw(
+        &self,
+        state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let key = self.nodes.iter().fold(
+            Key::new()
+                .add_usize(self.style as usize)
+                .add_str(self.focus.as_deref().unwrap_or_default())
+                .add_color(self.text)
+                .add_color(self.border)
+                .add_f32(self.label_size),
+            |key, node| {
+                key.add_str(&node.id)
+                    .add_str(&node.label)
+                    .add_str(node.parent.as_deref().unwrap_or_default())
+                    .add_f64(node.value)
+            },
+        );
+        let key = self
+            .colors
+            .iter()
+            .fold(key, |key, color| key.add_color(*color))
+            .build();
+        state.draw_cached(renderer, bounds.size(), key, |frame| {
+            if self.nodes.is_empty() || self.colors.is_empty() {
+                return;
+            }
+            let roots = if let Some(focus) = self.focus.as_deref() {
+                vec![focus]
+            } else {
+                self.nodes
+                    .iter()
+                    .filter(|node| node.parent.is_none())
+                    .map(|node| node.id.as_str())
+                    .collect()
+            };
+            match self.style {
+                HierarchyStyle::Treemap => {
+                    let rect = Rectangle::new(Point::ORIGIN, bounds.size());
+                    draw_treemap_level(frame, &self.nodes, &roots, rect, 0, self);
+                }
+                HierarchyStyle::Sunburst => {
+                    let center = Point::new(bounds.width * 0.5, bounds.height * 0.5);
+                    let max_depth = roots
+                        .iter()
+                        .map(|root| hierarchy_depth(&self.nodes, root))
+                        .max()
+                        .unwrap_or(1)
+                        .max(1);
+                    let ring = bounds.width.min(bounds.height) * 0.46 / max_depth as f32;
+                    let total = roots
+                        .iter()
+                        .map(|id| hierarchy_weight(&self.nodes, id))
+                        .sum::<f64>()
+                        .max(f64::EPSILON);
+                    let mut start = -std::f32::consts::FRAC_PI_2;
+                    for root in roots {
+                        let sweep = (hierarchy_weight(&self.nodes, root) / total) as f32
+                            * std::f32::consts::TAU;
+                        draw_sunburst_node(
+                            frame,
+                            &self.nodes,
+                            root,
+                            center,
+                            0,
+                            ring,
+                            start,
+                            sweep,
+                            self,
+                        );
+                        start += sweep;
+                    }
+                }
+            }
+        })
+    }
+}
+
+fn hierarchy_weight(nodes: &[HierarchyNode], id: &str) -> f64 {
+    let children = nodes
+        .iter()
+        .filter(|node| node.parent.as_deref() == Some(id));
+    let sum = children
+        .map(|child| hierarchy_weight(nodes, &child.id))
+        .sum::<f64>();
+    if sum > 0.0 {
+        sum
+    } else {
+        nodes
+            .iter()
+            .find(|node| node.id == id)
+            .map_or(0.0, |node| node.value)
+    }
+}
+
+fn hierarchy_depth(nodes: &[HierarchyNode], id: &str) -> usize {
+    1 + nodes
+        .iter()
+        .filter(|node| node.parent.as_deref() == Some(id))
+        .map(|child| hierarchy_depth(nodes, &child.id))
+        .max()
+        .unwrap_or(0)
+}
+
+fn draw_treemap_level(
+    frame: &mut canvas::Frame,
+    nodes: &[HierarchyNode],
+    ids: &[&str],
+    rect: Rectangle,
+    depth: usize,
+    program: &HierarchyProgram,
+) {
+    let total = ids
+        .iter()
+        .map(|id| hierarchy_weight(nodes, id))
+        .sum::<f64>()
+        .max(f64::EPSILON);
+    let mut offset = 0.0;
+    for (index, id) in ids.iter().enumerate() {
+        let share = (hierarchy_weight(nodes, id) / total) as f32;
+        let child_rect = if depth % 2 == 0 {
+            Rectangle::new(
+                Point::new(rect.x + rect.width * offset, rect.y),
+                Size::new(rect.width * share, rect.height),
+            )
+        } else {
+            Rectangle::new(
+                Point::new(rect.x, rect.y + rect.height * offset),
+                Size::new(rect.width, rect.height * share),
+            )
+        };
+        offset += share;
+        let inset = 1.5;
+        let drawn = Rectangle::new(
+            Point::new(child_rect.x + inset, child_rect.y + inset),
+            Size::new(
+                (child_rect.width - inset * 2.0).max(1.0),
+                (child_rect.height - inset * 2.0).max(1.0),
+            ),
+        );
+        frame.fill(
+            &Path::rectangle(drawn.position(), drawn.size()),
+            with_alpha(program.colors[(depth + index) % program.colors.len()], 0.72),
+        );
+        frame.stroke(
+            &Path::rectangle(drawn.position(), drawn.size()),
+            canvas::Stroke::default()
+                .with_width(1.0)
+                .with_color(program.border),
+        );
+        if let Some(node) = nodes.iter().find(|node| node.id == *id) {
+            if drawn.width > 48.0 && drawn.height > 24.0 {
+                frame.fill_text(canvas::Text {
+                    content: node.label.clone(),
+                    position: Point::new(drawn.x + 6.0, drawn.y + program.label_size + 5.0),
+                    color: program.text,
+                    size: iced::Pixels(program.label_size),
+                    ..Default::default()
+                });
+            }
+        }
+        let children = nodes
+            .iter()
+            .filter(|node| node.parent.as_deref() == Some(*id))
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>();
+        if !children.is_empty() {
+            let inner = Rectangle::new(
+                Point::new(drawn.x + 4.0, drawn.y + program.label_size + 8.0),
+                Size::new(
+                    (drawn.width - 8.0).max(1.0),
+                    (drawn.height - program.label_size - 12.0).max(1.0),
+                ),
+            );
+            draw_treemap_level(frame, nodes, &children, inner, depth + 1, program);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_sunburst_node(
+    frame: &mut canvas::Frame,
+    nodes: &[HierarchyNode],
+    id: &str,
+    center: Point,
+    depth: usize,
+    ring: f32,
+    start: f32,
+    sweep: f32,
+    program: &HierarchyProgram,
+) {
+    let inner = depth as f32 * ring;
+    let outer = inner + ring - 1.5;
+    let steps = ((sweep.abs() * 28.0).ceil() as usize).max(3);
+    let path = Path::new(|builder| {
+        for step in 0..=steps {
+            let angle = start + sweep * step as f32 / steps as f32;
+            let point = Point::new(
+                center.x + outer * angle.cos(),
+                center.y + outer * angle.sin(),
+            );
+            if step == 0 {
+                builder.move_to(point)
+            } else {
+                builder.line_to(point)
+            }
+        }
+        for step in (0..=steps).rev() {
+            let angle = start + sweep * step as f32 / steps as f32;
+            builder.line_to(Point::new(
+                center.x + inner * angle.cos(),
+                center.y + inner * angle.sin(),
+            ));
+        }
+        builder.close();
+    });
+    frame.fill(
+        &path,
+        with_alpha(program.colors[depth % program.colors.len()], 0.78),
+    );
+    frame.stroke(
+        &path,
+        canvas::Stroke::default()
+            .with_width(1.0)
+            .with_color(program.border),
+    );
+    if sweep > 0.34 && outer > 20.0 {
+        if let Some(node) = nodes.iter().find(|node| node.id == id) {
+            let angle = start + sweep * 0.5;
+            let radius = (inner + outer) * 0.5;
+            frame.fill_text(canvas::Text {
+                content: node.label.clone(),
+                position: Point::new(
+                    center.x + radius * angle.cos(),
+                    center.y + radius * angle.sin(),
+                ),
+                color: program.text,
+                size: iced::Pixels(program.label_size),
+                align_x: iced::alignment::Horizontal::Center.into(),
+                ..Default::default()
+            });
+        }
+    }
+    let children = nodes
+        .iter()
+        .filter(|node| node.parent.as_deref() == Some(id))
+        .collect::<Vec<_>>();
+    let total = children
+        .iter()
+        .map(|node| hierarchy_weight(nodes, &node.id))
+        .sum::<f64>()
+        .max(f64::EPSILON);
+    let mut child_start = start;
+    for child in children {
+        let child_sweep = sweep * (hierarchy_weight(nodes, &child.id) / total) as f32;
+        draw_sunburst_node(
+            frame,
+            nodes,
+            &child.id,
+            center,
+            depth + 1,
+            ring,
+            child_start,
+            child_sweep,
+            program,
+        );
+        child_start += child_sweep;
     }
 }
 

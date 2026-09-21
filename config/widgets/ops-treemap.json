@@ -1,0 +1,14 @@
+{
+  "schema_version":2,"id":"ops-treemap","kind":"hierarchy","title":"Token allocation","style":"treemap","unit":"tokens","focus":null,
+  "nodes":[
+    {"id":"total","label":"Project","value":100,"parent":null},
+    {"id":"runtime","label":"Runtime","value":46,"parent":"total"},
+    {"id":"ui","label":"Canvas UI","value":31,"parent":"total"},
+    {"id":"infra","label":"Infrastructure","value":23,"parent":"total"},
+    {"id":"render","label":"Rendering","value":27,"parent":"runtime"},
+    {"id":"bus","label":"Unibus","value":19,"parent":"runtime"},
+    {"id":"widgets","label":"Widgets","value":19,"parent":"ui"},
+    {"id":"themes","label":"Themes","value":12,"parent":"ui"}
+  ],
+  "data":{"state":"ready","source":"demo/hierarchy","provenance":"demo"},"chrome":"drag_only"
+}
