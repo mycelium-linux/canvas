@@ -7,6 +7,8 @@ use sha2::{Digest, Sha256};
 pub struct Entry {
     #[serde(default)]
     pub company_id: Option<String>,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
     pub project: String,
     pub project_name: String,
     pub id: String,
@@ -136,6 +138,9 @@ fn entries(id: &str, context: &Value) -> Result<Vec<Entry>, String> {
     let home = project_home(id)?;
     let mut result = vec![Entry {
         company_id: project["company_id"].as_str().map(str::to_owned),
+        workspace_id: context["definition"]["workspace_id"]
+            .as_str()
+            .map(str::to_owned),
         project: id.into(),
         project_name: name.into(),
         id: "@home".into(),
@@ -167,6 +172,9 @@ fn entries(id: &str, context: &Value) -> Result<Vec<Entry>, String> {
         });
         result.push(Entry {
             company_id: project["company_id"].as_str().map(str::to_owned),
+            workspace_id: context["definition"]["workspace_id"]
+                .as_str()
+                .map(str::to_owned),
             project: id.into(),
             project_name: name.into(),
             id: resource_id.into(),
@@ -326,7 +334,7 @@ fn add_observations(index: &mut Index, activity: &Value) -> Result<(), String> {
         }
         let id = format!("observed-{:x}", Sha256::digest(key.as_bytes()));
         index.entries.push(Entry {
-            company_id:None, project: id, project_name: name.into(), id: "@home".into(), title: name.into(),
+            company_id:None, workspace_id:None, project: id, project_name: name.into(), id: "@home".into(), title: name.into(),
             kind: "project".into(), uri: home.clone(), note: None, home: home.clone(),
             status: "observed".into(),
             purpose: format!("{} · {} agent sessions{}\nDiscovered through My agents; lifecycle has not been assigned.", key,
@@ -450,6 +458,16 @@ mod tests {
     use super::*;
     fn fixture() -> Value {
         serde_json::json!({"definition":{"project":{"id":"business","name":"Studio business"},"resource":[{"id":"notes","title":"Weekly notes","kind":"note","uri":"notes.md","context_path":"notes.md"},{"id":"sales","title":"Sales dashboard","kind":"artifact","uri":"https://example.test/sales"}]},"sources":[{"path":"notes.md","content":"A real owner note"},{"path":"private.md","content":"Not included"}]})
+    }
+    #[test]
+    fn canvas_workspace_identity_is_distinct_from_company_identity() {
+        let mut context = fixture();
+        context["definition"]["project"]["company_id"] = Value::Null;
+        context["definition"]["workspace_id"] = "fpl".into();
+        let entries = entries("business", &context).unwrap();
+        assert_eq!(entries[0].company_id, None);
+        assert_eq!(entries[0].workspace_id.as_deref(), Some("fpl"));
+        assert!(entries.iter().all(|entry| entry.workspace_id.as_deref() == Some("fpl")));
     }
     #[test]
     fn company_ids_group_equal_names_without_guessing_unassigned_ownership() {

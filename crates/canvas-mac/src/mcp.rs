@@ -613,14 +613,17 @@ fn recall(project: &str, target: Target) -> Result<Value, String> {
         .ok_or("Alfalfa project home is missing")?;
     let project_name = project_home.project_name.clone();
     let workspace_id = project_home
-        .company_id
+        .workspace_id
         .as_deref()
         .ok_or("Alfalfa project is not assigned to a portfolio workspace")?;
     let canvas = switch_canvas_workspace(&super::alfalfa::workspaces()?, workspace_id)?;
     let recalled = super::remote::rpc(project, "desktop-recall", &[], None)?;
     let status = super::remote::rpc(project, "desktop-status", &[], None)?;
     let window_count = workspace_window_count(&status, project)?;
-    let viewer = super::remote::open_desktop(project)?;
+    // The project presentation is the operation; a local VNC viewer is an
+    // optional observer. A TV/remote Canvas must not be reported as failed
+    // merely because this Mac has no TigerVNC application installed.
+    let viewer = viewer_receipt(super::remote::open_desktop(project));
     let (area, route) = target_area(target)?;
     let local = super::workspace::activate_saved_if_bound_at(project, area)?;
     Ok(json!({
@@ -637,8 +640,19 @@ fn recall(project: &str, target: Target) -> Result<Value, String> {
         "local_workspace_presented":local.is_some(),
         "local_window_count":local.as_ref().map(|activation| activation.windows.len()).unwrap_or(0),
         "canvas":canvas,
-        "viewer":{"output_index":viewer["output_index"],"reused":viewer["reused"].as_bool().unwrap_or(false)}
+        "viewer":viewer
     }))
+}
+
+fn viewer_receipt(result: Result<Value, String>) -> Value {
+    match result {
+        Ok(viewer) => json!({
+            "available": true,
+            "output_index": viewer["output_index"],
+            "reused": viewer["reused"].as_bool().unwrap_or(false),
+        }),
+        Err(error) => json!({"available": false, "reason": error}),
+    }
 }
 
 pub fn execute(name: &str, args: &Value) -> Result<Value, String> {
@@ -707,16 +721,18 @@ pub fn execute(name: &str, args: &Value) -> Result<Value, String> {
                 .iter()
                 .find(|entry| entry.id == resource && entry.id != "@home")
                 .ok_or("Alfalfa resource does not exist in the requested project")?;
-            let destination = if let Some(uri) = safe_web_uri(entry) {
+            let (destination, viewer) = if let Some(uri) = safe_web_uri(entry) {
                 super::remote::rpc(project, "desktop-recall", &[], None)?;
                 super::remote::rpc(project, "desktop-web-url", &[uri.into()], None)?;
-                super::remote::open_desktop(project)?;
-                "agora_browser"
+                (
+                    "agora_browser",
+                    Some(viewer_receipt(super::remote::open_desktop(project))),
+                )
             } else {
                 super::resources::open(entry)?;
-                "mac"
+                ("mac", None)
             };
-            json!({"project_id":project,"resource_id":resource,"title":entry.title,"kind":entry.kind,"opened":true,"destination":destination})
+            json!({"project_id":project,"resource_id":resource,"title":entry.title,"kind":entry.kind,"opened":true,"destination":destination,"viewer":viewer})
         }
         _ => return Err("Unknown orchestration tool".into()),
     };
@@ -982,6 +998,7 @@ mod tests {
     fn resource_projection_omits_uri_notes_and_context() {
         let entries = vec![super::super::resources::Entry {
             company_id: None,
+            workspace_id: None,
             project: "dock".into(),
             project_name: "Dock".into(),
             id: "code".into(),
@@ -1001,6 +1018,18 @@ mod tests {
         http.uri = "http://example.test/public".into();
         assert_eq!(public_resources(&[http]).unwrap()[0]["destination"], "mac");
         assert!(public_resources(&[entries[0].clone(), entries[0].clone()]).is_err());
+    }
+
+    #[test]
+    fn missing_local_viewer_does_not_turn_remote_recall_into_failure() {
+        assert_eq!(
+            viewer_receipt(Err("viewer unavailable".into())),
+            json!({"available":false,"reason":"viewer unavailable"})
+        );
+        assert_eq!(
+            viewer_receipt(Ok(json!({"output_index":2,"reused":true}))),
+            json!({"available":true,"output_index":2,"reused":true})
+        );
     }
 
     #[test]
