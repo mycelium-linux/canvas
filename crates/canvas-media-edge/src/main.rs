@@ -2,14 +2,16 @@
 
 use anyhow::{Context, Result, ensure};
 use canvas::bus::{Bus, BusConfig};
+use canvas::stream_binding::{BRIEFING_CONTRACT, STREAM_SCHEMA_VERSION, StreamEnvelope};
 use canvas_media_edge::{
-    DecodePolicy, HardwareDecoder, ffmpeg_raw_plan, gstreamer_raw_plan, now_unix_ms,
+    DecodePolicy, HardwareDecoder, gstreamer_raw_plan, now_unix_ms,
     write_detections, write_raw_frame,
 };
 use serde::Deserialize;
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     io::{BufReader, Read},
+    os::unix::net::UnixDatagram,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
@@ -108,8 +110,17 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
         config.bus.producer_id, config.bus.hub_endpoint, policy.decoder
     );
     let mut decoders = DecoderSet::new(config.gst_launch.clone(), config.ffmpeg.clone(), policy);
+    let mut speedy_games = BTreeMap::<String, u64>::new();
+    let mut roster_sequence = 0_u64;
     loop {
-        decoders.expire(now_unix_ms());
+        let now = now_unix_ms();
+        decoders.expire(now);
+        let before = speedy_games.len();
+        speedy_games.retain(|_, valid_until| *valid_until > now);
+        if speedy_games.len() != before {
+            roster_sequence = roster_sequence.saturating_add(1);
+            publish_speedy_roster(&config.bus.producer_id, roster_sequence, &speedy_games)?;
+        }
         match bus.try_read()? {
             Some((envelope, _payload)) if envelope.message.kind == CAMERA_STREAM_CONTRACT => {
                 let stream: CameraStream =
@@ -122,12 +133,15 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
                     serde_json::from_value(serde_json::Value::Object(envelope.message.body))
                         .context("decode media.video_stream.v1")?;
                 stream.validate().map_err(anyhow::Error::msg)?;
+                let stream_id = stream.stream_id.clone();
+                let valid_until = stream.valid_until_unix_ms;
                 decoders.upsert(CameraStream {
                     schema_version: stream.schema_version,
                     camera_id: stream.stream_id,
                     display_name: stream.display_name,
                     zone: stream.zone,
                     transport: stream.transport,
+                    transport_role: stream.transport_role,
                     endpoint: stream.endpoint,
                     codec: stream.codec,
                     width: stream.width,
@@ -136,6 +150,17 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
                     announced_at_unix_ms: stream.announced_at_unix_ms,
                     valid_until_unix_ms: stream.valid_until_unix_ms,
                 })?;
+                if stream_id.starts_with("retro-") {
+                    let changed = speedy_games.insert(stream_id, valid_until) != Some(valid_until);
+                    if changed {
+                        roster_sequence = roster_sequence.saturating_add(1);
+                        publish_speedy_roster(
+                            &config.bus.producer_id,
+                            roster_sequence,
+                            &speedy_games,
+                        )?;
+                    }
+                }
             }
             Some((envelope, _payload)) if envelope.message.kind == CAMERA_DETECTIONS_CONTRACT => {
                 let detections: CameraDetections =
@@ -151,6 +176,35 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
             None => {}
         }
     }
+}
+
+fn publish_speedy_roster(
+    owner: &str,
+    sequence: u64,
+    games: &BTreeMap<String, u64>,
+) -> Result<()> {
+    let path = canvas_core::stream_socket_path().context("Canvas stream socket unavailable")?;
+    let event = StreamEnvelope {
+        schema_version: STREAM_SCHEMA_VERSION,
+        owner: owner.to_owned(),
+        stream: "speedy-layout".into(),
+        contract: BRIEFING_CONTRACT.into(),
+        sequence,
+        emitted_at_ms: now_unix_ms(),
+        project_id: Some("speedy".into()),
+        payload: serde_json::json!({
+            "briefing": "speedy-layout",
+            "beat": sequence,
+            "games": games.keys().collect::<Vec<_>>()
+        }),
+    };
+    event.validate().map_err(anyhow::Error::msg)?;
+    let bytes = serde_json::to_vec(&event).context("encode Speedy roster")?;
+    UnixDatagram::unbound()
+        .context("open Speedy roster socket")?
+        .send_to(&bytes, &path)
+        .with_context(|| format!("publish Speedy roster to {}", path.display()))?;
+    Ok(())
 }
 
 struct DecoderSet {
@@ -191,10 +245,7 @@ impl DecoderSet {
         }
         let id = stream.camera_id.clone();
         let (program, plan) = match self.policy.decoder {
-            HardwareDecoder::VideoToolbox => {
-                (self.ffmpeg.clone(), ffmpeg_raw_plan(&stream, self.policy)?)
-            }
-            HardwareDecoder::V4l2M2m => (
+            HardwareDecoder::VideoToolbox | HardwareDecoder::V4l2M2m => (
                 self.gst_launch.clone(),
                 gstreamer_raw_plan(&stream, self.policy)?,
             ),

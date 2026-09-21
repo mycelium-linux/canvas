@@ -10,7 +10,7 @@
 //!   actor's identity, and always answered with a `canvas.result` receipt so
 //!   the central learns what *executed*, not just what was delivered.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::os::unix::net::UnixDatagram;
 use std::thread;
 use std::time::Duration;
@@ -118,6 +118,7 @@ fn run(config: &EdgeConfig) -> Result<()> {
 #[derive(Default)]
 struct Liveness {
     by_producer: HashMap<String, BTreeSet<String>>,
+    rlcd_by_session: HashMap<String, VecDeque<serde_json::Value>>,
 }
 
 impl Liveness {
@@ -213,6 +214,7 @@ fn ingest(
             receipt(bus, envelope, &request_id, outcome.0, outcome.1)
         }
         "audio_level" | "audio.level" => publish_audio_level(envelope),
+        "rlcd.decision.v1" => publish_rlcd_decision(liveness, envelope),
         "spatial_tracks" | "spatial.tracks" => publish_spatial_tracks(envelope),
         kinds::V1_REPLY | kinds::REPLY => Ok(()),
         canvas_core::unibus::kinds::NODE_STATE => {
@@ -244,6 +246,178 @@ fn ingest(
             Ok(())
         }
     }
+}
+
+/// Turn the transport-level RLCD event into Canvas's existing bounded widget
+/// snapshot contract. The edge owns the short presentation history; the
+/// producer remains unaware of Canvas layout and rendering details.
+fn publish_rlcd_decision(liveness: &mut Liveness, envelope: &Envelope) -> Result<()> {
+    let path = canvas_core::stream_socket_path().context("Canvas stream socket is unavailable")?;
+    let socket = UnixDatagram::unbound().context("open Canvas stream datagram")?;
+    let log = rlcd_decision_event(liveness, envelope)?;
+    let mut events = vec![log];
+    if let Some(probabilities) = rlcd_probability_event(envelope)? {
+        events.push(probabilities);
+    }
+    for event in events {
+        let bytes = serde_json::to_vec(&event).context("encode Canvas RLCD event")?;
+        socket
+            .send_to(&bytes, &path)
+            .with_context(|| format!("send RLCD event to {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn rlcd_probability_event(envelope: &Envelope) -> Result<Option<StreamEnvelope>> {
+    let body = &envelope.message.body;
+    if body["phase"].as_str() != Some("completed") {
+        return Ok(None);
+    }
+    let session = body["session_id"]
+        .as_str()
+        .context("RLCD event lacks session_id")?;
+    let sequence = body["sequence"]
+        .as_u64()
+        .context("RLCD event lacks sequence")?;
+    let selected = body["selected"].as_str();
+    let values = body
+        .get("response")
+        .and_then(|value| value.pointer("/answers/action/probabilities"))
+        .and_then(serde_json::Value::as_object)
+        .context("completed RLCD event lacks action probabilities")?;
+    let mut bars: Vec<_> = values
+        .iter()
+        .filter_map(|(label, value)| {
+            value.as_f64().map(|probability| {
+                serde_json::json!({
+                    "label": label.replace('_', " "),
+                    "value": probability * 100.0,
+                    "state": if selected == Some(label.as_str()) { "good" } else { "neutral" }
+                })
+            })
+        })
+        .collect();
+    bars.sort_by(|left, right| {
+        right["value"]
+            .as_f64()
+            .unwrap_or_default()
+            .total_cmp(&left["value"].as_f64().unwrap_or_default())
+    });
+    ensure!(!bars.is_empty(), "completed RLCD event has no probabilities");
+    Ok(Some(StreamEnvelope {
+        schema_version: STREAM_SCHEMA_VERSION,
+        owner: envelope.producer_id.clone(),
+        stream: format!("{session}-probabilities"),
+        contract: "canvas.widget.snapshot.v1".into(),
+        sequence,
+        emitted_at_ms: body["at_unix_ms"]
+            .as_u64()
+            .unwrap_or(envelope.issued_at_unix_ms),
+        project_id: Some("speedy".into()),
+        payload: serde_json::json!({
+            "widget": {
+                "kind": "ranked_bar",
+                "title": format!("Decision #{sequence} · {}", selected.unwrap_or("unknown").replace('_', " ")),
+                "bars": bars,
+                "unit": "%"
+            },
+            "data": {
+                "state": "ready",
+                "source": format!("unibus:{}:rlcd.decision.v1", envelope.producer_id),
+                "window": "live"
+            }
+        }),
+    }))
+}
+
+fn rlcd_decision_event(liveness: &mut Liveness, envelope: &Envelope) -> Result<StreamEnvelope> {
+    let body = &envelope.message.body;
+    ensure!(
+        body["schema_version"].as_u64() == Some(1),
+        "unsupported RLCD schema"
+    );
+    let session = body["session_id"]
+        .as_str()
+        .context("RLCD event lacks session_id")?;
+    ensure!(
+        !session.is_empty()
+            && session.len() <= 64
+            && session
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+        "invalid RLCD session_id"
+    );
+    let sequence = body["sequence"]
+        .as_u64()
+        .context("RLCD event lacks sequence")?;
+    let emitted_at_ms = body["at_unix_ms"]
+        .as_u64()
+        .unwrap_or(envelope.issued_at_unix_ms);
+    let phase = body["phase"].as_str().context("RLCD event lacks phase")?;
+    ensure!(
+        matches!(phase, "requested" | "completed" | "failed"),
+        "invalid RLCD phase"
+    );
+    let message = match phase {
+        "requested" => format!("#{sequence} · thinking…"),
+        "completed" => format!(
+            "#{sequence} · {} · {} ms · confidence {}",
+            body["selected"].as_str().unwrap_or("unknown"),
+            body["latency_ms"].as_u64().unwrap_or(0),
+            body["confidence"]
+                .as_f64()
+                .map(|value| format!("{value:.2}"))
+                .unwrap_or_else(|| "—".into())
+        ),
+        "failed" => format!(
+            "#{sequence} · failed · {}",
+            body["error"].as_str().unwrap_or("unknown error")
+        ),
+        _ => unreachable!(),
+    };
+    let entries = liveness
+        .rlcd_by_session
+        .entry(session.to_owned())
+        .or_default();
+    if phase != "requested" {
+        entries.retain(|entry| entry["call_id"] != body["call_id"]);
+    }
+    entries.push_front(serde_json::json!({
+        "call_id": body["call_id"],
+        "timestamp": emitted_at_ms.to_string(),
+        "message": message,
+        "level": match phase { "completed" => "good", "failed" => "warning", _ => "neutral" }
+    }));
+    entries.truncate(24);
+    let visible: Vec<_> = entries
+        .iter()
+        .cloned()
+        .map(|mut entry| {
+            entry.as_object_mut().map(|object| object.remove("call_id"));
+            entry
+        })
+        .collect();
+    Ok(StreamEnvelope {
+        schema_version: STREAM_SCHEMA_VERSION,
+        owner: envelope.producer_id.clone(),
+        stream: session.to_owned(),
+        contract: "canvas.widget.snapshot.v1".into(),
+        sequence,
+        emitted_at_ms,
+        project_id: Some("speedy".into()),
+        payload: serde_json::json!({
+            "widget": {
+                "kind": "event_log",
+                "title": format!("RLCD · {}", body["game"].as_str().unwrap_or(session)),
+                "entries": visible
+            },
+            "data": {
+                "state": if phase == "failed" { "error" } else { "ready" },
+                "source": format!("unibus:{}:rlcd.decision.v1", envelope.producer_id),
+                "window": "live"
+            }
+        }),
+    })
 }
 
 /// Adapt the transport-neutral audio observation into the local Canvas stream
@@ -661,5 +835,80 @@ mod tests {
         assert_eq!(event.sequence, 42);
         assert_eq!(event.payload["widget"]["kind"], "meter");
         assert_eq!(event.payload["widget"]["value"], 0.75);
+    }
+
+    #[test]
+    fn rlcd_call_animates_from_requested_to_completed_without_duplicate_rows() {
+        let mut liveness = Liveness::default();
+        let event = |phase: &str, selected: Option<&str>| {
+            Envelope::new(
+                "home",
+                "mac-studio-speedy",
+                None,
+                "",
+                Message::new(
+                    "rlcd.decision.v1",
+                    serde_json::json!({
+                        "schema_version": 1,
+                        "session_id": "retro-smk",
+                        "call_id": "retro-smk-7",
+                        "sequence": 7,
+                        "at_unix_ms": 1234,
+                        "phase": phase,
+                        "game": "Super Mario Kart (SNES)",
+                        "request": {"state": {"observation": {"speed": 783}}},
+                        "response": selected.map(|_| serde_json::json!({"answers": {"action": {
+                            "choice": "left",
+                            "probabilities": {"left": 0.81, "right": 0.12, "brake": 0.07}
+                        }}})),
+                        "selected": selected,
+                        "confidence": selected.map(|_| 0.81),
+                        "latency_ms": selected.map(|_| 44),
+                        "error": null
+                    }),
+                ),
+            )
+        };
+        let requested = rlcd_decision_event(&mut liveness, &event("requested", None)).unwrap();
+        requested.validate().unwrap();
+        assert_eq!(requested.project_id.as_deref(), Some("speedy"));
+        assert_eq!(
+            requested.payload["widget"]["entries"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            requested.payload["widget"]["entries"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("thinking")
+        );
+
+        let completed =
+            rlcd_decision_event(&mut liveness, &event("completed", Some("left"))).unwrap();
+        assert_eq!(
+            completed.payload["widget"]["entries"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let message = completed.payload["widget"]["entries"][0]["message"]
+            .as_str()
+            .unwrap();
+        assert!(message.contains("left"));
+        assert!(message.contains("44 ms"));
+
+        let probabilities = rlcd_probability_event(&event("completed", Some("left")))
+            .unwrap()
+            .unwrap();
+        probabilities.validate().unwrap();
+        assert_eq!(probabilities.stream, "retro-smk-probabilities");
+        assert_eq!(probabilities.payload["widget"]["kind"], "ranked_bar");
+        assert_eq!(probabilities.payload["widget"]["bars"][0]["label"], "left");
+        assert_eq!(probabilities.payload["widget"]["bars"][0]["value"], 81.0);
+        assert_eq!(probabilities.payload["widget"]["bars"][0]["state"], "good");
     }
 }

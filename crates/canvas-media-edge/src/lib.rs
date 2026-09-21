@@ -13,7 +13,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use unibus_media::{
-    CameraDetections, CameraStream, MEDIA_SCHEMA_VERSION, VideoCodec, VideoTransport,
+    CameraDetections, CameraStream, MEDIA_SCHEMA_VERSION, TransportRole, VideoCodec,
+    VideoTransport,
 };
 
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -51,10 +52,6 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
     stream.validate().map_err(anyhow::Error::msg)?;
     policy.validate()?;
     validate_endpoint(stream)?;
-    ensure!(
-        policy.decoder == HardwareDecoder::V4l2M2m,
-        "raw edge currently requires v4l2m2m"
-    );
     ensure!(
         stream.codec == VideoCodec::H264,
         "raw edge currently requires H.264"
@@ -98,8 +95,11 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
                 .rsplit_once(':')
                 .context("TCP endpoint must include a port")?;
             let port: u16 = port.parse().context("invalid TCP port")?;
+            argv.push(match stream.transport_role {
+                TransportRole::Listen => "tcpserversrc".into(),
+                TransportRole::Connect => "tcpclientsrc".into(),
+            });
             argv.extend([
-                "tcpserversrc".into(),
                 format!("host={host}"),
                 format!("port={port}"),
                 "!".into(),
@@ -124,11 +124,23 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
         ]),
         VideoTransport::Srt => bail!("raw edge does not yet support SRT"),
     }
+    match policy.decoder {
+        HardwareDecoder::V4l2M2m => argv.extend([
+            "!".into(),
+            "v4l2h264dec".into(),
+            "!".into(),
+            "v4l2convert".into(),
+        ]),
+        HardwareDecoder::VideoToolbox => argv.extend([
+            "!".into(),
+            "video/x-h264,stream-format=avc,alignment=au".into(),
+            "!".into(),
+            "vtdec_hw".into(),
+            "!".into(),
+            "videoconvert".into(),
+        ]),
+    }
     argv.extend([
-        "!".into(),
-        "v4l2h264dec".into(),
-        "!".into(),
-        "v4l2convert".into(),
         "!".into(),
         format!("video/x-raw,format=RGBA,width={width},height={height}"),
         "!".into(),
@@ -464,6 +476,7 @@ mod tests {
             display_name: "Front Door".into(),
             zone: "door".into(),
             transport,
+            transport_role: TransportRole::Listen,
             endpoint: endpoint.into(),
             codec: VideoCodec::H264,
             width: 1280,
@@ -529,6 +542,24 @@ mod tests {
         );
         assert!(plan.argv.iter().any(|arg| arg == "rawvideo"));
         assert!(!plan.argv.iter().any(|arg| arg == "sh" || arg == "-c"));
+    }
+
+    #[test]
+    fn tcp_role_selects_exactly_one_connection_owner() {
+        let mut value = stream(VideoTransport::TcpMpegTs, "tcp://127.0.0.1:6005");
+        let policy = DecodePolicy {
+            max_height: 720,
+            max_fps: 24.0,
+            decoder: HardwareDecoder::V4l2M2m,
+        };
+        let listener = gstreamer_raw_plan(&value, policy).unwrap();
+        assert!(listener.argv.iter().any(|arg| arg == "tcpserversrc"));
+        assert!(!listener.argv.iter().any(|arg| arg == "tcpclientsrc"));
+
+        value.transport_role = TransportRole::Connect;
+        let client = gstreamer_raw_plan(&value, policy).unwrap();
+        assert!(client.argv.iter().any(|arg| arg == "tcpclientsrc"));
+        assert!(!client.argv.iter().any(|arg| arg == "tcpserversrc"));
     }
 
     #[test]

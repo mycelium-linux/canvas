@@ -706,6 +706,7 @@ fn video_stream(id: &str, profile: &MediaProfile) -> Result<VideoStream> {
         display_name: format!("Browser {id}"),
         zone: profile.zone.clone(),
         transport: profile.transport(),
+        transport_role: unibus_media::TransportRole::Listen,
         endpoint: profile.advertised_endpoint.clone(),
         codec: VideoCodec::H264,
         width: profile.width,

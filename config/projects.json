@@ -24,6 +24,12 @@
       "name": "Home",
       "theme": { "source": "coherence", "mode": "dark", "accent": "info" },
       "resources": []
+    },
+    {
+      "id": "speedy",
+      "name": "Speedy",
+      "theme": { "source": "coherence", "mode": "dark", "accent": "info" },
+      "resources": []
     }
   ]
 }

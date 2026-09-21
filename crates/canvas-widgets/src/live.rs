@@ -10,7 +10,7 @@ use crate::{
     EventEntry, HeatmapStyle, HierarchyNode, HierarchyStyle, MeterStyle, MetricBoardStyle,
     ModelAnnotation, ModelView, NeuralEdge, NeuralNode, RichCardFormat, SpanTimelineStyle,
     SpatialBounds, SpatialTrack, StateLane, StatusLevel, StatusState, TargetMetric, TimedSpan,
-    WidgetDataState, WidgetKind, WidgetSpec,
+    WidgetChrome, WidgetDataState, WidgetKind, WidgetSpec,
 };
 use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
@@ -2076,6 +2076,7 @@ pub(crate) fn panel<'a, Message: 'a>(
     // Resolved before the closure below: capturing `visual` would tie the style
     // to the theme's lifetime, and Color is Copy.
     let border = freshness(spec.data.state, visual).border;
+    let compact = spec.effective_chrome() == WidgetChrome::Frameless;
     let content: Element<'a, Message> = match spec.data.state {
         WidgetDataState::Loading
         | WidgetDataState::NoData
@@ -2088,7 +2089,11 @@ pub(crate) fn panel<'a, Message: 'a>(
         // only cost the labels contrast they need in every state.
         WidgetDataState::Ready | WidgetDataState::Stale | WidgetDataState::Partial => body,
     };
-    let mut layout = column![].spacing(metrics.space_2);
+    let mut layout = column![].spacing(if compact {
+        metrics.space_1
+    } else {
+        metrics.space_2
+    });
     // The badge sits above the body and is drawn in every state, including
     // Ready: a demo widget that has data is exactly the one that would
     // otherwise pass for real.
@@ -2096,11 +2101,17 @@ pub(crate) fn panel<'a, Message: 'a>(
         layout = layout.push(badge);
     }
     layout = layout.push(content);
-    if let Some(footer) = data_footer(spec, visual) {
-        layout = layout.push(footer);
+    if !compact {
+        if let Some(footer) = data_footer(spec, visual) {
+            layout = layout.push(footer);
+        }
     }
     container(layout)
-        .padding(metrics.space_4)
+        .padding(if compact {
+            metrics.space_2
+        } else {
+            metrics.space_4
+        })
         .width(Length::Fill)
         .height(Length::Fill)
         .style(move |_| container::Style {
