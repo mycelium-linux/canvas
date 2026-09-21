@@ -101,6 +101,7 @@ const JUMP_BACK_KEYS: &str = "Ctrl-O";
 const JUMP_FORWARD_KEYS: &str = "Ctrl-Shift-O";
 const SHORTCUT_HELP_KEYS: &str = "Ctrl-Option-?";
 const FOCUSED_HELP_KEYS: &str = "?";
+const FOCUS_EMPHASIS_DURATION: Duration = Duration::from_millis(1_400);
 
 /// A position in the jump list: a project workspace and optionally an
 /// operational view within it.
@@ -341,6 +342,7 @@ enum Message {
     LinkOpened(String),
     TerminalInput(iced::keyboard::Event),
     ThemePickerSelect(usize),
+    SurfaceHover(Option<String>),
 }
 
 #[derive(Debug, Clone)]
@@ -539,6 +541,8 @@ struct App {
     cursor: Option<LogicalPoint>,
     cursor_window: Option<iced::window::Id>,
     desktop_focused: bool,
+    hovered_surface_id: Option<String>,
+    focus_emphasis_started: Option<Instant>,
     primary_pointer_down: bool,
     minimized_surfaces: BTreeSet<String>,
     maximized_surfaces: BTreeSet<String>,
@@ -924,6 +928,8 @@ impl App {
             cursor: None,
             cursor_window: None,
             desktop_focused: false,
+            hovered_surface_id: None,
+            focus_emphasis_started: None,
             primary_pointer_down: false,
             minimized_surfaces: BTreeSet::new(),
             maximized_surfaces: BTreeSet::new(),
@@ -1098,6 +1104,23 @@ impl App {
             return;
         }
         self.restore_snapped_layout();
+    }
+
+    fn begin_focus_emphasis(&mut self) {
+        self.focus_emphasis_started = self
+            .document
+            .focused_surface_id
+            .as_ref()
+            .map(|_| Instant::now());
+    }
+
+    fn focus_emphasis(&self, surface_id: &str) -> f32 {
+        if self.document.focused_surface_id.as_deref() != Some(surface_id) {
+            return 0.0;
+        }
+        self.focus_emphasis_started
+            .map(|started| focus_emphasis_curve(started.elapsed()))
+            .unwrap_or(0.0)
     }
 
     /// Move between readable pages of the generated widget catalog.
@@ -1287,6 +1310,13 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick => {
+                if self
+                    .focus_emphasis_started
+                    .is_some_and(|started| started.elapsed() >= FOCUS_EMPHASIS_DURATION)
+                {
+                    self.focus_emphasis_started = None;
+                    self.bump();
+                }
                 if self.theme_pack_last_check.elapsed() >= Duration::from_secs(1) {
                     self.theme_pack_last_check = Instant::now();
                     let theme_pack_fingerprint = ::canvas::theme_pack::fingerprint();
@@ -1555,6 +1585,13 @@ impl App {
                     picker.select(index);
                     Task::none()
                 }
+            }
+            Message::SurfaceHover(surface_id) => {
+                if self.hovered_surface_id != surface_id {
+                    self.hovered_surface_id = surface_id;
+                    self.bump();
+                }
+                Task::none()
             }
             Message::TerminalInput(kbd_event) => {
                 // Canvas-native text input to JARVIS. The text appears on the
@@ -3059,11 +3096,17 @@ impl App {
                     self.fail(pending, failure);
                     return Task::none();
                 }
+                let previous_focus = self.document.focused_surface_id.clone();
                 let presentation_changed = self.document.id != document.id
                     || self.document.background != document.background;
                 let workspace_id = document.id.clone();
                 self.start_transition();
                 self.document = document;
+                if self.document.focused_surface_id.is_some()
+                    && (self.document.focused_surface_id != previous_focus || presentation_changed)
+                {
+                    self.begin_focus_emphasis();
+                }
                 self.refresh_interaction_geometry();
                 self.prune_decoded();
                 self.active_project_workspace = None;
@@ -3082,15 +3125,27 @@ impl App {
                 Task::none()
             }
             Command::ApplyPatch { patch } => {
+                let emphasizes_focus = patch.operations.iter().any(|operation| {
+                    matches!(
+                        operation,
+                        PatchOperation::SetFocus {
+                            surface_id: Some(_)
+                        }
+                    )
+                });
                 match self.document.apply_patch(&patch, &self.catalog) {
                     Ok(document) => {
                         if let Err(failure) = self.ensure_background_available(&document) {
                             self.fail(pending, failure);
                             return Task::none();
                         }
+                        let previous_focus = self.document.focused_surface_id.clone();
                         let background_changed = self.document.background != document.background;
                         self.start_transition();
                         self.document = document;
+                        if self.document.focused_surface_id != previous_focus || emphasizes_focus {
+                            self.begin_focus_emphasis();
+                        }
                         self.refresh_interaction_geometry();
                         self.prune_decoded();
                         self.ensure_scene_decoded();
@@ -5086,6 +5141,7 @@ impl App {
                     self.desktop_focused = false;
                     if self.document.focused_surface_id.as_ref() != Some(&surface_id) {
                         self.document.focused_surface_id = Some(surface_id);
+                        self.begin_focus_emphasis();
                         changed = true;
                     }
                 }
@@ -6663,9 +6719,12 @@ impl App {
                         );
                         let focused = self.document.focused_surface_id.as_deref()
                             == Some(placement.surface_id.as_str());
+                        let hovered = self.hovered_surface_id.as_deref()
+                            == Some(placement.surface_id.as_str());
+                        let emphasis = self.focus_emphasis(&placement.surface_id);
                         let maximized = self.maximized_surfaces.contains(&placement.surface_id);
                         let chrome_hidden = self.document.chrome.title == SurfaceTitleMode::Hidden;
-                        let edge = if focused && !chrome_hidden && !frameless {
+                        let edge = if (focused || hovered) && (!chrome_hidden || emphasis > 0.0) {
                             if window_chrome.focus_edge == "left" {
                                 color(palette.danger)
                             } else {
@@ -6690,10 +6749,14 @@ impl App {
                         .style(move |_| container::Style {
                             border: iced::Border {
                                 color: Color {
-                                    a: if frameless {
+                                    a: if emphasis > 0.0 {
+                                        0.72 + emphasis * 0.28
+                                    } else if frameless && hovered {
+                                        0.46
+                                    } else if frameless {
                                         0.0
                                     } else if chrome_hidden {
-                                        0.52
+                                        if hovered { 0.78 } else { 0.52 }
                                     } else if focused {
                                         0.88
                                     } else {
@@ -6701,7 +6764,11 @@ impl App {
                                     },
                                     ..edge
                                 },
-                                width: if frameless {
+                                width: if emphasis > 0.0 {
+                                    chrome_style.border_width + 0.75 + emphasis * 1.25
+                                } else if frameless && hovered {
+                                    1.0
+                                } else if frameless {
                                     0.0
                                 } else if chrome_hidden {
                                     1.0
@@ -6726,7 +6793,9 @@ impl App {
                                     0,
                                     0,
                                     0,
-                                    if frameless {
+                                    if emphasis > 0.0 {
+                                        (chrome_style.shadow_opacity + emphasis * 0.22).min(0.92)
+                                    } else if frameless {
                                         0.0
                                     } else if chrome_hidden {
                                         0.10
@@ -6746,7 +6815,9 @@ impl App {
                                         chrome_style.shadow_offset
                                     },
                                 ),
-                                blur_radius: if frameless {
+                                blur_radius: if emphasis > 0.0 {
+                                    chrome_style.shadow_blur + emphasis * 14.0
+                                } else if frameless {
                                     0.0
                                 } else if chrome_hidden {
                                     8.0
@@ -6756,19 +6827,24 @@ impl App {
                             },
                             ..Default::default()
                         });
+                        let surface_id = placement.surface_id.clone();
                         Some(
-                            container(plane)
-                                .width(Length::Fill)
-                                .height(Length::Fill)
-                                .padding(iced::Padding {
-                                    top: bounds.y as f32,
-                                    right: 0.0,
-                                    bottom: 0.0,
-                                    left: bounds.x as f32,
-                                })
-                                .align_x(iced::alignment::Horizontal::Left)
-                                .align_y(iced::alignment::Vertical::Top)
-                                .into(),
+                            container(
+                                mouse_area(plane)
+                                    .on_enter(Message::SurfaceHover(Some(surface_id)))
+                                    .on_exit(Message::SurfaceHover(None)),
+                            )
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .padding(iced::Padding {
+                                top: bounds.y as f32,
+                                right: 0.0,
+                                bottom: 0.0,
+                                left: bounds.x as f32,
+                            })
+                            .align_x(iced::alignment::Horizontal::Left)
+                            .align_y(iced::alignment::Vertical::Top)
+                            .into(),
                         )
                     })
                     .collect::<Vec<Element<'_, Message>>>();
@@ -7468,6 +7544,15 @@ fn key_to_bytes(event: &iced::keyboard::Event) -> Vec<u8> {
         }
         _ => Vec::new(),
     }
+}
+
+fn focus_emphasis_curve(elapsed: Duration) -> f32 {
+    let progress = (elapsed.as_secs_f32() / FOCUS_EMPHASIS_DURATION.as_secs_f32()).clamp(0.0, 1.0);
+    if progress >= 1.0 {
+        return 0.0;
+    }
+    let pulse = (progress * core::f32::consts::TAU * 2.0).sin() * 0.5 + 0.5;
+    (1.0 - progress) * (0.45 + pulse * 0.55)
 }
 
 fn workspace_cycle_direction(event: &iced::keyboard::Event) -> Option<i32> {
@@ -9794,7 +9879,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .subscription(|app| {
         let animated = app.visible_indicator_id.is_some()
             || app.presence_preview.is_some()
-            || app.transition.is_some();
+            || app.transition.is_some()
+            || app.focus_emphasis_started.is_some();
         let background_animated = app.document.background.is_animated();
         // Background-only animation uses the configured background_max_fps, not
         // a hardcoded 60 Hz: shaders like Star Nest and Smoke Rings are
@@ -11801,6 +11887,28 @@ mod tests {
             repeat: false,
         };
         assert!(snap_layout_requested(&option_translated));
+    }
+
+    #[test]
+    fn focus_emphasis_is_bounded_and_settles_to_zero() {
+        for millis in [0, 100, 350, 700, 1_000, 1_399, 1_400, 2_000] {
+            let value = focus_emphasis_curve(Duration::from_millis(millis));
+            assert!((0.0..=1.0).contains(&value));
+        }
+        assert_eq!(
+            focus_emphasis_curve(FOCUS_EMPHASIS_DURATION),
+            0.0,
+            "the pulse must stop requesting visual emphasis"
+        );
+    }
+
+    #[test]
+    fn surface_hover_is_host_owned_and_clears_on_exit() {
+        let mut app = test_app();
+        drop(app.update(Message::SurfaceHover(Some("sample".into()))));
+        assert_eq!(app.hovered_surface_id.as_deref(), Some("sample"));
+        drop(app.update(Message::SurfaceHover(None)));
+        assert!(app.hovered_surface_id.is_none());
     }
 
     #[test]
