@@ -6,8 +6,8 @@ use canvas::control::{
     self, CONTROL_VERSION, Command, ControlReply, ControlRequest, ErrorCode, Outcome, Receipt, text,
 };
 use canvas::{
-    Layout, NormalizedRect, Placement, SCHEMA_VERSION, SurfaceChrome, SurfaceTitleMode,
-    WorkspaceDocument, WorkspacePatch,
+    Background, Layout, NormalizedRect, Placement, SCHEMA_VERSION, Surface, SurfaceChrome,
+    SurfaceContent, SurfaceTitleMode, ThemeRef, WorkspaceDocument, WorkspacePatch,
     compose::{self, LayoutMode},
 };
 
@@ -90,6 +90,9 @@ fn handle_line(line: &str) -> Result<(), String> {
     if tokens[0] == "workspace" {
         return handle_workspace(&tokens);
     }
+    if tokens[0] == "catalog" {
+        return handle_catalog(&tokens);
+    }
     if tokens[0] == "events" {
         // ... existing events handler
         return Ok(());
@@ -154,6 +157,69 @@ fn handle_line(line: &str) -> Result<(), String> {
         Err(e) => println!("ERR {e}"),
     }
     Ok(())
+}
+
+fn handle_catalog(tokens: &[String]) -> Result<(), String> {
+    if tokens.len() > 2 {
+        return Err("usage: catalog [widget-directory]".into());
+    }
+    let directory = tokens.get(1).map_or("config/widgets", String::as_str);
+    let document = catalog_document(directory)?;
+    send_mutation(Command::ApplyDocument { document })
+}
+
+fn catalog_document(directory: &str) -> Result<WorkspaceDocument, String> {
+    let mut paths = fs::read_dir(directory)
+        .map_err(|error| format!("read widget catalog {directory}: {error}"))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("read widget catalog entry: {error}"))?;
+    paths.retain(|path| {
+        path.extension()
+            .is_some_and(|extension| extension == "json")
+    });
+    paths.sort();
+    if paths.is_empty() {
+        return Err(format!(
+            "widget catalog {directory} contains no JSON fixtures"
+        ));
+    }
+    let mut surfaces = Vec::with_capacity(paths.len());
+    for path in paths {
+        let spec = canvas_widgets::WidgetSpec::from_file(&path)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        surfaces.push(Surface {
+            id: spec.id.clone(),
+            title: spec.id.clone(),
+            content: SurfaceContent::Widget { spec },
+            inputs: Vec::new(),
+        });
+    }
+    let ids = surfaces
+        .iter()
+        .map(|surface| surface.id.clone())
+        .collect::<Vec<_>>();
+    let columns = (ids.len() as f64).sqrt().ceil() as u32;
+    let rows = (ids.len() as u32).div_ceil(columns.max(1));
+    Ok(WorkspaceDocument {
+        schema_version: SCHEMA_VERSION,
+        id: "widget-catalog-all".into(),
+        project_id: "dock".into(),
+        revision: 1,
+        theme: ThemeRef::Project,
+        background: Background::default(),
+        chrome: SurfaceChrome {
+            title: SurfaceTitleMode::Hidden,
+            canvas_padding: 18,
+            surface_gap: 12,
+        },
+        surfaces,
+        layout: Layout::Canvas {
+            placements: tile_grid(&ids, rows, columns),
+        },
+        bindings: Vec::new(),
+        focused_surface_id: None,
+    })
 }
 
 fn handle_titles(tokens: &[String]) -> Result<(), String> {
@@ -649,4 +715,30 @@ fn rand_u64() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.subsec_micros() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+
+    #[test]
+    fn catalog_discovers_and_tiles_every_checked_in_widget() {
+        let directory = format!("{}/../../config/widgets", env!("CARGO_MANIFEST_DIR"));
+        let document = catalog_document(&directory).expect("catalog builds");
+        let fixture_count = fs::read_dir(&directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|value| value == "json")
+            })
+            .count();
+        assert_eq!(document.surfaces.len(), fixture_count);
+        let Layout::Canvas { placements } = document.layout else {
+            panic!("catalog must tile")
+        };
+        assert_eq!(placements.len(), fixture_count);
+    }
 }

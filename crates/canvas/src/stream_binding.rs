@@ -439,6 +439,10 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/service-topology-v1.lua"),
     ),
     (
+        "span-timeline-v1",
+        include_str!("../../../config/binders/span-timeline-v1.lua"),
+    ),
+    (
         "bifrost-requests-v1",
         include_str!("../../../config/binders/bifrost-requests-v1.lua"),
     ),
@@ -923,6 +927,51 @@ mod tests {
         assert_eq!(nodes.len(), 2);
         assert_eq!(nodes[1].state, canvas_widgets::StatusLevel::Warning);
         assert_eq!(edges[0].heat, 0.8);
+    }
+
+    #[test]
+    fn span_timeline_binder_selects_semantics_without_owning_frames() {
+        let mut target = test_spec(WidgetKind::SpanTimeline {
+            title: "Waiting".into(),
+            style: canvas_widgets::SpanTimelineStyle::Waterfall,
+            spans: vec![canvas_widgets::TimedSpan {
+                id: "waiting".into(),
+                label: "Waiting".into(),
+                start: 0.0,
+                end: 1.0,
+                lane: None,
+                parent: None,
+                state: None,
+                detail: None,
+            }],
+            unit: None,
+        });
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "traces".into(),
+            stream: "request".into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            project_id: Some("dock".into()),
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "title":"Request waterfall", "style":"waterfall", "unit":"ms",
+                "spans":[
+                    {"id":"root","label":"request","start":0,"end":42,"state":"good"},
+                    {"id":"db","label":"database","start":8,"end":30,"parent":"root","state":"warning"}
+                ]
+            }),
+        };
+        apply_named_adapter("span-timeline-v1", &event, &mut target).expect("timeline renders");
+        let WidgetKind::SpanTimeline {
+            style, spans, unit, ..
+        } = target.kind
+        else {
+            panic!("timeline binder changed widget family")
+        };
+        assert_eq!(style, canvas_widgets::SpanTimelineStyle::Waterfall);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(unit.as_deref(), Some("ms"));
     }
 
     #[test]

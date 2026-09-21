@@ -192,6 +192,7 @@ pub const KNOWN_WIDGET_KINDS: &[&str] = &[
     "stacked_bar",
     "pie_chart",
     "sankey",
+    "span_timeline",
     "state_timeline",
     "rate_bars",
     "table",
@@ -337,6 +338,15 @@ pub enum WidgetKind {
         title: String,
         nodes: Vec<FlowNode>,
         links: Vec<FlowLink>,
+        #[serde(default)]
+        unit: Option<String>,
+    },
+    /// Bounded timed spans rendered as a flame graph, request waterfall,
+    /// execution Gantt, or event river from one shared retained primitive.
+    SpanTimeline {
+        title: String,
+        style: SpanTimelineStyle,
+        spans: Vec<TimedSpan>,
         #[serde(default)]
         unit: Option<String>,
     },
@@ -976,6 +986,34 @@ pub struct FlowLink {
     pub label: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum SpanTimelineStyle {
+    Flame,
+    Waterfall,
+    Gantt,
+    EventRiver,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TimedSpan {
+    pub id: String,
+    pub label: String,
+    pub start: f64,
+    pub end: f64,
+    #[serde(default)]
+    pub lane: Option<String>,
+    #[serde(default)]
+    pub parent: Option<String>,
+    #[serde(default)]
+    pub state: Option<StatusLevel>,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1527,6 +1565,37 @@ impl WidgetSpec {
                     )?;
                 }
             }
+            WidgetKind::SpanTimeline {
+                title, spans, unit, ..
+            } => {
+                bounded_label(title, "span timeline title")?;
+                optional_label(unit, "span timeline unit")?;
+                check(
+                    !spans.is_empty() && spans.len() <= 256,
+                    "span timeline requires 1-256 spans",
+                )?;
+                let mut ids = HashSet::new();
+                for span in spans {
+                    bounded_label(&span.id, "span id")?;
+                    bounded_label(&span.label, "span label")?;
+                    optional_label(&span.lane, "span lane")?;
+                    optional_label(&span.parent, "span parent")?;
+                    optional_label(&span.detail, "span detail")?;
+                    check(
+                        span.start.is_finite() && span.end.is_finite() && span.start <= span.end,
+                        "span times must be finite and ordered",
+                    )?;
+                    check(ids.insert(span.id.as_str()), "span ids must be unique")?;
+                }
+                check(
+                    spans.iter().all(|span| {
+                        span.parent.as_ref().is_none_or(|parent| {
+                            parent != &span.id && ids.contains(parent.as_str())
+                        })
+                    }),
+                    "span parents must reference a distinct known span",
+                )?;
+            }
             WidgetKind::StateTimeline { title, lanes } => {
                 bounded_label(title, "state timeline title")?;
                 check(
@@ -1979,6 +2048,7 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
             SizeHint::new(220.0, row * 3.0 + chrome, 360.0, row * 6.0 + chrome, 2.0)
         }
         WidgetKind::Sankey { .. } => SizeHint::new(300.0, 180.0, 560.0, 300.0, 2.2),
+        WidgetKind::SpanTimeline { .. } => SizeHint::new(300.0, 160.0, 600.0, 320.0, 2.4),
         // A cell smaller than this is a colour with no shape; four rows is the
         // fewest that reads as a matrix rather than a bar chart.
         WidgetKind::Heatmap { .. } => {
@@ -2118,6 +2188,21 @@ mod tests {
                     label: None,
                 }],
                 unit: None,
+            },
+            WidgetKind::SpanTimeline {
+                title: "t".into(),
+                style: SpanTimelineStyle::Waterfall,
+                spans: vec![TimedSpan {
+                    id: "root".into(),
+                    label: "Root".into(),
+                    start: 0.0,
+                    end: 1.0,
+                    lane: None,
+                    parent: None,
+                    state: None,
+                    detail: None,
+                }],
+                unit: Some("ms".into()),
             },
             WidgetKind::Heatmap {
                 title: "t".into(),

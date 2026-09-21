@@ -1,0 +1,16 @@
+{
+  "schema_version": 2,
+  "id": "ops-flame",
+  "kind": "span_timeline",
+  "title": "CPU profile",
+  "style": "flame",
+  "unit": "samples",
+  "spans": [
+    {"id":"root","label":"canvas frame","start":0,"end":100},
+    {"id":"layout","label":"layout","start":0,"end":24,"parent":"root"},
+    {"id":"render","label":"render","start":24,"end":91,"parent":"root"},
+    {"id":"charts","label":"charts","start":31,"end":72,"parent":"render"},
+    {"id":"present","label":"present","start":91,"end":100,"parent":"root"}
+  ],
+  "data": {"state":"ready","source":"demo:profile","provenance":"demo","window":"10s"}
+}

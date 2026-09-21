@@ -7,8 +7,8 @@
 
 use crate::{
     BurnRateWindow, ChartType, ClockMode, HeatmapStyle, MeterStyle, NeuralEdge, NeuralNode,
-    SpatialBounds, SpatialTrack, StateLane, StatusLevel, StatusState, WidgetDataState, WidgetKind,
-    WidgetSpec,
+    SpanTimelineStyle, SpatialBounds, SpatialTrack, StateLane, StatusLevel, StatusState, TimedSpan,
+    WidgetDataState, WidgetKind, WidgetSpec,
 };
 use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
@@ -795,6 +795,35 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                     colors: series_colors(visual),
                     label: color(palette.text_muted),
                     surface: color(palette.surface_muted),
+                    label_size: metrics.micro,
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .spacing(metrics.space_2)
+            .into(),
+            visual,
+        ),
+        WidgetKind::SpanTimeline {
+            title,
+            style,
+            spans,
+            unit,
+        } => panel(
+            spec,
+            column![
+                row![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    space::horizontal(),
+                    text(unit.clone().unwrap_or_default())
+                        .size(metrics.small)
+                        .color(color(palette.text_muted)),
+                ],
+                Canvas::new(SpanTimelineProgram {
+                    style: *style,
+                    spans: spans.clone(),
+                    colors: series_colors(visual),
+                    palette: *palette,
                     label_size: metrics.micro,
                 })
                 .width(Length::Fill)
@@ -2416,6 +2445,185 @@ impl<Message> canvas::Program<Message> for SankeyProgram {
                     .into(),
                     ..Default::default()
                 });
+            }
+        })
+    }
+}
+
+struct SpanTimelineProgram {
+    style: SpanTimelineStyle,
+    spans: Vec<TimedSpan>,
+    colors: Vec<Color>,
+    palette: ThemePalette,
+    label_size: f32,
+}
+
+impl<Message> canvas::Program<Message> for SpanTimelineProgram {
+    type State = CacheState;
+
+    fn draw(
+        &self,
+        state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let key = self
+            .spans
+            .iter()
+            .fold(
+                self.colors.iter().fold(
+                    Key::new()
+                        .add_usize(self.style as usize)
+                        .add_color(color(self.palette.border))
+                        .add_color(color(self.palette.text)),
+                    |key, value| key.add_color(*value),
+                ),
+                |key, span| {
+                    key.add_str(&span.id)
+                        .add_str(&span.label)
+                        .add_f64(span.start)
+                        .add_f64(span.end)
+                        .add_str(span.lane.as_deref().unwrap_or(""))
+                        .add_str(span.parent.as_deref().unwrap_or(""))
+                        .add_str(span.detail.as_deref().unwrap_or(""))
+                        .add_usize(span.state.map_or(usize::MAX, |state| state as usize))
+                },
+            )
+            .build();
+        state.draw_cached(renderer, bounds.size(), key, |frame| {
+            let min = self
+                .spans
+                .iter()
+                .map(|span| span.start)
+                .fold(f64::INFINITY, f64::min);
+            let max = self
+                .spans
+                .iter()
+                .map(|span| span.end)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let duration = (max - min).max(f64::EPSILON);
+            let label_width = if self.style == SpanTimelineStyle::Flame {
+                8.0
+            } else {
+                (bounds.width * 0.20).clamp(56.0, 140.0)
+            };
+            let plot_width = (bounds.width - label_width - 8.0).max(1.0);
+            let mut lane_names = Vec::<String>::new();
+            for span in &self.spans {
+                let lane = span.lane.clone().unwrap_or_else(|| span.label.clone());
+                if !lane_names.contains(&lane) {
+                    lane_names.push(lane);
+                }
+            }
+            let depths: std::collections::HashMap<&str, usize> = self
+                .spans
+                .iter()
+                .map(|span| {
+                    let mut depth = 0usize;
+                    let mut parent = span.parent.as_deref();
+                    while let Some(id) = parent {
+                        depth += 1;
+                        if depth > self.spans.len() {
+                            break;
+                        }
+                        parent = self
+                            .spans
+                            .iter()
+                            .find(|candidate| candidate.id == id)
+                            .and_then(|candidate| candidate.parent.as_deref());
+                    }
+                    (span.id.as_str(), depth)
+                })
+                .collect();
+            let row_count = match self.style {
+                SpanTimelineStyle::Flame => depths.values().copied().max().unwrap_or(0) + 1,
+                SpanTimelineStyle::Waterfall => self.spans.len(),
+                SpanTimelineStyle::Gantt | SpanTimelineStyle::EventRiver => lane_names.len(),
+            }
+            .max(1);
+            let row_height = bounds.height / row_count as f32;
+            for (index, span) in self.spans.iter().enumerate() {
+                let row = match self.style {
+                    SpanTimelineStyle::Flame => row_count - 1 - depths[span.id.as_str()],
+                    SpanTimelineStyle::Waterfall => index,
+                    SpanTimelineStyle::Gantt | SpanTimelineStyle::EventRiver => {
+                        let lane = span.lane.as_deref().unwrap_or(&span.label);
+                        lane_names
+                            .iter()
+                            .position(|value| value == lane)
+                            .unwrap_or(0)
+                    }
+                };
+                let x = label_width + ((span.start - min) / duration) as f32 * plot_width;
+                let width = (((span.end - span.start) / duration) as f32 * plot_width).max(
+                    if self.style == SpanTimelineStyle::EventRiver {
+                        4.0
+                    } else {
+                        2.0
+                    },
+                );
+                let y = row as f32 * row_height + row_height * 0.16;
+                let height = row_height * 0.68;
+                let fill = span
+                    .state
+                    .map_or(self.colors[index % self.colors.len()], |value| {
+                        status_color(value, &self.palette)
+                    });
+                if self.style == SpanTimelineStyle::EventRiver
+                    && (span.end - span.start).abs() <= f64::EPSILON
+                {
+                    frame.fill(
+                        &Path::circle(
+                            Point::new(x, y + height * 0.5),
+                            (height * 0.28).clamp(2.0, 7.0),
+                        ),
+                        fill,
+                    );
+                } else {
+                    frame.fill(
+                        &Path::rounded_rectangle(
+                            Point::new(x, y),
+                            Size::new(width, height),
+                            (height * 0.16).into(),
+                        ),
+                        with_alpha(fill, 0.88),
+                    );
+                }
+                if self.style != SpanTimelineStyle::Flame {
+                    frame.fill_text(canvas::Text {
+                        content: if matches!(
+                            self.style,
+                            SpanTimelineStyle::Gantt | SpanTimelineStyle::EventRiver
+                        ) {
+                            span.lane.clone().unwrap_or_else(|| span.label.clone())
+                        } else {
+                            span.label.clone()
+                        },
+                        position: Point::new(0.0, y + height * 0.72),
+                        color: color(self.palette.text_muted),
+                        size: iced::Pixels(self.label_size),
+                        ..Default::default()
+                    });
+                } else if width > self.label_size * 4.0 {
+                    frame.fill_text(canvas::Text {
+                        content: span.label.clone(),
+                        position: Point::new(x + 4.0, y + height * 0.72),
+                        color: color(self.palette.background),
+                        size: iced::Pixels(self.label_size),
+                        ..Default::default()
+                    });
+                }
+            }
+            for tick in 0..=4 {
+                let x = label_width + plot_width * tick as f32 / 4.0;
+                frame.stroke(
+                    &Path::line(Point::new(x, 0.0), Point::new(x, bounds.height)),
+                    canvas::Stroke::default()
+                        .with_width(1.0)
+                        .with_color(with_alpha(color(self.palette.border), 0.24)),
+                );
             }
         })
     }

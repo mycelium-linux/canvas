@@ -225,6 +225,7 @@ fn appetite(kind: &WidgetKind) -> f32 {
         | WidgetKind::StackedBar { .. }
         | WidgetKind::PieChart { .. }
         | WidgetKind::Sankey { .. }
+        | WidgetKind::SpanTimeline { .. }
         | WidgetKind::StateTimeline { .. }
         | WidgetKind::RateBars { .. }
         | WidgetKind::Table { .. }
@@ -561,6 +562,7 @@ fn widget_title(spec: &canvas_widgets::WidgetSpec) -> String {
         | WidgetKind::RankedBar { title, .. }
         | WidgetKind::StackedBar { title, .. }
         | WidgetKind::Sankey { title, .. }
+        | WidgetKind::SpanTimeline { title, .. }
         | WidgetKind::StateTimeline { title, .. }
         | WidgetKind::RateBars { title, .. }
         | WidgetKind::Table { title, .. }
