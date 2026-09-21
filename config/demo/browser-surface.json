@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "agent-browser",
+  "project_id": "dock",
+  "revision": 1,
+  "theme": { "source": "project" },
+  "surfaces": [
+    {
+      "id": "agent-browser",
+      "title": "Agent browser",
+      "content": {
+        "kind": "live_video",
+        "source_id": "browser-agent-one",
+        "width": 1280,
+        "height": 720
+      },
+      "inputs": []
+    }
+  ],
+  "bindings": [],
+  "layout": {
+    "kind": "canvas",
+    "placements": [
+      {
+        "surface_id": "agent-browser",
+        "bounds": { "x": 0.08, "y": 0.08, "width": 0.84, "height": 0.84 },
+        "layer": 0
+      }
+    ]
+  }
+}

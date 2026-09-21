@@ -427,6 +427,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "canvas-browser-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "canvas",
+ "canvas-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "subtle",
+ "tempfile",
+ "tokio",
+ "unibus-media",
+]
+
+[[package]]
 name = "canvas-control"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,10 @@
+{
+  "listen": "127.0.0.1:7788",
+  "credential_file": "/path/to/canvas-browser-host.token",
+  "state_dir": "/path/to/browser-sessions",
+  "servo_binary": "/Applications/Servo.app/Contents/MacOS/servoshell",
+  "max_sessions": 8,
+  "webdriver_ports": { "start": 7100, "end": 7107 },
+  "startup_timeout_ms": 15000,
+  "media_profiles": {}
+}
