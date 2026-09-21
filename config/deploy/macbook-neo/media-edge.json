@@ -1,0 +1,18 @@
+{
+  "bus": {
+    "installation_id": "home",
+    "producer_id": "macbook-neo-media",
+    "hub_endpoint": "127.0.0.1:18794",
+    "token_file": "/Users/ajmwagar/.config/canvas/home-pi.token",
+    "zones": ["living-room"],
+    "capabilities": ["canvas.media"],
+    "screen_anchors": ["screen-neo"],
+    "schema_version": 1
+  },
+  "runtime_dir": "/Users/ajmwagar/Library/Application Support/Dock/canvas",
+  "gst_launch": "/opt/homebrew/bin/gst-launch-1.0",
+  "ffmpeg": "/opt/homebrew/bin/ffmpeg",
+  "max_height": 480,
+  "max_fps": 24.0,
+  "hardware_decoder": "videotoolbox"
+}

@@ -18,6 +18,12 @@
         { "id": "mac-browser", "title": "Local browser", "host": "mac", "kind": "mac_app", "target": "Safari" },
         { "id": "agora-desktop", "title": "Agora One desktop", "host": "agora_one", "kind": "remote_desktop", "target": "100.80.85.86" }
       ]
+    },
+    {
+      "id": "home",
+      "name": "Home",
+      "theme": { "source": "coherence", "mode": "dark", "accent": "info" },
+      "resources": []
     }
   ]
 }
