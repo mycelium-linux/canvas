@@ -34,6 +34,9 @@ use serde::Deserialize;
 
 const RECONNECT_MIN: Duration = Duration::from_secs(1);
 const RECONNECT_MAX: Duration = Duration::from_secs(15);
+/// macOS's default `net.local.dgram.maxdgram` is 2048 bytes. Leave framing
+/// headroom so every local stream snapshot remains portable across hosts.
+const MAX_LOCAL_STREAM_DATAGRAM: usize = 1_900;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -126,14 +129,13 @@ fn run(config: &EdgeConfig) -> Result<()> {
             .collect::<Vec<_>>(),
     );
     let mut liveness = Liveness::default();
-    let mirror_suppression = Arc::new(Mutex::new(None));
+    let mirror_runtime = Arc::new(Mutex::new(MirrorRuntime::default()));
     let _mirror_socket =
-        start_workspace_mirror(config, Arc::clone(&bus), Arc::clone(&mirror_suppression))?;
+        start_workspace_mirror(config, Arc::clone(&bus), Arc::clone(&mirror_runtime))?;
     loop {
         match bus.try_read() {
             Ok(Some((envelope, _payload))) => {
-                if let Err(e) = ingest(&bus, config, &mut liveness, &mirror_suppression, &envelope)
-                {
+                if let Err(e) = ingest(&bus, config, &mut liveness, &mirror_runtime, &envelope) {
                     eprintln!("canvas-edge: rejected {}: {e:#}", envelope.message.kind);
                 }
             }
@@ -179,7 +181,7 @@ fn ingest(
     bus: &Bus,
     config: &EdgeConfig,
     liveness: &mut Liveness,
-    mirror_suppression: &Arc<Mutex<Option<Vec<u8>>>>,
+    mirror_runtime: &Arc<Mutex<MirrorRuntime>>,
     envelope: &Envelope,
 ) -> Result<()> {
     match envelope.message.kind.as_str() {
@@ -249,7 +251,7 @@ fn ingest(
         "audio_level" | "audio.level" => publish_audio_level(envelope),
         "rlcd.decision.v1" => publish_rlcd_decision(liveness, envelope),
         "spatial_tracks" | "spatial.tracks" => publish_spatial_tracks(envelope),
-        MIRROR_KIND => apply_workspace_mirror(config, liveness, mirror_suppression, envelope),
+        MIRROR_KIND => apply_workspace_mirror(config, liveness, mirror_runtime, envelope),
         kinds::V1_REPLY | kinds::REPLY => Ok(()),
         canvas_core::unibus::kinds::NODE_STATE => {
             let online = envelope.message.body["online"].as_bool().unwrap_or(true);
@@ -284,6 +286,12 @@ fn ingest(
 
 struct MirrorSocketGuard(std::path::PathBuf);
 
+#[derive(Default)]
+struct MirrorRuntime {
+    local_document: Option<canvas::WorkspaceDocument>,
+    suppress_snapshot: Option<Vec<u8>>,
+}
+
 impl Drop for MirrorSocketGuard {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
@@ -293,7 +301,7 @@ impl Drop for MirrorSocketGuard {
 fn start_workspace_mirror(
     config: &EdgeConfig,
     bus: Arc<Bus>,
-    suppression: Arc<Mutex<Option<Vec<u8>>>>,
+    runtime: Arc<Mutex<MirrorRuntime>>,
 ) -> Result<Option<MirrorSocketGuard>> {
     let Some(mirror) = config.mirror.as_ref().filter(|mirror| mirror.enabled) else {
         return Ok(None);
@@ -361,12 +369,13 @@ fn start_workspace_mirror(
                         continue;
                     }
                     let local_bytes = frame.clone();
-                    let suppressed = suppression
+                    let suppressed = runtime
                         .lock()
                         .ok()
-                        .and_then(|mut value| {
-                            if value.as_ref() == Some(&local_bytes) {
-                                value.take()
+                        .and_then(|mut state| {
+                            state.local_document = Some(local.document.clone());
+                            if state.suppress_snapshot.as_ref() == Some(&local_bytes) {
+                                state.suppress_snapshot.take()
                             } else {
                                 None
                             }
@@ -416,7 +425,7 @@ fn start_workspace_mirror(
 fn apply_workspace_mirror(
     config: &EdgeConfig,
     liveness: &mut Liveness,
-    suppression: &Arc<Mutex<Option<Vec<u8>>>>,
+    runtime: &Arc<Mutex<MirrorRuntime>>,
     envelope: &Envelope,
 ) -> Result<()> {
     if !config.mirror.as_ref().is_some_and(|mirror| mirror.enabled) {
@@ -441,20 +450,33 @@ fn apply_workspace_mirror(
     }
     *previous = state.sequence;
 
-    let current = read_document()?;
+    let current = runtime
+        .lock()
+        .map_err(|_| anyhow::anyhow!("mirror runtime lock poisoned"))?
+        .local_document
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(read_document)?;
     // "Mirror" is intentionally opt-in by representation: two canvases only
     // converge while they are displaying the same named workspace.
-    if current.id != state.workspace_key {
+    if !should_apply_workspace_state(&current, &state) {
         return Ok(());
     }
+    // Snapshot QoS may legitimately redeliver the latest value after a peer
+    // reconnects. Applying an identical document would restart transitions,
+    // wake render work, and echo through the local publisher for no visual
+    // change. Equality is the idempotency boundary for complete snapshots.
     let local = LocalWorkspaceSnapshot {
         schema_version: MIRROR_SCHEMA_VERSION,
         document: state.document.clone(),
     };
-    *suppression
-        .lock()
-        .map_err(|_| anyhow::anyhow!("mirror suppression lock poisoned"))? =
-        Some(serde_json::to_vec(&local)?);
+    {
+        let mut runtime = runtime
+            .lock()
+            .map_err(|_| anyhow::anyhow!("mirror runtime lock poisoned"))?;
+        runtime.suppress_snapshot = Some(serde_json::to_vec(&local)?);
+        runtime.local_document = Some(state.document.clone());
+    }
     submit(ControlRequest {
         schema_version: canvas::control::CONTROL_VERSION,
         request_id: format!("mirror-{}-{}", state.origin, state.sequence),
@@ -464,6 +486,13 @@ fn apply_workspace_mirror(
             document: state.document,
         },
     })
+}
+
+fn should_apply_workspace_state(
+    current: &canvas::WorkspaceDocument,
+    state: &WorkspaceState,
+) -> bool {
+    current.id == state.workspace_key && current != &state.document
 }
 
 fn read_document() -> Result<canvas::WorkspaceDocument> {
@@ -499,6 +528,12 @@ fn publish_rlcd_decision(liveness: &mut Liveness, envelope: &Envelope) -> Result
     }
     for event in events {
         let bytes = serde_json::to_vec(&event).context("encode Canvas RLCD event")?;
+        ensure!(
+            bytes.len() <= MAX_LOCAL_STREAM_DATAGRAM,
+            "Canvas RLCD event is {} bytes (local socket limit {})",
+            bytes.len(),
+            MAX_LOCAL_STREAM_DATAGRAM
+        );
         socket
             .send_to(&bytes, &path)
             .with_context(|| format!("send RLCD event to {}", path.display()))?;
@@ -629,7 +664,10 @@ fn rlcd_decision_event(liveness: &mut Liveness, envelope: &Envelope) -> Result<S
         "message": message,
         "level": match phase { "completed" => "good", "failed" => "warning", _ => "neutral" }
     }));
-    entries.truncate(24);
+    // Eight decisions keep the widget useful and the complete envelope under
+    // macOS's 2 KiB Unix-datagram ceiling. Longer history belongs upstream,
+    // not in every latest-value UI snapshot.
+    entries.truncate(8);
     let visible: Vec<_> = entries
         .iter()
         .cloned()
@@ -965,6 +1003,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn mirror_only_applies_changed_state_for_the_active_workspace() {
+        let document: canvas::WorkspaceDocument =
+            serde_json::from_str(include_str!("../../../../config/workspaces/tv/speedy.json"))
+                .unwrap();
+        let mut state = WorkspaceState {
+            schema_version: MIRROR_SCHEMA_VERSION,
+            workspace_key: document.id.clone(),
+            origin: "other-screen".into(),
+            sequence: 1,
+            document: document.clone(),
+        };
+        assert!(!should_apply_workspace_state(&document, &state));
+        state.document.revision += 1;
+        assert!(should_apply_workspace_state(&document, &state));
+        state.workspace_key = "another-workspace".into();
+        assert!(!should_apply_workspace_state(&document, &state));
+    }
+
     fn command_envelope_from(producer: &str, inner: serde_json::Value) -> Envelope {
         Envelope::new(
             "home",
@@ -1130,6 +1187,7 @@ mod tests {
 
         let completed =
             rlcd_decision_event(&mut liveness, &event("completed", Some("left"))).unwrap();
+        assert!(serde_json::to_vec(&completed).unwrap().len() <= MAX_LOCAL_STREAM_DATAGRAM);
         assert_eq!(
             completed.payload["widget"]["entries"]
                 .as_array()

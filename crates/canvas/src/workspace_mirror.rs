@@ -31,7 +31,7 @@ pub struct WorkspaceState {
 pub struct Publisher {
     stream: Option<std::os::unix::net::UnixStream>,
     path: Option<std::path::PathBuf>,
-    last_sent: Vec<u8>,
+    last_sent: Option<WorkspaceDocument>,
 }
 
 #[cfg(unix)]
@@ -40,7 +40,7 @@ impl Publisher {
         Self {
             stream: None,
             path: canvas_core::workspace_mirror_socket_path(),
-            last_sent: Vec::new(),
+            last_sent: None,
         }
     }
 
@@ -48,15 +48,19 @@ impl Publisher {
     /// state; serialization failures remain visible because a valid Canvas
     /// document must always serialize.
     pub fn publish_if_changed(&mut self, document: &WorkspaceDocument) {
+        if self
+            .last_sent
+            .as_ref()
+            .is_some_and(|previous| same_representation(previous, document))
+        {
+            return;
+        }
         let snapshot = LocalWorkspaceSnapshot {
             schema_version: MIRROR_SCHEMA_VERSION,
             document: document.clone(),
         };
         let bytes = serde_json::to_vec(&snapshot)
             .expect("a validated Canvas workspace document must serialize");
-        if bytes == self.last_sent {
-            return;
-        }
         let Some(path) = &self.path else { return };
         use std::io::Write;
         let mut frame = bytes.clone();
@@ -77,11 +81,19 @@ impl Publisher {
                 .is_some_and(|stream| send(stream).is_ok());
         }
         if sent {
-            self.last_sent = bytes;
+            self.last_sent = Some(document.clone());
         } else {
             self.stream = None;
         }
     }
+}
+
+fn same_representation(left: &WorkspaceDocument, right: &WorkspaceDocument) -> bool {
+    let mut left = left.clone();
+    let mut right = right.clone();
+    left.revision = 0;
+    right.revision = 0;
+    left == right
 }
 
 #[cfg(test)]
@@ -115,5 +127,29 @@ mod tests {
         let encoded = serde_json::to_vec(&state).unwrap();
         let decoded: WorkspaceState = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn revision_only_changes_do_not_republish_the_same_representation() {
+        let document = WorkspaceDocument {
+            schema_version: crate::SCHEMA_VERSION,
+            id: "demo-home".into(),
+            project_id: "demo".into(),
+            revision: 1,
+            theme: crate::ThemeRef::Project,
+            background: crate::Background::Theme,
+            chrome: crate::SurfaceChrome::default(),
+            surfaces: Vec::new(),
+            layout: crate::Layout::Canvas {
+                placements: Vec::new(),
+            },
+            bindings: Vec::new(),
+            focused_surface_id: None,
+        };
+        let mut later = document.clone();
+        later.revision = 99;
+        assert!(same_representation(&document, &later));
+        later.id = "changed".into();
+        assert!(!same_representation(&document, &later));
     }
 }

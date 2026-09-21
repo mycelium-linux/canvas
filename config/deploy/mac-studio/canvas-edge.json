@@ -4,7 +4,7 @@
   "hub_endpoint": "127.0.0.1:18791",
   "token_file": "/Users/ajmwagar/.config/unibus/tokens/canvas-studio-display.token",
   "zones": ["living-room"],
-  "capabilities": ["display", "canvas.display", "canvas.workspace_mirror"],
+  "capabilities": ["display", "canvas.display", "canvas.rlcd", "canvas.workspace_mirror"],
   "screen_anchors": ["screen-studio"],
   "schema_version": 1,
   "mirror": {"enabled": true, "zone": "living-room"},
