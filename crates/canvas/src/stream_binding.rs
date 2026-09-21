@@ -15,7 +15,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicU64, Ordering},
 };
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const STREAM_SCHEMA_VERSION: u32 = 1;
 pub const MAX_STREAM_MESSAGE: usize = 64 * 1024;
@@ -358,12 +358,28 @@ pub fn start_server() -> Result<(StreamInbox, StreamSocketGuard)> {
 
 fn receive(socket: UnixDatagram, inbox: StreamInbox) {
     let mut bytes = vec![0; MAX_STREAM_MESSAGE + 1];
+    let mut consecutive_failures: u32 = 0;
     loop {
         let size = match socket.recv(&mut bytes) {
-            Ok(size) => size,
+            Ok(size) => {
+                consecutive_failures = 0;
+                size
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) => {
-                eprintln!("Canvas stream receive failed: {error}");
-                return;
+                // Retiring this thread wedges Canvas silently: it is the only
+                // reader of the stream socket, so every edge then blocks
+                // forever on a full kernel buffer (ENOBUFS) while the socket
+                // still exists. One transient error cost us the whole RLCD
+                // feed until the app was restarted. Back off and keep serving.
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                eprintln!(
+                    "Canvas stream receive failed ({consecutive_failures} in a row): {error}"
+                );
+                std::thread::sleep(Duration::from_millis(
+                    (50 * u64::from(consecutive_failures)).min(1_000),
+                ));
+                continue;
             }
         };
         if size > MAX_STREAM_MESSAGE {
@@ -2253,5 +2269,58 @@ mod tests {
             ArtifactManifest::MANIFEST_SCHEMA_VERSION
         );
         assert_eq!(manifest.id, "test");
+    }
+
+    /// The stream reader is the only consumer of the Canvas stream socket, so
+    /// exiting on a transient receive error leaves every edge publishing into a
+    /// kernel buffer that fills and then rejects forever with ENOBUFS — the
+    /// surfaces simply stop updating with nothing in the UI to explain it.
+    #[test]
+    fn reader_keeps_serving_after_transient_receive_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("stream.sock");
+        let socket = UnixDatagram::bind(&path).expect("bind stream socket");
+        // Non-blocking turns every empty poll into a real recv error, which is
+        // what the old loop treated as fatal.
+        socket.set_nonblocking(true).expect("non-blocking");
+
+        let inbox = StreamInbox::default();
+        let reader = inbox.clone();
+        std::thread::spawn(move || receive(socket, reader));
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(
+            inbox.stats().received,
+            0,
+            "nothing was sent yet, so nothing may have been ingested"
+        );
+
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "mac-studio-speedy-smk".into(),
+            stream: "retro-smk".into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            project_id: Some("speedy".into()),
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "widget": { "kind": "event_log", "title": "RLCD", "entries": [] }
+            }),
+        };
+        let bytes = serde_json::to_vec(&event).expect("encode event");
+        UnixDatagram::unbound()
+            .expect("sender")
+            .send_to(&bytes, &path)
+            .expect("send event");
+
+        // Worst case the reader is mid-backoff, so poll rather than sleep once.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while inbox.stats().received == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert_eq!(
+            inbox.stats().received,
+            1,
+            "reader retired itself on a transient error and never ingested the event"
+        );
     }
 }
