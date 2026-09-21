@@ -553,32 +553,51 @@ fn run_stream(
     let announcer = thread::Builder::new()
         .name(format!("browser-announce-{id}"))
         .spawn(move || {
-            let result = Client::connect(bus_config).and_then(|bus| {
-                while !announce_flag.load(Ordering::Acquire) {
-                    announce(&bus, destination.as_deref(), &stream, ttl)?;
-                    thread::sleep(Duration::from_millis(ttl / 3));
+            while !announce_flag.load(Ordering::Acquire) {
+                let result = Client::connect(bus_config.clone()).and_then(|bus| {
+                    while !announce_flag.load(Ordering::Acquire) {
+                        announce(&bus, destination.as_deref(), &stream, ttl)?;
+                        thread::sleep(Duration::from_millis(ttl / 3));
+                    }
+                    Ok(())
+                });
+                if let Err(error) = result {
+                    eprintln!("canvas-browser-host: announce reconnect: {error:#}");
+                    thread::sleep(Duration::from_secs(1));
                 }
-                Ok(())
-            });
-            if let Err(error) = result {
-                eprintln!("canvas-browser-host: announce failed: {error:#}");
             }
         })?;
     let interval = Duration::from_secs_f64(1.0 / f64::from(profile.fps));
     let url = format!("http://127.0.0.1:{port}/session/{webdriver_id}/screenshot");
+    let mut capture_failures = 0_u64;
+    let mut stream_result = Ok(());
     while !stop.load(Ordering::Acquire) {
         let started = Instant::now();
-        let response: serde_json::Value = client.get(&url).send()?.error_for_status()?.json()?;
-        let encoded = response
-            .get("value")
-            .and_then(serde_json::Value::as_str)
-            .context("WebDriver screenshot lacks value")?;
-        let png = base64::engine::general_purpose::STANDARD
-            .decode(encoded)
-            .context("decode WebDriver screenshot")?;
-        input
-            .write_all(&png)
-            .context("write screenshot to encoder")?;
+        let png = match capture_screenshot(&client, &url) {
+            Ok(png) => {
+                if capture_failures > 0 {
+                    eprintln!(
+                        "canvas-browser-host: stream '{id}' recovered after {capture_failures} dropped frame(s)"
+                    );
+                    capture_failures = 0;
+                }
+                png
+            }
+            Err(error) => {
+                capture_failures += 1;
+                if capture_failures == 1 || capture_failures.is_multiple_of(12) {
+                    eprintln!(
+                        "canvas-browser-host: stream '{id}' dropped frame {capture_failures}: {error:#}"
+                    );
+                }
+                thread::sleep(interval.saturating_sub(started.elapsed()));
+                continue;
+            }
+        };
+        if let Err(error) = input.write_all(&png) {
+            stream_result = Err(error).context("write screenshot to encoder");
+            break;
+        }
         thread::sleep(interval.saturating_sub(started.elapsed()));
     }
     announce_stop.store(true, Ordering::Release);
@@ -586,7 +605,18 @@ fn run_stream(
     let _ = encoder.kill();
     let _ = encoder.wait();
     let _ = announcer.join();
-    Ok(())
+    stream_result
+}
+
+fn capture_screenshot(client: &reqwest::blocking::Client, url: &str) -> Result<Vec<u8>> {
+    let response: serde_json::Value = client.get(url).send()?.error_for_status()?.json()?;
+    let encoded = response
+        .get("value")
+        .and_then(serde_json::Value::as_str)
+        .context("WebDriver screenshot lacks value")?;
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .context("decode WebDriver screenshot")
 }
 
 fn spawn_encoder(profile: &MediaProfile) -> Result<Child> {
