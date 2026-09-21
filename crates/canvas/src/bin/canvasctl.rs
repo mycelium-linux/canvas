@@ -160,15 +160,31 @@ fn handle_line(line: &str) -> Result<(), String> {
 }
 
 fn handle_catalog(tokens: &[String]) -> Result<(), String> {
-    if tokens.len() > 2 {
-        return Err("usage: catalog [widget-directory]".into());
+    if tokens.len() > 3 {
+        return Err("usage: catalog [widget-directory] [page]".into());
     }
     let directory = tokens.get(1).map_or("config/widgets", String::as_str);
-    let document = catalog_document(directory)?;
+    let page = tokens
+        .get(2)
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .map_err(|_| "catalog page must be a positive integer".to_string())
+        })
+        .transpose()?
+        .unwrap_or(1);
+    let document = catalog_document(directory, page)?;
     send_mutation(Command::ApplyDocument { document })
 }
 
-fn catalog_document(directory: &str) -> Result<WorkspaceDocument, String> {
+/// Six widgets remain legible on the smallest supported 1280x720 Canvas.
+/// A catalog is a visual inspection surface, not an index thumbnail sheet.
+const CATALOG_PAGE_SIZE: usize = 6;
+
+fn catalog_document(directory: &str, page: usize) -> Result<WorkspaceDocument, String> {
+    if page == 0 {
+        return Err("catalog page must be a positive integer".into());
+    }
     let mut paths = fs::read_dir(directory)
         .map_err(|error| format!("read widget catalog {directory}: {error}"))?
         .map(|entry| entry.map(|entry| entry.path()))
@@ -184,8 +200,16 @@ fn catalog_document(directory: &str) -> Result<WorkspaceDocument, String> {
             "widget catalog {directory} contains no JSON fixtures"
         ));
     }
-    let mut surfaces = Vec::with_capacity(paths.len());
-    for path in paths {
+    let page_count = paths.len().div_ceil(CATALOG_PAGE_SIZE);
+    if page > page_count {
+        return Err(format!(
+            "catalog page {page} does not exist; choose 1..={page_count}"
+        ));
+    }
+    let first = (page - 1) * CATALOG_PAGE_SIZE;
+    let last = (first + CATALOG_PAGE_SIZE).min(paths.len());
+    let mut surfaces = Vec::with_capacity(last - first);
+    for path in &paths[first..last] {
         let spec = canvas_widgets::WidgetSpec::from_file(&path)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         surfaces.push(Surface {
@@ -199,11 +223,11 @@ fn catalog_document(directory: &str) -> Result<WorkspaceDocument, String> {
         .iter()
         .map(|surface| surface.id.clone())
         .collect::<Vec<_>>();
-    let columns = (ids.len() as f64).sqrt().ceil() as u32;
+    let columns = if ids.len() <= 2 { ids.len() as u32 } else { 3 };
     let rows = (ids.len() as u32).div_ceil(columns.max(1));
     Ok(WorkspaceDocument {
         schema_version: SCHEMA_VERSION,
-        id: "widget-catalog-all".into(),
+        id: format!("widget-catalog-{page}-of-{page_count}"),
         project_id: "dock".into(),
         revision: 1,
         theme: ThemeRef::Project,
@@ -722,9 +746,8 @@ mod catalog_tests {
     use super::*;
 
     #[test]
-    fn catalog_discovers_and_tiles_every_checked_in_widget() {
+    fn catalog_pages_cover_every_checked_in_widget_at_readable_size() {
         let directory = format!("{}/../../config/widgets", env!("CARGO_MANIFEST_DIR"));
-        let document = catalog_document(&directory).expect("catalog builds");
         let fixture_count = fs::read_dir(&directory)
             .unwrap()
             .filter_map(Result::ok)
@@ -735,10 +758,23 @@ mod catalog_tests {
                     .is_some_and(|value| value == "json")
             })
             .count();
-        assert_eq!(document.surfaces.len(), fixture_count);
-        let Layout::Canvas { placements } = document.layout else {
-            panic!("catalog must tile")
-        };
-        assert_eq!(placements.len(), fixture_count);
+        let page_count = fixture_count.div_ceil(CATALOG_PAGE_SIZE);
+        let mut ids = std::collections::BTreeSet::new();
+        for page in 1..=page_count {
+            let document = catalog_document(&directory, page).expect("catalog page builds");
+            assert!(document.surfaces.len() <= CATALOG_PAGE_SIZE);
+            let Layout::Canvas { placements } = document.layout else {
+                panic!("catalog must tile")
+            };
+            assert_eq!(placements.len(), document.surfaces.len());
+            for placement in placements {
+                assert!(placement.bounds.width >= 1.0 / 3.0);
+                assert!(placement.bounds.height >= 0.5);
+            }
+            ids.extend(document.surfaces.into_iter().map(|surface| surface.id));
+        }
+        assert_eq!(ids.len(), fixture_count);
+        assert!(catalog_document(&directory, 0).is_err());
+        assert!(catalog_document(&directory, page_count + 1).is_err());
     }
 }
