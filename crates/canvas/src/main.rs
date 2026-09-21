@@ -603,10 +603,15 @@ impl App {
         // not just the 2 bundled ones. New projects get a default Coherence theme;
         // bundled projects keep their configured theme.
         Self::merge_alfalfa_projects(&mut catalog);
-        let mut project_id = workspaces
-            .active_project_id
-            .clone()
-            .unwrap_or_else(|| catalog.projects[0].id.clone());
+        let mut project_id = std::env::var("CANVAS_BOOT_PROJECT")
+            .ok()
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| {
+                workspaces
+                    .active_project_id
+                    .clone()
+                    .unwrap_or_else(|| catalog.projects[0].id.clone())
+            });
         let mut restored_document = workspaces.get(&project_id).cloned();
         if let Some(document) = &restored_document
             && let Err(error) = document.validate(&catalog)
@@ -9535,8 +9540,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(error) => eprintln!("Canvas appearance config ignored: {error}"),
     }
     let (receiver, socket) = start_server()?;
-    let initial_frame = platform::preferred_canvas_frame(INITIAL_FRAME);
-    let workspace_store_path = workspace_store::default_path()?;
+    let initial_frame = std::env::var("CANVAS_CAPTURE_FRAME")
+        .ok()
+        .and_then(|value| {
+            let (width, height) = value.split_once('x')?;
+            Some((width.parse().ok()?, height.parse().ok()?))
+        })
+        .map_or_else(
+            || platform::preferred_canvas_frame(INITIAL_FRAME),
+            |(width, height)| Rect {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+        );
+    let workspace_store_path = std::env::var_os("CANVAS_WORKSPACE_STORE_PATH")
+        .map(PathBuf::from)
+        .map_or_else(workspace_store::default_path, Ok)?;
     let boot_receiver = Arc::clone(&receiver);
     let boot_socket = Arc::new(Mutex::new(Some(socket)));
     iced::daemon(

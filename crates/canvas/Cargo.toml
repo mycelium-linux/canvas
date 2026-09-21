@@ -63,6 +63,10 @@ name = "canvasctl"
 path = "src/bin/canvasctl.rs"
 
 [[bin]]
+name = "canvas-workspace-capture"
+path = "src/bin/canvas-workspace-capture.rs"
+
+[[bin]]
 name = "canvas-mcp"
 path = "src/bin/canvas-mcp.rs"
 required-features = ["mcp"]
