@@ -431,6 +431,10 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/activity-grid-v1.lua"),
     ),
     (
+        "correlation-matrix-v1",
+        include_str!("../../../config/binders/correlation-matrix-v1.lua"),
+    ),
+    (
         "sankey-v1",
         include_str!("../../../config/binders/sankey-v1.lua"),
     ),
@@ -899,6 +903,44 @@ mod tests {
         };
         assert_eq!(style, canvas_widgets::HeatmapStyle::Activity);
         assert_eq!(values[1][1], 8.0);
+    }
+
+    #[test]
+    fn correlation_binder_builds_a_square_hoverable_matrix() {
+        let mut target = test_spec(WidgetKind::Heatmap {
+            title: "Waiting".into(),
+            rows: vec!["waiting".into()],
+            columns: vec!["waiting".into()],
+            values: vec![vec![1.0]],
+            style: canvas_widgets::HeatmapStyle::Matrix,
+            unit: None,
+        });
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "metrics".into(),
+            stream: "correlation".into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            project_id: Some("dock".into()),
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "labels":["latency","errors"],
+                "values":[[1.0,0.82],[0.82,1.0]]
+            }),
+        };
+        apply_named_adapter("correlation-matrix-v1", &event, &mut target)
+            .expect("correlation renders");
+        let WidgetKind::Heatmap {
+            rows,
+            columns,
+            values,
+            ..
+        } = target.kind
+        else {
+            panic!("correlation binder changed widget family")
+        };
+        assert_eq!(rows, columns);
+        assert_eq!(values[0][1], 0.82);
     }
 
     #[test]

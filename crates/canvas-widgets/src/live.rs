@@ -2065,7 +2065,7 @@ impl<Message> canvas::Program<Message> for HeatmapProgram {
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
-        _cursor: mouse::Cursor,
+        cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         // Float bit patterns are fingerprint material, not arithmetic. Normal
         // addition overflows quickly in debug builds for ordinary positive
@@ -2082,7 +2082,7 @@ impl<Message> canvas::Program<Message> for HeatmapProgram {
             .add_color(self.label)
             .add_f32(self.label_size)
             .build();
-        state.draw_cached(renderer, bounds.size(), key, |frame| {
+        let mut output = state.draw_cached(renderer, bounds.size(), key, |frame| {
             if self.style == HeatmapStyle::Activity {
                 self.draw_activity(frame, bounds);
                 return;
@@ -2169,7 +2169,51 @@ impl<Message> canvas::Program<Message> for HeatmapProgram {
                     ..Default::default()
                 });
             }
-        })
+        });
+        if self.style == HeatmapStyle::Activity {
+            return output;
+        }
+        let Some(position) = cursor.position_in(bounds) else {
+            return output;
+        };
+        let label_width = (bounds.width * 0.18).clamp(42.0, 110.0);
+        let top = 18.0;
+        let plot_bottom = (bounds.height - top - 24.0).max(top);
+        let cell_w = ((bounds.width - label_width) / self.columns.len() as f32).max(1.0);
+        let cell_h = ((plot_bottom - top) / self.rows.len() as f32).max(1.0);
+        if position.x < label_width || position.y < top || position.y >= plot_bottom {
+            return output;
+        }
+        let column = ((position.x - label_width) / cell_w) as usize;
+        let row = ((position.y - top) / cell_h) as usize;
+        let (Some(row_label), Some(column_label), Some(value)) = (
+            self.rows.get(row),
+            self.columns.get(column),
+            self.values.get(row).and_then(|values| values.get(column)),
+        ) else {
+            return output;
+        };
+        let mut overlay = canvas::Frame::new(renderer, bounds.size());
+        let content = format!("{row_label} × {column_label}  {}", short_value(*value));
+        let width = (content.chars().count() as f32 * self.label_size * 0.56 + 18.0)
+            .clamp(120.0, bounds.width * 0.75);
+        let origin = Point::new(
+            (position.x + 10.0).min((bounds.width - width).max(0.0)),
+            (position.y - self.label_size * 2.4).max(0.0),
+        );
+        overlay.fill(
+            &Path::rounded_rectangle(origin, Size::new(width, self.label_size * 2.0), 5.0.into()),
+            self.low,
+        );
+        overlay.fill_text(canvas::Text {
+            content,
+            position: Point::new(origin.x + 9.0, origin.y + self.label_size * 1.35),
+            color: self.label,
+            size: iced::Pixels(self.label_size),
+            ..Default::default()
+        });
+        output.push(overlay.into_geometry());
+        output
     }
 }
 
