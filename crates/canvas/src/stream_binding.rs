@@ -435,6 +435,10 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/sankey-v1.lua"),
     ),
     (
+        "service-topology-v1",
+        include_str!("../../../config/binders/service-topology-v1.lua"),
+    ),
+    (
         "bifrost-requests-v1",
         include_str!("../../../config/binders/bifrost-requests-v1.lua"),
     ),
@@ -887,6 +891,38 @@ mod tests {
         };
         assert_eq!(style, canvas_widgets::HeatmapStyle::Activity);
         assert_eq!(values[1][1], 8.0);
+    }
+
+    #[test]
+    fn service_topology_binder_reuses_the_retained_graph_contract() {
+        let mut target = test_spec(WidgetKind::NeuralGraph {
+            title: "Waiting".into(),
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        });
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "unibus".into(),
+            stream: "service-topology".into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            project_id: Some("dock".into()),
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "nodes": [
+                    {"id":"edge","name":"Edge","health":"healthy","activity":0.7},
+                    {"id":"api","name":"API","health":"degraded","activity":1.0}
+                ],
+                "edges": [{"source":"edge","target":"api","activity":0.8}]
+            }),
+        };
+        apply_named_adapter("service-topology-v1", &event, &mut target).expect("topology renders");
+        let WidgetKind::NeuralGraph { nodes, edges, .. } = target.kind else {
+            panic!("topology binder changed widget family")
+        };
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[1].state, canvas_widgets::StatusLevel::Warning);
+        assert_eq!(edges[0].heat, 0.8);
     }
 
     #[test]
