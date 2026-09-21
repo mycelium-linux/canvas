@@ -441,6 +441,7 @@ dependencies = [
  "subtle",
  "tempfile",
  "tokio",
+ "unibus 0.1.0",
  "unibus-media",
 ]
 

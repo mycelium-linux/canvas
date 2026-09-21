@@ -8,8 +8,6 @@
 
 use anyhow::{Context, Result, bail, ensure};
 use base64::Engine as _;
-use canvas::bus::{Bus, BusConfig};
-use canvas_core::unibus::Message;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -25,6 +23,10 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use subtle::ConstantTimeEq;
+use unibus::{
+    Message,
+    client::{Client, ClientConfig},
+};
 use unibus_media::{
     MEDIA_SCHEMA_VERSION, VIDEO_STREAM_CONTRACT, VideoCodec, VideoStream, VideoTransport,
 };
@@ -83,7 +85,7 @@ pub enum HardwareEncoder {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MediaProfile {
-    pub bus: BusConfig,
+    pub bus: ClientConfig,
     pub destination: Option<String>,
     pub ffmpeg_binary: PathBuf,
     pub encoder: HardwareEncoder,
@@ -551,7 +553,7 @@ fn run_stream(
     let announcer = thread::Builder::new()
         .name(format!("browser-announce-{id}"))
         .spawn(move || {
-            let result = Bus::connect(bus_config).and_then(|bus| {
+            let result = Client::connect(bus_config).and_then(|bus| {
                 while !announce_flag.load(Ordering::Acquire) {
                     announce(&bus, destination.as_deref(), &stream, ttl)?;
                     thread::sleep(Duration::from_millis(ttl / 3));
@@ -674,7 +676,7 @@ fn video_stream(id: &str, profile: &MediaProfile) -> Result<VideoStream> {
 }
 
 fn announce(
-    client: &Bus,
+    client: &Client,
     destination: Option<&str>,
     template: &VideoStream,
     ttl_ms: u64,
@@ -687,8 +689,8 @@ fn announce(
         .as_object()
         .cloned()
         .context("video stream is not an object")?;
-    let envelope = client.to_destination(
-        destination.unwrap_or("broadcast"),
+    let envelope = client.envelope(
+        destination,
         Message::new(VIDEO_STREAM_CONTRACT, serde_json::Value::Object(body)),
     )?;
     client.send(&envelope, &[])
