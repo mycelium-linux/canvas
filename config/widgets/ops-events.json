@@ -3,6 +3,9 @@
   "id": "ops-events",
   "kind": "event_log",
   "title": "Recent events",
+  "query": null,
+  "paused": false,
+  "follow": true,
   "entries": [
     {"timestamp":"06:34:10","message":"Canvas deployment completed","level":"good"},
     {"timestamp":"06:35:22","message":"MCP Bridge latency above 250 ms","level":"warning"},

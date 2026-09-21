@@ -6,9 +6,9 @@
 //! all render through one library.
 
 use crate::{
-    BurnRateWindow, ChartType, ClockMode, HeatmapStyle, MeterStyle, NeuralEdge, NeuralNode,
-    SpanTimelineStyle, SpatialBounds, SpatialTrack, StateLane, StatusLevel, StatusState, TimedSpan,
-    WidgetDataState, WidgetKind, WidgetSpec,
+    BurnRateWindow, ChartType, ClockMode, EventEntry, HeatmapStyle, MeterStyle, NeuralEdge,
+    NeuralNode, SpanTimelineStyle, SpatialBounds, SpatialTrack, StateLane, StatusLevel,
+    StatusState, TimedSpan, WidgetDataState, WidgetKind, WidgetSpec,
 };
 use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
@@ -926,38 +926,65 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                 visual,
             )
         }
-        WidgetKind::EventLog { title, entries } => {
-            let lines = entries.iter().rev().take(7).fold(
-                column![].spacing(metrics.space_2),
-                |column, entry| {
-                    column.push(
-                        row![
-                            status_dot(status_color(entry.level, palette), 7.0),
-                            text(&entry.timestamp)
-                                .size(metrics.small)
-                                .color(color(palette.text_muted)),
-                            text(&entry.message)
-                                .size(metrics.small)
-                                .color(color(palette.text))
-                        ]
-                        .spacing(metrics.space_2),
-                    )
-                },
-            );
-            let lines = if let Some(overflow) = overflow_label(entries.len(), 7, "events") {
-                lines.push(
-                    text(overflow)
-                        .size(metrics.small)
-                        .color(color(palette.warning)),
-                )
+        WidgetKind::EventLog {
+            title,
+            entries,
+            query,
+            paused,
+            follow,
+        } => {
+            let query_lower = query.as_deref().unwrap_or_default().to_lowercase();
+            let visible = entries
+                .iter()
+                .filter(|entry| {
+                    query_lower.is_empty()
+                        || entry.message.to_lowercase().contains(&query_lower)
+                        || entry.timestamp.to_lowercase().contains(&query_lower)
+                })
+                .collect::<Vec<_>>();
+            let ordered = if *follow {
+                Box::new(visible.iter().rev().copied()) as Box<dyn Iterator<Item = &EventEntry>>
             } else {
-                lines
+                Box::new(visible.iter().copied()) as Box<dyn Iterator<Item = &EventEntry>>
             };
+            let lines = ordered.fold(column![].spacing(metrics.space_2), |column, entry| {
+                column.push(
+                    row![
+                        status_dot(status_color(entry.level, palette), 7.0),
+                        text(&entry.timestamp)
+                            .size(metrics.small)
+                            .color(color(palette.text_muted)),
+                        text(&entry.message)
+                            .size(metrics.small)
+                            .color(color(palette.text))
+                    ]
+                    .spacing(metrics.space_2),
+                )
+            });
             panel(
                 spec,
                 column![
-                    text(title).size(metrics.body).color(color(palette.text)),
-                    lines
+                    row![
+                        text(title).size(metrics.body).color(color(palette.text)),
+                        space::horizontal(),
+                        text(if *paused {
+                            "PAUSED"
+                        } else if *follow {
+                            "FOLLOW"
+                        } else {
+                            "HOLD"
+                        })
+                        .size(metrics.micro)
+                        .color(color(if *paused {
+                            palette.warning
+                        } else {
+                            palette.text_muted
+                        })),
+                    ],
+                    query.as_ref().map(|value| text(format!("filter: {value}"))
+                        .size(metrics.micro)
+                        .color(color(palette.info))),
+                    scrollable(lines).height(Length::Fill)
                 ]
                 .spacing(metrics.space_2)
                 .into(),

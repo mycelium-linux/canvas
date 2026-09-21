@@ -435,6 +435,10 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/correlation-matrix-v1.lua"),
     ),
     (
+        "log-stream-v1",
+        include_str!("../../../config/binders/log-stream-v1.lua"),
+    ),
+    (
         "sankey-v1",
         include_str!("../../../config/binders/sankey-v1.lua"),
     ),
@@ -944,6 +948,45 @@ mod tests {
     }
 
     #[test]
+    fn log_binder_exposes_filter_pause_and_follow_as_snapshot_state() {
+        let mut target = test_spec(WidgetKind::EventLog {
+            title: "Waiting".into(),
+            entries: Vec::new(),
+            query: None,
+            paused: false,
+            follow: true,
+        });
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "runtime".into(),
+            stream: "logs".into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            project_id: Some("dock".into()),
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "entries":[{"time":"12:00:00","line":"decoder late","severity":"warn"}],
+                "query":"decoder", "paused":true, "follow":false
+            }),
+        };
+        apply_named_adapter("log-stream-v1", &event, &mut target).expect("logs render");
+        let WidgetKind::EventLog {
+            entries,
+            query,
+            paused,
+            follow,
+            ..
+        } = target.kind
+        else {
+            panic!("log binder changed widget family")
+        };
+        assert_eq!(entries[0].level, canvas_widgets::StatusLevel::Warning);
+        assert_eq!(query.as_deref(), Some("decoder"));
+        assert!(paused);
+        assert!(!follow);
+    }
+
+    #[test]
     fn service_topology_binder_reuses_the_retained_graph_contract() {
         let mut target = test_spec(WidgetKind::NeuralGraph {
             title: "Waiting".into(),
@@ -1354,6 +1397,9 @@ mod tests {
         let mut pulse = test_spec(WidgetKind::EventLog {
             title: "stale".into(),
             entries: Vec::new(),
+            query: None,
+            paused: false,
+            follow: true,
         });
         apply_named_adapter("alfalfa-pulse-v1", &event, &mut pulse).expect("eventlog renders");
         let WidgetKind::EventLog { title, entries, .. } = &pulse.kind else {
@@ -1566,6 +1612,9 @@ mod tests {
                 WidgetKind::EventLog {
                     title: "loading".into(),
                     entries: Vec::new(),
+                    query: None,
+                    paused: false,
+                    follow: true,
                 }
             } else {
                 WidgetKind::StatusList {

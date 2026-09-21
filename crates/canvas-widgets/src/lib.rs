@@ -374,6 +374,12 @@ pub enum WidgetKind {
     EventLog {
         title: String,
         entries: Vec<EventEntry>,
+        #[serde(default)]
+        query: Option<String>,
+        #[serde(default)]
+        paused: bool,
+        #[serde(default = "default_true")]
+        follow: bool,
     },
     /// Compact health summary for nodes, agents, or DAG stages.
     ///
@@ -1221,6 +1227,10 @@ fn default_meter_style() -> MeterStyle {
     MeterStyle::Led
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1669,8 +1679,14 @@ impl WidgetSpec {
                     "table cell exceeds 4096 bytes",
                 )?;
             }
-            WidgetKind::EventLog { title, entries } => {
+            WidgetKind::EventLog {
+                title,
+                entries,
+                query,
+                ..
+            } => {
                 bounded_label(title, "event log title")?;
+                optional_label(query, "event log query")?;
                 check(entries.len() <= 256, "event log exceeds 256 entries")?;
                 check(
                     entries.iter().all(|entry| {
@@ -2224,6 +2240,9 @@ mod tests {
             WidgetKind::EventLog {
                 title: "t".into(),
                 entries: Vec::new(),
+                query: None,
+                paused: false,
+                follow: true,
             },
             WidgetKind::NeuralGraph {
                 title: "Neural activity".into(),
