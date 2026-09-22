@@ -17,6 +17,15 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 pub const CONTROL_VERSION: u32 = 1;
+
+/// `request_id` on a reply to a request that could not be parsed.
+///
+/// The server cannot echo an id it never successfully read, so it answers with
+/// this sentinel. Clients must recognise it and report the server's message:
+/// treating it as a correlation mismatch hides the real cause — an unknown
+/// surface kind surfaced as "reply does not match the request", which says
+/// nothing about the kind.
+pub const UNCORRELATED_REQUEST_ID: &str = "invalid";
 pub const MAX_CONTROL_MESSAGE: u64 = 256 * 1024;
 pub const MAX_ACTIVE_INDICATORS: usize = 16;
 pub const MAX_MESH_NODES: usize = 8;
@@ -1227,6 +1236,14 @@ pub fn send(request: &ControlRequest) -> Result<ControlReply, String> {
         .map_err(|error| error.to_string())?;
     let reply: ControlReply = serde_json::from_slice(&read_frame(stream)?)
         .map_err(|error| format!("invalid Canvas control reply: {error}"))?;
+    if reply.request_id == UNCORRELATED_REQUEST_ID && reply.request_id != request.request_id {
+        // Canvas could not parse the request at all, so it could not echo the
+        // id. Its message is the only useful thing here.
+        return Err(match &reply.outcome {
+            Outcome::Error { message, .. } => message.clone(),
+            _ => "Canvas rejected the request without a reason".to_string(),
+        });
+    }
     if reply.schema_version != CONTROL_VERSION || reply.request_id != request.request_id {
         return Err("Canvas control reply does not match the request".into());
     }
