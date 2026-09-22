@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "id": "models-workspace",
+  "project_id": "home",
+  "revision": 1,
+  "theme": { "source": "project" },
+  "background": { "kind": "shader", "shader_id": "smoke-rings", "speed": 0.42 },
+  "chrome": { "title": "hidden", "canvas_padding": 24, "surface_gap": 14 },
+  "surfaces": [
+    {
+      "id": "model-benchy",
+      "title": "3DBenchy",
+      "content": { "kind": "live_video", "source_id": "model-benchy", "width": 320, "height": 180 },
+      "inputs": []
+    }
+  ],
+  "layout": {
+    "kind": "canvas",
+    "placements": [
+      { "surface_id": "model-benchy", "bounds": { "x": 0.10, "y": 0.10, "width": 0.80, "height": 0.80 }, "layer": 0 }
+    ]
+  },
+  "bindings": [],
+  "focused_surface_id": null
+}

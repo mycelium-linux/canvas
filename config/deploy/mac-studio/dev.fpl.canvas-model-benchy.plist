@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.fpl.canvas-model-benchy</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/ajmwagar/.local/bin/canvas-model-host</string>
+    <string>/Users/ajmwagar/.config/dock/canvas/model-scenes/benchy.lua</string>
+    <string>/Users/ajmwagar/.cache/dock/canvas/model-assets</string>
+    <string>tcp://127.0.0.1:55006</string>
+    <string>320</string>
+    <string>180</string>
+    <string>24</string>
+    <string>videotoolbox</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>StandardOutPath</key><string>/Users/ajmwagar/Library/Logs/canvas-model-benchy.log</string>
+  <key>StandardErrorPath</key><string>/Users/ajmwagar/Library/Logs/canvas-model-benchy.log</string>
+</dict>
+</plist>
