@@ -15,10 +15,29 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const REDRAW_INTERVAL: std::time::Duration = std::time::Duration::from_millis(42);
 
+/// A producer at 24 fps that misses this much is not merely between frames.
+const FRESH_SECONDS: f32 = 3.0;
+/// Fully drained by here: no feed this quiet is still reporting the present.
+const STALE_SECONDS: f32 = 20.0;
+
+/// How dead a feed looks, from its silence.
+///
+/// Unreadable metadata counts as fully stale rather than fully fresh: a
+/// surface that cannot say when it last moved is not evidence that it just
+/// did, and this is what a security board is read from.
+fn staleness_of(age: std::time::Duration) -> f32 {
+    let seconds = age.as_secs_f32();
+    ((seconds - FRESH_SECONDS) / (STALE_SECONDS - FRESH_SECONDS)).clamp(0.0, 1.0)
+}
+
 const SHADER: &str = r#"
 struct Uniforms {
     viewport: vec2<f32>,
     source: vec2<f32>,
+    // 0 while the producer is writing frames, rising to 1 once it has stopped
+    // for long enough that nothing on screen should be read as current.
+    staleness: f32,
+    _pad: vec3<f32>,
 };
 
 @group(0) @binding(0) var frame: texture_2d<f32>;
@@ -62,7 +81,13 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         if abs(uv.y - 0.5) > height * 0.5 { return vec4<f32>(0.0); }
         uv.y = (uv.y - 0.5) / height + 0.5;
     }
-    return textureSample(frame, frame_sampler, uv);
+    let frame_color = textureSample(frame, frame_sampler, uv);
+    // A camera that has stopped keeps its last frame on the texture forever.
+    // Drained of colour and darkened, it still shows what was there without
+    // being mistakable for what is there now.
+    let luma = dot(frame_color.rgb, vec3<f32>(0.299, 0.587, 0.114));
+    let drained = mix(frame_color.rgb, vec3<f32>(luma), u.staleness);
+    return vec4<f32>(drained * (1.0 - 0.55 * u.staleness), frame_color.a);
 }
 "#;
 
@@ -99,6 +124,8 @@ struct TextureState {
     texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     uniform: wgpu::Buffer,
+    width: u32,
+    height: u32,
     stamp: Option<(SystemTime, u64)>,
     generation: u64,
 }
@@ -130,7 +157,8 @@ impl Pipeline {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Canvas retained video uniforms"),
-            size: 16,
+            // vec2 + vec2 + f32 + vec3 padding, std140-aligned.
+            size: 32,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -156,6 +184,8 @@ impl Pipeline {
             texture,
             bind_group,
             uniform,
+            width,
+            height,
             stamp: None,
             generation: self.generation,
         }
@@ -301,7 +331,15 @@ impl shader::Primitive for Primitive {
         bounds: &Rectangle,
         _viewport: &shader::Viewport,
     ) {
-        if !pipeline.textures.contains_key(&self.ticket) {
+        let needs_texture = pipeline
+            .textures
+            .get(&self.ticket)
+            .is_none_or(|state| state.width != self.width || state.height != self.height);
+        // iced may preserve shader widget state when a workspace inserts or
+        // replaces a surface at the same tree position. The retained ticket is
+        // therefore stable across a source-size change; recreate the texture
+        // before uploading instead of asking wgpu to overrun the old extent.
+        if needs_texture {
             let state = pipeline.texture_state(device, self.width, self.height);
             pipeline.textures.insert(self.ticket, state);
         }
@@ -310,17 +348,30 @@ impl shader::Primitive for Primitive {
             .get_mut(&self.ticket)
             .expect("retained video texture was inserted");
         state.generation = pipeline.generation;
+        let metadata = std::fs::metadata(&self.path).ok();
+        // Age the picture by how long the producer has been silent, not by how
+        // long this surface has been open: a feed that died an hour ago must
+        // not look the same as one delivering frames right now.
+        let staleness = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+            .map_or(1.0, staleness_of);
         let uniforms = [
             bounds.width,
             bounds.height,
             self.width as f32,
             self.height as f32,
+            staleness,
+            0.0,
+            0.0,
+            0.0,
         ];
         queue.write_buffer(&state.uniform, 0, unsafe {
-            std::slice::from_raw_parts(uniforms.as_ptr().cast::<u8>(), 16)
+            std::slice::from_raw_parts(uniforms.as_ptr().cast::<u8>(), 32)
         });
 
-        let Ok(metadata) = std::fs::metadata(&self.path) else {
+        let Some(metadata) = metadata else {
             return;
         };
         let stamp = (metadata.modified().unwrap_or(UNIX_EPOCH), metadata.len());
@@ -376,4 +427,36 @@ pub fn view<'a, Message: 'a>(path: PathBuf, width: u32, height: u32) -> Element<
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
+}
+
+#[cfg(test)]
+mod staleness_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn a_live_feed_is_untouched() {
+        assert_eq!(staleness_of(Duration::from_millis(40)), 0.0);
+        assert_eq!(staleness_of(Duration::from_secs_f32(FRESH_SECONDS)), 0.0);
+    }
+
+    /// A brief hitch must not make a working camera look broken.
+    #[test]
+    fn a_stutter_is_not_a_failure() {
+        assert!(staleness_of(Duration::from_secs(4)) < 0.15);
+    }
+
+    /// The failure this exists for: cameras that stopped hours ago were still
+    /// being drawn at full colour, indistinguishable from live.
+    #[test]
+    fn a_feed_that_died_hours_ago_is_fully_drained() {
+        assert_eq!(staleness_of(Duration::from_secs(38_724)), 1.0);
+        assert_eq!(staleness_of(Duration::from_secs_f32(STALE_SECONDS)), 1.0);
+    }
+
+    #[test]
+    fn decay_is_monotonic() {
+        let curve: Vec<f32> = (0..30).map(|s| staleness_of(Duration::from_secs(s))).collect();
+        assert!(curve.windows(2).all(|pair| pair[1] >= pair[0]), "{curve:?}");
+    }
 }
