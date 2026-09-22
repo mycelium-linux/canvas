@@ -229,6 +229,8 @@ fn catalog_document(directory: &str, page: usize) -> Result<WorkspaceDocument, S
     let columns = if ids.len() <= 2 { ids.len() as u32 } else { 3 };
     let rows = (ids.len() as u32).div_ceil(columns.max(1));
     Ok(WorkspaceDocument {
+        pages: Vec::new(),
+        active_page: 0,
         schema_version: SCHEMA_VERSION,
         id: "widget-catalog-all".into(),
         project_id: "dock".into(),

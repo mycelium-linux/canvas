@@ -778,6 +778,8 @@ mod tests {
 
     fn document(project_id: &str) -> WorkspaceDocument {
         WorkspaceDocument {
+            pages: Vec::new(),
+            active_page: 0,
             schema_version: SCHEMA_VERSION,
             id: format!("{project_id}-workspace"),
             project_id: project_id.into(),

@@ -106,11 +106,110 @@ pub struct WorkspaceDocument {
     #[serde(default)]
     pub chrome: SurfaceChrome,
     pub surfaces: Vec<Surface>,
+    /// The first page's arrangement.
+    ///
+    /// Kept as a bare field rather than folded into `pages` because
+    /// `deny_unknown_fields` means a document that dropped it would not
+    /// deserialize at all, and the store upgrade runs *after* parsing — every
+    /// saved workspace would have become unreadable to reach a tidier shape.
+    /// Pages are additive instead, so a document written before they existed
+    /// loads unchanged.
     pub layout: Layout,
+    /// Arrangements beyond the first, over the same surface pool.
+    ///
+    /// Pages partition the *layout*, never the surfaces: everything stays in
+    /// `surfaces` whichever page is showing, so a parked surface keeps its
+    /// decoded frame and its stream binding and a switch costs nothing.
+    /// Splitting the pool instead would tear down and restart a stream on
+    /// every switch, which is the flicker pages exist to avoid.
+    #[serde(default)]
+    pub pages: Vec<Page>,
+    /// Which page is showing. 0 is `layout`; n is `pages[n - 1]`.
+    ///
+    /// That off-by-one is why readers go through [`WorkspaceDocument::active_layout`]
+    /// instead of indexing: out of range resolves to the first page rather
+    /// than panicking, so a document from a build with more pages still draws.
+    #[serde(default)]
+    pub active_page: usize,
     #[serde(default)]
     pub bindings: Vec<DataBinding>,
     #[serde(default)]
     pub focused_surface_id: Option<String>,
+}
+
+/// One named arrangement within a workspace.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
+pub struct Page {
+    pub name: String,
+    pub layout: Layout,
+}
+
+impl WorkspaceDocument {
+    /// Total pages, always at least one.
+    pub fn page_count(&self) -> usize {
+        1 + self.pages.len()
+    }
+
+    /// The showing page, clamped into range.
+    pub fn active_page_index(&self) -> usize {
+        if self.active_page < self.page_count() {
+            self.active_page
+        } else {
+            0
+        }
+    }
+
+    pub fn active_layout(&self) -> &Layout {
+        match self.active_page_index().checked_sub(1) {
+            None => &self.layout,
+            Some(index) => &self.pages[index].layout,
+        }
+    }
+
+    pub fn active_layout_mut(&mut self) -> &mut Layout {
+        match self.active_page_index().checked_sub(1) {
+            None => &mut self.layout,
+            Some(index) => &mut self.pages[index].layout,
+        }
+    }
+
+    /// Display name of a page. The first is "Main" unless a document says
+    /// otherwise, which keeps every pre-pages workspace labelled sensibly.
+    pub fn page_name(&self, index: usize) -> &str {
+        match index.checked_sub(1) {
+            None => "Main",
+            Some(index) => self
+                .pages
+                .get(index)
+                .map(|page| page.name.as_str())
+                .unwrap_or("Main"),
+        }
+    }
+
+    pub fn active_page_name(&self) -> &str {
+        self.page_name(self.active_page_index())
+    }
+
+    /// Move `delta` pages, wrapping at both ends.
+    ///
+    /// Wrapping rather than clamping so a two-page board toggles with one key
+    /// instead of stranding you on the last page.
+    pub fn step_page(&mut self, delta: i32) -> usize {
+        let count = self.page_count() as i32;
+        let current = self.active_page_index() as i32;
+        self.active_page = (current + delta).rem_euclid(count) as usize;
+        self.active_page
+    }
+
+    /// Every layout in the document, active or parked.
+    ///
+    /// Anything that asks "is this surface still referenced?" must consult all
+    /// pages — a surface parked on page two is live, not orphaned.
+    pub fn layouts(&self) -> impl Iterator<Item = &Layout> {
+        std::iter::once(&self.layout).chain(self.pages.iter().map(|page| &page.layout))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1129,6 +1228,27 @@ impl WorkspaceDocument {
 
         let mut placed = BTreeSet::new();
         self.layout.validate(&surface_ids, &mut placed)?;
+        check(
+            self.pages.len() < MAX_ITEMS,
+            "Workspace has too many pages",
+        )?;
+        for page in &self.pages {
+            check(visible(&page.name), "Page name must be printable")?;
+            // A fresh `placed` per page: the set exists to catch one surface
+            // placed twice in a single arrangement, but the same surface
+            // appearing on two pages is the normal way to keep a feed visible
+            // either side of a switch.
+            let mut placed = BTreeSet::new();
+            page.layout.validate(&surface_ids, &mut placed)?;
+        }
+        check(
+            self.active_page < self.page_count(),
+            format!(
+                "Active page {} is beyond the {} page(s) in this workspace",
+                self.active_page,
+                self.page_count()
+            ),
+        )?;
         if let Some(focused) = &self.focused_surface_id {
             check(
                 surface_ids.contains(focused.as_str()),
@@ -1582,6 +1702,8 @@ mod tests {
 
     fn document() -> WorkspaceDocument {
         WorkspaceDocument {
+            pages: Vec::new(),
+            active_page: 0,
             schema_version: SCHEMA_VERSION,
             id: "dock-main".into(),
             project_id: "dock".into(),
@@ -2012,5 +2134,115 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::*;
+
+    fn page(name: &str, surface: &str) -> Page {
+        Page {
+            name: name.into(),
+            layout: Layout::Surface {
+                surface_id: surface.into(),
+            },
+        }
+    }
+
+    fn document() -> WorkspaceDocument {
+        WorkspaceDocument {
+            schema_version: SCHEMA_VERSION,
+            id: "w".into(),
+            project_id: "p".into(),
+            revision: 1,
+            theme: ThemeRef::Project,
+            background: Background::default(),
+            chrome: SurfaceChrome::default(),
+            surfaces: Vec::new(),
+            layout: Layout::Surface {
+                surface_id: "first".into(),
+            },
+            pages: Vec::new(),
+            active_page: 0,
+            bindings: Vec::new(),
+            focused_surface_id: None,
+        }
+    }
+
+    #[test]
+    fn a_document_without_pages_has_exactly_one() {
+        let document = document();
+        assert_eq!(document.page_count(), 1);
+        assert_eq!(document.active_layout(), &document.layout);
+        assert_eq!(document.active_page_name(), "Main");
+    }
+
+    #[test]
+    fn the_first_page_is_the_bare_layout_and_the_rest_come_from_pages() {
+        let mut document = document();
+        document.pages = vec![page("Games", "second")];
+
+        assert_eq!(document.page_count(), 2);
+        assert_eq!(document.active_layout(), &document.layout);
+
+        document.active_page = 1;
+        assert_eq!(
+            document.active_layout(),
+            &Layout::Surface {
+                surface_id: "second".into()
+            }
+        );
+        assert_eq!(document.active_page_name(), "Games");
+    }
+
+    #[test]
+    fn stepping_wraps_at_both_ends() {
+        let mut document = document();
+        document.pages = vec![page("Games", "second")];
+
+        assert_eq!(document.step_page(1), 1);
+        assert_eq!(document.step_page(1), 0, "past the last page comes the first");
+        assert_eq!(document.step_page(-1), 1, "and back the other way");
+    }
+
+    #[test]
+    fn a_single_page_document_stays_put() {
+        let mut document = document();
+        assert_eq!(document.step_page(1), 0);
+        assert_eq!(document.step_page(-1), 0);
+    }
+
+    /// A document written by a build with more pages must still draw rather
+    /// than panic on an index this build cannot resolve.
+    #[test]
+    fn an_out_of_range_active_page_falls_back_to_the_first() {
+        let mut document = document();
+        document.active_page = 9;
+        assert_eq!(document.active_page_index(), 0);
+        assert_eq!(document.active_layout(), &document.layout);
+        assert_eq!(document.active_page_name(), "Main");
+    }
+
+    #[test]
+    fn layouts_yields_every_page_so_parked_surfaces_are_not_orphans() {
+        let mut document = document();
+        document.pages = vec![page("Games", "second"), page("Ops", "third")];
+        assert_eq!(document.layouts().count(), 3);
+    }
+
+    /// Pages are additive, so a document saved before they existed loads with
+    /// one page rather than failing on the missing fields.
+    #[test]
+    fn a_pre_pages_document_deserializes_to_a_single_page() {
+        let json = serde_json::to_value(document()).expect("serializes");
+        let mut map = json.as_object().expect("object").clone();
+        map.remove("pages");
+        map.remove("active_page");
+
+        let restored: WorkspaceDocument =
+            serde_json::from_value(serde_json::Value::Object(map)).expect("loads without pages");
+        assert_eq!(restored.page_count(), 1);
+        assert_eq!(restored.active_page, 0);
     }
 }

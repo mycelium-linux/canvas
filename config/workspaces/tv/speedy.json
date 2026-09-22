@@ -1,569 +1,850 @@
 {
-  "schema_version": 1,
-  "id": "speedy-workspace",
-  "project_id": "speedy",
-  "revision": 5,
-  "theme": {
-    "source": "project"
+ "schema_version": 1,
+ "id": "speedy-workspace",
+ "project_id": "speedy",
+ "revision": 6,
+ "theme": {
+  "source": "project"
+ },
+ "background": {
+  "kind": "shader",
+  "shader_id": "smoke-rings",
+  "speed": 0.7
+ },
+ "chrome": {
+  "title": "hidden",
+  "canvas_padding": 6,
+  "surface_gap": 6
+ },
+ "surfaces": [
+  {
+   "id": "umk3-game",
+   "title": "Ultimate Mortal Kombat 3",
+   "content": {
+    "kind": "live_video",
+    "source_id": "retro-umk3",
+    "width": 298,
+    "height": 224
+   },
+   "inputs": []
   },
-  "background": {
-    "kind": "shader",
-    "shader_id": "smoke-rings",
-    "speed": 0.7
-  },
-  "chrome": {
-    "title": "hidden",
-    "canvas_padding": 6,
-    "surface_gap": 6
-  },
-  "surfaces": [
-    {
-      "id": "umk3-game",
-      "title": "Ultimate Mortal Kombat 3",
-      "content": {
-        "kind": "live_video",
-        "source_id": "retro-umk3",
-        "width": 298,
-        "height": 224
-      },
-      "inputs": []
-    },
-    {
-      "id": "umk3-rlcd",
-      "title": "UMK3 decisions",
-      "content": {
-        "kind": "widget",
-        "spec": {
-          "schema_version": 2,
-          "id": "umk3-rlcd",
-          "kind": "event_log",
-          "title": "UMK3 \u00b7 waiting",
-          "entries": [],
-          "theme": null,
-          "refresh_ms": 50,
-          "chrome": "standard",
-          "data": {
-            "state": "loading",
-            "source": "unibus:rlcd.decision.v1",
-            "observed_at": null,
-            "window": "live",
-            "detail": null,
-            "provenance": "live"
-          }
-        }
-      },
-      "inputs": [
-        {
-          "id": "decisions",
-          "contract": "canvas.widget.snapshot.v1"
-        }
-      ]
-    },
-    {
-      "id": "umk3-fan",
-      "title": "UMK3 decisions",
-      "content": {
-        "kind": "widget",
-        "spec": {
-          "schema_version": 2,
-          "id": "umk3-fan",
-          "kind": "dag_graph",
-          "title": "Awaiting decision",
-          "nodes": [],
-          "edges": [],
-          "theme": null,
-          "chrome": "frameless",
-          "data": {
-            "state": "loading",
-            "source": "unibus:rlcd.decision.v1",
-            "observed_at": null,
-            "window": "live",
-            "detail": null,
-            "provenance": "live"
-          }
-        }
-      },
-      "inputs": [
-        {
-          "id": "fan",
-          "contract": "canvas.widget.snapshot.v1"
-        }
-      ]
-    },
-    {
-      "id": "smk-game",
-      "title": "Super Mario Kart",
-      "content": {
-        "kind": "live_video",
-        "source_id": "retro-smk",
-        "width": 298,
-        "height": 224
-      },
-      "inputs": []
-    },
-    {
-      "id": "smk-rlcd",
-      "title": "Mario Kart decisions",
-      "content": {
-        "kind": "widget",
-        "spec": {
-          "schema_version": 2,
-          "id": "smk-rlcd",
-          "kind": "event_log",
-          "title": "Mario Kart \u00b7 idle",
-          "entries": [],
-          "theme": null,
-          "refresh_ms": 50,
-          "chrome": "frameless",
-          "data": {
-            "state": "loading",
-            "source": "unibus:rlcd.decision.v1",
-            "observed_at": null,
-            "window": "live",
-            "detail": null,
-            "provenance": "live"
-          }
-        }
-      },
-      "inputs": [
-        {
-          "id": "decisions",
-          "contract": "canvas.widget.snapshot.v1"
-        }
-      ]
-    },
-    {
-      "id": "smk-fan",
-      "title": "SMK decisions",
-      "content": {
-        "kind": "widget",
-        "spec": {
-          "schema_version": 2,
-          "id": "smk-fan",
-          "kind": "dag_graph",
-          "title": "Awaiting decision",
-          "nodes": [],
-          "edges": [],
-          "theme": null,
-          "chrome": "frameless",
-          "data": {
-            "state": "loading",
-            "source": "unibus:rlcd.decision.v1",
-            "observed_at": null,
-            "window": "live",
-            "detail": null,
-            "provenance": "live"
-          }
-        }
-      },
-      "inputs": [
-        {
-          "id": "fan",
-          "contract": "canvas.widget.snapshot.v1"
-        }
-      ]
-    },
-    {
-      "id": "smb-game",
-      "title": "Super Mario Bros.",
-      "content": {
-        "kind": "live_video",
-        "source_id": "retro-smb",
-        "width": 292,
-        "height": 240
-      },
-      "inputs": []
-    },
-    {
-      "id": "smb-rlcd",
-      "title": "SMB decisions",
-      "content": {
-        "kind": "widget",
-        "spec": {
-          "schema_version": 2,
-          "id": "smb-rlcd",
-          "kind": "event_log",
-          "title": "Super Mario Bros. \u00b7 idle",
-          "entries": [],
-          "theme": null,
-          "refresh_ms": 50,
-          "chrome": "frameless",
-          "data": {
-            "state": "loading",
-            "source": "unibus:rlcd.decision.v1",
-            "observed_at": null,
-            "window": "live",
-            "detail": null,
-            "provenance": "live"
-          }
-        }
-      },
-      "inputs": [
-        {
-          "id": "decisions",
-          "contract": "canvas.widget.snapshot.v1"
-        }
-      ]
-    },
-    {
-      "id": "smb-fan",
-      "title": "SMB decisions",
-      "content": {
-        "kind": "widget",
-        "spec": {
-          "schema_version": 2,
-          "id": "smb-fan",
-          "kind": "dag_graph",
-          "title": "Awaiting decision",
-          "nodes": [],
-          "edges": [],
-          "theme": null,
-          "chrome": "frameless",
-          "data": {
-            "state": "loading",
-            "source": "unibus:rlcd.decision.v1",
-            "observed_at": null,
-            "window": "live",
-            "detail": null,
-            "provenance": "live"
-          }
-        }
-      },
-      "inputs": [
-        {
-          "id": "fan",
-          "contract": "canvas.widget.snapshot.v1"
-        }
-      ]
-    },
-    {
-      "id": "tetris-game",
-      "title": "Tetris",
-      "content": {
-        "kind": "live_video",
-        "source_id": "retro-gb-tetris",
-        "width": 160,
-        "height": 144
-      },
-      "inputs": []
-    },
-    {
-      "id": "tetris-rlcd",
-      "title": "Tetris decisions",
-      "content": {
-        "kind": "widget",
-        "spec": {
-          "schema_version": 2,
-          "id": "tetris-rlcd",
-          "kind": "event_log",
-          "title": "Tetris \u00b7 idle",
-          "entries": [],
-          "theme": null,
-          "refresh_ms": 50,
-          "chrome": "frameless",
-          "data": {
-            "state": "loading",
-            "source": "unibus:rlcd.decision.v1",
-            "observed_at": null,
-            "window": "live",
-            "detail": null,
-            "provenance": "live"
-          }
-        }
-      },
-      "inputs": [
-        {
-          "id": "decisions",
-          "contract": "canvas.widget.snapshot.v1"
-        }
-      ]
-    },
-    {
-      "id": "tetris-fan",
-      "title": "TETRIS decisions",
-      "content": {
-        "kind": "widget",
-        "spec": {
-          "schema_version": 2,
-          "id": "tetris-fan",
-          "kind": "dag_graph",
-          "title": "Awaiting decision",
-          "nodes": [],
-          "edges": [],
-          "theme": null,
-          "chrome": "frameless",
-          "data": {
-            "state": "loading",
-            "source": "unibus:rlcd.decision.v1",
-            "observed_at": null,
-            "window": "live",
-            "detail": null,
-            "provenance": "live"
-          }
-        }
-      },
-      "inputs": [
-        {
-          "id": "fan",
-          "contract": "canvas.widget.snapshot.v1"
-        }
-      ]
+  {
+   "id": "umk3-rlcd",
+   "title": "UMK3 decisions",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "umk3-rlcd",
+     "kind": "event_log",
+     "title": "UMK3 \u00b7 waiting",
+     "entries": [],
+     "theme": null,
+     "refresh_ms": 50,
+     "chrome": "standard",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     }
     }
-  ],
-  "layout": {
+   },
+   "inputs": [
+    {
+     "id": "decisions",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "umk3-fan",
+   "title": "UMK3 decisions",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "umk3-fan",
+     "kind": "dag_graph",
+     "title": "Awaiting decision",
+     "nodes": [],
+     "edges": [],
+     "theme": null,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "fan",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "smk-game",
+   "title": "Super Mario Kart",
+   "content": {
+    "kind": "live_video",
+    "source_id": "retro-smk",
+    "width": 298,
+    "height": 224
+   },
+   "inputs": []
+  },
+  {
+   "id": "smk-rlcd",
+   "title": "Mario Kart decisions",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "smk-rlcd",
+     "kind": "event_log",
+     "title": "Mario Kart \u00b7 idle",
+     "entries": [],
+     "theme": null,
+     "refresh_ms": 50,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "decisions",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "smk-fan",
+   "title": "SMK decisions",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "smk-fan",
+     "kind": "dag_graph",
+     "title": "Awaiting decision",
+     "nodes": [],
+     "edges": [],
+     "theme": null,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "fan",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "smb-game",
+   "title": "Super Mario Bros.",
+   "content": {
+    "kind": "live_video",
+    "source_id": "retro-smb",
+    "width": 292,
+    "height": 240
+   },
+   "inputs": []
+  },
+  {
+   "id": "smb-rlcd",
+   "title": "SMB decisions",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "smb-rlcd",
+     "kind": "event_log",
+     "title": "Super Mario Bros. \u00b7 idle",
+     "entries": [],
+     "theme": null,
+     "refresh_ms": 50,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "decisions",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "smb-fan",
+   "title": "SMB decisions",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "smb-fan",
+     "kind": "dag_graph",
+     "title": "Awaiting decision",
+     "nodes": [],
+     "edges": [],
+     "theme": null,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "fan",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "tetris-game",
+   "title": "Tetris",
+   "content": {
+    "kind": "live_video",
+    "source_id": "retro-gb-tetris",
+    "width": 160,
+    "height": 144
+   },
+   "inputs": []
+  },
+  {
+   "id": "tetris-rlcd",
+   "title": "Tetris decisions",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "tetris-rlcd",
+     "kind": "event_log",
+     "title": "Tetris \u00b7 idle",
+     "entries": [],
+     "theme": null,
+     "refresh_ms": 50,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "decisions",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "tetris-fan",
+   "title": "TETRIS decisions",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "tetris-fan",
+     "kind": "dag_graph",
+     "title": "Awaiting decision",
+     "nodes": [],
+     "edges": [],
+     "theme": null,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "fan",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "retro2048-game",
+   "title": "2048",
+   "content": {
+    "kind": "live_video",
+    "source_id": "retro-2048",
+    "width": 320,
+    "height": 240
+   },
+   "inputs": []
+  },
+  {
+   "id": "retro2048-rlcd",
+   "title": "2048 \u00b7 idle",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "retro2048-rlcd",
+     "kind": "event_log",
+     "title": "2048 \u00b7 idle",
+     "entries": [],
+     "theme": null,
+     "refresh_ms": 50,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "decisions",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "retro2048-fan",
+   "title": "2048 decisions",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "retro2048-fan",
+     "kind": "dag_graph",
+     "title": "Awaiting decision",
+     "nodes": [],
+     "edges": [],
+     "theme": null,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "fan",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "freedoom-game",
+   "title": "FreeDoom",
+   "content": {
+    "kind": "live_video",
+    "source_id": "retro-freedoom",
+    "width": 267,
+    "height": 200
+   },
+   "inputs": []
+  },
+  {
+   "id": "freedoom-rlcd",
+   "title": "FreeDoom \u00b7 idle",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "freedoom-rlcd",
+     "kind": "event_log",
+     "title": "FreeDoom \u00b7 idle",
+     "entries": [],
+     "theme": null,
+     "refresh_ms": 50,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "decisions",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "freedoom-fan",
+   "title": "FreeDoom decisions",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "freedoom-fan",
+     "kind": "dag_graph",
+     "title": "Awaiting decision",
+     "nodes": [],
+     "edges": [],
+     "theme": null,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "fan",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  }
+ ],
+ "layout": {
+  "kind": "canvas",
+  "placements": [
+   {
+    "surface_id": "umk3-game",
+    "bounds": {
+     "x": 0.005,
+     "y": 0.025,
+     "width": 0.37,
+     "height": 0.45
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "umk3-fan",
+    "bounds": {
+     "x": 0.38,
+     "y": 0.025,
+     "width": 0.115,
+     "height": 0.3
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "umk3-rlcd",
+    "bounds": {
+     "x": 0.38,
+     "y": 0.33,
+     "width": 0.115,
+     "height": 0.145
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "smk-game",
+    "bounds": {
+     "x": 0.505,
+     "y": 0.025,
+     "width": 0.37,
+     "height": 0.45
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "smk-fan",
+    "bounds": {
+     "x": 0.88,
+     "y": 0.025,
+     "width": 0.115,
+     "height": 0.3
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "smk-rlcd",
+    "bounds": {
+     "x": 0.88,
+     "y": 0.33,
+     "width": 0.115,
+     "height": 0.145
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "smb-game",
+    "bounds": {
+     "x": 0.005,
+     "y": 0.525,
+     "width": 0.37,
+     "height": 0.45
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "smb-fan",
+    "bounds": {
+     "x": 0.38,
+     "y": 0.525,
+     "width": 0.115,
+     "height": 0.3
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "smb-rlcd",
+    "bounds": {
+     "x": 0.38,
+     "y": 0.83,
+     "width": 0.115,
+     "height": 0.145
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "tetris-game",
+    "bounds": {
+     "x": 0.505,
+     "y": 0.525,
+     "width": 0.37,
+     "height": 0.45
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "tetris-fan",
+    "bounds": {
+     "x": 0.88,
+     "y": 0.525,
+     "width": 0.115,
+     "height": 0.3
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "tetris-rlcd",
+    "bounds": {
+     "x": 0.88,
+     "y": 0.83,
+     "width": 0.115,
+     "height": 0.145
+    },
+    "layer": 0
+   }
+  ]
+ },
+ "bindings": [
+  {
+   "id": "umk3-rlcd-live",
+   "source": {
+    "owner": "mac-studio-speedy-umk3",
+    "stream": "retro-umk3",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "umk3-rlcd",
+    "input_id": "decisions"
+   },
+   "adapter": "widget-snapshot-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "umk3-fan-live",
+   "source": {
+    "owner": "mac-studio-speedy-umk3",
+    "stream": "retro-umk3-fan",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "umk3-fan",
+    "input_id": "fan"
+   },
+   "adapter": "widget-snapshot-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "smk-rlcd-live",
+   "source": {
+    "owner": "mac-studio-speedy-smk",
+    "stream": "retro-smk",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "smk-rlcd",
+    "input_id": "decisions"
+   },
+   "adapter": "widget-snapshot-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "smk-fan-live",
+   "source": {
+    "owner": "mac-studio-speedy-smk",
+    "stream": "retro-smk-fan",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "smk-fan",
+    "input_id": "fan"
+   },
+   "adapter": "widget-snapshot-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "smb-rlcd-live",
+   "source": {
+    "owner": "mac-studio-speedy-smb",
+    "stream": "retro-smb",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "smb-rlcd",
+    "input_id": "decisions"
+   },
+   "adapter": "widget-snapshot-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "smb-fan-live",
+   "source": {
+    "owner": "mac-studio-speedy-smb",
+    "stream": "retro-smb-fan",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "smb-fan",
+    "input_id": "fan"
+   },
+   "adapter": "widget-snapshot-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "tetris-rlcd-live",
+   "source": {
+    "owner": "mac-studio-speedy-tetris",
+    "stream": "retro-gb-tetris",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "tetris-rlcd",
+    "input_id": "decisions"
+   },
+   "adapter": "widget-snapshot-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "tetris-fan-live",
+   "source": {
+    "owner": "mac-studio-speedy-tetris",
+    "stream": "retro-gb-tetris-fan",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "tetris-fan",
+    "input_id": "fan"
+   },
+   "adapter": "widget-snapshot-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "retro2048-rlcd-live",
+   "source": {
+    "owner": "mac-studio-speedy-2048",
+    "stream": "retro-2048",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "retro2048-rlcd",
+    "input_id": "decisions"
+   },
+   "adapter": "widget-snapshot-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "retro2048-fan-live",
+   "source": {
+    "owner": "mac-studio-speedy-2048",
+    "stream": "retro-2048-fan",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "retro2048-fan",
+    "input_id": "fan"
+   },
+   "adapter": "widget-snapshot-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "freedoom-rlcd-live",
+   "source": {
+    "owner": "mac-studio-speedy-freedoom",
+    "stream": "retro-freedoom",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "freedoom-rlcd",
+    "input_id": "decisions"
+   },
+   "adapter": "widget-snapshot-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "freedoom-fan-live",
+   "source": {
+    "owner": "mac-studio-speedy-freedoom",
+    "stream": "retro-freedoom-fan",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "freedoom-fan",
+    "input_id": "fan"
+   },
+   "adapter": "widget-snapshot-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  }
+ ],
+ "focused_surface_id": null,
+ "pages": [
+  {
+   "name": "Arcade B",
+   "layout": {
     "kind": "canvas",
     "placements": [
-      {
-        "surface_id": "umk3-game",
-        "bounds": {
-          "x": 0.005,
-          "y": 0.025,
-          "width": 0.37,
-          "height": 0.45
-        },
-        "layer": 0
+     {
+      "surface_id": "retro2048-game",
+      "bounds": {
+       "x": 0.005,
+       "y": 0.05,
+       "width": 0.35,
+       "height": 0.66
       },
-      {
-        "surface_id": "umk3-fan",
-        "bounds": {
-          "x": 0.38,
-          "y": 0.025,
-          "width": 0.115,
-          "height": 0.3
-        },
-        "layer": 0
+      "layer": 0
+     },
+     {
+      "surface_id": "retro2048-fan",
+      "bounds": {
+       "x": 0.36,
+       "y": 0.05,
+       "width": 0.13,
+       "height": 0.4
       },
-      {
-        "surface_id": "umk3-rlcd",
-        "bounds": {
-          "x": 0.38,
-          "y": 0.33,
-          "width": 0.115,
-          "height": 0.145
-        },
-        "layer": 0
+      "layer": 0
+     },
+     {
+      "surface_id": "retro2048-rlcd",
+      "bounds": {
+       "x": 0.36,
+       "y": 0.46,
+       "width": 0.13,
+       "height": 0.25
       },
-      {
-        "surface_id": "smk-game",
-        "bounds": {
-          "x": 0.505,
-          "y": 0.025,
-          "width": 0.37,
-          "height": 0.45
-        },
-        "layer": 0
+      "layer": 0
+     },
+     {
+      "surface_id": "freedoom-game",
+      "bounds": {
+       "x": 0.505,
+       "y": 0.05,
+       "width": 0.35,
+       "height": 0.66
       },
-      {
-        "surface_id": "smk-fan",
-        "bounds": {
-          "x": 0.88,
-          "y": 0.025,
-          "width": 0.115,
-          "height": 0.3
-        },
-        "layer": 0
+      "layer": 0
+     },
+     {
+      "surface_id": "freedoom-fan",
+      "bounds": {
+       "x": 0.86,
+       "y": 0.05,
+       "width": 0.13,
+       "height": 0.4
       },
-      {
-        "surface_id": "smk-rlcd",
-        "bounds": {
-          "x": 0.88,
-          "y": 0.33,
-          "width": 0.115,
-          "height": 0.145
-        },
-        "layer": 0
+      "layer": 0
+     },
+     {
+      "surface_id": "freedoom-rlcd",
+      "bounds": {
+       "x": 0.86,
+       "y": 0.46,
+       "width": 0.13,
+       "height": 0.25
       },
-      {
-        "surface_id": "smb-game",
-        "bounds": {
-          "x": 0.005,
-          "y": 0.525,
-          "width": 0.37,
-          "height": 0.45
-        },
-        "layer": 0
-      },
-      {
-        "surface_id": "smb-fan",
-        "bounds": {
-          "x": 0.38,
-          "y": 0.525,
-          "width": 0.115,
-          "height": 0.3
-        },
-        "layer": 0
-      },
-      {
-        "surface_id": "smb-rlcd",
-        "bounds": {
-          "x": 0.38,
-          "y": 0.83,
-          "width": 0.115,
-          "height": 0.145
-        },
-        "layer": 0
-      },
-      {
-        "surface_id": "tetris-game",
-        "bounds": {
-          "x": 0.505,
-          "y": 0.525,
-          "width": 0.37,
-          "height": 0.45
-        },
-        "layer": 0
-      },
-      {
-        "surface_id": "tetris-fan",
-        "bounds": {
-          "x": 0.88,
-          "y": 0.525,
-          "width": 0.115,
-          "height": 0.3
-        },
-        "layer": 0
-      },
-      {
-        "surface_id": "tetris-rlcd",
-        "bounds": {
-          "x": 0.88,
-          "y": 0.83,
-          "width": 0.115,
-          "height": 0.145
-        },
-        "layer": 0
-      }
+      "layer": 0
+     }
     ]
-  },
-  "bindings": [
-    {
-      "id": "umk3-rlcd-live",
-      "source": {
-        "owner": "mac-studio-speedy-umk3",
-        "stream": "retro-umk3",
-        "contract": "canvas.widget.snapshot.v1"
-      },
-      "target": {
-        "surface_id": "umk3-rlcd",
-        "input_id": "decisions"
-      },
-      "adapter": "widget-snapshot-v1",
-      "delivery": {
-        "mode": "latest"
-      }
-    },
-    {
-      "id": "umk3-fan-live",
-      "source": {
-        "owner": "mac-studio-speedy-umk3",
-        "stream": "retro-umk3-fan",
-        "contract": "canvas.widget.snapshot.v1"
-      },
-      "target": {
-        "surface_id": "umk3-fan",
-        "input_id": "fan"
-      },
-      "adapter": "widget-snapshot-v1",
-      "delivery": {
-        "mode": "latest"
-      }
-    },
-    {
-      "id": "smk-rlcd-live",
-      "source": {
-        "owner": "mac-studio-speedy-smk",
-        "stream": "retro-smk",
-        "contract": "canvas.widget.snapshot.v1"
-      },
-      "target": {
-        "surface_id": "smk-rlcd",
-        "input_id": "decisions"
-      },
-      "adapter": "widget-snapshot-v1",
-      "delivery": {
-        "mode": "latest"
-      }
-    },
-    {
-      "id": "smk-fan-live",
-      "source": {
-        "owner": "mac-studio-speedy-smk",
-        "stream": "retro-smk-fan",
-        "contract": "canvas.widget.snapshot.v1"
-      },
-      "target": {
-        "surface_id": "smk-fan",
-        "input_id": "fan"
-      },
-      "adapter": "widget-snapshot-v1",
-      "delivery": {
-        "mode": "latest"
-      }
-    },
-    {
-      "id": "smb-rlcd-live",
-      "source": {
-        "owner": "mac-studio-speedy-smb",
-        "stream": "retro-smb",
-        "contract": "canvas.widget.snapshot.v1"
-      },
-      "target": {
-        "surface_id": "smb-rlcd",
-        "input_id": "decisions"
-      },
-      "adapter": "widget-snapshot-v1",
-      "delivery": {
-        "mode": "latest"
-      }
-    },
-    {
-      "id": "smb-fan-live",
-      "source": {
-        "owner": "mac-studio-speedy-smb",
-        "stream": "retro-smb-fan",
-        "contract": "canvas.widget.snapshot.v1"
-      },
-      "target": {
-        "surface_id": "smb-fan",
-        "input_id": "fan"
-      },
-      "adapter": "widget-snapshot-v1",
-      "delivery": {
-        "mode": "latest"
-      }
-    },
-    {
-      "id": "tetris-rlcd-live",
-      "source": {
-        "owner": "mac-studio-speedy-tetris",
-        "stream": "retro-gb-tetris",
-        "contract": "canvas.widget.snapshot.v1"
-      },
-      "target": {
-        "surface_id": "tetris-rlcd",
-        "input_id": "decisions"
-      },
-      "adapter": "widget-snapshot-v1",
-      "delivery": {
-        "mode": "latest"
-      }
-    },
-    {
-      "id": "tetris-fan-live",
-      "source": {
-        "owner": "mac-studio-speedy-tetris",
-        "stream": "retro-gb-tetris-fan",
-        "contract": "canvas.widget.snapshot.v1"
-      },
-      "target": {
-        "surface_id": "tetris-fan",
-        "input_id": "fan"
-      },
-      "adapter": "widget-snapshot-v1",
-      "delivery": {
-        "mode": "latest"
-      }
-    }
-  ],
-  "focused_surface_id": null
+   }
+  }
+ ],
+ "active_page": 0
 }

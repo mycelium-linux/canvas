@@ -624,6 +624,8 @@ mod tests {
 
     fn empty_document() -> WorkspaceDocument {
         WorkspaceDocument {
+            pages: Vec::new(),
+            active_page: 0,
             schema_version: crate::SCHEMA_VERSION,
             id: "dock".into(),
             project_id: "dock".into(),

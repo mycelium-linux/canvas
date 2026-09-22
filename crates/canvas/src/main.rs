@@ -412,7 +412,7 @@ fn placement_surface_ids(layout: &Layout) -> Vec<String> {
 /// surface ids. This keeps restart state inferred from the document instead of
 /// persisting a second view-name field that could drift from its layout.
 fn inferred_snapped_view(document: &WorkspaceDocument) -> Option<String> {
-    let Layout::Canvas { placements } = &document.layout else {
+    let Layout::Canvas { placements } = document.active_layout() else {
         return None;
     };
     if placements.is_empty() {
@@ -818,6 +818,8 @@ impl App {
             })
             .collect();
         let document = restored_document.unwrap_or_else(|| WorkspaceDocument {
+            pages: Vec::new(),
+            active_page: 0,
             schema_version: SCHEMA_VERSION,
             id: "canvas-runtime".into(),
             project_id: project_id.clone(),
@@ -971,7 +973,7 @@ impl App {
     /// Capture the presentation just before a workspace change so the view can
     /// interpolate from it. Call before mutating `document` or the theme.
     fn start_transition(&mut self) {
-        let from_placements = match &self.document.layout {
+        let from_placements = match self.document.active_layout() {
             Layout::Canvas { placements } => placements
                 .iter()
                 .map(|placement| {
@@ -1101,7 +1103,7 @@ impl App {
     fn toggle_snapped_layout(&mut self) {
         if let Some(previous) = self.free_layout.take() {
             self.start_transition();
-            self.document.layout = previous;
+            *self.document.active_layout_mut() = previous;
             self.bump();
             self.status = "Restored your arrangement.".into();
             self.emit_event("layout_restored".to_owned());
@@ -1136,7 +1138,7 @@ impl App {
         if self.document.id != "widget-catalog-all" {
             return false;
         }
-        let Layout::Canvas { placements } = &self.document.layout else {
+        let Layout::Canvas { placements } = self.document.active_layout() else {
             return false;
         };
         let page_size = placements.len().max(1);
@@ -1163,7 +1165,7 @@ impl App {
             .collect::<Vec<_>>();
         let columns = if ids.len() <= 2 { ids.len() as u32 } else { 3 };
         self.start_transition();
-        self.document.layout = Layout::Canvas {
+        *self.document.active_layout_mut() = Layout::Canvas {
             placements: ::canvas::compose::grid(&ids, 1, columns),
         };
         self.document.revision = self.document.revision.saturating_add(1);
@@ -1187,7 +1189,7 @@ impl App {
         };
         match ::canvas::operational_views::materialize(&view_id, &self.document, self.view_fit()) {
             Ok(snapped) => {
-                if snapped.document.layout == self.document.layout {
+                if snapped.document.layout == *self.document.active_layout() {
                     self.status = format!("Layout already matches {view_id}.");
                     return;
                 }
@@ -1196,7 +1198,7 @@ impl App {
                 // closed since it was opened, a layout-only assignment would
                 // reference a surface that no longer exists. materialize starts
                 // from the current document, so existing surfaces are preserved.
-                self.free_layout = Some(self.document.layout.clone());
+                self.free_layout = Some(self.document.active_layout().clone());
                 self.start_transition();
                 self.document = snapped.document;
                 self.bump();
@@ -1223,7 +1225,7 @@ impl App {
             self.status = "No saved workspace layout is available to snap to.".into();
             return;
         };
-        if saved_layout == self.document.layout {
+        if saved_layout == *self.document.active_layout() {
             self.status = "Layout already matches the saved workspace.".into();
             return;
         }
@@ -1241,9 +1243,9 @@ impl App {
                 "Saved workspace layout references surfaces that are no longer open.".into();
             return;
         }
-        self.free_layout = Some(self.document.layout.clone());
+        self.free_layout = Some(self.document.active_layout().clone());
         self.start_transition();
-        self.document.layout = saved_layout;
+        *self.document.active_layout_mut() = saved_layout;
         self.document.revision = self.document.revision.saturating_add(1);
         self.bump();
         self.status = format!(
@@ -1353,22 +1355,10 @@ impl App {
                     self.last_clock_second = clock_second;
                 }
                 let clock_millis = now_unix_ms();
-                if clock_millis.saturating_sub(self.last_clock_millis) >= 40
-                    && self.document.surfaces.iter().any(|surface| {
-                        matches!(
-                            surface.content,
-                            SurfaceContent::Widget {
-                                spec: canvas_widgets::WidgetSpec {
-                                    kind: canvas_widgets::WidgetKind::Clock {
-                                        mode: canvas_widgets::ClockMode::Analog,
-                                        ..
-                                    },
-                                    ..
-                                }
-                            }
-                        )
-                    })
-                {
+                if self.widget_animation_interval().is_some_and(|interval| {
+                    clock_millis.saturating_sub(self.last_clock_millis)
+                        >= interval.as_millis() as u64
+                }) {
                     self.last_clock_millis = clock_millis;
                 }
                 let toggle_visibility = self
@@ -1466,11 +1456,12 @@ impl App {
                     eprintln!("{}", self.status);
                 }
                 let frame = self.windows.get(&window).copied().unwrap_or(self.frame);
-                iced::window::set_mode(window, iced::window::Mode::Fullscreen)
-                    .chain(iced::window::move_to(
-                        window,
-                        Point::new(frame.x as f32, frame.y as f32),
-                    ))
+                // Canvas windows are borderless and already sized to the
+                // selected display. Native macOS fullscreen creates a Space
+                // transition that can stall this utility-style window's event
+                // loop, so fill the display directly and keep control/stream
+                // sockets responsive.
+                iced::window::move_to(window, Point::new(frame.x as f32, frame.y as f32))
                     .chain(iced::window::resize(
                         window,
                         Size::new(frame.width as f32, frame.height as f32),
@@ -1726,6 +1717,9 @@ impl App {
                 }
                 if self.desktop_focused && shortcut_help_requested(&kbd_event) {
                     return self.toggle_shortcut_help();
+                }
+                if let Some(direction) = page_cycle_direction(&kbd_event) {
+                    return self.cycle_page(direction);
                 }
                 if let Some(direction) = workspace_cycle_direction(&kbd_event) {
                     return self.cycle_project_workspace(direction);
@@ -2433,7 +2427,7 @@ impl App {
         // waking up is not a reason to undo their work.
         let untouched =
             ::canvas::operational_views::materialize(&view_id, &self.document, previous)
-                .is_ok_and(|before| before.document.layout == self.document.layout);
+                .is_ok_and(|before| before.document.layout == *self.document.active_layout());
         if !untouched {
             return;
         }
@@ -2442,7 +2436,7 @@ impl App {
                 if fitted.document == self.document {
                     return;
                 }
-                let surface_ids = placement_surface_ids(&fitted.document.layout);
+                let surface_ids = placement_surface_ids(fitted.document.active_layout());
                 self.start_transition();
                 self.document = fitted.document;
                 for surface_id in &surface_ids {
@@ -2548,7 +2542,7 @@ impl App {
                 self.apply_display_target(&DisplayTarget::Exact { display_ids: ids })?;
             task = display_task;
         }
-        let mut placements = flatten_layout(&self.document.layout);
+        let mut placements = flatten_layout(self.document.active_layout());
         let next_layer = placements
             .iter()
             .map(|placement| placement.layer)
@@ -2569,7 +2563,7 @@ impl App {
             });
         }
         self.start_transition();
-        self.document.layout = Layout::Canvas { placements };
+        *self.document.active_layout_mut() = Layout::Canvas { placements };
         self.document.focused_surface_id = Some(surface_id.into());
         self.document.revision = self.document.revision.saturating_add(1);
         self.bump();
@@ -2579,6 +2573,34 @@ impl App {
             display.id
         ));
         Ok((display.id, bounds, task))
+    }
+
+    /// Move to another page of the same workspace.
+    ///
+    /// Deliberately not a workspace switch: the surface pool is untouched, so
+    /// every parked stream keeps decoding and the board is simply drawn from a
+    /// different arrangement. That is the point of pages — a second screenful
+    /// that costs nothing to reach.
+    fn cycle_page(&mut self, direction: i32) -> Task<Message> {
+        if self.document.page_count() < 2 {
+            self.status = "This workspace has one page.".into();
+            return Task::none();
+        }
+        let index = self.document.step_page(direction);
+        let name = self.document.active_page_name().to_string();
+        self.status = format!(
+            "Page {} of {} — {name}",
+            index + 1,
+            self.document.page_count()
+        );
+        self.start_transition();
+        // Surfaces are shared across pages, so nothing is decoded or dropped
+        // here. Anything the incoming page shows that has never been drawn
+        // decodes on demand, exactly as it would on first paint.
+        self.ensure_scene_decoded();
+        self.bump();
+        self.emit_event(format!("page_switched {index}"));
+        Task::none()
     }
 
     fn cycle_project_workspace(&mut self, direction: i32) -> Task<Message> {
@@ -2621,6 +2643,8 @@ impl App {
             // First visit to this project: create a workspace with a default
             // repo-status table surface so the user sees live data immediately.
             let document = WorkspaceDocument {
+                pages: Vec::new(),
+                active_page: 0,
                 schema_version: SCHEMA_VERSION,
                 // Store keys may carry Alfalfa's capitalization; document ids
                 // follow the lowercase identifier grammar.
@@ -3842,6 +3866,8 @@ impl App {
                     // user sees live data immediately instead of an empty screen.
                     let project_id = name.clone();
                     let document = WorkspaceDocument {
+                        pages: Vec::new(),
+                        active_page: 0,
                         schema_version: SCHEMA_VERSION,
                         // Store keys may carry Alfalfa's capitalization; document ids
                         // follow the lowercase identifier grammar.
@@ -4291,7 +4317,7 @@ impl App {
                                     Vec::new()
                                 },
                             });
-                            let mut placements = match &self.document.layout {
+                            let mut placements = match self.document.active_layout() {
                                 Layout::Canvas { placements } => placements.clone(),
                                 Layout::Surface { surface_id: sid } => {
                                     vec![Placement {
@@ -4319,7 +4345,7 @@ impl App {
                                     layer: placements.len() as i32,
                                 });
                             }
-                            self.document.layout = Layout::Canvas { placements };
+                            *self.document.active_layout_mut() = Layout::Canvas { placements };
                         }
                         self.document.revision = self.document.revision.saturating_add(1);
                         self.bump();
@@ -4350,7 +4376,7 @@ impl App {
                             self.fail(pending, Failure::invalid(error.to_string()));
                             return Task::none();
                         }
-                        let surface_ids = placement_surface_ids(&opened.document.layout);
+                        let surface_ids = placement_surface_ids(opened.document.active_layout());
                         let changed = opened.document != self.document;
                         if changed {
                             self.start_transition();
@@ -4474,7 +4500,7 @@ impl App {
                                 inputs: Vec::new(),
                             });
                         }
-                        let mut placements = match &self.document.layout {
+                        let mut placements = match self.document.active_layout() {
                             Layout::Canvas { placements } => placements.clone(),
                             Layout::Surface { surface_id: sid } => vec![Placement {
                                 surface_id: sid.clone(),
@@ -4500,7 +4526,7 @@ impl App {
                                 layer: placements.len() as i32,
                             });
                         }
-                        self.document.layout = Layout::Canvas { placements };
+                        *self.document.active_layout_mut() = Layout::Canvas { placements };
                         self.bump();
                         self.status = format!("Opened data viz surface {surface_id}.");
                         self.emit_event(format!("surface_opened {surface_id}"));
@@ -4836,7 +4862,7 @@ impl App {
         if self.minimized_surfaces.contains(surface_id) {
             return None;
         }
-        let local = match &self.document.layout {
+        let local = match self.document.active_layout() {
             Layout::Canvas { placements } => {
                 let placement = placements
                     .iter()
@@ -5012,7 +5038,7 @@ impl App {
     }
 
     fn interaction_surfaces(&self) -> Vec<SurfaceGeometry> {
-        let Layout::Canvas { placements } = &self.document.layout else {
+        let Layout::Canvas { placements } = self.document.active_layout() else {
             return Vec::new();
         };
         placements
@@ -5062,7 +5088,7 @@ impl App {
         let position = self.cursor?;
         let frame = self.frame;
         let titlebar_height = f64::from(self.window_chrome().titlebar_height);
-        let Layout::Canvas { placements } = &self.document.layout else {
+        let Layout::Canvas { placements } = self.document.active_layout() else {
             return None;
         };
         let mut placements = placements.iter().collect::<Vec<_>>();
@@ -5162,7 +5188,7 @@ impl App {
                     }
                 }
                 InteractionIntent::PromoteToFront { surface_id } => {
-                    let Layout::Canvas { placements } = &mut self.document.layout else {
+                    let Layout::Canvas { placements } = self.document.active_layout_mut() else {
                         continue;
                     };
                     let top = placements
@@ -5182,7 +5208,7 @@ impl App {
                 InteractionIntent::SetBounds { surface_id, bounds } => {
                     let frame = self.frame;
                     let chrome = self.document.chrome;
-                    let Layout::Canvas { placements } = &mut self.document.layout else {
+                    let Layout::Canvas { placements } = self.document.active_layout_mut() else {
                         continue;
                     };
                     if let Some(placement) = placements
@@ -5375,11 +5401,11 @@ impl App {
             .map(|surface| surface.id.clone())
             .collect::<Vec<_>>();
         if ids.is_empty() {
-            self.document.layout = Layout::Empty;
+            *self.document.active_layout_mut() = Layout::Empty;
             self.document.revision = self.document.revision.saturating_add(1);
             return;
         }
-        let existing = match &self.document.layout {
+        let existing = match self.document.active_layout() {
             Layout::Canvas { placements } => placements
                 .iter()
                 .map(|placement| (placement.surface_id.clone(), placement.clone()))
@@ -5391,7 +5417,7 @@ impl App {
             // A stack nobody has arranged yet earns a composition, not a
             // pile: the golden mosaic fills the wall in one deliberate pass
             // instead of cascading centered rectangles over each other.
-            self.document.layout = Layout::Canvas {
+            *self.document.active_layout_mut() = Layout::Canvas {
                 placements: ::canvas::compose::compose(
                     ::canvas::compose::LayoutMode::Golden,
                     &ids,
@@ -5424,7 +5450,7 @@ impl App {
                 })
             })
             .collect();
-        self.document.layout = Layout::Canvas { placements };
+        *self.document.active_layout_mut() = Layout::Canvas { placements };
         self.document.revision = self.document.revision.saturating_add(1);
     }
 
@@ -5960,10 +5986,21 @@ impl App {
                 // arrives here, it means the host hasn't bound it yet — show
                 // a labeled panel rather than an empty blank.
                 let visual = self.presented_visual_theme();
-                canvas_widgets::live::element_at(
+                let artwork = match &spec.kind {
+                    canvas_widgets::WidgetKind::MediaCard {
+                        artwork_source: Some(source_id),
+                        ..
+                    } => self
+                        .live_frame_cache
+                        .get(source_id)
+                        .map(|(_, frame)| frame.handle.clone()),
+                    _ => None,
+                };
+                canvas_widgets::live::element_at_with_artwork(
                     spec,
                     &visual,
                     canvas_widgets::live::chrono_now_at_millis(self.last_clock_millis as i64),
+                    artwork,
                 )
             }
             ContentSource::Image { .. }
@@ -6326,11 +6363,13 @@ impl App {
     }
 
     fn widget_animation_interval(&self) -> Option<Duration> {
-        self.document
-            .surfaces
-            .iter()
-            .filter_map(|surface| match &surface.content {
-                SurfaceContent::Widget { spec } => spec.animation_interval_ms(),
+        // Bindings mutate the retained runtime spec, not the persisted
+        // workspace template. Cadence must therefore follow `decoded`, or a
+        // paused template that Lua turns into playing media never gets frames.
+        self.decoded
+            .values()
+            .filter_map(|surface| match &surface.source {
+                ContentSource::Widget { spec } => spec.animation_interval_ms(),
                 _ => None,
             })
             .min()
@@ -6673,7 +6712,7 @@ impl App {
             ..self.frame
         };
 
-        let content: Element<'_, Message> = match &self.document.layout {
+        let content: Element<'_, Message> = match self.document.active_layout() {
             Layout::Canvas { placements } => {
                 let mut placements = placements.iter().collect::<Vec<_>>();
                 placements.sort_by_key(|placement| {
@@ -7583,6 +7622,32 @@ fn focus_emphasis_curve(elapsed: Duration) -> f32 {
     }
     let pulse = (progress * core::f32::consts::TAU * 2.0).sin() * 0.5 + 0.5;
     (1.0 - progress) * (0.45 + pulse * 0.55)
+}
+
+/// Ctrl+Left / Ctrl+Right steps pages within the current workspace.
+///
+/// Horizontal to the workspace cycle's vertical (Ctrl+Shift+Up/Down): moving
+/// sideways stays inside the board, moving up and down leaves it. Shift is
+/// excluded so the two cannot be pressed as the same gesture.
+fn page_cycle_direction(event: &iced::keyboard::Event) -> Option<i32> {
+    use iced::keyboard::{Event, Key, key::Named};
+    let Event::KeyPressed {
+        key,
+        modifiers,
+        repeat: false,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    if !modifiers.control() || modifiers.shift() || modifiers.alt() || modifiers.logo() {
+        return None;
+    }
+    match key {
+        Key::Named(Named::ArrowLeft) => Some(-1),
+        Key::Named(Named::ArrowRight) => Some(1),
+        _ => None,
+    }
 }
 
 fn workspace_cycle_direction(event: &iced::keyboard::Event) -> Option<i32> {
@@ -10189,6 +10254,8 @@ mod tests {
         let base = Catalog::bundled().unwrap();
         let dock = base.projects[0].id.clone();
         let doc = |project: &str, id: &str| WorkspaceDocument {
+            pages: Vec::new(),
+            active_page: 0,
             schema_version: SCHEMA_VERSION,
             id: id.into(),
             project_id: project.into(),
@@ -10562,6 +10629,8 @@ mod tests {
         let mut app = test_app();
         let active = app.document.project_id.clone();
         app.workspaces.upsert(WorkspaceDocument {
+            pages: Vec::new(),
+            active_page: 0,
             schema_version: SCHEMA_VERSION,
             id: "studio-workspace".into(),
             project_id: "studio".into(),
@@ -11909,6 +11978,66 @@ mod tests {
     }
 
     #[test]
+    fn control_arrows_step_pages_and_nothing_else_does() {
+        use iced::keyboard::{Event, Key, Location, Modifiers, key};
+        let pressed = |named, modifiers| Event::KeyPressed {
+            key: Key::Named(named),
+            modified_key: Key::Named(named),
+            physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+            location: Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        };
+
+        assert_eq!(
+            page_cycle_direction(&pressed(key::Named::ArrowRight, Modifiers::CTRL)),
+            Some(1)
+        );
+        assert_eq!(
+            page_cycle_direction(&pressed(key::Named::ArrowLeft, Modifiers::CTRL)),
+            Some(-1)
+        );
+
+        // Ctrl+Shift+Up/Down cycles workspaces. Pages must not also answer to
+        // it, or one gesture would move two different things at once.
+        assert_eq!(
+            page_cycle_direction(&pressed(
+                key::Named::ArrowRight,
+                Modifiers::CTRL | Modifiers::SHIFT
+            )),
+            None
+        );
+        assert_eq!(
+            page_cycle_direction(&pressed(key::Named::ArrowUp, Modifiers::CTRL)),
+            None,
+            "vertical belongs to workspaces"
+        );
+        assert_eq!(
+            page_cycle_direction(&pressed(key::Named::ArrowRight, Modifiers::default())),
+            None,
+            "a bare arrow belongs to whatever has focus"
+        );
+    }
+
+    /// Holding the key must not sweep through every page at keyboard repeat
+    /// rate — each press moves one page.
+    #[test]
+    fn a_held_arrow_does_not_sweep_through_pages() {
+        use iced::keyboard::{Event, Key, Location, Modifiers, key};
+        let repeated = Event::KeyPressed {
+            key: Key::Named(key::Named::ArrowRight),
+            modified_key: Key::Named(key::Named::ArrowRight),
+            physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+            location: Location::Standard,
+            modifiers: Modifiers::CTRL,
+            text: None,
+            repeat: true,
+        };
+        assert_eq!(page_cycle_direction(&repeated), None);
+    }
+
+    #[test]
     fn control_number_shortcuts_map_to_display_ordinals() {
         use iced::keyboard::{Event, Key, Location, Modifiers, key};
         let pressed = |number: &'static str| Event::KeyPressed {
@@ -12782,6 +12911,8 @@ mod tests {
         assert_eq!(app.document.chrome.canvas_padding, 0);
 
         let studio = WorkspaceDocument {
+            pages: Vec::new(),
+            active_page: 0,
             schema_version: SCHEMA_VERSION,
             id: "studio-workspace".into(),
             project_id: "studio".into(),
@@ -12834,6 +12965,8 @@ mod tests {
     fn project_workspace_switch_replaces_same_named_live_image_source() {
         fn live_document(project_id: &str, source_id: &str) -> WorkspaceDocument {
             WorkspaceDocument {
+                pages: Vec::new(),
+                active_page: 0,
                 schema_version: SCHEMA_VERSION,
                 id: format!("{project_id}-workspace"),
                 project_id: project_id.into(),
@@ -13220,6 +13353,8 @@ mod tests {
         let catalog = Catalog::bundled().unwrap();
         let project_id = catalog.projects[0].id.clone();
         let mut document = WorkspaceDocument {
+            pages: Vec::new(),
+            active_page: 0,
             schema_version: SCHEMA_VERSION,
             id: "saved-project-desktop".into(),
             project_id: project_id.clone(),

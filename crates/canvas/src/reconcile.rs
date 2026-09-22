@@ -173,6 +173,8 @@ fn replace_project(
     catalog: &Catalog,
 ) -> crate::Result<Reconciliation> {
     let mut document = WorkspaceDocument {
+        pages: Vec::new(),
+        active_page: 0,
         schema_version: SCHEMA_VERSION,
         id: current.id.clone(),
         project_id: desired.project_id.clone(),
@@ -463,6 +465,8 @@ mod tests {
 
     fn current() -> WorkspaceDocument {
         WorkspaceDocument {
+            pages: Vec::new(),
+            active_page: 0,
             schema_version: SCHEMA_VERSION,
             id: "primary".into(),
             project_id: "dock".into(),

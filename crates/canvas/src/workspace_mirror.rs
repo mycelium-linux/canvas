@@ -109,6 +109,8 @@ mod tests {
 
     fn demo_document() -> WorkspaceDocument {
         WorkspaceDocument {
+            pages: Vec::new(),
+            active_page: 0,
             schema_version: crate::SCHEMA_VERSION,
             id: "demo-home".into(),
             project_id: "demo".into(),
@@ -173,6 +175,8 @@ mod tests {
     #[test]
     fn revision_only_changes_do_not_republish_the_same_representation() {
         let document = WorkspaceDocument {
+            pages: Vec::new(),
+            active_page: 0,
             schema_version: crate::SCHEMA_VERSION,
             id: "demo-home".into(),
             project_id: "demo".into(),
