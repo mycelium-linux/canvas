@@ -133,6 +133,7 @@ fn run(config: &EdgeConfig) -> Result<()> {
     let mirror_runtime = Arc::new(Mutex::new(MirrorRuntime::default()));
     let _mirror_socket =
         start_workspace_mirror(config, Arc::clone(&bus), Arc::clone(&mirror_runtime))?;
+    start_prompt_bridge(config, Arc::clone(&bus))?;
     loop {
         match bus.try_read() {
             Ok(Some((envelope, _payload))) => {
@@ -332,6 +333,124 @@ struct MirrorRuntime {
 impl Drop for MirrorSocketGuard {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// Contract a prompt typed on the wall is published under.
+const PROMPT_KIND: &str = "canvas.prompt.v1";
+
+/// How often the spool is drained.
+///
+/// The main loop blocks on a hub read with a timeout measured in seconds, so
+/// draining there would leave a prompt sitting for up to a minute. Prompts are
+/// interactive; this runs on its own thread.
+const PROMPT_POLL: Duration = Duration::from_millis(200);
+
+/// A prompt is one typed line. Anything larger did not come from the wall.
+const MAX_PROMPT_SPOOL_BYTES: u64 = 16 * 1024;
+
+/// Publish prompts Canvas has spooled, and remove each once it is on the bus.
+///
+/// Canvas has no bus client: it writes one file per submission under the
+/// runtime root and this owns the crossing, which is the same split that keeps
+/// the wall from becoming a client of every tool that might answer.
+///
+/// Addressed to the zone rather than to the target's producer, because Canvas
+/// names a target ("transmog") and not an address. Interested services filter
+/// on `target`; resolving it here would put a routing table in the display
+/// path and break whenever a tool moved.
+fn start_prompt_bridge(config: &EdgeConfig, bus: Arc<Bus>) -> Result<()> {
+    let Some(root) = canvas_core::runtime_root() else {
+        eprintln!("canvas-edge: no runtime root; prompts will not be published");
+        return Ok(());
+    };
+    let directory = root.join("prompts");
+    fs::create_dir_all(&directory).context("create prompt spool directory")?;
+    let zone = config
+        .bus
+        .zones
+        .first()
+        .cloned()
+        .context("publishing prompts requires a zone")?;
+    let origin = config.bus.producer_id.clone();
+    thread::Builder::new()
+        .name("canvas-prompt-bridge".into())
+        .spawn(move || {
+            loop {
+                drain_prompts(&directory, &bus, &zone, &origin);
+                thread::sleep(PROMPT_POLL);
+            }
+        })
+        .context("spawn prompt bridge")?;
+    Ok(())
+}
+
+/// Spool files in the order they were submitted.
+///
+/// The names lead with their timestamp, so a lexical sort is submission order:
+/// two prompts typed in sequence must reach the bus in that sequence.
+fn spooled_prompts(directory: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut spooled: Vec<std::path::PathBuf> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "json"))
+        .collect();
+    spooled.sort();
+    spooled
+}
+
+/// A spool file's body, if it is publishable at all.
+///
+/// `None` means it never will be — malformed, oversize, or missing the two
+/// fields that give it meaning — as distinct from a publish that failed and
+/// should be retried.
+fn parse_prompt(bytes: &[u8]) -> Option<serde_json::Value> {
+    if bytes.len() as u64 > MAX_PROMPT_SPOOL_BYTES {
+        return None;
+    }
+    let body: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let target = body.get("target").and_then(serde_json::Value::as_str)?;
+    let text = body.get("text").and_then(serde_json::Value::as_str)?;
+    if target.trim().is_empty() || text.trim().is_empty() {
+        return None;
+    }
+    Some(body)
+}
+
+fn drain_prompts(directory: &std::path::Path, bus: &Bus, zone: &str, origin: &str) {
+    for path in spooled_prompts(directory) {
+        let Some(mut body) = fs::read(&path).ok().as_deref().and_then(parse_prompt) else {
+            // Unparseable or oversize will never become publishable, so it is
+            // dropped rather than retried forever — a bad file must not wedge
+            // every prompt behind it.
+            eprintln!("canvas-edge: discarding unusable prompt {}", path.display());
+            let _ = fs::remove_file(&path);
+            continue;
+        };
+
+        body["origin"] = serde_json::Value::String(origin.to_string());
+        let message = canvas_core::unibus::Message::new(PROMPT_KIND, body);
+        match bus
+            .to_destination(zone, message)
+            .and_then(|envelope| bus.send(&envelope, &[]))
+        {
+            Ok(()) => {
+                // Removed only once it is on the bus: a crash between the two
+                // re-sends rather than loses what someone typed.
+                if let Err(error) = fs::remove_file(&path) {
+                    eprintln!("canvas-edge: published prompt but could not clear spool: {error}");
+                }
+            }
+            Err(error) => {
+                // Left in place deliberately. The hub may be down; the next
+                // tick tries again.
+                eprintln!("canvas-edge: prompt publish failed, will retry: {error:#}");
+                return;
+            }
+        }
     }
 }
 
@@ -1680,5 +1799,77 @@ mod rlcd_robustness_tests {
         let empty = envelope(serde_json::json!({}));
         assert!(rlcd_decision_event(&mut liveness, &empty).is_err());
         assert!(rlcd_decision_fan_event(&mut liveness, &empty).is_err());
+    }
+}
+
+#[cfg(test)]
+mod prompt_spool_tests {
+    use super::*;
+
+    fn spool(directory: &std::path::Path, name: &str, body: &str) {
+        fs::write(directory.join(name), body).expect("spool write");
+    }
+
+    fn usable(target: &str, text: &str) -> String {
+        serde_json::json!({
+            "schema_version": 1, "target": target, "text": text, "at_unix_ms": 1u64
+        })
+        .to_string()
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let directory = std::env::temp_dir().join(format!("canvas-prompt-{tag}"));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).expect("scratch");
+        directory
+    }
+
+    /// The spool is a queue: two prompts typed in order must publish in order.
+    #[test]
+    fn prompts_drain_in_submission_order() {
+        let directory = scratch("order");
+        spool(&directory, "0000000000002-000001-transmog.json", &usable("transmog", "second"));
+        spool(&directory, "0000000000001-000001-transmog.json", &usable("transmog", "first"));
+
+        let texts: Vec<String> = spooled_prompts(&directory)
+            .iter()
+            .filter_map(|path| fs::read(path).ok())
+            .filter_map(|bytes| parse_prompt(&bytes))
+            .map(|body| body["text"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(texts, ["first", "second"]);
+    }
+
+    #[test]
+    fn only_json_is_drained() {
+        let directory = scratch("ext");
+        spool(&directory, "0000000000001-000001-transmog.json", &usable("transmog", "yes"));
+        spool(&directory, "0000000000002-000001-transmog.json.tmp", &usable("transmog", "partial"));
+        // An atomic write lands via a temporary name; draining it would publish
+        // a half-written file.
+        assert_eq!(spooled_prompts(&directory).len(), 1);
+    }
+
+    /// Unusable is distinct from "publish failed": these can never succeed, so
+    /// the drain must drop them rather than block every prompt behind one.
+    #[test]
+    fn unusable_spool_files_are_rejected_not_retried() {
+        assert!(parse_prompt(b"not json at all").is_none());
+        assert!(parse_prompt(serde_json::json!({"text": "no target"}).to_string().as_bytes()).is_none());
+        assert!(parse_prompt(serde_json::json!({"target": "transmog"}).to_string().as_bytes()).is_none());
+        assert!(
+            parse_prompt(usable("transmog", "   ").as_bytes()).is_none(),
+            "whitespace is not a prompt"
+        );
+        let huge = usable("transmog", &"x".repeat(MAX_PROMPT_SPOOL_BYTES as usize + 1));
+        assert!(parse_prompt(huge.as_bytes()).is_none(), "oversize never came from the wall");
+    }
+
+    #[test]
+    fn a_usable_prompt_keeps_its_target_and_text() {
+        let body = parse_prompt(usable("transmog", "a bracket 40mm tall").as_bytes())
+            .expect("usable");
+        assert_eq!(body["target"], "transmog");
+        assert_eq!(body["text"], "a bracket 40mm tall");
     }
 }

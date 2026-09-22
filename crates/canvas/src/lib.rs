@@ -505,13 +505,29 @@ pub enum SurfaceContent {
         width: u32,
         height: u32,
     },
+    /// A line of text the wall can send somewhere.
+    ///
+    /// Canvas does not interpret it and does not know what `target` can do: the
+    /// surface spools what was typed and a bridge publishes it on the bus, so
+    /// the tools that answer stay replaceable and the wall stays a display. A
+    /// prompt that reached into transmog or lob directly would make Canvas a
+    /// client of both and break the moment either changed.
+    ///
+    /// `target` is an identifier rather than an address for the same reason a
+    /// `live_video` source is a name and never a path — a document must not be
+    /// able to steer the host at something of its choosing.
+    Prompt {
+        target: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        placeholder: Option<String>,
+    },
     /// Content from a newer Canvas, kept exactly as written.
     #[serde(untagged)]
     Unsupported(serde_json::Value),
 }
 
 /// The `kind` tags this build can render. Anything else is a newer Canvas.
-const KNOWN_SURFACE_KINDS: [&str; 9] = [
+const KNOWN_SURFACE_KINDS: [&str; 10] = [
     "project_resource",
     "asset",
     "chart",
@@ -521,6 +537,7 @@ const KNOWN_SURFACE_KINDS: [&str; 9] = [
     "stream",
     "live_image",
     "live_video",
+    "prompt",
 ];
 
 impl SurfaceContent {
@@ -536,6 +553,7 @@ impl SurfaceContent {
             Self::Stream { .. } => "stream",
             Self::LiveImage { .. } => "live_image",
             Self::LiveVideo { .. } => "live_video",
+            Self::Prompt { .. } => "prompt",
             Self::Unsupported(raw) => raw
                 .get("kind")
                 .and_then(serde_json::Value::as_str)
@@ -626,6 +644,11 @@ enum Known {
         width: u32,
         height: u32,
     },
+    Prompt {
+        target: String,
+        #[serde(default)]
+        placeholder: Option<String>,
+    },
 }
 
 impl Known {
@@ -649,6 +672,13 @@ impl Known {
                 source_id,
                 width,
                 height,
+            },
+            Self::Prompt {
+                target,
+                placeholder,
+            } => SurfaceContent::Prompt {
+                target,
+                placeholder,
             },
         }
     }
@@ -1188,6 +1218,24 @@ impl WorkspaceDocument {
                         identifier(source_id),
                         format!("Invalid live image source id: {source_id}"),
                     )?;
+                }
+                SurfaceContent::Prompt {
+                    target,
+                    placeholder,
+                } => {
+                    // An identifier, not an address: the bridge resolves where
+                    // a target lives, so a document cannot name a destination
+                    // of its own choosing.
+                    check(
+                        identifier(target),
+                        format!("Invalid prompt target: {target}"),
+                    )?;
+                    if let Some(placeholder) = placeholder {
+                        check(
+                            visible(placeholder),
+                            "Prompt placeholder must be printable",
+                        )?;
+                    }
                 }
                 SurfaceContent::LiveVideo {
                     source_id,
@@ -2244,5 +2292,73 @@ mod page_tests {
             serde_json::from_value(serde_json::Value::Object(map)).expect("loads without pages");
         assert_eq!(restored.page_count(), 1);
         assert_eq!(restored.active_page, 0);
+    }
+}
+
+#[cfg(test)]
+mod surface_kind_parity_tests {
+    use super::*;
+
+    /// Every kind this build claims to know must actually deserialize.
+    ///
+    /// `SurfaceContent` and the derived `Known` list the variants separately,
+    /// so adding a kind to one and not the other compiles cleanly and then
+    /// fails only at runtime: the tag passes the known-kind check, `Known`
+    /// rejects it as an unknown variant, and the whole document is refused.
+    /// That is how the `prompt` kind shipped broken — the unit tests built the
+    /// variant in Rust and never parsed one from JSON.
+    ///
+    /// A probe object carrying only `kind` is enough to tell the two failures
+    /// apart: a missing variant says "unknown variant", while a recognised
+    /// variant complains about the fields it still needs.
+    #[test]
+    fn every_known_kind_has_a_deserializable_variant() {
+        for tag in KNOWN_SURFACE_KINDS {
+            let probe = serde_json::json!({ "kind": tag });
+            if let Err(error) = Known::deserialize(&probe) {
+                assert!(
+                    !error.to_string().contains("unknown variant"),
+                    "{tag:?} is listed in KNOWN_SURFACE_KINDS but Known has no variant for it: \
+                     a document using it would be refused whole"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_prompt_surface_round_trips_through_json() {
+        let content = SurfaceContent::Prompt {
+            target: "transmog".into(),
+            placeholder: Some("Describe a part".into()),
+        };
+        let json = serde_json::to_value(&content).expect("serializes");
+        assert_eq!(json["kind"], "prompt");
+
+        let parsed: SurfaceContent = serde_json::from_value(json).expect("parses back");
+        assert_eq!(parsed, content, "a prompt must not degrade to Unsupported");
+    }
+
+    /// The placeholder is optional, so a prompt without one still parses.
+    #[test]
+    fn a_prompt_without_a_placeholder_parses() {
+        let parsed: SurfaceContent =
+            serde_json::from_value(serde_json::json!({"kind": "prompt", "target": "lob"}))
+                .expect("parses");
+        assert_eq!(
+            parsed,
+            SurfaceContent::Prompt {
+                target: "lob".into(),
+                placeholder: None
+            }
+        );
+    }
+
+    /// A kind from a newer build still degrades to one placeholder tile rather
+    /// than taking the document down — the behaviour `prompt` briefly broke.
+    #[test]
+    fn an_unknown_kind_is_still_retained_verbatim() {
+        let raw = serde_json::json!({"kind": "hologram", "spin": 3});
+        let parsed: SurfaceContent = serde_json::from_value(raw.clone()).expect("parses");
+        assert_eq!(parsed, SurfaceContent::Unsupported(raw));
     }
 }

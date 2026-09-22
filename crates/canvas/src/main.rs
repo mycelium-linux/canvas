@@ -252,7 +252,29 @@ enum ContentSource {
     Widget {
         spec: canvas_widgets::WidgetSpec,
     },
+    /// A line being typed on the wall, plus what has already been sent.
+    ///
+    /// `draft` lives here rather than in the document because a half-typed
+    /// prompt is not part of the board: persisting and mirroring every
+    /// keystroke would put partial words on every other screen and write the
+    /// store on each character. `sent` is kept only so the surface can show
+    /// that something left — the answers come back as their own surfaces.
+    Prompt {
+        target: String,
+        placeholder: Option<String>,
+        draft: String,
+        sent: Vec<String>,
+    },
 }
+
+/// Longest prompt a surface will accept.
+///
+/// A wall is not a text editor; this is a sentence, not a document. Bounded so
+/// a key held down cannot grow the draft without limit.
+const MAX_PROMPT_CHARS: usize = 400;
+
+/// How many sent lines a prompt surface remembers.
+const PROMPT_SENT_TAIL: usize = 3;
 
 #[derive(Debug, Clone)]
 struct RuntimeSurface {
@@ -1727,6 +1749,17 @@ impl App {
                 if let Some(ordinal) = display_shortcut(&kbd_event) {
                     return self.toggle_display_ordinal(ordinal);
                 }
+                // A focused prompt takes the keys before the terminal arm,
+                // so typing lands in the prompt rather than being swallowed.
+                if let Some(id) = self.document.focused_surface_id.clone() {
+                    if self
+                        .decoded
+                        .get(&id)
+                        .is_some_and(|surface| matches!(surface.source, ContentSource::Prompt { .. }))
+                    {
+                        return self.handle_prompt_key(&id, kbd_event);
+                    }
+                }
                 #[allow(clippy::collapsible_if)]
                 if let Some(surface) = self
                     .document
@@ -2573,6 +2606,116 @@ impl App {
             display.id
         ));
         Ok((display.id, bounds, task))
+    }
+
+    /// Type into the focused prompt surface.
+    ///
+    /// Handled by hand rather than with an iced text input because Canvas
+    /// already routes keys to the focused surface itself (that is how terminals
+    /// receive input), and a second, widget-owned focus would compete with it.
+    fn handle_prompt_key(
+        &mut self,
+        surface_id: &str,
+        event: iced::keyboard::Event,
+    ) -> Task<Message> {
+        use iced::keyboard::{Event, Key, key::Named};
+        let Event::KeyPressed { key, text, .. } = event else {
+            return Task::none();
+        };
+        let Some(surface) = self.decoded.get_mut(surface_id) else {
+            return Task::none();
+        };
+        let ContentSource::Prompt {
+            target,
+            draft,
+            sent,
+            ..
+        } = &mut surface.source
+        else {
+            return Task::none();
+        };
+
+        match key {
+            Key::Named(Named::Backspace) => {
+                draft.pop();
+            }
+            Key::Named(Named::Escape) => draft.clear(),
+            Key::Named(Named::Enter) => {
+                let line = draft.trim().to_string();
+                if line.is_empty() {
+                    return Task::none();
+                }
+                let target = target.clone();
+                draft.clear();
+                sent.push(line.clone());
+                // Only the tail is kept: this is a receipt that something was
+                // sent, not a transcript. Answers arrive as their own surfaces.
+                while sent.len() > PROMPT_SENT_TAIL {
+                    sent.remove(0);
+                }
+                return self.submit_prompt(&target, &line);
+            }
+            Key::Named(Named::Space) => draft.push(' '),
+            _ => {
+                // `text` is what the layout actually produced, so punctuation
+                // and non-US layouts arrive correctly instead of being
+                // reconstructed from the keycode.
+                if let Some(text) = text {
+                    if draft.chars().count() < MAX_PROMPT_CHARS {
+                        draft.extend(text.chars().filter(|character| !character.is_control()));
+                    }
+                }
+            }
+        }
+        Task::none()
+    }
+
+    /// Hand a finished prompt to the bridge.
+    ///
+    /// Canvas has no bus client — its outbound idiom is an atomic write under
+    /// the runtime root — so the prompt is spooled as one file per submission
+    /// and `canvas-edge`, which already owns the canvas/bus boundary, publishes
+    /// and removes it. Keeping the wall off the bus is what stops a display
+    /// from becoming a client of every tool that might answer.
+    fn submit_prompt(&mut self, target: &str, line: &str) -> Task<Message> {
+        let Some(root) = ::canvas::runtime_config::root() else {
+            self.status = "No runtime directory: the prompt was not sent.".into();
+            return Task::none();
+        };
+        let directory = root.join("prompts");
+        if let Err(error) = std::fs::create_dir_all(&directory) {
+            self.status = format!("Could not spool the prompt: {error}");
+            self.emit_event(format!("prompt_spool_failed {error}"));
+            return Task::none();
+        }
+        // Sequence first so the bridge drains in submission order, and the
+        // runtime revision disambiguates two submissions in the same
+        // millisecond.
+        let at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_millis() as u64)
+            .unwrap_or_default();
+        let name = format!("{at_ms:013}-{:06}-{target}.json", self.runtime_revision);
+        let body = serde_json::json!({
+            "schema_version": 1,
+            "target": target,
+            "text": line,
+            "at_unix_ms": at_ms,
+            "project_id": self.document.project_id,
+        });
+        match canvas_core::write_atomic(&directory.join(&name), body.to_string().as_bytes()) {
+            Ok(()) => {
+                self.status = format!("Sent to {target}.");
+                self.emit_event(format!("prompt_sent {target}"));
+            }
+            Err(error) => {
+                // Loud: the line is gone from the draft, so silence here would
+                // read as sent.
+                self.status = format!("Could not send to {target}: {error}");
+                self.emit_event(format!("prompt_spool_failed {error}"));
+            }
+        }
+        Task::none()
     }
 
     /// Move to another page of the same workspace.
@@ -5508,6 +5651,18 @@ impl App {
                                 && decoded_width == width
                                 && decoded_height == height
                         ),
+                        // Identity is the target, never the draft: the draft is
+                        // runtime state the document does not carry, so
+                        // comparing the whole source would discard a
+                        // half-typed prompt on every document re-application —
+                        // the words would vanish mid-sentence.
+                        SurfaceContent::Prompt { target, .. } => matches!(
+                            &decoded.source,
+                            ContentSource::Prompt {
+                                target: decoded_target,
+                                ..
+                            } if decoded_target == target
+                        ),
                         _ => true,
                     }
             })
@@ -5666,6 +5821,18 @@ impl App {
                 SurfaceContent::Widget { spec } => (
                     ContentKind::Widget,
                     ContentSource::Widget { spec: spec.clone() },
+                ),
+                SurfaceContent::Prompt {
+                    target,
+                    placeholder,
+                } => (
+                    ContentKind::Widget,
+                    ContentSource::Prompt {
+                        target: target.clone(),
+                        placeholder: placeholder.clone(),
+                        draft: String::new(),
+                        sent: Vec::new(),
+                    },
                 ),
                 SurfaceContent::LiveImage { source_id } => {
                     let Some(root) = ::canvas::runtime_config::root() else {
@@ -5955,6 +6122,67 @@ impl App {
                 .width(width)
                 .height(height)
                 .into()
+            }
+            ContentSource::Prompt {
+                target,
+                placeholder,
+                draft,
+                sent,
+            } => {
+                let palette = self.project_palette();
+                let focused =
+                    self.document.focused_surface_id.as_deref() == Some(&surface.snapshot.id);
+                let mut column = iced::widget::Column::<Message>::new()
+                    .spacing(10)
+                    .push(
+                        text(format!("→ {target}"))
+                            .size(13)
+                            .color(color(palette.text_muted)),
+                    );
+
+                // An empty draft shows the placeholder muted. The caret appears
+                // only while focused, so an unfocused prompt does not look like
+                // it is waiting on a keystroke it will never receive.
+                let (line, line_color) = if draft.is_empty() {
+                    (
+                        placeholder
+                            .clone()
+                            .unwrap_or_else(|| "Type, then press Enter".into()),
+                        palette.text_muted,
+                    )
+                } else {
+                    (draft.clone(), palette.text)
+                };
+                column = column.push(
+                    text(format!("{line}{}", if focused { "▌" } else { "" }))
+                        .size(22)
+                        .color(color(line_color)),
+                );
+
+                // Newest first: the confirmation you just earned is the one
+                // worth reading.
+                for line in sent.iter().rev() {
+                    column = column.push(
+                        text(format!("sent · {line}"))
+                            .size(12)
+                            .color(color(palette.text_muted)),
+                    );
+                }
+
+                container(column)
+                    .padding(16)
+                    .width(width)
+                    .height(height)
+                    .style(move |_| iced::widget::container::Style {
+                        background: Some(color(palette.surface).into()),
+                        border: iced::Border {
+                            color: color(if focused { palette.primary } else { palette.border }),
+                            width: 1.0,
+                            radius: 6.0.into(),
+                        },
+                        ..Default::default()
+                    })
+                    .into()
             }
             ContentSource::Stream { url } => {
                 // No decoder is wired for video/streams yet (see docs/widget-quality.md
@@ -9834,7 +10062,7 @@ fn write_text_reply(stream: &mut impl Write, reply: &ControlReply) {
 fn write_error_reply(stream: &mut impl Write, is_text: bool, code: ErrorCode, message: &str) {
     let reply = ControlReply {
         schema_version: CONTROL_VERSION,
-        request_id: "invalid".into(),
+        request_id: ::canvas::control::UNCORRELATED_REQUEST_ID.into(),
         revision: 0,
         outcome: Outcome::Error {
             code,
@@ -11975,6 +12203,130 @@ mod tests {
             .unwrap();
         assert!(pdf.bounds.x < 1.0 / 3.0);
         assert!(pdf.bounds.width < 1.0 / 3.0);
+    }
+
+    fn key(named: iced::keyboard::key::Named) -> iced::keyboard::Event {
+        use iced::keyboard::{Event, Key, Location, Modifiers, key};
+        Event::KeyPressed {
+            key: Key::Named(named),
+            modified_key: Key::Named(named),
+            physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+            location: Location::Standard,
+            modifiers: Modifiers::default(),
+            text: None,
+            repeat: false,
+        }
+    }
+
+    fn typed(character: &'static str) -> iced::keyboard::Event {
+        use iced::keyboard::{Event, Key, Location, Modifiers, key};
+        Event::KeyPressed {
+            key: Key::Character(character.into()),
+            modified_key: Key::Character(character.into()),
+            physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+            location: Location::Standard,
+            modifiers: Modifiers::default(),
+            text: Some(character.into()),
+            repeat: false,
+        }
+    }
+
+    fn app_with_prompt() -> App {
+        let mut app = test_app();
+        app.document.surfaces = vec![Surface {
+            id: "ask".into(),
+            title: "Ask transmog".into(),
+            content: SurfaceContent::Prompt {
+                target: "transmog".into(),
+                placeholder: None,
+            },
+            inputs: Vec::new(),
+        }];
+        *app.document.active_layout_mut() = Layout::Surface {
+            surface_id: "ask".into(),
+        };
+        app.document.focused_surface_id = Some("ask".into());
+        app.ensure_scene_decoded();
+        app
+    }
+
+    fn draft_of(app: &App) -> String {
+        match &app.decoded.get("ask").expect("prompt decoded").source {
+            ContentSource::Prompt { draft, .. } => draft.clone(),
+            other => panic!("expected a prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typing_into_a_prompt_builds_a_draft_and_backspace_removes_it() {
+        let mut app = app_with_prompt();
+        for character in ["h", "i"] {
+            let _ = app.handle_prompt_key("ask", typed(character));
+        }
+        assert_eq!(draft_of(&app), "hi");
+
+        let _ = app.handle_prompt_key("ask", key(iced::keyboard::key::Named::Backspace));
+        assert_eq!(draft_of(&app), "h");
+
+        let _ = app.handle_prompt_key("ask", key(iced::keyboard::key::Named::Escape));
+        assert_eq!(draft_of(&app), "", "escape abandons the line");
+    }
+
+    /// Enter spools the line and clears the draft. The draft must not survive:
+    /// the line has left, and showing it still would invite sending it twice.
+    #[test]
+    fn enter_spools_the_prompt_and_clears_the_draft() {
+        let mut app = app_with_prompt();
+        for character in ["g", "o"] {
+            let _ = app.handle_prompt_key("ask", typed(character));
+        }
+        let _ = app.handle_prompt_key("ask", key(iced::keyboard::key::Named::Enter));
+
+        assert_eq!(draft_of(&app), "");
+        match &app.decoded.get("ask").unwrap().source {
+            ContentSource::Prompt { sent, .. } => assert_eq!(sent, &["go".to_string()]),
+            other => panic!("expected a prompt, got {other:?}"),
+        }
+
+        let spool = ::canvas::runtime_config::root()
+            .expect("runtime root")
+            .join("prompts");
+        let found: Vec<serde_json::Value> = std::fs::read_dir(&spool)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| std::fs::read(entry.path()).ok())
+            .filter_map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .filter(|body| body["text"] == "go")
+            .collect();
+        assert!(!found.is_empty(), "the line should be spooled for the bridge");
+        assert_eq!(found[0]["target"], "transmog");
+    }
+
+    #[test]
+    fn an_empty_prompt_is_not_sent() {
+        let mut app = app_with_prompt();
+        let _ = app.handle_prompt_key("ask", typed(" "));
+        let _ = app.handle_prompt_key("ask", key(iced::keyboard::key::Named::Enter));
+        match &app.decoded.get("ask").unwrap().source {
+            ContentSource::Prompt { sent, .. } => {
+                assert!(sent.is_empty(), "whitespace is not a prompt")
+            }
+            other => panic!("expected a prompt, got {other:?}"),
+        }
+    }
+
+    /// Re-applying the document must not wipe what is being typed: the draft is
+    /// runtime state the document does not carry, so identity is the target.
+    #[test]
+    fn a_half_typed_prompt_survives_a_document_reapplication() {
+        let mut app = app_with_prompt();
+        for character in ["h", "a", "l", "f"] {
+            let _ = app.handle_prompt_key("ask", typed(character));
+        }
+        app.prune_decoded();
+        app.ensure_scene_decoded();
+        assert_eq!(draft_of(&app), "half");
     }
 
     #[test]
