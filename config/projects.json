@@ -4,37 +4,111 @@
     {
       "id": "dock",
       "name": "Dock",
-      "theme": { "source": "coherence", "mode": "dark", "accent": "info" },
+      "theme": {
+        "source": "coherence",
+        "mode": "dark",
+        "accent": "info"
+      },
       "resources": [
-        { "id": "mac-terminal", "title": "Local terminal", "host": "mac", "kind": "mac_app", "target": "kitty" },
-        { "id": "agora-desktop", "title": "Agora One desktop", "host": "agora_one", "kind": "remote_desktop", "target": "100.80.85.86" }
+        {
+          "id": "mac-terminal",
+          "title": "Local terminal",
+          "host": "mac",
+          "kind": "mac_app",
+          "target": "kitty"
+        },
+        {
+          "id": "agora-desktop",
+          "title": "Agora One desktop",
+          "host": "agora_one",
+          "kind": "remote_desktop",
+          "target": "100.80.85.86"
+        }
       ]
     },
     {
       "id": "studio",
       "name": "Studio",
-      "theme": { "source": "coherence", "mode": "light", "accent": "brand" },
+      "theme": {
+        "source": "coherence",
+        "mode": "light",
+        "accent": "brand"
+      },
       "resources": [
-        { "id": "mac-browser", "title": "Local browser", "host": "mac", "kind": "mac_app", "target": "Safari" },
-        { "id": "agora-desktop", "title": "Agora One desktop", "host": "agora_one", "kind": "remote_desktop", "target": "100.80.85.86" }
+        {
+          "id": "mac-browser",
+          "title": "Local browser",
+          "host": "mac",
+          "kind": "mac_app",
+          "target": "Safari"
+        },
+        {
+          "id": "agora-desktop",
+          "title": "Agora One desktop",
+          "host": "agora_one",
+          "kind": "remote_desktop",
+          "target": "100.80.85.86"
+        }
       ]
     },
     {
       "id": "home",
       "name": "Home",
-      "theme": { "source": "coherence", "mode": "dark", "accent": "info" },
+      "theme": {
+        "source": "coherence",
+        "mode": "dark",
+        "accent": "info"
+      },
       "resources": []
     },
     {
       "id": "speedy",
       "name": "Speedy",
-      "theme": { "source": "coherence", "mode": "dark", "accent": "info" },
+      "theme": {
+        "source": "coherence",
+        "mode": "dark",
+        "accent": "info"
+      },
       "resources": []
     },
     {
       "id": "security",
       "name": "Security",
-      "theme": { "source": "coherence", "mode": "dark", "accent": "brand" },
+      "theme": {
+        "source": "coherence",
+        "mode": "dark",
+        "accent": "brand"
+      },
+      "resources": []
+    },
+    {
+      "id": "lob",
+      "name": "Legion of BOM",
+      "theme": {
+        "source": "coherence",
+        "mode": "dark",
+        "accent": "brand"
+      },
+      "resources": []
+    },
+    {
+      "id": "transmog",
+      "name": "Transmog",
+      "theme": {
+        "source": "coherence",
+        "mode": "dark",
+        "accent": "success"
+      },
+      "resources": []
+    },
+    {
+      "id": "surf",
+      "name": "Surf",
+      "theme": {
+        "source": "coherence",
+        "mode": "dark",
+        "accent": "info"
+      },
       "resources": []
     }
   ]

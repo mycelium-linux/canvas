@@ -552,12 +552,18 @@ fn publish_rlcd_decision(liveness: &mut Liveness, envelope: &Envelope) -> Result
     }
     for event in events {
         let bytes = serde_json::to_vec(&event).context("encode Canvas RLCD event")?;
-        ensure!(
-            bytes.len() <= MAX_LOCAL_STREAM_DATAGRAM,
-            "Canvas RLCD event is {} bytes (local socket limit {})",
-            bytes.len(),
-            MAX_LOCAL_STREAM_DATAGRAM
-        );
+        if bytes.len() > MAX_LOCAL_STREAM_DATAGRAM {
+            // Drop the one snapshot that does not fit, not the whole decision.
+            // Aborting here cost the event log its update too, so an oversized
+            // fan blanked the surfaces that were working fine.
+            eprintln!(
+                "canvas-edge: skipped {} snapshot at {} bytes (local socket limit {})",
+                event.stream,
+                bytes.len(),
+                MAX_LOCAL_STREAM_DATAGRAM
+            );
+            continue;
+        }
         socket
             .send_to(&bytes, &path)
             .with_context(|| format!("send RLCD event to {}", path.display()))?;
@@ -570,10 +576,10 @@ fn publish_rlcd_decision(liveness: &mut Liveness, envelope: &Envelope) -> Result
 /// The trunk is history and competes with the part anyone is actually watching,
 /// so it is short and fades. Raising this costs datagram budget that the fan
 /// needs more (see `MAX_LOCAL_STREAM_DATAGRAM`).
-const FAN_TRUNK_DEPTH: usize = 5;
+const FAN_TRUNK_DEPTH: usize = 4;
 /// Alternatives drawn around the live decision. The tail of a posterior is
 /// visually indistinguishable from zero, so it is not worth the bytes.
-const FAN_WIDTH: usize = 6;
+const FAN_WIDTH: usize = 5;
 
 /// A decision fan: the recent trunk, and the live decision blooming into every
 /// action that was considered.
@@ -693,7 +699,7 @@ fn rlcd_decision_fan_event(
         emitted_at_ms: body["at_unix_ms"]
             .as_u64()
             .unwrap_or(envelope.issued_at_unix_ms),
-        project_id: Some("speedy".into()),
+        project_id: Some(rlcd_project(body)),
         payload: serde_json::json!({
             "widget": {
                 "kind": "dag_graph",
@@ -708,6 +714,21 @@ fn rlcd_decision_fan_event(
             }
         }),
     }))
+}
+
+/// Which board an RLCD widget belongs to.
+///
+/// Every producer of `rlcd.decision.v1` used to be a Speedy game, so the
+/// project was hardcoded and the widgets could only ever route to that one
+/// board. Other tools run the same decision loop and deserve the same view, so
+/// a producer may now name its own board; Speedy's agents predate the field and
+/// keep working without it.
+fn rlcd_project(body: &serde_json::Map<String, serde_json::Value>) -> String {
+    body.get("project")
+        .and_then(serde_json::Value::as_str)
+        .filter(|project| !project.is_empty())
+        .unwrap_or("speedy")
+        .to_owned()
 }
 
 fn rlcd_probability_event(envelope: &Envelope) -> Result<Option<StreamEnvelope>> {
@@ -758,7 +779,7 @@ fn rlcd_probability_event(envelope: &Envelope) -> Result<Option<StreamEnvelope>>
         emitted_at_ms: body["at_unix_ms"]
             .as_u64()
             .unwrap_or(envelope.issued_at_unix_ms),
-        project_id: Some("speedy".into()),
+        project_id: Some(rlcd_project(body)),
         payload: serde_json::json!({
             "widget": {
                 "kind": "ranked_bar",
@@ -852,7 +873,7 @@ fn rlcd_decision_event(liveness: &mut Liveness, envelope: &Envelope) -> Result<S
         contract: "canvas.widget.snapshot.v1".into(),
         sequence,
         emitted_at_ms,
-        project_id: Some("speedy".into()),
+        project_id: Some(rlcd_project(body)),
         payload: serde_json::json!({
             "widget": {
                 "kind": "event_log",
@@ -1409,11 +1430,14 @@ mod decision_fan_tests {
         Envelope::new("home", "mac-studio-speedy-umk3", None, "", Message::new("rlcd.decision.v1", body))
     }
 
-    fn fan(liveness: &mut Liveness, envelope: &Envelope) -> serde_json::Value {
+    fn fan_envelope(liveness: &mut Liveness, envelope: &Envelope) -> StreamEnvelope {
         rlcd_decision_fan_event(liveness, envelope)
             .expect("fan composes")
             .expect("fan present")
-            .payload
+    }
+
+    fn fan(liveness: &mut Liveness, envelope: &Envelope) -> serde_json::Value {
+        fan_envelope(liveness, envelope).payload
     }
 
     /// The whole point of the view: paths nobody took are drawn with their real
@@ -1489,15 +1513,42 @@ mod decision_fan_tests {
     #[test]
     fn a_full_fan_fits_the_local_datagram() {
         let mut liveness = Liveness::default();
-        let mut payload = serde_json::Value::Null;
+        let mut envelope = None;
+        // Long action names and a long session id, because the guard measures
+        // the whole envelope and the first version of this test measured only
+        // the payload — so it passed while the real board dropped every event.
         for sequence in 1..=(FAN_TRUNK_DEPTH as u64 + 2) {
-            payload = fan(&mut liveness, &decision(sequence, "completed", Some("high_punch")));
+            let mut decision = decision(sequence, "completed", Some("uppercut"));
+            decision.message.body["session_id"] = "retro-umk3-tournament-long".into();
+            envelope = Some(fan_envelope(&mut liveness, &decision));
         }
-        let encoded = serde_json::to_vec(&payload).unwrap();
+        let encoded = serde_json::to_vec(&envelope.expect("fan")).unwrap();
         assert!(
             encoded.len() <= MAX_LOCAL_STREAM_DATAGRAM,
-            "fan payload is {} bytes, over the {MAX_LOCAL_STREAM_DATAGRAM} limit",
+            "fan envelope is {} bytes, over the {MAX_LOCAL_STREAM_DATAGRAM} limit",
             encoded.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod rlcd_project_tests {
+    use super::*;
+
+    /// Speedy's agents predate the field and must keep routing to their board.
+    #[test]
+    fn a_producer_without_a_project_is_still_speedy() {
+        let plain = serde_json::json!({"session_id": "retro-smb"});
+        let empty = serde_json::json!({"project": ""});
+        assert_eq!(rlcd_project(plain.as_object().unwrap()), "speedy");
+        assert_eq!(rlcd_project(empty.as_object().unwrap()), "speedy");
+    }
+
+    /// Other tools run the same loop and deserve the same view on their own
+    /// board; hardcoding the project meant only Speedy could ever have one.
+    #[test]
+    fn a_producer_may_name_its_own_board() {
+        let named = serde_json::json!({"project": "surf"});
+        assert_eq!(rlcd_project(named.as_object().unwrap()), "surf");
     }
 }
