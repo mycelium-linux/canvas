@@ -166,6 +166,23 @@ impl WorkspaceStore {
             .find(|id| self.projects.contains_key(*id))
     }
 
+    /// Bring an older store forward in place.
+    ///
+    /// v1 differs from v2 only by `display_policy`, which is `#[serde(default)]`
+    /// and documented as absent in v1 — so a v1 file already deserializes
+    /// correctly and only its stamp is stale. Refusing it instead cost the
+    /// Studio every saved workspace: the store held 298 KB of real
+    /// arrangements that Canvas would not write to, so saving a workspace
+    /// failed and the project picker kept restoring a stale board.
+    ///
+    /// Anything older than v1, or newer than this build understands, is left
+    /// alone for `validate` to reject.
+    pub fn upgrade(&mut self) {
+        if self.schema_version == 1 {
+            self.schema_version = STORE_SCHEMA_VERSION;
+        }
+    }
+
     pub fn validate(&self, catalog: &Catalog) -> Result<(), Error> {
         if self.schema_version != STORE_SCHEMA_VERSION {
             return Err(Error(
@@ -604,6 +621,7 @@ pub fn load(path: &Path, catalog: &Catalog) -> Result<(WorkspaceStore, Vec<Strin
     }
     let mut store: WorkspaceStore = serde_json::from_slice(&bytes)
         .map_err(|error| Error(format!("Parse Canvas workspace store: {error}")))?;
+    store.upgrade();
     // Salvage, don't annihilate: one workspace for an Alfalfa-discovered
     // project (or one legacy document that no longer validates) must not
     // discard every other arrangement — that silent reset destroyed users'
@@ -700,6 +718,51 @@ mod tests {
     use super::*;
     use crate::{Background, Layout, SCHEMA_VERSION, SurfaceChrome, ThemeRef};
     use canvas_core::{Accent, ThemeMode, ThemeSelection};
+
+    /// The Studio held 298 KB of real arrangements in a v1 store. Because the
+    /// version gate refused it outright, saving a workspace failed and the
+    /// project picker kept restoring a stale board. v1 and v2 differ only by
+    /// `display_policy`, which already defaults, so the upgrade must carry the
+    /// arrangements forward rather than reset them.
+    #[test]
+    fn a_v1_store_upgrades_without_losing_anything() {
+        let mut store = WorkspaceStore {
+            schema_version: 1,
+            definitions: BTreeMap::from([("fab".into(), definition("fab", "Fab"))]),
+            projects: BTreeMap::from([("fab".into(), document("fab"))]),
+            active_project_id: Some("fab".into()),
+            recent_project_ids: vec!["dock".into()],
+            display_policy: None,
+        };
+        let before = store.projects.clone();
+
+        store.upgrade();
+
+        assert_eq!(store.schema_version, STORE_SCHEMA_VERSION);
+        assert_eq!(store.projects, before, "arrangements must survive");
+        assert_eq!(store.active_project_id.as_deref(), Some("fab"));
+        assert_eq!(store.recent_project_ids, vec!["dock".to_string()]);
+    }
+
+    #[test]
+    fn a_current_store_is_untouched_by_upgrade() {
+        let mut store = WorkspaceStore::default();
+        let before = store.clone();
+        store.upgrade();
+        assert_eq!(store, before);
+    }
+
+    /// An unknown future stamp is not something this build can interpret, so
+    /// it must reach validate() and be refused rather than be relabelled.
+    #[test]
+    fn a_future_store_is_not_silently_relabelled() {
+        let mut store = WorkspaceStore {
+            schema_version: STORE_SCHEMA_VERSION + 7,
+            ..WorkspaceStore::default()
+        };
+        store.upgrade();
+        assert_eq!(store.schema_version, STORE_SCHEMA_VERSION + 7);
+    }
 
     pub(super) fn definition(project_id: &str, name: &str) -> ProjectWorkspaceSpec {
         ProjectWorkspaceSpec {
