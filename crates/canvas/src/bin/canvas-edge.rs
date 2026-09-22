@@ -28,6 +28,7 @@ use canvas::control::{
 use canvas::stream_binding::{STREAM_SCHEMA_VERSION, StreamEnvelope};
 use canvas::workspace_mirror::{
     LocalWorkspaceSnapshot, MIRROR_KIND, MIRROR_SCHEMA_VERSION, WorkspaceState,
+    same_representation,
 };
 use canvas_core::unibus::{Envelope, envelope, kinds, result_message};
 use serde::Deserialize;
@@ -289,7 +290,11 @@ struct MirrorSocketGuard(std::path::PathBuf);
 #[derive(Default)]
 struct MirrorRuntime {
     local_document: Option<canvas::WorkspaceDocument>,
-    suppress_snapshot: Option<Vec<u8>>,
+    /// The board we just handed to the local canvas, held so its echo can be
+    /// recognised. Stored as a document rather than as bytes because applying
+    /// it bumps `revision`, so the snapshot that comes back never matches the
+    /// bytes that went out.
+    suppress_snapshot: Option<canvas::WorkspaceDocument>,
 }
 
 impl Drop for MirrorSocketGuard {
@@ -368,13 +373,16 @@ fn start_workspace_mirror(
                         eprintln!("canvas-edge: rejected unsupported local mirror schema");
                         continue;
                     }
-                    let local_bytes = frame.clone();
                     let suppressed = runtime
                         .lock()
                         .ok()
                         .and_then(|mut state| {
                             state.local_document = Some(local.document.clone());
-                            if state.suppress_snapshot.as_ref() == Some(&local_bytes) {
+                            if state
+                                .suppress_snapshot
+                                .as_ref()
+                                .is_some_and(|pending| same_representation(pending, &local.document))
+                            {
                                 state.suppress_snapshot.take()
                             } else {
                                 None
@@ -466,15 +474,11 @@ fn apply_workspace_mirror(
     // reconnects. Applying an identical document would restart transitions,
     // wake render work, and echo through the local publisher for no visual
     // change. Equality is the idempotency boundary for complete snapshots.
-    let local = LocalWorkspaceSnapshot {
-        schema_version: MIRROR_SCHEMA_VERSION,
-        document: state.document.clone(),
-    };
     {
         let mut runtime = runtime
             .lock()
             .map_err(|_| anyhow::anyhow!("mirror runtime lock poisoned"))?;
-        runtime.suppress_snapshot = Some(serde_json::to_vec(&local)?);
+        runtime.suppress_snapshot = Some(state.document.clone());
         runtime.local_document = Some(state.document.clone());
     }
     submit(ControlRequest {

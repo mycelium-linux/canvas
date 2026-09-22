@@ -88,7 +88,14 @@ impl Publisher {
     }
 }
 
-fn same_representation(left: &WorkspaceDocument, right: &WorkspaceDocument) -> bool {
+/// Whether two documents describe the same board.
+///
+/// `revision` is a per-canvas counter rather than a property of what is on
+/// screen, so it must stay out of the comparison. Applying a document always
+/// bumps it, so any echo check that treats the result as a *different*
+/// document will send it straight back to the peer it came from, and the two
+/// canvases will escalate revisions against each other forever.
+pub fn same_representation(left: &WorkspaceDocument, right: &WorkspaceDocument) -> bool {
     let mut left = left.clone();
     let mut right = right.clone();
     left.revision = 0;
@@ -100,9 +107,8 @@ fn same_representation(left: &WorkspaceDocument, right: &WorkspaceDocument) -> b
 mod tests {
     use super::*;
 
-    #[test]
-    fn wire_state_round_trips_without_losing_the_document() {
-        let document = WorkspaceDocument {
+    fn demo_document() -> WorkspaceDocument {
+        WorkspaceDocument {
             schema_version: crate::SCHEMA_VERSION,
             id: "demo-home".into(),
             project_id: "demo".into(),
@@ -116,7 +122,42 @@ mod tests {
             },
             bindings: Vec::new(),
             focused_surface_id: None,
-        };
+        }
+    }
+
+    /// The loop that ran two canvases to revision 112,000 against each other:
+    /// the echo check compared serialized snapshots, but applying a document
+    /// bumps its revision, so the snapshot coming back never matched the bytes
+    /// that went out. Every apply published an echo, and each echo was "newer"
+    /// than the peer's copy, so both sides escalated without end.
+    #[test]
+    fn a_document_is_the_same_board_after_its_revision_is_bumped() {
+        let document = demo_document();
+        let mut applied = document.clone();
+        applied.revision += 1;
+        assert!(
+            same_representation(&document, &applied),
+            "a bumped revision is the same board and must not echo back"
+        );
+        assert_ne!(
+            serde_json::to_vec(&document).unwrap(),
+            serde_json::to_vec(&applied).unwrap(),
+            "byte equality is exactly what failed here"
+        );
+    }
+
+    #[test]
+    fn a_real_edit_is_a_different_board() {
+        let document = demo_document();
+        let mut edited = document.clone();
+        edited.revision += 1;
+        edited.chrome.canvas_padding += 2;
+        assert!(!same_representation(&document, &edited));
+    }
+
+    #[test]
+    fn wire_state_round_trips_without_losing_the_document() {
+        let document = demo_document();
         let state = WorkspaceState {
             schema_version: MIRROR_SCHEMA_VERSION,
             workspace_key: document.id.clone(),

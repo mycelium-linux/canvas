@@ -5436,9 +5436,21 @@ impl App {
                         SurfaceContent::Asset { asset } => {
                             decoded.snapshot.asset_sha256.as_ref() == Some(&asset.sha256)
                         }
+                        // A bound widget is *meant* to diverge from its
+                        // template: stream bindings mutate the retained spec
+                        // with live values. Comparing the whole spec therefore
+                        // discarded the live widget on every document
+                        // re-application, so the surface fell back to its
+                        // placeholder and then refilled — the decision widgets
+                        // flashed "loading" and then the new state instead of
+                        // updating in place. Identity is the widget's id and
+                        // family, as it already is for live video below.
                         SurfaceContent::Widget { spec } => matches!(
                             &decoded.source,
-                            ContentSource::Widget { spec: decoded_spec } if decoded_spec == spec
+                            ContentSource::Widget { spec: decoded_spec }
+                                if decoded_spec.id == spec.id
+                                    && std::mem::discriminant(&decoded_spec.kind)
+                                        == std::mem::discriminant(&spec.kind)
                         ),
                         SurfaceContent::Chart { chart } => matches!(
                             &decoded.source,

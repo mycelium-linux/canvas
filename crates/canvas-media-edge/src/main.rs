@@ -151,8 +151,15 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
                     valid_until_unix_ms: stream.valid_until_unix_ms,
                 })?;
                 if stream_id.starts_with("retro-") {
-                    let changed = speedy_games.insert(stream_id, valid_until) != Some(valid_until);
-                    if changed {
+                    // The roster payload is the membership, and a session's
+                    // re-announcement only carries a later lease. Comparing the
+                    // expiry made every heartbeat look like a change, so the
+                    // roster republished several times a second — and because
+                    // the roster is a briefing, Canvas repainted the whole wall
+                    // each time and the decision widgets visibly flickered.
+                    // Departures are handled by the expiry sweep above.
+                    let joined = speedy_games.insert(stream_id, valid_until).is_none();
+                    if joined {
                         roster_sequence = roster_sequence.saturating_add(1);
                         publish_speedy_roster(
                             &config.bus.producer_id,
