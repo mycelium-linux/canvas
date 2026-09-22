@@ -157,6 +157,14 @@ struct Liveness {
     fan_by_session: HashMap<String, VecDeque<FanEntry>>,
 }
 
+/// A posterior as whole percent, for a label the eye can rank at a glance.
+///
+/// Clamped because a producer that sends a score outside 0..=1 should show a
+/// wrong-looking number rather than wrap around to a plausible one.
+fn percent(score: f64) -> u8 {
+    (score.clamp(0.0, 1.0) * 100.0).round() as u8
+}
+
 /// One decision, reduced to what the fan draws.
 ///
 /// The model scores *every* action it was offered, not just the one it took,
@@ -168,6 +176,13 @@ struct FanEntry {
     /// `None` while the call is still in flight, which is what draws a
     /// thinking node rather than a gap.
     selected: Option<String>,
+    /// Posterior of the action actually taken.
+    ///
+    /// Held per decision so a trunk node is lit by how sure that decision was.
+    /// `heat` then means one thing everywhere in the graph — strength of belief
+    /// — rather than recency on the trunk and probability on the branches,
+    /// which cannot be read as a single picture.
+    confidence: Option<f64>,
     /// Offered actions with their posterior, highest first.
     alternatives: Vec<(String, f64)>,
     failed: bool,
@@ -619,12 +634,20 @@ fn rlcd_decision_fan_event(
     alternatives.sort_by(|left, right| right.1.total_cmp(&left.1));
     alternatives.truncate(FAN_WIDTH);
 
+    let selected = body
+        .get("selected")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let confidence = selected.as_ref().and_then(|chosen| {
+        alternatives
+            .iter()
+            .find(|(action, _)| action == chosen)
+            .map(|(_, score)| *score)
+    });
     let entry = FanEntry {
         sequence,
-        selected: body
-            .get("selected")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
+        selected,
+        confidence,
         alternatives,
         failed: phase == "failed",
     };
@@ -650,11 +673,25 @@ fn rlcd_decision_fan_event(
     for (index, decision) in trunk.iter().enumerate() {
         // Oldest fades toward idle; the live decision is fully lit. This is the
         // trunk compression: history stays legible without taking the eye.
-        let heat = (index + 1) as f32 / depth as f32;
+        let live_node = index + 1 == depth;
+        // Heat is confidence, never recency: position already carries time,
+        // left to right. A decision nobody scored sits dim rather than
+        // borrowing brightness from being recent.
+        let heat = decision.confidence.unwrap_or(0.0) as f32;
         let id = format!("d{}", decision.sequence);
+        // The live decision's answer is exploded directly beneath it, ticked
+        // and with its odds. Repeating the word here too made the same pick
+        // read as two separate things, so the live node carries only its
+        // number and the history carries what it settled on.
+        let label = match (live_node, decision.selected.as_deref()) {
+            (true, None) => format!("#{} deciding…", decision.sequence),
+            (true, Some(_)) => format!("#{}", decision.sequence),
+            (false, Some(chosen)) => format!("#{} {chosen}", decision.sequence),
+            (false, None) => format!("#{} —", decision.sequence),
+        };
         nodes.push(serde_json::json!({
             "id": id,
-            "label": decision.selected.clone().unwrap_or_else(|| "thinking".into()),
+            "label": label,
             "group": "decided",
             "heat": heat,
             "state": if decision.failed { "warning" }
@@ -675,9 +712,17 @@ fn rlcd_decision_fan_event(
     for (rank, (action, score)) in live.alternatives.iter().enumerate() {
         let id = format!("a{rank}");
         let chosen = live.selected.as_deref() == Some(action.as_str());
+        // Colour alone could not answer "which one did it pick?" — the tick
+        // says it outright, and the percentage spares the eye from having to
+        // rank shades against each other.
+        let label = if chosen {
+            format!("✓ {action} {}%", percent(*score))
+        } else {
+            format!("{action} {}%", percent(*score))
+        };
         nodes.push(serde_json::json!({
             "id": id,
-            "label": action,
+            "label": label,
             "group": if chosen { "taken" } else { "considered" },
             "heat": *score as f32,
             "state": if chosen { "good" } else { "neutral" },
@@ -689,6 +734,14 @@ fn rlcd_decision_fan_event(
         }));
     }
 
+    // The title answers the question from across the room, before any of the
+    // graph is read: what did it just do, and how sure was it.
+    let headline = match (&live.selected, live.confidence) {
+        _ if live.failed => "failed".to_string(),
+        (Some(chosen), Some(score)) => format!("{chosen} {}%", percent(score)),
+        (Some(chosen), None) => chosen.clone(),
+        (None, _) => "deciding…".to_string(),
+    };
     let considered = live.alternatives.len();
     Ok(Some(StreamEnvelope {
         schema_version: STREAM_SCHEMA_VERSION,
@@ -703,7 +756,7 @@ fn rlcd_decision_fan_event(
         payload: serde_json::json!({
             "widget": {
                 "kind": "dag_graph",
-                "title": format!("Decision #{sequence} · {considered} considered"),
+                "title": format!("#{sequence} · {headline} · of {considered}"),
                 "nodes": nodes,
                 "edges": edges,
             },
@@ -1456,11 +1509,17 @@ mod decision_fan_tests {
 
         let taken: Vec<_> = nodes.iter().filter(|n| n["group"] == "taken").collect();
         assert_eq!(taken.len(), 1, "exactly one path was taken");
-        assert_eq!(taken[0]["label"], "uppercut");
+        assert_eq!(
+            taken[0]["label"], "✓ uppercut 24%",
+            "the pick is named outright, not left to be inferred from a shade"
+        );
 
         let considered: Vec<_> = nodes.iter().filter(|n| n["group"] == "considered").collect();
         assert_eq!(considered.len(), FAN_WIDTH - 1, "the rest fan out around it");
-        let block = considered.iter().find(|n| n["label"] == "block").unwrap();
+        let block = considered
+            .iter()
+            .find(|n| n["label"] == "block 20%")
+            .expect("an untaken action states its own odds");
         assert!(
             (block["heat"].as_f64().unwrap() - 0.20).abs() < 1e-6,
             "an untaken path fades by its real posterior, not a placeholder"
@@ -1492,9 +1551,23 @@ mod decision_fan_tests {
         let nodes = payload["widget"]["nodes"].as_array().unwrap();
         let trunk: Vec<_> = nodes.iter().filter(|n| n["group"] == "decided").collect();
         assert_eq!(trunk.len(), FAN_TRUNK_DEPTH, "history is capped");
+        // Heat is confidence now, not recency — every one of these decisions
+        // picked "block" at the same 0.20, so they are equally lit and the
+        // passage of time is carried by position instead. Mixing the two
+        // meanings into one channel is what made the graph unreadable.
         let heats: Vec<f64> = trunk.iter().map(|n| n["heat"].as_f64().unwrap()).collect();
-        assert!(heats.windows(2).all(|p| p[1] > p[0]), "older is dimmer: {heats:?}");
-        assert!((heats.last().unwrap() - 1.0).abs() < 1e-6, "the live decision is fully lit");
+        assert!(
+            heats.iter().all(|heat| (heat - 0.20).abs() < 1e-6),
+            "each node is lit by how sure that decision was: {heats:?}"
+        );
+        // Order still reads left to right, and only the live node drops the
+        // word for its choice.
+        let labels: Vec<&str> = trunk.iter().map(|n| n["label"].as_str().unwrap()).collect();
+        assert_eq!(labels.last().copied(), Some("#8"), "live node is bare: {labels:?}");
+        assert!(
+            labels[..labels.len() - 1].iter().all(|label| label.ends_with(" block")),
+            "history says what it settled on: {labels:?}"
+        );
     }
 
     /// A call still in flight draws a thinking node, and is replaced in place
@@ -1504,14 +1577,16 @@ mod decision_fan_tests {
         let mut liveness = Liveness::default();
         let pending = fan(&mut liveness, &decision(7, "requested", None));
         let thinking: Vec<_> = pending["widget"]["nodes"].as_array().unwrap().iter()
-            .filter(|n| n["label"] == "thinking").collect();
+            .filter(|n| n["label"] == "#7 deciding…").collect();
         assert_eq!(thinking.len(), 1);
 
         let done = fan(&mut liveness, &decision(7, "completed", Some("sweep")));
         let trunk: Vec<_> = done["widget"]["nodes"].as_array().unwrap().iter()
             .filter(|n| n["group"] == "decided").collect();
         assert_eq!(trunk.len(), 1, "the same decision, not two");
-        assert_eq!(trunk[0]["label"], "sweep");
+        // The live decision carries only its number: its answer is exploded
+        // directly beneath it, ticked, so naming it twice read as two things.
+        assert_eq!(trunk[0]["label"], "#7");
     }
 
     /// Canvas's stream socket is a Unix datagram; macOS caps it at 2048 and the
