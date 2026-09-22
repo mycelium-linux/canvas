@@ -3,8 +3,13 @@
 //! Scripts return declarative desired state. They receive no filesystem,
 //! process, clock, network, or GPU handles and are never retained in the frame
 //! loop; the validated [`SceneState`](crate::SceneState) is.
+//!
+//! A scene that follows a build still needs to know what exists, so the host
+//! enumerates the asset root and passes the result in as a plain table. That
+//! keeps the choice of *which* mesh to show in the scene, where it belongs,
+//! without handing the sandbox a directory to read.
 
-use crate::SceneState;
+use crate::{SceneContext, SceneState};
 use anyhow::{Result, anyhow, ensure};
 use mlua::{Lua, LuaOptions, LuaSerdeExt, StdLib, Value, VmState};
 use std::sync::{
@@ -16,6 +21,10 @@ const MAX_SCRIPT_BYTES: usize = 64 * 1024;
 const MAX_INTERRUPTS: usize = 20_000;
 
 pub fn evaluate(source: &str) -> Result<SceneState> {
+    evaluate_with(source, &SceneContext::default())
+}
+
+pub fn evaluate_with(source: &str, context: &SceneContext) -> Result<SceneState> {
     ensure!(
         source.len() <= MAX_SCRIPT_BYTES,
         "model scene Lua exceeds 64 KiB"
@@ -35,6 +44,12 @@ pub fn evaluate(source: &str) -> Result<SceneState> {
             }
         }
     });
+    let assets = lua
+        .to_value(context)
+        .map_err(|error| anyhow!("encode model scene context: {error}"))?;
+    lua.globals()
+        .set("assets", assets)
+        .map_err(|error| anyhow!("bind model scene context: {error}"))?;
     let value: Value = lua
         .load(source)
         .set_name("model-scene")

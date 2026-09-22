@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use canvas_core::VisualTheme;
 use canvas_core::{Accent, ThemeMode, ThemeSelection};
-use canvas_model_host::{CameraFlight, Material, Orbit, SceneState, lua, mesh, renderer::Renderer};
+use canvas_model_host::{CameraFlight, Material, Orbit, SceneContext, SceneState, lua, mesh, renderer::Renderer};
 use std::{
     collections::{BTreeMap, VecDeque},
     io::Write,
@@ -142,7 +142,11 @@ fn main() -> Result<()> {
     let fps: u32 = args[5].parse().context("invalid fps")?;
     anyhow::ensure!((1..=30).contains(&fps), "fps must be 1..=30");
 
-    let mut scene = read_scene(&scene_path)?;
+    // A scene cannot look at the asset root itself, so the host enumerates it
+    // and re-enumerates whenever the set changes — that is what lets a scene
+    // follow a build without anything rewriting the scene file per step.
+    let mut assets = SceneContext::scan(&asset_root);
+    let mut scene = read_scene(&scene_path, &assets)?;
     let mut scene_stamp = modified(&scene_path)?;
     let workers = std::thread::available_parallelism()
         .map_or(2, usize::from)
@@ -179,11 +183,24 @@ fn main() -> Result<()> {
     let mut next_output = 0u64;
     let mut completed = BTreeMap::new();
     let mut measured_at = Instant::now();
+    // Twice a second is well inside human reaction time for a build landing a
+    // step, and keeps a directory listing off the frame path.
+    let asset_scan_interval = Duration::from_millis(500);
+    let mut asset_scanned_at = Instant::now();
 
     loop {
         let frame_started = Instant::now();
-        if modified(&scene_path).is_ok_and(|stamp| stamp > scene_stamp) {
-            match read_scene(&scene_path) {
+        let mut assets_changed = false;
+        if asset_scanned_at.elapsed() >= asset_scan_interval {
+            asset_scanned_at = Instant::now();
+            let next_assets = SceneContext::scan(&asset_root);
+            assets_changed = next_assets != assets;
+            if assets_changed {
+                assets = next_assets;
+            }
+        }
+        if assets_changed || modified(&scene_path).is_ok_and(|stamp| stamp > scene_stamp) {
+            match read_scene(&scene_path, &assets) {
                 Ok(next) => {
                     scene_stamp = modified(&scene_path)?;
                     let asset_changed = next.asset != scene.asset;
@@ -252,10 +269,10 @@ fn main() -> Result<()> {
     }
 }
 
-fn read_scene(path: &Path) -> Result<SceneState> {
+fn read_scene(path: &Path, assets: &SceneContext) -> Result<SceneState> {
     let source =
         std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    lua::evaluate(&source)
+    lua::evaluate_with(&source, assets)
 }
 
 fn modified(path: &Path) -> Result<SystemTime> {

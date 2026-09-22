@@ -187,6 +187,61 @@ fn safe_asset(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
+/// What a scene is told about the meshes on disk.
+///
+/// Scenes are handed no filesystem, so a scene that wants to follow a build
+/// cannot go looking. The host enumerates; the scene decides. Which step to
+/// show and how to frame it stays scene policy instead of becoming renderer
+/// behaviour.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SceneContext {
+    /// Every renderable mesh beneath the asset root, in build order.
+    pub steps: Vec<String>,
+    /// The most recent one, so following a build is a single lookup.
+    ///
+    /// Omitted rather than null when there is nothing yet: mlua serializes
+    /// `None` as a NULL sentinel, which Lua's `or` treats as *present*, so a
+    /// scene's `assets.latest or fallback` would have picked the sentinel and
+    /// failed to decode. An absent key is genuinely `nil`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest: Option<String>,
+}
+
+impl SceneContext {
+    pub fn scan(root: &std::path::Path) -> Self {
+        let mut steps: Vec<String> = std::fs::read_dir(root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| safe_asset(name))
+            .collect();
+        // `step-10` comes after `step-9`, which a lexical sort gets backwards —
+        // a viewer would show the build lurching about instead of progressing.
+        steps.sort_by(|left, right| {
+            step_ordinal(left)
+                .cmp(&step_ordinal(right))
+                .then_with(|| left.cmp(right))
+        });
+        let latest = steps.last().cloned();
+        Self { steps, latest }
+    }
+}
+
+/// The trailing integer in a mesh filename, if it has one.
+fn step_ordinal(name: &str) -> Option<u64> {
+    let stem = name.strip_suffix(".stl")?;
+    let digits: String = stem
+        .chars()
+        .rev()
+        .take_while(char::is_ascii_digit)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    digits.parse().ok()
+}
+
 /// Critically damped camera transition with a deliberate overscan fly-in.
 #[derive(Debug, Clone, Copy)]
 pub struct CameraFlight {
@@ -256,5 +311,94 @@ mod tests {
         scene.asset = "sha256-deadbeef.stl".into();
         scene.transition_ms = 9_000;
         assert!(scene.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod scene_context_tests {
+    use super::*;
+
+    fn touch(dir: &std::path::Path, name: &str) {
+        std::fs::write(dir.join(name), b"solid\n").expect("write mesh");
+    }
+
+    /// A viewer following a build must see step 10 as the newest, not step 9.
+    /// A lexical sort puts "step-10.stl" before "step-2.stl", which would show
+    /// the part lurching backwards mid-build.
+    #[test]
+    fn steps_are_ordered_by_number_not_by_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in ["step-2.stl", "step-10.stl", "step-9.stl", "step-0.stl"] {
+            touch(dir.path(), name);
+        }
+        let assets = SceneContext::scan(dir.path());
+        assert_eq!(
+            assets.steps,
+            vec!["step-0.stl", "step-2.stl", "step-9.stl", "step-10.stl"]
+        );
+        assert_eq!(assets.latest.as_deref(), Some("step-10.stl"));
+    }
+
+    /// Only meshes the renderer will accept are offered, so a scene cannot be
+    /// handed a name that fails the bake.
+    #[test]
+    fn only_renderable_meshes_are_offered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        touch(dir.path(), "step-0.stl");
+        touch(dir.path(), "status.json");
+        touch(dir.path(), "notes.txt");
+        let assets = SceneContext::scan(dir.path());
+        assert_eq!(assets.steps, vec!["step-0.stl"]);
+    }
+
+    #[test]
+    fn an_empty_build_offers_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let assets = SceneContext::scan(dir.path());
+        assert!(assets.steps.is_empty());
+        assert!(assets.latest.is_none());
+    }
+
+    /// The point of the whole change: the scene picks the step, and picks a new
+    /// one as the build produces it, with nothing rewriting the scene file.
+    #[test]
+    fn the_scene_follows_the_build_without_being_edited() {
+        let source = r#"
+            return {
+              scene_id = "transmog-build",
+              asset = assets.latest or "fallback.stl",
+              fly_in = false,
+            }
+        "#;
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let empty = crate::lua::evaluate_with(source, &SceneContext::scan(dir.path()))
+            .expect("scene evaluates with no steps");
+        assert_eq!(empty.asset, "fallback.stl");
+
+        touch(dir.path(), "step-0.stl");
+        let first = crate::lua::evaluate_with(source, &SceneContext::scan(dir.path()))
+            .expect("scene evaluates");
+        assert_eq!(first.asset, "step-0.stl");
+
+        touch(dir.path(), "step-1.stl");
+        let second = crate::lua::evaluate_with(source, &SceneContext::scan(dir.path()))
+            .expect("scene evaluates");
+        assert_eq!(second.asset, "step-1.stl", "same source, newer step");
+    }
+
+    /// The shipped scene must work under StdLib::NONE — no math, string, or
+    /// table library is available to it.
+    #[test]
+    fn the_shipped_transmog_scene_evaluates_in_the_sandbox() {
+        let source = include_str!("../../../config/model-scenes/transmog-build.lua");
+        let dir = tempfile::tempdir().expect("tempdir");
+        for index in 0..3 {
+            touch(dir.path(), &format!("step-{index}.stl"));
+        }
+        let scene = crate::lua::evaluate_with(source, &SceneContext::scan(dir.path()))
+            .expect("shipped transmog scene evaluates");
+        assert_eq!(scene.asset, "step-2.stl");
+        assert!(!scene.fly_in, "each step is a cut, not a camera re-fly");
     }
 }
