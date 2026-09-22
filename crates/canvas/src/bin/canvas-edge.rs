@@ -272,9 +272,9 @@ fn ingest(
         MIRROR_KIND => apply_workspace_mirror(config, liveness, mirror_runtime, envelope),
         kinds::V1_REPLY | kinds::REPLY => Ok(()),
         canvas_core::unibus::kinds::NODE_STATE => {
-            let online = envelope.message.body["online"].as_bool().unwrap_or(true);
+            let online = envelope.message.body.get("online").and_then(serde_json::Value::as_bool).unwrap_or(true);
             if !online {
-                let producer = envelope.message.body["producer_id"]
+                let producer = envelope.message.body.get("producer_id").map_or(serde_json::Value::Null, Clone::clone)
                     .as_str()
                     .unwrap_or_default()
                     .to_owned();
@@ -595,11 +595,11 @@ fn rlcd_decision_fan_event(
     envelope: &Envelope,
 ) -> Result<Option<StreamEnvelope>> {
     let body = &envelope.message.body;
-    let session = body["session_id"]
+    let session = body.get("session_id").unwrap_or(&serde_json::Value::Null)
         .as_str()
         .context("RLCD event lacks session_id")?;
-    let sequence = body["sequence"].as_u64().context("RLCD event lacks sequence")?;
-    let phase = body["phase"].as_str().context("RLCD event lacks phase")?;
+    let sequence = body.get("sequence").unwrap_or(&serde_json::Value::Null).as_u64().context("RLCD event lacks sequence")?;
+    let phase = body.get("phase").unwrap_or(&serde_json::Value::Null).as_str().context("RLCD event lacks phase")?;
 
     // A decision still in flight carries no response at all, so this walks the
     // path rather than indexing it — indexing absent keys panics.
@@ -696,7 +696,7 @@ fn rlcd_decision_fan_event(
         stream: format!("{session}-fan"),
         contract: "canvas.widget.snapshot.v1".into(),
         sequence,
-        emitted_at_ms: body["at_unix_ms"]
+        emitted_at_ms: body.get("at_unix_ms").unwrap_or(&serde_json::Value::Null)
             .as_u64()
             .unwrap_or(envelope.issued_at_unix_ms),
         project_id: Some(rlcd_project(body)),
@@ -733,16 +733,16 @@ fn rlcd_project(body: &serde_json::Map<String, serde_json::Value>) -> String {
 
 fn rlcd_probability_event(envelope: &Envelope) -> Result<Option<StreamEnvelope>> {
     let body = &envelope.message.body;
-    if body["phase"].as_str() != Some("completed") {
+    if body.get("phase").unwrap_or(&serde_json::Value::Null).as_str() != Some("completed") {
         return Ok(None);
     }
-    let session = body["session_id"]
+    let session = body.get("session_id").unwrap_or(&serde_json::Value::Null)
         .as_str()
         .context("RLCD event lacks session_id")?;
-    let sequence = body["sequence"]
+    let sequence = body.get("sequence").unwrap_or(&serde_json::Value::Null)
         .as_u64()
         .context("RLCD event lacks sequence")?;
-    let selected = body["selected"].as_str();
+    let selected = body.get("selected").unwrap_or(&serde_json::Value::Null).as_str();
     let values = body
         .get("response")
         .and_then(|value| value.pointer("/answers/action/probabilities"))
@@ -776,7 +776,7 @@ fn rlcd_probability_event(envelope: &Envelope) -> Result<Option<StreamEnvelope>>
         stream: format!("{session}-probabilities"),
         contract: "canvas.widget.snapshot.v1".into(),
         sequence,
-        emitted_at_ms: body["at_unix_ms"]
+        emitted_at_ms: body.get("at_unix_ms").unwrap_or(&serde_json::Value::Null)
             .as_u64()
             .unwrap_or(envelope.issued_at_unix_ms),
         project_id: Some(rlcd_project(body)),
@@ -799,10 +799,10 @@ fn rlcd_probability_event(envelope: &Envelope) -> Result<Option<StreamEnvelope>>
 fn rlcd_decision_event(liveness: &mut Liveness, envelope: &Envelope) -> Result<StreamEnvelope> {
     let body = &envelope.message.body;
     ensure!(
-        body["schema_version"].as_u64() == Some(1),
+        body.get("schema_version").unwrap_or(&serde_json::Value::Null).as_u64() == Some(1),
         "unsupported RLCD schema"
     );
-    let session = body["session_id"]
+    let session = body.get("session_id").unwrap_or(&serde_json::Value::Null)
         .as_str()
         .context("RLCD event lacks session_id")?;
     ensure!(
@@ -813,13 +813,13 @@ fn rlcd_decision_event(liveness: &mut Liveness, envelope: &Envelope) -> Result<S
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
         "invalid RLCD session_id"
     );
-    let sequence = body["sequence"]
+    let sequence = body.get("sequence").unwrap_or(&serde_json::Value::Null)
         .as_u64()
         .context("RLCD event lacks sequence")?;
-    let emitted_at_ms = body["at_unix_ms"]
+    let emitted_at_ms = body.get("at_unix_ms").unwrap_or(&serde_json::Value::Null)
         .as_u64()
         .unwrap_or(envelope.issued_at_unix_ms);
-    let phase = body["phase"].as_str().context("RLCD event lacks phase")?;
+    let phase = body.get("phase").unwrap_or(&serde_json::Value::Null).as_str().context("RLCD event lacks phase")?;
     ensure!(
         matches!(phase, "requested" | "completed" | "failed"),
         "invalid RLCD phase"
@@ -828,16 +828,16 @@ fn rlcd_decision_event(liveness: &mut Liveness, envelope: &Envelope) -> Result<S
         "requested" => format!("#{sequence} · thinking…"),
         "completed" => format!(
             "#{sequence} · {} · {} ms · confidence {}",
-            body["selected"].as_str().unwrap_or("unknown"),
-            body["latency_ms"].as_u64().unwrap_or(0),
-            body["confidence"]
+            body.get("selected").unwrap_or(&serde_json::Value::Null).as_str().unwrap_or("unknown"),
+            body.get("latency_ms").unwrap_or(&serde_json::Value::Null).as_u64().unwrap_or(0),
+            body.get("confidence").unwrap_or(&serde_json::Value::Null)
                 .as_f64()
                 .map(|value| format!("{value:.2}"))
                 .unwrap_or_else(|| "—".into())
         ),
         "failed" => format!(
             "#{sequence} · failed · {}",
-            body["error"].as_str().unwrap_or("unknown error")
+            body.get("error").unwrap_or(&serde_json::Value::Null).as_str().unwrap_or("unknown error")
         ),
         _ => unreachable!(),
     };
@@ -845,11 +845,17 @@ fn rlcd_decision_event(liveness: &mut Liveness, envelope: &Envelope) -> Result<S
         .rlcd_by_session
         .entry(session.to_owned())
         .or_default();
-    if phase != "requested" {
-        entries.retain(|entry| entry["call_id"] != body["call_id"]);
+    // A producer that omits call_id is a producer whose rows cannot be
+    // de-duplicated, not a reason to take the edge down.
+    let call_id = body
+        .get("call_id")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    if phase != "requested" && !call_id.is_null() {
+        entries.retain(|entry| entry["call_id"] != call_id);
     }
     entries.push_front(serde_json::json!({
-        "call_id": body["call_id"],
+        "call_id": call_id,
         "timestamp": emitted_at_ms.to_string(),
         "message": message,
         "level": match phase { "completed" => "good", "failed" => "warning", _ => "neutral" }
@@ -877,7 +883,7 @@ fn rlcd_decision_event(liveness: &mut Liveness, envelope: &Envelope) -> Result<S
         payload: serde_json::json!({
             "widget": {
                 "kind": "event_log",
-                "title": format!("RLCD · {}", body["game"].as_str().unwrap_or(session)),
+                "title": format!("RLCD · {}", body.get("game").and_then(serde_json::Value::as_str).unwrap_or(session)),
                 "entries": visible
             },
             "data": {
@@ -1550,5 +1556,54 @@ mod rlcd_project_tests {
     fn a_producer_may_name_its_own_board() {
         let named = serde_json::json!({"project": "surf"});
         assert_eq!(rlcd_project(named.as_object().unwrap()), "surf");
+    }
+}
+
+#[cfg(test)]
+mod rlcd_robustness_tests {
+    use super::*;
+    use canvas_core::unibus::Message;
+
+    fn envelope(body: serde_json::Value) -> Envelope {
+        Envelope::new("home", "mac-studio-speedy-smb", None, "", Message::new("rlcd.decision.v1", body))
+    }
+
+    /// A decision event missing `confidence` took canvas-edge down: the body is
+    /// a serde_json::Map, and indexing a Map with an absent key panics rather
+    /// than yielding null. One optional field from one producer crash-looped
+    /// the process that feeds every RLCD widget on the wall.
+    #[test]
+    fn a_decision_without_optional_fields_does_not_panic() {
+        let mut liveness = Liveness::default();
+        let sparse = envelope(serde_json::json!({
+            "schema_version": 1,
+            "session_id": "retro-smb",
+            "sequence": 1,
+            "phase": "completed",
+            // no selected, latency_ms, confidence, at_unix_ms, game, response
+        }));
+        rlcd_decision_event(&mut liveness, &sparse).expect("sparse completed event survives");
+        rlcd_decision_fan_event(&mut liveness, &sparse).expect("fan survives");
+        // Rejecting an event with no probabilities is correct; panicking on one
+        // is not. Only the second is a defect, so assert the call returns.
+        let _ = rlcd_probability_event(&sparse);
+    }
+
+    #[test]
+    fn a_failed_decision_without_an_error_string_does_not_panic() {
+        let mut liveness = Liveness::default();
+        let sparse = envelope(serde_json::json!({
+            "schema_version": 1, "session_id": "retro-smb", "sequence": 2, "phase": "failed",
+        }));
+        rlcd_decision_event(&mut liveness, &sparse).expect("sparse failed event survives");
+    }
+
+    /// Malformed traffic is a reason to reject that event, never to exit.
+    #[test]
+    fn an_event_missing_required_fields_is_rejected_not_fatal() {
+        let mut liveness = Liveness::default();
+        let empty = envelope(serde_json::json!({}));
+        assert!(rlcd_decision_event(&mut liveness, &empty).is_err());
+        assert!(rlcd_decision_fan_event(&mut liveness, &empty).is_err());
     }
 }
