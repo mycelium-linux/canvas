@@ -520,6 +520,16 @@ pub enum SurfaceContent {
         target: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         placeholder: Option<String>,
+        /// Which of the target's sessions this surface talks to.
+        ///
+        /// `None` means "whichever session that target considers current",
+        /// resolved by the tool rather than pinned here — a session id is
+        /// ephemeral, so a document that always named one would go stale the
+        /// moment the session ended and would mirror that staleness to every
+        /// other screen. Pinning is for when you deliberately want *this*
+        /// board watching *that* session.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
     },
     /// Content from a newer Canvas, kept exactly as written.
     #[serde(untagged)]
@@ -648,6 +658,8 @@ enum Known {
         target: String,
         #[serde(default)]
         placeholder: Option<String>,
+        #[serde(default)]
+        session: Option<String>,
     },
 }
 
@@ -676,9 +688,11 @@ impl Known {
             Self::Prompt {
                 target,
                 placeholder,
+                session,
             } => SurfaceContent::Prompt {
                 target,
                 placeholder,
+                session,
             },
         }
     }
@@ -1222,6 +1236,7 @@ impl WorkspaceDocument {
                 SurfaceContent::Prompt {
                     target,
                     placeholder,
+                    session,
                 } => {
                     // An identifier, not an address: the bridge resolves where
                     // a target lives, so a document cannot name a destination
@@ -1235,6 +1250,12 @@ impl WorkspaceDocument {
                             visible(placeholder),
                             "Prompt placeholder must be printable",
                         )?;
+                    }
+                    if let Some(session) = session {
+                        // Printable rather than `identifier`: session ids come
+                        // from whichever tool minted them and their shape is
+                        // not Canvas's to dictate.
+                        check(visible(session), "Prompt session must be printable")?;
                     }
                 }
                 SurfaceContent::LiveVideo {
@@ -2330,6 +2351,7 @@ mod surface_kind_parity_tests {
         let content = SurfaceContent::Prompt {
             target: "transmog".into(),
             placeholder: Some("Describe a part".into()),
+            session: None,
         };
         let json = serde_json::to_value(&content).expect("serializes");
         assert_eq!(json["kind"], "prompt");
@@ -2348,9 +2370,36 @@ mod surface_kind_parity_tests {
             parsed,
             SurfaceContent::Prompt {
                 target: "lob".into(),
-                placeholder: None
+                placeholder: None,
+                session: None
             }
         );
+    }
+
+    /// A pinned session must survive the round trip, and an unpinned one must
+    /// stay absent rather than becoming null — the tool reads "absent" as
+    /// "use your current session".
+    #[test]
+    fn a_pinned_session_round_trips_and_an_unpinned_one_stays_absent() {
+        let pinned = SurfaceContent::Prompt {
+            target: "operator".into(),
+            placeholder: None,
+            session: Some("ses_9f2".into()),
+        };
+        let json = serde_json::to_value(&pinned).expect("serializes");
+        assert_eq!(json["session"], "ses_9f2");
+        assert_eq!(
+            serde_json::from_value::<SurfaceContent>(json).expect("parses"),
+            pinned
+        );
+
+        let unpinned = SurfaceContent::Prompt {
+            target: "operator".into(),
+            placeholder: None,
+            session: None,
+        };
+        let json = serde_json::to_value(&unpinned).expect("serializes");
+        assert!(json.get("session").is_none(), "unpinned must be absent: {json}");
     }
 
     /// A kind from a newer build still degrades to one placeholder tile rather

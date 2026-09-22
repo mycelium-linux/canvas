@@ -262,6 +262,8 @@ enum ContentSource {
     Prompt {
         target: String,
         placeholder: Option<String>,
+        /// Pinned session, or `None` to let the target choose.
+        session: Option<String>,
         draft: String,
         sent: Vec<String>,
     },
@@ -2627,6 +2629,7 @@ impl App {
         };
         let ContentSource::Prompt {
             target,
+            session,
             draft,
             sent,
             ..
@@ -2646,6 +2649,7 @@ impl App {
                     return Task::none();
                 }
                 let target = target.clone();
+                let session = session.clone();
                 draft.clear();
                 sent.push(line.clone());
                 // Only the tail is kept: this is a receipt that something was
@@ -2653,7 +2657,7 @@ impl App {
                 while sent.len() > PROMPT_SENT_TAIL {
                     sent.remove(0);
                 }
-                return self.submit_prompt(&target, &line);
+                return self.submit_prompt(&target, session.as_deref(), &line);
             }
             Key::Named(Named::Space) => draft.push(' '),
             _ => {
@@ -2677,7 +2681,12 @@ impl App {
     /// and `canvas-edge`, which already owns the canvas/bus boundary, publishes
     /// and removes it. Keeping the wall off the bus is what stops a display
     /// from becoming a client of every tool that might answer.
-    fn submit_prompt(&mut self, target: &str, line: &str) -> Task<Message> {
+    fn submit_prompt(
+        &mut self,
+        target: &str,
+        session: Option<&str>,
+        line: &str,
+    ) -> Task<Message> {
         let Some(root) = ::canvas::runtime_config::root() else {
             self.status = "No runtime directory: the prompt was not sent.".into();
             return Task::none();
@@ -2696,13 +2705,18 @@ impl App {
             .map(|since| since.as_millis() as u64)
             .unwrap_or_default();
         let name = format!("{at_ms:013}-{:06}-{target}.json", self.runtime_revision);
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "schema_version": 1,
             "target": target,
             "text": line,
             "at_unix_ms": at_ms,
             "project_id": self.document.project_id,
         });
+        // Absent rather than null when unpinned: the tool then applies its own
+        // notion of "current", which is the whole point of not pinning.
+        if let Some(session) = session {
+            body["session"] = serde_json::Value::String(session.to_string());
+        }
         match canvas_core::write_atomic(&directory.join(&name), body.to_string().as_bytes()) {
             Ok(()) => {
                 self.status = format!("Sent to {target}.");
@@ -5656,12 +5670,15 @@ impl App {
                         // comparing the whole source would discard a
                         // half-typed prompt on every document re-application —
                         // the words would vanish mid-sentence.
-                        SurfaceContent::Prompt { target, .. } => matches!(
+                        SurfaceContent::Prompt {
+                            target, session, ..
+                        } => matches!(
                             &decoded.source,
                             ContentSource::Prompt {
                                 target: decoded_target,
+                                session: decoded_session,
                                 ..
-                            } if decoded_target == target
+                            } if decoded_target == target && decoded_session == session
                         ),
                         _ => true,
                     }
@@ -5825,11 +5842,13 @@ impl App {
                 SurfaceContent::Prompt {
                     target,
                     placeholder,
+                    session,
                 } => (
                     ContentKind::Widget,
                     ContentSource::Prompt {
                         target: target.clone(),
                         placeholder: placeholder.clone(),
+                        session: session.clone(),
                         draft: String::new(),
                         sent: Vec::new(),
                     },
@@ -6126,19 +6145,23 @@ impl App {
             ContentSource::Prompt {
                 target,
                 placeholder,
+                session,
                 draft,
                 sent,
             } => {
                 let palette = self.project_palette();
                 let focused =
                     self.document.focused_surface_id.as_deref() == Some(&surface.snapshot.id);
+                // Which session is named outright: on a wall showing several
+                // agents, "→ operator" alone cannot tell you which of them is
+                // about to receive what you type.
+                let addressed = match session {
+                    Some(session) => format!("→ {target} · {session}"),
+                    None => format!("→ {target} · current session"),
+                };
                 let mut column = iced::widget::Column::<Message>::new()
                     .spacing(10)
-                    .push(
-                        text(format!("→ {target}"))
-                            .size(13)
-                            .color(color(palette.text_muted)),
-                    );
+                    .push(text(addressed).size(13).color(color(palette.text_muted)));
 
                 // An empty draft shows the placeholder muted. The caret appears
                 // only while focused, so an unfocused prompt does not look like
@@ -12239,6 +12262,7 @@ mod tests {
             content: SurfaceContent::Prompt {
                 target: "transmog".into(),
                 placeholder: None,
+                session: None,
             },
             inputs: Vec::new(),
         }];
