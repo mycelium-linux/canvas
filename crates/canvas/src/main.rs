@@ -2115,7 +2115,19 @@ impl App {
                 }
             }
 
-            let previous = self.stream_sequences.get(&binding.id).copied().unwrap_or(0);
+            let marked = self.stream_sequences.get(&binding.id).copied().unwrap_or(0);
+            let newest = matching
+                .iter()
+                .map(|event| event.sequence)
+                .max()
+                .unwrap_or_default();
+            let previous = effective_stream_watermark(marked, newest);
+            if previous != marked {
+                eprintln!(
+                    "Canvas binding {} restarted upstream at sequence {newest} (was {marked})",
+                    binding.id
+                );
+            }
             matching.retain(|event| event.sequence > previous);
             if matching.is_empty() {
                 continue;
@@ -9953,6 +9965,18 @@ fn now_unix_ms() -> u64 {
 }
 
 #[cfg(feature = "lua-scenes")]
+/// The sequence to filter a binding's incoming events against.
+///
+/// A sequence counts within one producer run, so a producer that restarts
+/// begins again below the mark we kept. Filtering on the old mark then wedges
+/// the surface until Canvas itself restarts — the Speedy decision widgets sat
+/// on their placeholder for hours because every agent restart reset the count
+/// to 1. A run that has plainly gone backwards is a new run, so re-baseline.
+/// Replays and duplicates within one run are still dropped.
+fn effective_stream_watermark(marked: u64, newest: u64) -> u64 {
+    if newest < marked { 0 } else { marked }
+}
+
 fn stream_health_transition(
     current: canvas_widgets::WidgetDataState,
     since_start: Duration,
@@ -10024,6 +10048,32 @@ mod tests {
     use super::*;
 
     #[cfg(feature = "lua-scenes")]
+    #[test]
+    /// The Speedy failure: an agent restarts, its decision counter returns to
+    /// 1, and the binding's mark is far above that. Filtering on the stale mark
+    /// discards every later decision, so the widget keeps its placeholder until
+    /// Canvas restarts.
+    #[test]
+    fn a_restarted_producer_rebaselines_instead_of_being_ignored() {
+        assert_eq!(effective_stream_watermark(5000, 1), 0);
+    }
+
+    #[test]
+    fn a_running_producer_keeps_its_mark() {
+        assert_eq!(effective_stream_watermark(41, 42), 41);
+    }
+
+    /// A duplicate or replay inside one run is not a restart.
+    #[test]
+    fn an_equal_sequence_is_not_treated_as_a_restart() {
+        assert_eq!(effective_stream_watermark(42, 42), 42);
+    }
+
+    #[test]
+    fn a_first_event_starts_from_zero() {
+        assert_eq!(effective_stream_watermark(0, 1), 0);
+    }
+
     #[test]
     fn stream_health_names_missing_first_events_and_preserves_errors() {
         use canvas_widgets::WidgetDataState;
