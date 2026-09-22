@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.fpl.canvas-model-transmog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/ajmwagar/.local/bin/canvas-model-host</string>
+    <string>/Users/ajmwagar/.config/dock/canvas/model-scenes/transmog-build.lua</string>
+    <!-- transmog's --stream directory: step-0.stl, step-1.stl, … as it builds.
+         The scene reads whichever is newest; nothing rewrites the scene. -->
+    <string>/Users/ajmwagar/.cache/dock/canvas/transmog-steps</string>
+    <!-- UDP to loopback so this Mac's own media edge binds and decodes it.
+         The tcp:// model lane is forwarded to the Pi instead. -->
+    <string>udp://127.0.0.1:55207</string>
+    <string>320</string>
+    <string>180</string>
+    <string>24</string>
+    <string>videotoolbox</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>StandardOutPath</key><string>/Users/ajmwagar/Library/Logs/canvas-model-transmog.log</string>
+  <key>StandardErrorPath</key><string>/Users/ajmwagar/Library/Logs/canvas-model-transmog.log</string>
+</dict>
+</plist>
