@@ -1,4 +1,10 @@
 //! Versioned, same-user control channel to the separately installed Accessibility app.
+//!
+//! Window and Accessibility work needs that app, because only it holds TCC
+//! access. Reading the display inventory does not: see [`displays`].
+#[cfg(target_os = "macos")]
+pub mod displays;
+
 use serde::{Deserialize, Serialize};
 use std::{
     io::{BufRead, BufReader, Read, Write},

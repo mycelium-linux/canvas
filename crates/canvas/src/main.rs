@@ -9462,20 +9462,22 @@ mod platform {
             | NSApplicationPresentationOptions::NSApplicationPresentationAutoHideMenuBar
     }
 
+    /// Canvas reads its own screens. Routing this through Dock Control made a
+    /// second process a hard dependency of Canvas knowing where it can draw:
+    /// with nothing listening on the control socket the inventory came back
+    /// empty, so the display shortcuts reported every monitor as disconnected
+    /// and Canvas could not be targeted at one.
     #[cfg(target_os = "macos")]
     pub fn displays() -> Result<Vec<DisplayInfo>, String> {
-        match canvas_control::request(canvas_control::Operation::Displays)? {
-            canvas_control::Response::Displays { displays } => Ok(displays
-                .iter()
-                .map(|display| DisplayInfo {
-                    id: display.id.clone(),
-                    name: display.name.clone(),
-                    frame: canvas_frame(display),
-                    primary: display.primary,
-                })
-                .collect()),
-            _ => Err("Dock Control did not return display geometry".into()),
-        }
+        Ok(canvas_control::displays::enumerate()?
+            .iter()
+            .map(|display| DisplayInfo {
+                id: display.id.clone(),
+                name: display.name.clone(),
+                frame: canvas_frame(display),
+                primary: display.primary,
+            })
+            .collect())
     }
 
     #[cfg(target_os = "macos")]

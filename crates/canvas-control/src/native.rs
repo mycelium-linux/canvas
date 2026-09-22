@@ -329,41 +329,10 @@ impl Native {
     }
 
     unsafe fn displays(&mut self) -> Result<Response, String> {
-        let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
-        let count: usize = msg_send![screens, count];
-        let mut raw = Vec::new();
-        for i in 0..count {
-            let screen: *mut AnyObject = msg_send![screens,objectAtIndex:i];
-            let frame: NSRect = msg_send![screen, frame];
-            let visible: NSRect = msg_send![screen, visibleFrame];
-            let name: *mut AnyObject = msg_send![screen, localizedName];
-            let desc: *mut AnyObject = msg_send![screen, deviceDescription];
-            let key = string("NSScreenNumber");
-            let number: *mut AnyObject = msg_send![desc,objectForKey:key.0 as *mut AnyObject];
-            let number: u32 = msg_send![number, unsignedIntValue];
-            let uuid = Owned(CGDisplayCreateUUIDFromDisplayID(number) as _);
-            let uuidtext = Owned(CFUUIDCreateString(ptr::null(), uuid.0 as _) as _);
-            raw.push((text(uuidtext.0), objtext(name), frame, visible));
-        }
-        let primary_height = raw.first().map(|(_, _, f, _)| f.size.height).unwrap_or(0.);
-        let rect = |r: NSRect| Rect {
-            x: r.origin.x.round() as i32,
-            y: (primary_height - r.origin.y - r.size.height).round() as i32,
-            width: r.size.width.round() as u32,
-            height: r.size.height.round() as u32,
-        };
+        // Shared with Canvas, which reads the inventory in-process rather than
+        // making this app a dependency of it knowing its own screens.
         Ok(Response::Displays {
-            displays: raw
-                .into_iter()
-                .enumerate()
-                .map(|(i, (id, name, frame, visible))| Display {
-                    id,
-                    name,
-                    frame: rect(frame),
-                    visible_frame: rect(visible),
-                    primary: i == 0,
-                })
-                .collect(),
+            displays: canvas_control::displays::enumerate()?,
         })
     }
 
