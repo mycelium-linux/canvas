@@ -154,6 +154,23 @@ struct Liveness {
     by_producer: HashMap<String, BTreeSet<String>>,
     rlcd_by_session: HashMap<String, VecDeque<serde_json::Value>>,
     mirror_sequences: HashMap<String, u64>,
+    fan_by_session: HashMap<String, VecDeque<FanEntry>>,
+}
+
+/// One decision, reduced to what the fan draws.
+///
+/// The model scores *every* action it was offered, not just the one it took,
+/// and that posterior is already on the wire. Keeping it here is what lets the
+/// paths nobody took fade by their real probability rather than by decoration.
+#[derive(Clone)]
+struct FanEntry {
+    sequence: u64,
+    /// `None` while the call is still in flight, which is what draws a
+    /// thinking node rather than a gap.
+    selected: Option<String>,
+    /// Offered actions with their posterior, highest first.
+    alternatives: Vec<(String, f64)>,
+    failed: bool,
 }
 
 impl Liveness {
@@ -530,6 +547,9 @@ fn publish_rlcd_decision(liveness: &mut Liveness, envelope: &Envelope) -> Result
     if let Some(probabilities) = rlcd_probability_event(envelope)? {
         events.push(probabilities);
     }
+    if let Some(fan) = rlcd_decision_fan_event(liveness, envelope)? {
+        events.push(fan);
+    }
     for event in events {
         let bytes = serde_json::to_vec(&event).context("encode Canvas RLCD event")?;
         ensure!(
@@ -543,6 +563,151 @@ fn publish_rlcd_decision(liveness: &mut Liveness, envelope: &Envelope) -> Result
             .with_context(|| format!("send RLCD event to {}", path.display()))?;
     }
     Ok(())
+}
+
+/// How much of the trunk stays on screen behind the live decision.
+///
+/// The trunk is history and competes with the part anyone is actually watching,
+/// so it is short and fades. Raising this costs datagram budget that the fan
+/// needs more (see `MAX_LOCAL_STREAM_DATAGRAM`).
+const FAN_TRUNK_DEPTH: usize = 5;
+/// Alternatives drawn around the live decision. The tail of a posterior is
+/// visually indistinguishable from zero, so it is not worth the bytes.
+const FAN_WIDTH: usize = 6;
+
+/// A decision fan: the recent trunk, and the live decision blooming into every
+/// action that was considered.
+///
+/// This is deliberately one level deep, because that is the shape of the data.
+/// Every decision here is an independent `Answer::Choice` over an offered set —
+/// nothing on the wire says one decision followed from another beyond sequence
+/// order. Drawing a deeper tree would be inventing structure the model never
+/// produced. What is real, and what this draws, is the posterior: the paths not
+/// taken, scored, fading against the one that was.
+fn rlcd_decision_fan_event(
+    liveness: &mut Liveness,
+    envelope: &Envelope,
+) -> Result<Option<StreamEnvelope>> {
+    let body = &envelope.message.body;
+    let session = body["session_id"]
+        .as_str()
+        .context("RLCD event lacks session_id")?;
+    let sequence = body["sequence"].as_u64().context("RLCD event lacks sequence")?;
+    let phase = body["phase"].as_str().context("RLCD event lacks phase")?;
+
+    // A decision still in flight carries no response at all, so this walks the
+    // path rather than indexing it — indexing absent keys panics.
+    let mut alternatives: Vec<(String, f64)> = body
+        .get("response")
+        .and_then(|response| response.get("answers"))
+        .and_then(|answers| answers.get("action"))
+        .and_then(|action| action.get("probabilities"))
+        .and_then(serde_json::Value::as_object)
+        .map(|scores| {
+            scores
+                .iter()
+                .filter_map(|(key, value)| value.as_f64().map(|score| (key.clone(), score)))
+                .collect()
+        })
+        .unwrap_or_default();
+    alternatives.sort_by(|left, right| right.1.total_cmp(&left.1));
+    alternatives.truncate(FAN_WIDTH);
+
+    let entry = FanEntry {
+        sequence,
+        selected: body
+            .get("selected")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        alternatives,
+        failed: phase == "failed",
+    };
+
+    let trunk = liveness.fan_by_session.entry(session.to_owned()).or_default();
+    // A decision is re-reported as it moves requested -> completed, so replace
+    // rather than append or the trunk fills with duplicates of one decision.
+    match trunk.iter().position(|held| held.sequence == sequence) {
+        Some(index) => trunk[index] = entry,
+        None => trunk.push_back(entry),
+    }
+    while trunk.len() > FAN_TRUNK_DEPTH {
+        trunk.pop_front();
+    }
+    let trunk: Vec<FanEntry> = trunk.iter().cloned().collect();
+    let Some(live) = trunk.last() else {
+        return Ok(None);
+    };
+
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let depth = trunk.len();
+    for (index, decision) in trunk.iter().enumerate() {
+        // Oldest fades toward idle; the live decision is fully lit. This is the
+        // trunk compression: history stays legible without taking the eye.
+        let heat = (index + 1) as f32 / depth as f32;
+        let id = format!("d{}", decision.sequence);
+        nodes.push(serde_json::json!({
+            "id": id,
+            "label": decision.selected.clone().unwrap_or_else(|| "thinking".into()),
+            "group": "decided",
+            "heat": heat,
+            "state": if decision.failed { "warning" }
+                     else if decision.selected.is_some() { "good" }
+                     else { "neutral" },
+        }));
+        if index > 0 {
+            edges.push(serde_json::json!({
+                "from": format!("d{}", trunk[index - 1].sequence),
+                "to": id,
+                "heat": heat,
+            }));
+        }
+    }
+
+    // Only the live decision blooms. Fanning the whole trunk would bury the
+    // thing being watched and blow the datagram budget.
+    for (rank, (action, score)) in live.alternatives.iter().enumerate() {
+        let id = format!("a{rank}");
+        let chosen = live.selected.as_deref() == Some(action.as_str());
+        nodes.push(serde_json::json!({
+            "id": id,
+            "label": action,
+            "group": if chosen { "taken" } else { "considered" },
+            "heat": *score as f32,
+            "state": if chosen { "good" } else { "neutral" },
+        }));
+        edges.push(serde_json::json!({
+            "from": format!("d{}", live.sequence),
+            "to": id,
+            "heat": *score as f32,
+        }));
+    }
+
+    let considered = live.alternatives.len();
+    Ok(Some(StreamEnvelope {
+        schema_version: STREAM_SCHEMA_VERSION,
+        owner: envelope.producer_id.clone(),
+        stream: format!("{session}-fan"),
+        contract: "canvas.widget.snapshot.v1".into(),
+        sequence,
+        emitted_at_ms: body["at_unix_ms"]
+            .as_u64()
+            .unwrap_or(envelope.issued_at_unix_ms),
+        project_id: Some("speedy".into()),
+        payload: serde_json::json!({
+            "widget": {
+                "kind": "dag_graph",
+                "title": format!("Decision #{sequence} · {considered} considered"),
+                "nodes": nodes,
+                "edges": edges,
+            },
+            "data": {
+                "state": if live.failed { "error" } else { "ready" },
+                "source": format!("unibus:{}:rlcd.decision.v1", envelope.producer_id),
+                "window": "live",
+            }
+        }),
+    }))
 }
 
 fn rlcd_probability_event(envelope: &Envelope) -> Result<Option<StreamEnvelope>> {
@@ -1214,5 +1379,125 @@ mod tests {
         assert_eq!(probabilities.payload["widget"]["bars"][0]["label"], "left");
         assert_eq!(probabilities.payload["widget"]["bars"][0]["value"], 81.0);
         assert_eq!(probabilities.payload["widget"]["bars"][0]["state"], "good");
+    }
+}
+
+#[cfg(test)]
+mod decision_fan_tests {
+    use super::*;
+    use canvas_core::unibus::Message;
+
+    fn decision(sequence: u64, phase: &str, selected: Option<&str>) -> Envelope {
+        let mut body = serde_json::json!({
+            "schema_version": 1,
+            "session_id": "retro-umk3",
+            "call_id": format!("c{sequence}"),
+            "sequence": sequence,
+            "at_unix_ms": 1_790_016_064_000_u64 + sequence,
+            "phase": phase,
+            "game": "umk3",
+        });
+        if let Some(selected) = selected {
+            body["selected"] = selected.into();
+            // A real posterior from a captured UMK3 run: every offered action
+            // scored, not just the one taken.
+            body["response"] = serde_json::json!({"answers": {"action": {"probabilities": {
+                "uppercut": 0.24, "block": 0.20, "advance": 0.19, "sweep": 0.19,
+                "retreat": 0.07, "high_punch": 0.05, "jump_kick": 0.03, "low_punch": 0.03
+            }}}});
+        }
+        Envelope::new("home", "mac-studio-speedy-umk3", None, "", Message::new("rlcd.decision.v1", body))
+    }
+
+    fn fan(liveness: &mut Liveness, envelope: &Envelope) -> serde_json::Value {
+        rlcd_decision_fan_event(liveness, envelope)
+            .expect("fan composes")
+            .expect("fan present")
+            .payload
+    }
+
+    /// The whole point of the view: paths nobody took are drawn with their real
+    /// posterior so they fade honestly, rather than being dropped or invented.
+    #[test]
+    fn every_considered_action_is_drawn_with_its_own_score() {
+        let mut liveness = Liveness::default();
+        let payload = fan(&mut liveness, &decision(1, "completed", Some("uppercut")));
+        let nodes = payload["widget"]["nodes"].as_array().unwrap();
+
+        let taken: Vec<_> = nodes.iter().filter(|n| n["group"] == "taken").collect();
+        assert_eq!(taken.len(), 1, "exactly one path was taken");
+        assert_eq!(taken[0]["label"], "uppercut");
+
+        let considered: Vec<_> = nodes.iter().filter(|n| n["group"] == "considered").collect();
+        assert_eq!(considered.len(), FAN_WIDTH - 1, "the rest fan out around it");
+        let block = considered.iter().find(|n| n["label"] == "block").unwrap();
+        assert!(
+            (block["heat"].as_f64().unwrap() - 0.20).abs() < 1e-6,
+            "an untaken path fades by its real posterior, not a placeholder"
+        );
+    }
+
+    /// Every decision is an independent choice; nothing on the wire says one
+    /// followed from another. A second level would be invented structure.
+    #[test]
+    fn the_fan_is_one_level_deep() {
+        let mut liveness = Liveness::default();
+        let payload = fan(&mut liveness, &decision(1, "completed", Some("uppercut")));
+        let edges = payload["widget"]["edges"].as_array().unwrap();
+        let alternatives: Vec<_> = edges.iter().filter(|e| e["to"].as_str().unwrap().starts_with('a')).collect();
+        assert!(
+            alternatives.iter().all(|e| e["from"] == "d1"),
+            "every considered action hangs off the live decision, nothing deeper"
+        );
+    }
+
+    /// The trunk is history: bounded, and fading toward the live decision.
+    #[test]
+    fn the_trunk_is_bounded_and_fades_into_the_past() {
+        let mut liveness = Liveness::default();
+        let mut payload = serde_json::Value::Null;
+        for sequence in 1..=(FAN_TRUNK_DEPTH as u64 + 4) {
+            payload = fan(&mut liveness, &decision(sequence, "completed", Some("block")));
+        }
+        let nodes = payload["widget"]["nodes"].as_array().unwrap();
+        let trunk: Vec<_> = nodes.iter().filter(|n| n["group"] == "decided").collect();
+        assert_eq!(trunk.len(), FAN_TRUNK_DEPTH, "history is capped");
+        let heats: Vec<f64> = trunk.iter().map(|n| n["heat"].as_f64().unwrap()).collect();
+        assert!(heats.windows(2).all(|p| p[1] > p[0]), "older is dimmer: {heats:?}");
+        assert!((heats.last().unwrap() - 1.0).abs() < 1e-6, "the live decision is fully lit");
+    }
+
+    /// A call still in flight draws a thinking node, and is replaced in place
+    /// when it completes rather than leaving a duplicate behind.
+    #[test]
+    fn an_in_flight_decision_becomes_its_result() {
+        let mut liveness = Liveness::default();
+        let pending = fan(&mut liveness, &decision(7, "requested", None));
+        let thinking: Vec<_> = pending["widget"]["nodes"].as_array().unwrap().iter()
+            .filter(|n| n["label"] == "thinking").collect();
+        assert_eq!(thinking.len(), 1);
+
+        let done = fan(&mut liveness, &decision(7, "completed", Some("sweep")));
+        let trunk: Vec<_> = done["widget"]["nodes"].as_array().unwrap().iter()
+            .filter(|n| n["group"] == "decided").collect();
+        assert_eq!(trunk.len(), 1, "the same decision, not two");
+        assert_eq!(trunk[0]["label"], "sweep");
+    }
+
+    /// Canvas's stream socket is a Unix datagram; macOS caps it at 2048 and the
+    /// edge refuses anything over 1900. A fan that exceeds it is never drawn.
+    #[test]
+    fn a_full_fan_fits_the_local_datagram() {
+        let mut liveness = Liveness::default();
+        let mut payload = serde_json::Value::Null;
+        for sequence in 1..=(FAN_TRUNK_DEPTH as u64 + 2) {
+            payload = fan(&mut liveness, &decision(sequence, "completed", Some("high_punch")));
+        }
+        let encoded = serde_json::to_vec(&payload).unwrap();
+        assert!(
+            encoded.len() <= MAX_LOCAL_STREAM_DATAGRAM,
+            "fan payload is {} bytes, over the {MAX_LOCAL_STREAM_DATAGRAM} limit",
+            encoded.len()
+        );
     }
 }
