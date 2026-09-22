@@ -15,6 +15,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const REDRAW_INTERVAL: std::time::Duration = std::time::Duration::from_millis(42);
 
+/// Size of the shader's `Uniforms`: two vec2s, staleness, and scalar padding.
+///
+/// The WGSL struct, this buffer and the bind group layout's `min_binding_size`
+/// must agree. Growing the struct without the layout aborts the process on
+/// pipeline creation rather than failing soft.
+const UNIFORM_BYTES: u64 = 32;
+
 /// A producer at 24 fps that misses this much is not merely between frames.
 const FRESH_SECONDS: f32 = 3.0;
 /// Fully drained by here: no feed this quiet is still reporting the present.
@@ -37,7 +44,11 @@ struct Uniforms {
     // 0 while the producer is writing frames, rising to 1 once it has stopped
     // for long enough that nothing on screen should be read as current.
     staleness: f32,
-    _pad: vec3<f32>,
+    // Scalars, not a vec3: a vec3 here aligns the struct to 16 and grows it to
+    // 48 bytes against a 32-byte binding, which wgpu rejects outright.
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 };
 
 @group(0) @binding(0) var frame: texture_2d<f32>;
@@ -82,12 +93,17 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         uv.y = (uv.y - 0.5) / height + 0.5;
     }
     let frame_color = textureSample(frame, frame_sampler, uv);
-    // A camera that has stopped keeps its last frame on the texture forever.
-    // Drained of colour and darkened, it still shows what was there without
-    // being mistakable for what is there now.
-    let luma = dot(frame_color.rgb, vec3<f32>(0.299, 0.587, 0.114));
-    let drained = mix(frame_color.rgb, vec3<f32>(luma), u.staleness);
-    return vec4<f32>(drained * (1.0 - 0.55 * u.staleness), frame_color.a);
+    // A camera that has stopped keeps its last frame on the texture forever, so
+    // a dead feed has to be marked. NOT by draining colour: these cameras
+    // switch to infrared at night and produce legitimately black-and-white
+    // video, so a greyscale picture is normal exactly when it matters most.
+    // Diagonal banding cannot come out of a camera, so it cannot be mistaken
+    // for the scene. Computed in framebuffer space to keep the bands an even
+    // width whatever size the surface is.
+    let band = step(0.5, fract((in.position.x + in.position.y) / 24.0));
+    let dimmed = frame_color.rgb * (1.0 - 0.45 * u.staleness);
+    let barred = dimmed * (1.0 - 0.35 * u.staleness * band);
+    return vec4<f32>(barred, frame_color.a);
 }
 "#;
 
@@ -157,8 +173,7 @@ impl Pipeline {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Canvas retained video uniforms"),
-            // vec2 + vec2 + f32 + vec3 padding, std140-aligned.
-            size: 32,
+            size: UNIFORM_BYTES,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -256,7 +271,9 @@ impl shader::Pipeline for Pipeline {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(16),
+                        // Must match the uniform struct and the buffer exactly; wgpu
+                        // refuses the pipeline outright if the layout promises less.
+                        min_binding_size: wgpu::BufferSize::new(UNIFORM_BYTES),
                     },
                     count: None,
                 },
@@ -368,7 +385,7 @@ impl shader::Primitive for Primitive {
             0.0,
         ];
         queue.write_buffer(&state.uniform, 0, unsafe {
-            std::slice::from_raw_parts(uniforms.as_ptr().cast::<u8>(), 32)
+            std::slice::from_raw_parts(uniforms.as_ptr().cast::<u8>(), UNIFORM_BYTES as usize)
         });
 
         let Some(metadata) = metadata else {
