@@ -30,6 +30,12 @@
       "name": "Speedy",
       "theme": { "source": "coherence", "mode": "dark", "accent": "info" },
       "resources": []
+    },
+    {
+      "id": "security",
+      "name": "Security",
+      "theme": { "source": "coherence", "mode": "dark", "accent": "brand" },
+      "resources": []
     }
   ]
 }
