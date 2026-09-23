@@ -139,16 +139,19 @@ fn now_ms() -> u64 {
         .unwrap_or_default()
 }
 
-fn list_sessions(
-    clients: &Clients,
-    target: &Target,
-) -> Result<Vec<Session>> {
+fn list_sessions(clients: &Clients, target: &Target) -> Result<Vec<Session>> {
+    if target.kind == AdapterKind::DesktopBridge {
+        return list_via_broker(target);
+    }
     let path = match target.kind {
         AdapterKind::Edgerunner => edgerunner::list_path(target.project.as_deref()),
         AdapterKind::Surf => surf::list_path().to_string(),
+        AdapterKind::DesktopBridge => unreachable!("handled above"),
     };
     let response = authorized(
-        clients.get(&target.name)?.get(format!("{}{path}", target.base_url)),
+        clients
+            .get(&target.name)?
+            .get(format!("{}{path}", target.http_base()?)),
         target,
     )
     .header("Accept", "application/json")
@@ -178,8 +181,37 @@ fn list_sessions(
         .filter_map(|item| match target.kind {
             AdapterKind::Edgerunner => edgerunner::parse_session(item, stamp),
             AdapterKind::Surf => surf::parse_session(item, stamp),
+            AdapterKind::DesktopBridge => None,
         })
         .collect())
+}
+
+
+/// List sessions by asking the desktop bridge, which attaches the owner's OIDC
+/// identity itself.
+///
+/// A subprocess rather than an HTTP call because that is the interface offered:
+/// the bridge prints JSON and keeps the credential. Bounded output so a
+/// misbehaving binary cannot grow this process without limit.
+fn list_via_broker(target: &Target) -> Result<Vec<Session>> {
+    use canvas_agent_bridge::desktop_bridge;
+
+    let output = std::process::Command::new(target.broker_command())
+        .args(desktop_bridge::list_args())
+        .output()
+        .with_context(|| format!("run {} for {}", target.broker_command(), target.name))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "{} owner-session list failed: {}",
+        target.broker_command(),
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .last()
+            .unwrap_or("no detail")
+    );
+    let reply: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .context("desktop bridge printed something that is not JSON")?;
+    desktop_bridge::parse_list(&reply, now_ms())
 }
 
 fn deliver(config: &BridgeConfig, clients: &Clients, body: &serde_json::Value) -> Result<()> {
@@ -191,6 +223,14 @@ fn deliver(config: &BridgeConfig, clients: &Clients, body: &serde_json::Value) -
         )
     })?;
 
+    // Refused here, with a reason, rather than further in: the desktop bridge
+    // brokers reads and vends no token, so it has no way to send anything.
+    anyhow::ensure!(
+        target.kind.can_deliver(),
+        "target {:?} is read-only through the desktop bridge; it can show sessions but not \
+         receive a prompt",
+        target.name
+    );
     let session = match prompt.session.as_deref() {
         Some(pinned) => pinned.to_string(),
         None => {
@@ -205,12 +245,13 @@ fn deliver(config: &BridgeConfig, clients: &Clients, body: &serde_json::Value) -
             edgerunner::message_body(&prompt.text),
         ),
         AdapterKind::Surf => (surf::execute_path(&session), surf::execute_body(&prompt.text)),
+        AdapterKind::DesktopBridge => anyhow::bail!("refused above"),
     };
 
     let response = authorized(
         clients
             .get(&target.name)?
-            .post(format!("{}{path}", target.base_url)),
+            .post(format!("{}{path}", target.http_base()?)),
         target,
     )
     .json(&payload)

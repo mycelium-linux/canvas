@@ -14,6 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod desktop_bridge;
 pub mod edgerunner;
 pub mod roster;
 pub mod surf;
@@ -29,6 +30,22 @@ pub enum AdapterKind {
     Edgerunner,
     /// Surf: a browsing agent driven by observe/execute.
     Surf,
+    /// Edgerunner, reached through `fpl-desktop-bridge` so the OIDC credential
+    /// never enters this process. Read-only: the bridge brokers narrow reads
+    /// and deliberately vends no token, so a roster works and a prompt does
+    /// not.
+    DesktopBridge,
+}
+
+impl AdapterKind {
+    /// Whether this adapter can deliver a prompt, as opposed to only reading.
+    ///
+    /// Stated as a property rather than discovered at delivery time, so a
+    /// prompt aimed at a read-only target is refused with a reason instead of
+    /// failing somewhere further in.
+    pub fn can_deliver(self) -> bool {
+        !matches!(self, Self::DesktopBridge)
+    }
 }
 
 /// One target a prompt surface may name.
@@ -38,7 +55,12 @@ pub struct Target {
     /// The name Canvas uses. Matched exactly against a prompt's `target`.
     pub name: String,
     pub kind: AdapterKind,
-    pub base_url: String,
+    /// Control-plane origin. Unused by adapters that shell out.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Binary to invoke for adapters that broker through a local command.
+    #[serde(default)]
+    pub command: Option<String>,
     /// Environment variable holding the bearer token.
     ///
     /// A variable name rather than the token itself, so a config file that
@@ -52,6 +74,25 @@ pub struct Target {
     /// supports it.
     #[serde(default)]
     pub project: Option<String>,
+}
+
+impl Target {
+    /// The origin for adapters that speak HTTP.
+    ///
+    /// An error rather than an empty string: a request built against "" would
+    /// go somewhere surprising instead of failing.
+    pub fn http_base(&self) -> anyhow::Result<&str> {
+        self.base_url.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("target {:?} has no base_url to call", self.name)
+        })
+    }
+
+    /// The command for adapters that broker through a local binary.
+    pub fn broker_command(&self) -> &str {
+        self.command
+            .as_deref()
+            .unwrap_or(desktop_bridge::DEFAULT_COMMAND)
+    }
 }
 
 /// Read, never written: `BusConfig` is deserialize-only upstream, and a config
@@ -94,12 +135,23 @@ impl BridgeConfig {
                 "two targets are both named {:?}; a prompt could not say which it meant",
                 target.name
             );
-            anyhow::ensure!(
-                target.base_url.starts_with("http://") || target.base_url.starts_with("https://"),
-                "target {:?} needs an http(s) base_url, got {:?}",
-                target.name,
-                target.base_url
-            );
+            match target.kind {
+                AdapterKind::DesktopBridge => anyhow::ensure!(
+                    target.base_url.is_none(),
+                    "target {:?} is brokered through a command, so a base_url would be ignored \
+                     rather than honoured",
+                    target.name
+                ),
+                AdapterKind::Edgerunner | AdapterKind::Surf => {
+                    let base = target.base_url.as_deref().unwrap_or_default();
+                    anyhow::ensure!(
+                        base.starts_with("http://") || base.starts_with("https://"),
+                        "target {:?} needs an http(s) base_url, got {:?}",
+                        target.name,
+                        target.base_url
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -255,6 +307,27 @@ mod tests {
         assert!(!rendered.contains("token\":"), "{rendered}");
     }
 
+
+    #[test]
+    fn a_brokered_target_needs_no_url_and_refuses_one() {
+        let brokered = parse(config(serde_json::json!([
+            {"name": "operator", "kind": "desktop_bridge"}
+        ])))
+        .expect("valid without a url");
+        assert!(!brokered.target("operator").unwrap().kind.can_deliver());
+
+        let error = parse(config(serde_json::json!([
+            {"name": "operator", "kind": "desktop_bridge", "base_url": "https://a.example"}
+        ])))
+        .expect_err("a url here would be silently ignored");
+        assert!(error.to_string().contains("would be ignored"), "{error}");
+    }
+
+    #[test]
+    fn http_adapters_still_deliver_prompts() {
+        assert!(AdapterKind::Edgerunner.can_deliver());
+        assert!(AdapterKind::Surf.can_deliver());
+    }
     #[test]
     fn a_prompt_needs_a_target_and_something_to_say() {
         let good = Prompt::parse(&serde_json::json!({"target": "operator", "text": "status?"}))
