@@ -9,7 +9,8 @@ use canvas_media_edge::{
 };
 use serde::Deserialize;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
+    fs,
     io::{BufReader, Read},
     os::unix::net::UnixDatagram,
     path::{Path, PathBuf},
@@ -114,7 +115,9 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
     let mut last_beat = 0_u64;
     loop {
         let now = now_unix_ms();
+        let wanted = wanted_video();
         decoders.expire(now);
+        decoders.retain_wanted(wanted.as_ref());
         let before = speedy_games.len();
         speedy_games.retain(|_, valid_until| *valid_until > now);
         // Republish when the clock turns the beat over, or when the roster
@@ -139,7 +142,7 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
                 let stream: CameraStream =
                     serde_json::from_value(serde_json::Value::Object(envelope.message.body))
                         .context("decode camera.stream.v1")?;
-                decoders.upsert(stream)?;
+                decoders.upsert(stream, wanted.as_ref())?;
             }
             Some((envelope, _payload)) if envelope.message.kind == VIDEO_STREAM_CONTRACT => {
                 let stream: VideoStream =
@@ -148,7 +151,8 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
                 stream.validate().map_err(anyhow::Error::msg)?;
                 let stream_id = stream.stream_id.clone();
                 let valid_until = stream.valid_until_unix_ms;
-                decoders.upsert(CameraStream {
+                decoders.upsert(
+                    CameraStream {
                     schema_version: stream.schema_version,
                     camera_id: stream.stream_id,
                     display_name: stream.display_name,
@@ -162,7 +166,9 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
                     frame_rate_millihz: stream.frame_rate_millihz,
                     announced_at_unix_ms: stream.announced_at_unix_ms,
                     valid_until_unix_ms: stream.valid_until_unix_ms,
-                })?;
+                    },
+                    wanted.as_ref(),
+                )?;
                 if stream_id.starts_with("retro-") {
                     // The roster payload is the membership, and a session's
                     // re-announcement only carries a later lease. Comparing the
@@ -217,6 +223,25 @@ fn spotlight_beat(now_unix_ms: u64) -> u64 {
     now_unix_ms / SPOTLIGHT_DWELL_MS
 }
 
+
+/// The video sources Canvas says it is displaying.
+///
+/// `None` is "no preference", which is what an absent, unreadable or empty list
+/// means: a Canvas that has not written one yet, or is not running, must not
+/// cause every decoder to stop. Only an explicit, non-empty list narrows what
+/// this edge decodes.
+fn wanted_video() -> Option<BTreeSet<String>> {
+    let root = canvas_core::runtime_root()?;
+    let body = fs::read_to_string(root.join("state/wanted-video")).ok()?;
+    let wanted: BTreeSet<String> = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect();
+    (!wanted.is_empty()).then_some(wanted)
+}
+
 fn publish_speedy_roster(owner: &str, sequence: u64, games: &BTreeMap<String, u64>) -> Result<()> {
     let path = canvas_core::stream_socket_path().context("Canvas stream socket unavailable")?;
     let event = StreamEnvelope {
@@ -259,8 +284,13 @@ impl DecoderSet {
         }
     }
 
-    fn upsert(&mut self, stream: CameraStream) -> Result<()> {
+    fn upsert(&mut self, stream: CameraStream, wanted: Option<&BTreeSet<String>>) -> Result<()> {
         stream.validate().map_err(anyhow::Error::msg)?;
+        // Announced but not displayed: remember nothing and spawn nothing. The
+        // announcement will come round again when it is wanted.
+        if wanted.is_some_and(|wanted| !wanted.contains(&stream.camera_id)) {
+            return Ok(());
+        }
         ensure!(
             stream.valid_until_unix_ms > now_unix_ms(),
             "stream announcement is expired"
@@ -289,6 +319,26 @@ impl DecoderSet {
         self.workers.insert(id.clone(), worker);
         eprintln!("canvas-media-edge: started native camera source '{id}'");
         Ok(())
+    }
+
+    /// Stop decoding anything the display is not asking for.
+    ///
+    /// `None` means no preference — an absent or unreadable list must keep the
+    /// wall fed, never blank it.
+    fn retain_wanted(&mut self, wanted: Option<&BTreeSet<String>>) {
+        let Some(wanted) = wanted else { return };
+        let unwanted: Vec<_> = self
+            .workers
+            .keys()
+            .filter(|id| !wanted.contains(*id))
+            .cloned()
+            .collect();
+        for id in unwanted {
+            if let Some(worker) = self.workers.remove(&id) {
+                worker.stop();
+            }
+            eprintln!("canvas-media-edge: stopped '{id}', nothing on screen shows it");
+        }
     }
 
     fn expire(&mut self, now: u64) {
@@ -447,5 +497,44 @@ mod tests {
             )
             .is_err()
         );
+    }
+}
+#[cfg(test)]
+mod wanted_video_tests {
+    use super::*;
+
+    fn parse(body: &str) -> Option<BTreeSet<String>> {
+        let wanted: BTreeSet<String> = body
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect();
+        (!wanted.is_empty()).then_some(wanted)
+    }
+
+    /// The rule the wall depends on: no list means decode everything. A reader
+    /// that treated "I cannot find it" as "show nothing" would blank every
+    /// display the moment Canvas restarted.
+    #[test]
+    fn an_empty_or_blank_list_is_no_preference() {
+        assert!(parse("").is_none());
+        assert!(parse("\n\n   \n").is_none());
+    }
+
+    #[test]
+    fn a_list_narrows_to_exactly_what_it_names() {
+        let wanted = parse("retro-smb\nretro-smk\n").expect("a real list");
+        assert!(wanted.contains("retro-smb"));
+        assert!(wanted.contains("retro-smk"));
+        assert!(!wanted.contains("cat"), "an off-screen camera is not wanted");
+        assert_eq!(wanted.len(), 2);
+    }
+
+    #[test]
+    fn surrounding_whitespace_does_not_hide_a_source() {
+        let wanted = parse("  retro-smb  \n\tcat\t\n").expect("a real list");
+        assert!(wanted.contains("retro-smb"));
+        assert!(wanted.contains("cat"));
     }
 }
