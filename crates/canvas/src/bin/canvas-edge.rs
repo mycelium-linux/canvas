@@ -1138,25 +1138,32 @@ fn rlcd_decision_event(liveness: &mut Liveness, envelope: &Envelope) -> Result<S
         "invalid RLCD phase"
     );
     let message = match phase {
-        "requested" => format!("#{sequence} · thinking…"),
-        "completed" => format!(
-            "#{sequence} · {} · {} ms · confidence {}",
-            body.get("selected")
-                .unwrap_or(&serde_json::Value::Null)
-                .as_str()
-                .unwrap_or("unknown"),
-            body.get("latency_ms")
-                .unwrap_or(&serde_json::Value::Null)
-                .as_u64()
-                .unwrap_or(0),
-            body.get("confidence")
-                .unwrap_or(&serde_json::Value::Null)
-                .as_f64()
-                .map(|value| format!("{value:.2}"))
-                .unwrap_or_else(|| "—".into())
-        ),
+        "requested" => "thinking…".to_string(),
+        // Terse on purpose: this sits in a strip a few characters tall. The
+        // sequence number was the widest thing on every line and told a viewer
+        // nothing, and a baseline policy reports confidence 1.00 every single
+        // time — printing it on every row spends the width on a constant.
+        // Confidence appears only when it is not certain, which is exactly
+        // when it is worth reading.
+        "completed" => {
+            let action = body
+                .get("selected")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+                .replace('_', " ");
+            let latency = body
+                .get("latency_ms")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            match body.get("confidence").and_then(serde_json::Value::as_f64) {
+                Some(confidence) if confidence < 0.999 => {
+                    format!("{action} · {latency}ms · {:.0}%", confidence * 100.0)
+                }
+                _ => format!("{action} · {latency}ms"),
+            }
+        }
         "failed" => format!(
-            "#{sequence} · failed · {}",
+            "failed · {}",
             body.get("error")
                 .unwrap_or(&serde_json::Value::Null)
                 .as_str()
@@ -1206,7 +1213,14 @@ fn rlcd_decision_event(liveness: &mut Liveness, envelope: &Envelope) -> Result<S
         payload: serde_json::json!({
             "widget": {
                 "kind": "event_log",
-                "title": format!("RLCD · {}", body.get("game").and_then(serde_json::Value::as_str).unwrap_or(session)),
+                // The surface already names the game, and chrome titles are
+                // hidden on this board, so "RLCD · smb" spent a line repeating
+                // the tile it sits in.
+                "title": body
+                    .get("game")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(session)
+                    .to_string(),
                 "entries": visible
             },
             "data": {
@@ -1718,7 +1732,19 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(message.contains("left"));
-        assert!(message.contains("44 ms"));
+        assert!(message.contains("44ms"));
+        // The row sits in a strip a few characters tall, so what is *absent*
+        // matters as much as what is present: the sequence number was the
+        // widest thing on the line, and a baseline reports confidence 1.00
+        // every time.
+        assert!(
+            !message.contains('#'),
+            "the sequence number is not worth the width: {message}"
+        );
+        assert!(
+            !message.contains("confidence"),
+            "a certain decision should not spend a line saying so: {message}"
+        );
 
         let probabilities = rlcd_probability_event(&event("completed", Some("left")))
             .unwrap()

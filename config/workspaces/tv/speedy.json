@@ -2,7 +2,7 @@
  "schema_version": 1,
  "id": "speedy-workspace",
  "project_id": "speedy",
- "revision": 9,
+ "revision": 10,
  "theme": {
   "source": "project"
  },
@@ -278,18 +278,18 @@
     "bounds": {
      "x": 0.004,
      "y": 0.006,
-     "width": 0.4,
-     "height": 0.492
+     "width": 0.492,
+     "height": 0.4
     },
     "layer": 0
    },
    {
     "surface_id": "umk3-decision",
     "bounds": {
-     "x": 0.408,
-     "y": 0.006,
-     "width": 0.088,
-     "height": 0.492
+     "x": 0.004,
+     "y": 0.412,
+     "width": 0.492,
+     "height": 0.086
     },
     "layer": 0
    },
@@ -298,18 +298,18 @@
     "bounds": {
      "x": 0.504,
      "y": 0.006,
-     "width": 0.4,
-     "height": 0.492
+     "width": 0.492,
+     "height": 0.4
     },
     "layer": 0
    },
    {
     "surface_id": "smk-decision",
     "bounds": {
-     "x": 0.908,
-     "y": 0.006,
-     "width": 0.088,
-     "height": 0.492
+     "x": 0.504,
+     "y": 0.412,
+     "width": 0.492,
+     "height": 0.086
     },
     "layer": 0
    },
@@ -318,18 +318,18 @@
     "bounds": {
      "x": 0.004,
      "y": 0.502,
-     "width": 0.4,
-     "height": 0.492
+     "width": 0.492,
+     "height": 0.4
     },
     "layer": 0
    },
    {
     "surface_id": "smb-decision",
     "bounds": {
-     "x": 0.408,
-     "y": 0.502,
-     "width": 0.088,
-     "height": 0.492
+     "x": 0.004,
+     "y": 0.908,
+     "width": 0.492,
+     "height": 0.086
     },
     "layer": 0
    },
@@ -338,18 +338,18 @@
     "bounds": {
      "x": 0.504,
      "y": 0.502,
-     "width": 0.4,
-     "height": 0.492
+     "width": 0.492,
+     "height": 0.4
     },
     "layer": 0
    },
    {
     "surface_id": "tetris-decision",
     "bounds": {
-     "x": 0.908,
-     "y": 0.502,
-     "width": 0.088,
-     "height": 0.492
+     "x": 0.504,
+     "y": 0.908,
+     "width": 0.492,
+     "height": 0.086
     },
     "layer": 0
    }
@@ -465,18 +465,18 @@
       "bounds": {
        "x": 0.004,
        "y": 0.006,
-       "width": 0.4,
-       "height": 0.988
+       "width": 0.492,
+       "height": 0.86
       },
       "layer": 0
      },
      {
       "surface_id": "retro2048-decision",
       "bounds": {
-       "x": 0.408,
-       "y": 0.006,
-       "width": 0.088,
-       "height": 0.988
+       "x": 0.004,
+       "y": 0.872,
+       "width": 0.492,
+       "height": 0.12
       },
       "layer": 0
      },
@@ -485,18 +485,18 @@
       "bounds": {
        "x": 0.504,
        "y": 0.006,
-       "width": 0.4,
-       "height": 0.988
+       "width": 0.492,
+       "height": 0.86
       },
       "layer": 0
      },
      {
       "surface_id": "freedoom-decision",
       "bounds": {
-       "x": 0.908,
-       "y": 0.006,
-       "width": 0.088,
-       "height": 0.988
+       "x": 0.504,
+       "y": 0.872,
+       "width": 0.492,
+       "height": 0.12
       },
       "layer": 0
      }
