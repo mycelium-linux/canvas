@@ -23,5 +23,8 @@
  "stream_endpoint": "udp://127.0.0.1:55119",
  "advertised_endpoint": "udp://0.0.0.0:55119",
  "encoder": "apple_video_toolbox",
- "player_slots": 1
+ "player_slots": 1,
+ "mirror_endpoints": [
+  "udp://100.120.101.5:55119"
+ ]
 }

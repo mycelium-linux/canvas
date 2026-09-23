@@ -123,7 +123,16 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
         let beat = spotlight_beat(now);
         if speedy_games.len() != before || (beat != last_beat && !speedy_games.is_empty()) {
             last_beat = beat;
-            publish_speedy_roster(&config.bus.producer_id, beat, &speedy_games)?;
+            // Canvas owns the stream socket, and on a machine that starts this
+            // edge first the socket does not exist yet. Propagating that error
+            // tore down the run loop and every decoder with it, so the host
+            // never decoded anything until Canvas happened to win the race.
+            // A roster nobody can receive yet is a reason to try again later,
+            // not a reason to stop decoding video.
+            if let Err(error) = publish_speedy_roster(&config.bus.producer_id, beat, &speedy_games)
+            {
+                eprintln!("canvas-media-edge: roster not published yet: {error:#}");
+            }
         }
         match bus.try_read()? {
             Some((envelope, _payload)) if envelope.message.kind == CAMERA_STREAM_CONTRACT => {
@@ -167,11 +176,13 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
                         // A new game recomposes the board, but under the
                         // spotlight the clock already chose — joining must not
                         // advance the rotation.
-                        publish_speedy_roster(
+                        if let Err(error) = publish_speedy_roster(
                             &config.bus.producer_id,
                             spotlight_beat(now_unix_ms()),
                             &speedy_games,
-                        )?;
+                        ) {
+                            eprintln!("canvas-media-edge: roster not published yet: {error:#}");
+                        }
                     }
                 }
             }
