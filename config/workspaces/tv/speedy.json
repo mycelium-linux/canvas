@@ -2,7 +2,7 @@
  "schema_version": 1,
  "id": "speedy-workspace",
  "project_id": "speedy",
- "revision": 7,
+ "revision": 8,
  "theme": {
   "source": "project"
  },
@@ -29,68 +29,6 @@
    "inputs": []
   },
   {
-   "id": "umk3-rlcd",
-   "title": "UMK3 decisions",
-   "content": {
-    "kind": "widget",
-    "spec": {
-     "schema_version": 2,
-     "id": "umk3-rlcd",
-     "kind": "event_log",
-     "title": "UMK3 \u00b7 waiting",
-     "entries": [],
-     "theme": null,
-     "refresh_ms": 50,
-     "chrome": "standard",
-     "data": {
-      "state": "loading",
-      "source": "unibus:rlcd.decision.v1",
-      "observed_at": null,
-      "window": "live",
-      "detail": null,
-      "provenance": "live"
-     }
-    }
-   },
-   "inputs": [
-    {
-     "id": "decisions",
-     "contract": "canvas.widget.snapshot.v1"
-    }
-   ]
-  },
-  {
-   "id": "umk3-fan",
-   "title": "UMK3 decisions",
-   "content": {
-    "kind": "widget",
-    "spec": {
-     "schema_version": 2,
-     "id": "umk3-fan",
-     "kind": "dag_graph",
-     "title": "Awaiting decision",
-     "nodes": [],
-     "edges": [],
-     "theme": null,
-     "chrome": "frameless",
-     "data": {
-      "state": "loading",
-      "source": "unibus:rlcd.decision.v1",
-      "observed_at": null,
-      "window": "live",
-      "detail": null,
-      "provenance": "live"
-     }
-    }
-   },
-   "inputs": [
-    {
-     "id": "fan",
-     "contract": "canvas.widget.snapshot.v1"
-    }
-   ]
-  },
-  {
    "id": "smk-game",
    "title": "Super Mario Kart",
    "content": {
@@ -100,68 +38,6 @@
     "height": 224
    },
    "inputs": []
-  },
-  {
-   "id": "smk-rlcd",
-   "title": "Mario Kart decisions",
-   "content": {
-    "kind": "widget",
-    "spec": {
-     "schema_version": 2,
-     "id": "smk-rlcd",
-     "kind": "event_log",
-     "title": "Mario Kart \u00b7 idle",
-     "entries": [],
-     "theme": null,
-     "refresh_ms": 50,
-     "chrome": "frameless",
-     "data": {
-      "state": "loading",
-      "source": "unibus:rlcd.decision.v1",
-      "observed_at": null,
-      "window": "live",
-      "detail": null,
-      "provenance": "live"
-     }
-    }
-   },
-   "inputs": [
-    {
-     "id": "decisions",
-     "contract": "canvas.widget.snapshot.v1"
-    }
-   ]
-  },
-  {
-   "id": "smk-fan",
-   "title": "SMK decisions",
-   "content": {
-    "kind": "widget",
-    "spec": {
-     "schema_version": 2,
-     "id": "smk-fan",
-     "kind": "dag_graph",
-     "title": "Awaiting decision",
-     "nodes": [],
-     "edges": [],
-     "theme": null,
-     "chrome": "frameless",
-     "data": {
-      "state": "loading",
-      "source": "unibus:rlcd.decision.v1",
-      "observed_at": null,
-      "window": "live",
-      "detail": null,
-      "provenance": "live"
-     }
-    }
-   },
-   "inputs": [
-    {
-     "id": "fan",
-     "contract": "canvas.widget.snapshot.v1"
-    }
-   ]
   },
   {
    "id": "smb-game",
@@ -175,68 +51,6 @@
    "inputs": []
   },
   {
-   "id": "smb-rlcd",
-   "title": "SMB decisions",
-   "content": {
-    "kind": "widget",
-    "spec": {
-     "schema_version": 2,
-     "id": "smb-rlcd",
-     "kind": "event_log",
-     "title": "Super Mario Bros. \u00b7 idle",
-     "entries": [],
-     "theme": null,
-     "refresh_ms": 50,
-     "chrome": "frameless",
-     "data": {
-      "state": "loading",
-      "source": "unibus:rlcd.decision.v1",
-      "observed_at": null,
-      "window": "live",
-      "detail": null,
-      "provenance": "live"
-     }
-    }
-   },
-   "inputs": [
-    {
-     "id": "decisions",
-     "contract": "canvas.widget.snapshot.v1"
-    }
-   ]
-  },
-  {
-   "id": "smb-fan",
-   "title": "SMB decisions",
-   "content": {
-    "kind": "widget",
-    "spec": {
-     "schema_version": 2,
-     "id": "smb-fan",
-     "kind": "dag_graph",
-     "title": "Awaiting decision",
-     "nodes": [],
-     "edges": [],
-     "theme": null,
-     "chrome": "frameless",
-     "data": {
-      "state": "loading",
-      "source": "unibus:rlcd.decision.v1",
-      "observed_at": null,
-      "window": "live",
-      "detail": null,
-      "provenance": "live"
-     }
-    }
-   },
-   "inputs": [
-    {
-     "id": "fan",
-     "contract": "canvas.widget.snapshot.v1"
-    }
-   ]
-  },
-  {
    "id": "tetris-game",
    "title": "Tetris",
    "content": {
@@ -246,68 +60,6 @@
     "height": 144
    },
    "inputs": []
-  },
-  {
-   "id": "tetris-rlcd",
-   "title": "Tetris decisions",
-   "content": {
-    "kind": "widget",
-    "spec": {
-     "schema_version": 2,
-     "id": "tetris-rlcd",
-     "kind": "event_log",
-     "title": "Tetris \u00b7 idle",
-     "entries": [],
-     "theme": null,
-     "refresh_ms": 50,
-     "chrome": "frameless",
-     "data": {
-      "state": "loading",
-      "source": "unibus:rlcd.decision.v1",
-      "observed_at": null,
-      "window": "live",
-      "detail": null,
-      "provenance": "live"
-     }
-    }
-   },
-   "inputs": [
-    {
-     "id": "decisions",
-     "contract": "canvas.widget.snapshot.v1"
-    }
-   ]
-  },
-  {
-   "id": "tetris-fan",
-   "title": "TETRIS decisions",
-   "content": {
-    "kind": "widget",
-    "spec": {
-     "schema_version": 2,
-     "id": "tetris-fan",
-     "kind": "dag_graph",
-     "title": "Awaiting decision",
-     "nodes": [],
-     "edges": [],
-     "theme": null,
-     "chrome": "frameless",
-     "data": {
-      "state": "loading",
-      "source": "unibus:rlcd.decision.v1",
-      "observed_at": null,
-      "window": "live",
-      "detail": null,
-      "provenance": "live"
-     }
-    }
-   },
-   "inputs": [
-    {
-     "id": "fan",
-     "contract": "canvas.widget.snapshot.v1"
-    }
-   ]
   },
   {
    "id": "retro2048-game",
@@ -321,68 +73,6 @@
    "inputs": []
   },
   {
-   "id": "retro2048-rlcd",
-   "title": "2048 \u00b7 idle",
-   "content": {
-    "kind": "widget",
-    "spec": {
-     "schema_version": 2,
-     "id": "retro2048-rlcd",
-     "kind": "event_log",
-     "title": "2048 \u00b7 idle",
-     "entries": [],
-     "theme": null,
-     "refresh_ms": 50,
-     "chrome": "frameless",
-     "data": {
-      "state": "loading",
-      "source": "unibus:rlcd.decision.v1",
-      "observed_at": null,
-      "window": "live",
-      "detail": null,
-      "provenance": "live"
-     }
-    }
-   },
-   "inputs": [
-    {
-     "id": "decisions",
-     "contract": "canvas.widget.snapshot.v1"
-    }
-   ]
-  },
-  {
-   "id": "retro2048-fan",
-   "title": "2048 decisions",
-   "content": {
-    "kind": "widget",
-    "spec": {
-     "schema_version": 2,
-     "id": "retro2048-fan",
-     "kind": "dag_graph",
-     "title": "Awaiting decision",
-     "nodes": [],
-     "edges": [],
-     "theme": null,
-     "chrome": "frameless",
-     "data": {
-      "state": "loading",
-      "source": "unibus:rlcd.decision.v1",
-      "observed_at": null,
-      "window": "live",
-      "detail": null,
-      "provenance": "live"
-     }
-    }
-   },
-   "inputs": [
-    {
-     "id": "fan",
-     "contract": "canvas.widget.snapshot.v1"
-    }
-   ]
-  },
-  {
    "id": "freedoom-game",
    "title": "FreeDoom",
    "content": {
@@ -394,18 +84,24 @@
    "inputs": []
   },
   {
-   "id": "freedoom-rlcd",
-   "title": "FreeDoom \u00b7 idle",
+   "id": "umk3-decision",
+   "title": "Ultimate Mortal Kombat 3 decision",
    "content": {
     "kind": "widget",
     "spec": {
      "schema_version": 2,
-     "id": "freedoom-rlcd",
-     "kind": "event_log",
-     "title": "FreeDoom \u00b7 idle",
-     "entries": [],
+     "id": "umk3-decision",
+     "kind": "ranked_bar",
+     "title": "Awaiting decision",
+     "bars": [
+      {
+       "label": "waiting",
+       "value": 0.0,
+       "state": "neutral"
+      }
+     ],
+     "unit": "%",
      "theme": null,
-     "refresh_ms": 50,
      "chrome": "frameless",
      "data": {
       "state": "loading",
@@ -419,23 +115,29 @@
    },
    "inputs": [
     {
-     "id": "decisions",
+     "id": "decision",
      "contract": "canvas.widget.snapshot.v1"
     }
    ]
   },
   {
-   "id": "freedoom-fan",
-   "title": "FreeDoom decisions",
+   "id": "smk-decision",
+   "title": "Super Mario Kart decision",
    "content": {
     "kind": "widget",
     "spec": {
      "schema_version": 2,
-     "id": "freedoom-fan",
-     "kind": "dag_graph",
+     "id": "smk-decision",
+     "kind": "ranked_bar",
      "title": "Awaiting decision",
-     "nodes": [],
-     "edges": [],
+     "bars": [
+      {
+       "label": "waiting",
+       "value": 0.0,
+       "state": "neutral"
+      }
+     ],
+     "unit": "%",
      "theme": null,
      "chrome": "frameless",
      "data": {
@@ -450,7 +152,155 @@
    },
    "inputs": [
     {
-     "id": "fan",
+     "id": "decision",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "smb-decision",
+   "title": "Super Mario Bros. decision",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "smb-decision",
+     "kind": "ranked_bar",
+     "title": "Awaiting decision",
+     "bars": [
+      {
+       "label": "waiting",
+       "value": 0.0,
+       "state": "neutral"
+      }
+     ],
+     "unit": "%",
+     "theme": null,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "decision",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "tetris-decision",
+   "title": "Tetris decision",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "tetris-decision",
+     "kind": "ranked_bar",
+     "title": "Awaiting decision",
+     "bars": [
+      {
+       "label": "waiting",
+       "value": 0.0,
+       "state": "neutral"
+      }
+     ],
+     "unit": "%",
+     "theme": null,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "decision",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "retro2048-decision",
+   "title": "2048 decision",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "retro2048-decision",
+     "kind": "ranked_bar",
+     "title": "Awaiting decision",
+     "bars": [
+      {
+       "label": "waiting",
+       "value": 0.0,
+       "state": "neutral"
+      }
+     ],
+     "unit": "%",
+     "theme": null,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "decision",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "freedoom-decision",
+   "title": "FreeDoom decision",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "freedoom-decision",
+     "kind": "ranked_bar",
+     "title": "Awaiting decision",
+     "bars": [
+      {
+       "label": "waiting",
+       "value": 0.0,
+       "state": "neutral"
+      }
+     ],
+     "unit": "%",
+     "theme": null,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "decision",
      "contract": "canvas.widget.snapshot.v1"
     }
    ]
@@ -464,28 +314,18 @@
     "bounds": {
      "x": 0.004,
      "y": 0.006,
-     "width": 0.362,
+     "width": 0.4,
      "height": 0.492
     },
     "layer": 0
    },
    {
-    "surface_id": "umk3-fan",
+    "surface_id": "umk3-decision",
     "bounds": {
-     "x": 0.37,
+     "x": 0.408,
      "y": 0.006,
-     "width": 0.126,
-     "height": 0.3
-    },
-    "layer": 0
-   },
-   {
-    "surface_id": "umk3-rlcd",
-    "bounds": {
-     "x": 0.37,
-     "y": 0.312,
-     "width": 0.126,
-     "height": 0.186
+     "width": 0.088,
+     "height": 0.492
     },
     "layer": 0
    },
@@ -494,28 +334,18 @@
     "bounds": {
      "x": 0.504,
      "y": 0.006,
-     "width": 0.362,
+     "width": 0.4,
      "height": 0.492
     },
     "layer": 0
    },
    {
-    "surface_id": "smk-fan",
+    "surface_id": "smk-decision",
     "bounds": {
-     "x": 0.87,
+     "x": 0.908,
      "y": 0.006,
-     "width": 0.126,
-     "height": 0.3
-    },
-    "layer": 0
-   },
-   {
-    "surface_id": "smk-rlcd",
-    "bounds": {
-     "x": 0.87,
-     "y": 0.312,
-     "width": 0.126,
-     "height": 0.186
+     "width": 0.088,
+     "height": 0.492
     },
     "layer": 0
    },
@@ -524,28 +354,18 @@
     "bounds": {
      "x": 0.004,
      "y": 0.502,
-     "width": 0.362,
+     "width": 0.4,
      "height": 0.492
     },
     "layer": 0
    },
    {
-    "surface_id": "smb-fan",
+    "surface_id": "smb-decision",
     "bounds": {
-     "x": 0.37,
+     "x": 0.408,
      "y": 0.502,
-     "width": 0.126,
-     "height": 0.3
-    },
-    "layer": 0
-   },
-   {
-    "surface_id": "smb-rlcd",
-    "bounds": {
-     "x": 0.37,
-     "y": 0.808,
-     "width": 0.126,
-     "height": 0.186
+     "width": 0.088,
+     "height": 0.492
     },
     "layer": 0
    },
@@ -554,28 +374,18 @@
     "bounds": {
      "x": 0.504,
      "y": 0.502,
-     "width": 0.362,
+     "width": 0.4,
      "height": 0.492
     },
     "layer": 0
    },
    {
-    "surface_id": "tetris-fan",
+    "surface_id": "tetris-decision",
     "bounds": {
-     "x": 0.87,
+     "x": 0.908,
      "y": 0.502,
-     "width": 0.126,
-     "height": 0.3
-    },
-    "layer": 0
-   },
-   {
-    "surface_id": "tetris-rlcd",
-    "bounds": {
-     "x": 0.87,
-     "y": 0.808,
-     "width": 0.126,
-     "height": 0.186
+     "width": 0.088,
+     "height": 0.492
     },
     "layer": 0
    }
@@ -583,15 +393,15 @@
  },
  "bindings": [
   {
-   "id": "umk3-rlcd-live",
+   "id": "umk3-decision-live",
    "source": {
     "owner": "mac-studio-speedy-umk3",
-    "stream": "retro-umk3",
+    "stream": "retro-umk3-probabilities",
     "contract": "canvas.widget.snapshot.v1"
    },
    "target": {
-    "surface_id": "umk3-rlcd",
-    "input_id": "decisions"
+    "surface_id": "umk3-decision",
+    "input_id": "decision"
    },
    "adapter": "widget-snapshot-v1",
    "delivery": {
@@ -599,31 +409,15 @@
    }
   },
   {
-   "id": "umk3-fan-live",
-   "source": {
-    "owner": "mac-studio-speedy-umk3",
-    "stream": "retro-umk3-fan",
-    "contract": "canvas.widget.snapshot.v1"
-   },
-   "target": {
-    "surface_id": "umk3-fan",
-    "input_id": "fan"
-   },
-   "adapter": "widget-snapshot-v1",
-   "delivery": {
-    "mode": "latest"
-   }
-  },
-  {
-   "id": "smk-rlcd-live",
+   "id": "smk-decision-live",
    "source": {
     "owner": "mac-studio-speedy-smk",
-    "stream": "retro-smk",
+    "stream": "retro-smk-probabilities",
     "contract": "canvas.widget.snapshot.v1"
    },
    "target": {
-    "surface_id": "smk-rlcd",
-    "input_id": "decisions"
+    "surface_id": "smk-decision",
+    "input_id": "decision"
    },
    "adapter": "widget-snapshot-v1",
    "delivery": {
@@ -631,31 +425,15 @@
    }
   },
   {
-   "id": "smk-fan-live",
-   "source": {
-    "owner": "mac-studio-speedy-smk",
-    "stream": "retro-smk-fan",
-    "contract": "canvas.widget.snapshot.v1"
-   },
-   "target": {
-    "surface_id": "smk-fan",
-    "input_id": "fan"
-   },
-   "adapter": "widget-snapshot-v1",
-   "delivery": {
-    "mode": "latest"
-   }
-  },
-  {
-   "id": "smb-rlcd-live",
+   "id": "smb-decision-live",
    "source": {
     "owner": "mac-studio-speedy-smb",
-    "stream": "retro-smb",
+    "stream": "retro-smb-probabilities",
     "contract": "canvas.widget.snapshot.v1"
    },
    "target": {
-    "surface_id": "smb-rlcd",
-    "input_id": "decisions"
+    "surface_id": "smb-decision",
+    "input_id": "decision"
    },
    "adapter": "widget-snapshot-v1",
    "delivery": {
@@ -663,31 +441,15 @@
    }
   },
   {
-   "id": "smb-fan-live",
-   "source": {
-    "owner": "mac-studio-speedy-smb",
-    "stream": "retro-smb-fan",
-    "contract": "canvas.widget.snapshot.v1"
-   },
-   "target": {
-    "surface_id": "smb-fan",
-    "input_id": "fan"
-   },
-   "adapter": "widget-snapshot-v1",
-   "delivery": {
-    "mode": "latest"
-   }
-  },
-  {
-   "id": "tetris-rlcd-live",
+   "id": "tetris-decision-live",
    "source": {
     "owner": "mac-studio-speedy-tetris",
-    "stream": "retro-gb-tetris",
+    "stream": "retro-gb-tetris-probabilities",
     "contract": "canvas.widget.snapshot.v1"
    },
    "target": {
-    "surface_id": "tetris-rlcd",
-    "input_id": "decisions"
+    "surface_id": "tetris-decision",
+    "input_id": "decision"
    },
    "adapter": "widget-snapshot-v1",
    "delivery": {
@@ -695,31 +457,15 @@
    }
   },
   {
-   "id": "tetris-fan-live",
-   "source": {
-    "owner": "mac-studio-speedy-tetris",
-    "stream": "retro-gb-tetris-fan",
-    "contract": "canvas.widget.snapshot.v1"
-   },
-   "target": {
-    "surface_id": "tetris-fan",
-    "input_id": "fan"
-   },
-   "adapter": "widget-snapshot-v1",
-   "delivery": {
-    "mode": "latest"
-   }
-  },
-  {
-   "id": "retro2048-rlcd-live",
+   "id": "retro2048-decision-live",
    "source": {
     "owner": "mac-studio-speedy-2048",
-    "stream": "retro-2048",
+    "stream": "retro-2048-probabilities",
     "contract": "canvas.widget.snapshot.v1"
    },
    "target": {
-    "surface_id": "retro2048-rlcd",
-    "input_id": "decisions"
+    "surface_id": "retro2048-decision",
+    "input_id": "decision"
    },
    "adapter": "widget-snapshot-v1",
    "delivery": {
@@ -727,47 +473,15 @@
    }
   },
   {
-   "id": "retro2048-fan-live",
-   "source": {
-    "owner": "mac-studio-speedy-2048",
-    "stream": "retro-2048-fan",
-    "contract": "canvas.widget.snapshot.v1"
-   },
-   "target": {
-    "surface_id": "retro2048-fan",
-    "input_id": "fan"
-   },
-   "adapter": "widget-snapshot-v1",
-   "delivery": {
-    "mode": "latest"
-   }
-  },
-  {
-   "id": "freedoom-rlcd-live",
+   "id": "freedoom-decision-live",
    "source": {
     "owner": "mac-studio-speedy-freedoom",
-    "stream": "retro-freedoom",
+    "stream": "retro-freedoom-probabilities",
     "contract": "canvas.widget.snapshot.v1"
    },
    "target": {
-    "surface_id": "freedoom-rlcd",
-    "input_id": "decisions"
-   },
-   "adapter": "widget-snapshot-v1",
-   "delivery": {
-    "mode": "latest"
-   }
-  },
-  {
-   "id": "freedoom-fan-live",
-   "source": {
-    "owner": "mac-studio-speedy-freedoom",
-    "stream": "retro-freedoom-fan",
-    "contract": "canvas.widget.snapshot.v1"
-   },
-   "target": {
-    "surface_id": "freedoom-fan",
-    "input_id": "fan"
+    "surface_id": "freedoom-decision",
+    "input_id": "decision"
    },
    "adapter": "widget-snapshot-v1",
    "delivery": {
@@ -787,28 +501,18 @@
       "bounds": {
        "x": 0.004,
        "y": 0.006,
-       "width": 0.362,
+       "width": 0.4,
        "height": 0.988
       },
       "layer": 0
      },
      {
-      "surface_id": "retro2048-fan",
+      "surface_id": "retro2048-decision",
       "bounds": {
-       "x": 0.37,
+       "x": 0.408,
        "y": 0.006,
-       "width": 0.126,
-       "height": 0.6
-      },
-      "layer": 0
-     },
-     {
-      "surface_id": "retro2048-rlcd",
-      "bounds": {
-       "x": 0.37,
-       "y": 0.612,
-       "width": 0.126,
-       "height": 0.382
+       "width": 0.088,
+       "height": 0.988
       },
       "layer": 0
      },
@@ -817,28 +521,18 @@
       "bounds": {
        "x": 0.504,
        "y": 0.006,
-       "width": 0.362,
+       "width": 0.4,
        "height": 0.988
       },
       "layer": 0
      },
      {
-      "surface_id": "freedoom-fan",
+      "surface_id": "freedoom-decision",
       "bounds": {
-       "x": 0.87,
+       "x": 0.908,
        "y": 0.006,
-       "width": 0.126,
-       "height": 0.6
-      },
-      "layer": 0
-     },
-     {
-      "surface_id": "freedoom-rlcd",
-      "bounds": {
-       "x": 0.87,
-       "y": 0.612,
-       "width": 0.126,
-       "height": 0.382
+       "width": 0.088,
+       "height": 0.988
       },
       "layer": 0
      }

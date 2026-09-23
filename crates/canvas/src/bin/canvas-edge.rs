@@ -1050,6 +1050,20 @@ fn rlcd_probability_event(envelope: &Envelope) -> Result<Option<StreamEnvelope>>
         !bars.is_empty(),
         "completed RLCD event has no probabilities"
     );
+    let headline = match selected {
+        Some(action) => {
+            let taken = bars
+                .iter()
+                .find(|bar| bar["label"] == action.replace('_', " "))
+                .and_then(|bar| bar["value"].as_f64());
+            match taken {
+                Some(value) => format!("{} {:.0}%", action.replace('_', " "), value),
+                None => action.replace('_', " "),
+            }
+        }
+        None => "deciding…".to_string(),
+    };
+
     Ok(Some(StreamEnvelope {
         schema_version: STREAM_SCHEMA_VERSION,
         owner: envelope.producer_id.clone(),
@@ -1065,7 +1079,11 @@ fn rlcd_probability_event(envelope: &Envelope) -> Result<Option<StreamEnvelope>>
         payload: serde_json::json!({
             "widget": {
                 "kind": "ranked_bar",
-                "title": format!("Decision #{sequence} · {}", selected.unwrap_or("unknown").replace('_', " ")),
+                // The action taken and how sure it was, and nothing else. The
+                // sequence number read as the loudest thing on the tile while
+                // being the least useful at a glance, and the confidence —
+                // the one number worth crossing the room for — was missing.
+                "title": headline,
                 "bars": bars,
                 "unit": "%"
             },

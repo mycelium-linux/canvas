@@ -140,6 +140,35 @@ impl ArtifactManifest {
 }
 
 /// Path to the global user-level artifact directory.
+
+/// Ask the kernel for a larger receive queue on the stream socket.
+///
+/// Four games deciding at once burst far faster than one frame drains, and the
+/// default queue is small enough that producers were getting ENOBUFS and
+/// dropping snapshots. Best effort on purpose: a kernel that refuses the size
+/// leaves the default in place, which is the behaviour we already had.
+fn widen_receive_buffer(socket: &UnixDatagram) {
+    use std::os::fd::AsRawFd;
+
+    let wanted: libc::c_int = 4 * 1024 * 1024;
+    // SAFETY: a valid fd owned by `socket`, and a correctly sized option value.
+    let applied = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            std::ptr::from_ref(&wanted).cast(),
+            std::mem::size_of_val(&wanted) as libc::socklen_t,
+        )
+    };
+    if applied != 0 {
+        eprintln!(
+            "Canvas stream socket kept its default receive buffer: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
 fn global_artifact_path(id: &str) -> Option<PathBuf> {
     let state_root = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -328,6 +357,7 @@ pub fn start_server() -> Result<(StreamInbox, StreamSocketGuard)> {
         fs::remove_file(&path).map_err(|error| Error(error.to_string()))?;
     }
     let socket = UnixDatagram::bind(&path).map_err(|error| Error(error.to_string()))?;
+    widen_receive_buffer(&socket);
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
         .map_err(|error| Error(error.to_string()))?;
     let inbox = StreamInbox::default();
