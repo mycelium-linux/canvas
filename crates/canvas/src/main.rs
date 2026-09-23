@@ -989,6 +989,7 @@ impl App {
         };
         app.publish_web_themes();
         app.publish_active_project();
+        app.publish_wanted_video();
         app.ensure_scene_decoded();
         app.reset_background_animation();
         Ok(app)
@@ -2748,6 +2749,9 @@ impl App {
         // here. Anything the incoming page shows that has never been drawn
         // decodes on demand, exactly as it would on first paint.
         self.ensure_scene_decoded();
+        // The visible set changed even though the document did not, so the
+        // media edge needs telling or it keeps feeding the page you left.
+        self.publish_wanted_video();
         self.bump();
         self.emit_event(format!("page_switched {index}"));
         Task::none()
@@ -5692,6 +5696,7 @@ impl App {
         self.shared_views.clear();
         self.live_pending.clear();
         self.publish_active_project();
+        self.publish_wanted_video();
         #[cfg(feature = "lua-scenes")]
         {
             self.stream_sequences.clear();
@@ -5716,6 +5721,45 @@ impl App {
                 self.document.chrome,
                 self.window_chrome().titlebar_height,
             );
+        }
+    }
+
+    /// Publish the video sources this Canvas is actually showing.
+    ///
+    /// The media edge decodes whatever is announced, which means a camera on a
+    /// board nobody is looking at still burns a decoder. On the Pi that is not
+    /// merely wasteful: its H.264 decoding is hardware, and the buffer pool ran
+    /// out once there were enough streams, after which nothing decoded at all.
+    /// Only Canvas knows what is on screen, so only Canvas can say.
+    ///
+    /// Written as a plain list under the runtime root, the same way the active
+    /// project is published. An empty or missing file means "no preference",
+    /// never "nothing" — a reader that cannot find this must keep decoding
+    /// rather than blank the wall.
+    fn publish_wanted_video(&mut self) {
+        let Some(root) = canvas_core::runtime_root() else {
+            return;
+        };
+        let placed = placement_surface_ids(self.document.active_layout());
+        let mut wanted: Vec<&str> = self
+            .document
+            .surfaces
+            .iter()
+            .filter(|surface| placed.iter().any(|id| id == &surface.id))
+            .filter_map(|surface| match &surface.content {
+                SurfaceContent::LiveVideo { source_id, .. } => Some(source_id.as_str()),
+                SurfaceContent::LiveImage { source_id } => Some(source_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+        let body = wanted.join("\n");
+        if let Err(error) =
+            canvas_core::write_atomic(&root.join("state/wanted-video"), body.as_bytes())
+        {
+            self.events
+                .push(format!("wanted_video_publish_failed {error}"));
         }
     }
 

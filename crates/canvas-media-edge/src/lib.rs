@@ -13,8 +13,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use unibus_media::{
-    CameraDetections, CameraStream, MEDIA_SCHEMA_VERSION, TransportRole, VideoCodec,
-    VideoTransport,
+    CameraDetections, CameraStream, MEDIA_SCHEMA_VERSION, TransportRole, VideoCodec, VideoTransport,
 };
 
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -407,9 +406,36 @@ pub fn write_frame(runtime_root: &Path, camera_id: &str, bytes: &[u8]) -> Result
     Ok(path)
 }
 
+
+/// Create a directory tree owner-only, including any parents this is the first
+/// to make.
+///
+/// Whichever process reaches `<runtime>/dock/canvas` first on a fresh boot
+/// decides its mode, and Canvas refuses to start against anything other than
+/// 0700 — "Canvas control directory must be owner-only mode 0700". When this
+/// edge won that race with the default 0755 the display crash-looped to a grey
+/// screen, so creating them narrow is not a preference but a requirement of the
+/// directory being shared.
+fn create_owner_only(path: &Path) -> Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    if path.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        create_owner_only(parent)?;
+    }
+    match fs::DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) => Ok(()),
+        // Another process created it between the check and the call.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("create {}", path.display())),
+    }
+}
+
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().context("output path has no parent")?;
-    fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    create_owner_only(parent)?;
     let temp = path.with_extension(format!("tmp-{}", std::process::id()));
     fs::write(&temp, bytes).with_context(|| format!("write {}", temp.display()))?;
     fs::rename(&temp, path).with_context(|| format!("publish {}", path.display()))?;
