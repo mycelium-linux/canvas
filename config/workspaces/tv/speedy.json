@@ -2,7 +2,7 @@
  "schema_version": 1,
  "id": "speedy-workspace",
  "project_id": "speedy",
- "revision": 8,
+ "revision": 9,
  "theme": {
   "source": "project"
  },
@@ -91,16 +91,8 @@
     "spec": {
      "schema_version": 2,
      "id": "umk3-decision",
-     "kind": "ranked_bar",
-     "title": "Awaiting decision",
-     "bars": [
-      {
-       "label": "waiting",
-       "value": 0.0,
-       "state": "neutral"
-      }
-     ],
-     "unit": "%",
+     "kind": "event_log",
+     "title": "Ultimate Mortal Kombat 3 decision",
      "theme": null,
      "chrome": "frameless",
      "data": {
@@ -110,7 +102,9 @@
       "window": "live",
       "detail": null,
       "provenance": "live"
-     }
+     },
+     "entries": [],
+     "refresh_ms": 50
     }
    },
    "inputs": [
@@ -128,16 +122,8 @@
     "spec": {
      "schema_version": 2,
      "id": "smk-decision",
-     "kind": "ranked_bar",
-     "title": "Awaiting decision",
-     "bars": [
-      {
-       "label": "waiting",
-       "value": 0.0,
-       "state": "neutral"
-      }
-     ],
-     "unit": "%",
+     "kind": "event_log",
+     "title": "Super Mario Kart decision",
      "theme": null,
      "chrome": "frameless",
      "data": {
@@ -147,7 +133,9 @@
       "window": "live",
       "detail": null,
       "provenance": "live"
-     }
+     },
+     "entries": [],
+     "refresh_ms": 50
     }
    },
    "inputs": [
@@ -165,16 +153,8 @@
     "spec": {
      "schema_version": 2,
      "id": "smb-decision",
-     "kind": "ranked_bar",
-     "title": "Awaiting decision",
-     "bars": [
-      {
-       "label": "waiting",
-       "value": 0.0,
-       "state": "neutral"
-      }
-     ],
-     "unit": "%",
+     "kind": "event_log",
+     "title": "Super Mario Bros. decision",
      "theme": null,
      "chrome": "frameless",
      "data": {
@@ -184,7 +164,9 @@
       "window": "live",
       "detail": null,
       "provenance": "live"
-     }
+     },
+     "entries": [],
+     "refresh_ms": 50
     }
    },
    "inputs": [
@@ -202,16 +184,8 @@
     "spec": {
      "schema_version": 2,
      "id": "tetris-decision",
-     "kind": "ranked_bar",
-     "title": "Awaiting decision",
-     "bars": [
-      {
-       "label": "waiting",
-       "value": 0.0,
-       "state": "neutral"
-      }
-     ],
-     "unit": "%",
+     "kind": "event_log",
+     "title": "Tetris decision",
      "theme": null,
      "chrome": "frameless",
      "data": {
@@ -221,7 +195,9 @@
       "window": "live",
       "detail": null,
       "provenance": "live"
-     }
+     },
+     "entries": [],
+     "refresh_ms": 50
     }
    },
    "inputs": [
@@ -239,16 +215,8 @@
     "spec": {
      "schema_version": 2,
      "id": "retro2048-decision",
-     "kind": "ranked_bar",
-     "title": "Awaiting decision",
-     "bars": [
-      {
-       "label": "waiting",
-       "value": 0.0,
-       "state": "neutral"
-      }
-     ],
-     "unit": "%",
+     "kind": "event_log",
+     "title": "2048 decision",
      "theme": null,
      "chrome": "frameless",
      "data": {
@@ -258,7 +226,9 @@
       "window": "live",
       "detail": null,
       "provenance": "live"
-     }
+     },
+     "entries": [],
+     "refresh_ms": 50
     }
    },
    "inputs": [
@@ -276,16 +246,8 @@
     "spec": {
      "schema_version": 2,
      "id": "freedoom-decision",
-     "kind": "ranked_bar",
-     "title": "Awaiting decision",
-     "bars": [
-      {
-       "label": "waiting",
-       "value": 0.0,
-       "state": "neutral"
-      }
-     ],
-     "unit": "%",
+     "kind": "event_log",
+     "title": "FreeDoom decision",
      "theme": null,
      "chrome": "frameless",
      "data": {
@@ -295,7 +257,9 @@
       "window": "live",
       "detail": null,
       "provenance": "live"
-     }
+     },
+     "entries": [],
+     "refresh_ms": 50
     }
    },
    "inputs": [
@@ -396,7 +360,7 @@
    "id": "umk3-decision-live",
    "source": {
     "owner": "mac-studio-speedy-umk3",
-    "stream": "retro-umk3-probabilities",
+    "stream": "retro-umk3",
     "contract": "canvas.widget.snapshot.v1"
    },
    "target": {
@@ -412,7 +376,7 @@
    "id": "smk-decision-live",
    "source": {
     "owner": "mac-studio-speedy-smk",
-    "stream": "retro-smk-probabilities",
+    "stream": "retro-smk",
     "contract": "canvas.widget.snapshot.v1"
    },
    "target": {
@@ -428,7 +392,7 @@
    "id": "smb-decision-live",
    "source": {
     "owner": "mac-studio-speedy-smb",
-    "stream": "retro-smb-probabilities",
+    "stream": "retro-smb",
     "contract": "canvas.widget.snapshot.v1"
    },
    "target": {
@@ -444,7 +408,7 @@
    "id": "tetris-decision-live",
    "source": {
     "owner": "mac-studio-speedy-tetris",
-    "stream": "retro-gb-tetris-probabilities",
+    "stream": "retro-gb-tetris",
     "contract": "canvas.widget.snapshot.v1"
    },
    "target": {
@@ -460,7 +424,7 @@
    "id": "retro2048-decision-live",
    "source": {
     "owner": "mac-studio-speedy-2048",
-    "stream": "retro-2048-probabilities",
+    "stream": "retro-2048",
     "contract": "canvas.widget.snapshot.v1"
    },
    "target": {
@@ -476,7 +440,7 @@
    "id": "freedoom-decision-live",
    "source": {
     "owner": "mac-studio-speedy-freedoom",
-    "stream": "retro-freedoom-probabilities",
+    "stream": "retro-freedoom",
     "contract": "canvas.widget.snapshot.v1"
    },
    "target": {
