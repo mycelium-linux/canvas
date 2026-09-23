@@ -1754,11 +1754,9 @@ impl App {
                 // A focused prompt takes the keys before the terminal arm,
                 // so typing lands in the prompt rather than being swallowed.
                 if let Some(id) = self.document.focused_surface_id.clone() {
-                    if self
-                        .decoded
-                        .get(&id)
-                        .is_some_and(|surface| matches!(surface.source, ContentSource::Prompt { .. }))
-                    {
+                    if self.decoded.get(&id).is_some_and(|surface| {
+                        matches!(surface.source, ContentSource::Prompt { .. })
+                    }) {
                         return self.handle_prompt_key(&id, kbd_event);
                     }
                 }
@@ -2681,12 +2679,7 @@ impl App {
     /// and `canvas-edge`, which already owns the canvas/bus boundary, publishes
     /// and removes it. Keeping the wall off the bus is what stops a display
     /// from becoming a client of every tool that might answer.
-    fn submit_prompt(
-        &mut self,
-        target: &str,
-        session: Option<&str>,
-        line: &str,
-    ) -> Task<Message> {
+    fn submit_prompt(&mut self, target: &str, session: Option<&str>, line: &str) -> Task<Message> {
         let Some(root) = ::canvas::runtime_config::root() else {
             self.status = "No runtime directory: the prompt was not sent.".into();
             return Task::none();
@@ -6199,7 +6192,11 @@ impl App {
                     .style(move |_| iced::widget::container::Style {
                         background: Some(color(palette.surface).into()),
                         border: iced::Border {
-                            color: color(if focused { palette.primary } else { palette.border }),
+                            color: color(if focused {
+                                palette.primary
+                            } else {
+                                palette.border
+                            }),
                             width: 1.0,
                             radius: 6.0.into(),
                         },
@@ -12323,7 +12320,10 @@ mod tests {
             .filter_map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
             .filter(|body| body["text"] == "go")
             .collect();
-        assert!(!found.is_empty(), "the line should be spooled for the bridge");
+        assert!(
+            !found.is_empty(),
+            "the line should be spooled for the bridge"
+        );
         assert_eq!(found[0]["target"], "transmog");
     }
 

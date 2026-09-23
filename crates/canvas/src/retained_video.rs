@@ -473,7 +473,9 @@ mod staleness_tests {
 
     #[test]
     fn decay_is_monotonic() {
-        let curve: Vec<f32> = (0..30).map(|s| staleness_of(Duration::from_secs(s))).collect();
+        let curve: Vec<f32> = (0..30)
+            .map(|s| staleness_of(Duration::from_secs(s)))
+            .collect();
         assert!(curve.windows(2).all(|pair| pair[1] >= pair[0]), "{curve:?}");
     }
 }

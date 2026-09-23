@@ -27,8 +27,7 @@ use canvas::control::{
 };
 use canvas::stream_binding::{STREAM_SCHEMA_VERSION, StreamEnvelope};
 use canvas::workspace_mirror::{
-    LocalWorkspaceSnapshot, MIRROR_KIND, MIRROR_SCHEMA_VERSION, WorkspaceState,
-    same_representation,
+    LocalWorkspaceSnapshot, MIRROR_KIND, MIRROR_SCHEMA_VERSION, WorkspaceState, same_representation,
 };
 use canvas_core::unibus::{Envelope, envelope, kinds, result_message};
 use serde::Deserialize;
@@ -288,9 +287,18 @@ fn ingest(
         MIRROR_KIND => apply_workspace_mirror(config, liveness, mirror_runtime, envelope),
         kinds::V1_REPLY | kinds::REPLY => Ok(()),
         canvas_core::unibus::kinds::NODE_STATE => {
-            let online = envelope.message.body.get("online").and_then(serde_json::Value::as_bool).unwrap_or(true);
+            let online = envelope
+                .message
+                .body
+                .get("online")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
             if !online {
-                let producer = envelope.message.body.get("producer_id").map_or(serde_json::Value::Null, Clone::clone)
+                let producer = envelope
+                    .message
+                    .body
+                    .get("producer_id")
+                    .map_or(serde_json::Value::Null, Clone::clone)
                     .as_str()
                     .unwrap_or_default()
                     .to_owned();
@@ -396,7 +404,10 @@ fn spooled_prompts(directory: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut spooled: Vec<std::path::PathBuf> = entries
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "json"))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
         .collect();
     spooled.sort();
     spooled
@@ -490,76 +501,99 @@ fn start_workspace_mirror(
                         continue;
                     }
                 };
-                let mut reader = BufReader::new(stream);
-                let mut frame = Vec::new();
-                loop {
-                    frame.clear();
-                    match reader
-                        .by_ref()
-                        .take(canvas::control::MAX_CONTROL_MESSAGE + 1)
-                        .read_until(b'\n', &mut frame)
-                    {
-                        Ok(0) => break,
-                        Ok(_)
-                            if frame.len() as u64 <= canvas::control::MAX_CONTROL_MESSAGE
-                                && frame.last() == Some(&b'\n') => {}
-                        Ok(_) => {
-                            eprintln!("canvas-edge: rejected oversized mirror snapshot");
-                            break;
-                        }
-                        Err(error) => {
-                            eprintln!("canvas-edge: mirror socket receive failed: {error}");
-                            break;
-                        }
-                    }
-                    frame.pop();
-                    let local: LocalWorkspaceSnapshot = match serde_json::from_slice(&frame) {
-                        Ok(local) => local,
-                        Err(error) => {
-                            eprintln!("canvas-edge: rejected local mirror snapshot: {error}");
-                            continue;
-                        }
-                    };
-                    if local.schema_version != MIRROR_SCHEMA_VERSION {
-                        eprintln!("canvas-edge: rejected unsupported local mirror schema");
-                        continue;
-                    }
-                    let suppressed = runtime
-                        .lock()
-                        .ok()
-                        .and_then(|mut state| {
-                            state.local_document = Some(local.document.clone());
-                            if state
-                                .suppress_snapshot
-                                .as_ref()
-                                .is_some_and(|pending| same_representation(pending, &local.document))
+                // One thread per peer. Reading a connection inline meant this
+                // listener served exactly one client at a time: a Canvas that
+                // connected and then sat idle — which is what a reconnect after
+                // a failed write leaves behind — held the only slot, and every
+                // later connection waited in the backlog forever. Nothing
+                // errored and nothing logged; mirroring simply stopped, which
+                // is the worst way for it to fail.
+                let bus = Arc::clone(&bus);
+                let runtime = Arc::clone(&runtime);
+                let sequence = Arc::clone(&sequence);
+                let zone = zone.clone();
+                let origin = origin.clone();
+                if let Err(error) = thread::Builder::new()
+                    .name("canvas-workspace-mirror-peer".into())
+                    .spawn(move || {
+                        let mut reader = BufReader::new(stream);
+                        let mut frame = Vec::new();
+                        loop {
+                            frame.clear();
+                            match reader
+                                .by_ref()
+                                .take(canvas::control::MAX_CONTROL_MESSAGE + 1)
+                                .read_until(b'\n', &mut frame)
                             {
-                                state.suppress_snapshot.take()
-                            } else {
-                                None
+                                Ok(0) => break,
+                                Ok(_)
+                                    if frame.len() as u64
+                                        <= canvas::control::MAX_CONTROL_MESSAGE
+                                        && frame.last() == Some(&b'\n') => {}
+                                Ok(_) => {
+                                    eprintln!("canvas-edge: rejected oversized mirror snapshot");
+                                    break;
+                                }
+                                Err(error) => {
+                                    eprintln!("canvas-edge: mirror socket receive failed: {error}");
+                                    break;
+                                }
                             }
-                        })
-                        .is_some();
-                    if suppressed {
-                        continue;
-                    }
-                    let state = WorkspaceState {
-                        schema_version: MIRROR_SCHEMA_VERSION,
-                        workspace_key: local.document.id.clone(),
-                        origin: origin.clone(),
-                        sequence: sequence.fetch_add(1, Ordering::Relaxed) + 1,
-                        document: local.document,
-                    };
-                    let message = canvas_core::unibus::Message::new(
-                        MIRROR_KIND,
-                        serde_json::to_value(state).expect("mirror state serializes"),
-                    );
-                    let result = bus
-                        .to_destination(&zone, message)
-                        .and_then(|envelope| bus.send(&envelope, &[]));
-                    if let Err(error) = result {
-                        eprintln!("canvas-edge: publish workspace mirror failed: {error:#}");
-                    }
+                            frame.pop();
+                            let local: LocalWorkspaceSnapshot = match serde_json::from_slice(&frame)
+                            {
+                                Ok(local) => local,
+                                Err(error) => {
+                                    eprintln!(
+                                        "canvas-edge: rejected local mirror snapshot: {error}"
+                                    );
+                                    continue;
+                                }
+                            };
+                            if local.schema_version != MIRROR_SCHEMA_VERSION {
+                                eprintln!("canvas-edge: rejected unsupported local mirror schema");
+                                continue;
+                            }
+                            let suppressed = runtime
+                                .lock()
+                                .ok()
+                                .and_then(|mut state| {
+                                    state.local_document = Some(local.document.clone());
+                                    if state.suppress_snapshot.as_ref().is_some_and(|pending| {
+                                        same_representation(pending, &local.document)
+                                    }) {
+                                        state.suppress_snapshot.take()
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .is_some();
+                            if suppressed {
+                                continue;
+                            }
+                            let state = WorkspaceState {
+                                schema_version: MIRROR_SCHEMA_VERSION,
+                                workspace_key: local.document.id.clone(),
+                                origin: origin.clone(),
+                                sequence: sequence.fetch_add(1, Ordering::Relaxed) + 1,
+                                document: local.document,
+                            };
+                            let message = canvas_core::unibus::Message::new(
+                                MIRROR_KIND,
+                                serde_json::to_value(state).expect("mirror state serializes"),
+                            );
+                            let result = bus
+                                .to_destination(&zone, message)
+                                .and_then(|envelope| bus.send(&envelope, &[]));
+                            if let Err(error) = result {
+                                eprintln!(
+                                    "canvas-edge: publish workspace mirror failed: {error:#}"
+                                );
+                            }
+                        }
+                    })
+                {
+                    eprintln!("canvas-edge: mirror peer thread failed to start: {error}");
                 }
             }
         })
@@ -729,11 +763,21 @@ fn rlcd_decision_fan_event(
     envelope: &Envelope,
 ) -> Result<Option<StreamEnvelope>> {
     let body = &envelope.message.body;
-    let session = body.get("session_id").unwrap_or(&serde_json::Value::Null)
+    let session = body
+        .get("session_id")
+        .unwrap_or(&serde_json::Value::Null)
         .as_str()
         .context("RLCD event lacks session_id")?;
-    let sequence = body.get("sequence").unwrap_or(&serde_json::Value::Null).as_u64().context("RLCD event lacks sequence")?;
-    let phase = body.get("phase").unwrap_or(&serde_json::Value::Null).as_str().context("RLCD event lacks phase")?;
+    let sequence = body
+        .get("sequence")
+        .unwrap_or(&serde_json::Value::Null)
+        .as_u64()
+        .context("RLCD event lacks sequence")?;
+    let phase = body
+        .get("phase")
+        .unwrap_or(&serde_json::Value::Null)
+        .as_str()
+        .context("RLCD event lacks phase")?;
 
     // A decision still in flight carries no response at all, so this walks the
     // path rather than indexing it — indexing absent keys panics.
@@ -771,7 +815,10 @@ fn rlcd_decision_fan_event(
         failed: phase == "failed",
     };
 
-    let trunk = liveness.fan_by_session.entry(session.to_owned()).or_default();
+    let trunk = liveness
+        .fan_by_session
+        .entry(session.to_owned())
+        .or_default();
     // A decision is re-reported as it moves requested -> completed, so replace
     // rather than append or the trunk fills with duplicates of one decision.
     match trunk.iter().position(|held| held.sequence == sequence) {
@@ -868,7 +915,9 @@ fn rlcd_decision_fan_event(
         stream: format!("{session}-fan"),
         contract: "canvas.widget.snapshot.v1".into(),
         sequence,
-        emitted_at_ms: body.get("at_unix_ms").unwrap_or(&serde_json::Value::Null)
+        emitted_at_ms: body
+            .get("at_unix_ms")
+            .unwrap_or(&serde_json::Value::Null)
             .as_u64()
             .unwrap_or(envelope.issued_at_unix_ms),
         project_id: Some(rlcd_project(body)),
@@ -905,16 +954,28 @@ fn rlcd_project(body: &serde_json::Map<String, serde_json::Value>) -> String {
 
 fn rlcd_probability_event(envelope: &Envelope) -> Result<Option<StreamEnvelope>> {
     let body = &envelope.message.body;
-    if body.get("phase").unwrap_or(&serde_json::Value::Null).as_str() != Some("completed") {
+    if body
+        .get("phase")
+        .unwrap_or(&serde_json::Value::Null)
+        .as_str()
+        != Some("completed")
+    {
         return Ok(None);
     }
-    let session = body.get("session_id").unwrap_or(&serde_json::Value::Null)
+    let session = body
+        .get("session_id")
+        .unwrap_or(&serde_json::Value::Null)
         .as_str()
         .context("RLCD event lacks session_id")?;
-    let sequence = body.get("sequence").unwrap_or(&serde_json::Value::Null)
+    let sequence = body
+        .get("sequence")
+        .unwrap_or(&serde_json::Value::Null)
         .as_u64()
         .context("RLCD event lacks sequence")?;
-    let selected = body.get("selected").unwrap_or(&serde_json::Value::Null).as_str();
+    let selected = body
+        .get("selected")
+        .unwrap_or(&serde_json::Value::Null)
+        .as_str();
     let values = body
         .get("response")
         .and_then(|value| value.pointer("/answers/action/probabilities"))
@@ -948,7 +1009,9 @@ fn rlcd_probability_event(envelope: &Envelope) -> Result<Option<StreamEnvelope>>
         stream: format!("{session}-probabilities"),
         contract: "canvas.widget.snapshot.v1".into(),
         sequence,
-        emitted_at_ms: body.get("at_unix_ms").unwrap_or(&serde_json::Value::Null)
+        emitted_at_ms: body
+            .get("at_unix_ms")
+            .unwrap_or(&serde_json::Value::Null)
             .as_u64()
             .unwrap_or(envelope.issued_at_unix_ms),
         project_id: Some(rlcd_project(body)),
@@ -971,10 +1034,15 @@ fn rlcd_probability_event(envelope: &Envelope) -> Result<Option<StreamEnvelope>>
 fn rlcd_decision_event(liveness: &mut Liveness, envelope: &Envelope) -> Result<StreamEnvelope> {
     let body = &envelope.message.body;
     ensure!(
-        body.get("schema_version").unwrap_or(&serde_json::Value::Null).as_u64() == Some(1),
+        body.get("schema_version")
+            .unwrap_or(&serde_json::Value::Null)
+            .as_u64()
+            == Some(1),
         "unsupported RLCD schema"
     );
-    let session = body.get("session_id").unwrap_or(&serde_json::Value::Null)
+    let session = body
+        .get("session_id")
+        .unwrap_or(&serde_json::Value::Null)
         .as_str()
         .context("RLCD event lacks session_id")?;
     ensure!(
@@ -985,13 +1053,21 @@ fn rlcd_decision_event(liveness: &mut Liveness, envelope: &Envelope) -> Result<S
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
         "invalid RLCD session_id"
     );
-    let sequence = body.get("sequence").unwrap_or(&serde_json::Value::Null)
+    let sequence = body
+        .get("sequence")
+        .unwrap_or(&serde_json::Value::Null)
         .as_u64()
         .context("RLCD event lacks sequence")?;
-    let emitted_at_ms = body.get("at_unix_ms").unwrap_or(&serde_json::Value::Null)
+    let emitted_at_ms = body
+        .get("at_unix_ms")
+        .unwrap_or(&serde_json::Value::Null)
         .as_u64()
         .unwrap_or(envelope.issued_at_unix_ms);
-    let phase = body.get("phase").unwrap_or(&serde_json::Value::Null).as_str().context("RLCD event lacks phase")?;
+    let phase = body
+        .get("phase")
+        .unwrap_or(&serde_json::Value::Null)
+        .as_str()
+        .context("RLCD event lacks phase")?;
     ensure!(
         matches!(phase, "requested" | "completed" | "failed"),
         "invalid RLCD phase"
@@ -1000,16 +1076,26 @@ fn rlcd_decision_event(liveness: &mut Liveness, envelope: &Envelope) -> Result<S
         "requested" => format!("#{sequence} · thinking…"),
         "completed" => format!(
             "#{sequence} · {} · {} ms · confidence {}",
-            body.get("selected").unwrap_or(&serde_json::Value::Null).as_str().unwrap_or("unknown"),
-            body.get("latency_ms").unwrap_or(&serde_json::Value::Null).as_u64().unwrap_or(0),
-            body.get("confidence").unwrap_or(&serde_json::Value::Null)
+            body.get("selected")
+                .unwrap_or(&serde_json::Value::Null)
+                .as_str()
+                .unwrap_or("unknown"),
+            body.get("latency_ms")
+                .unwrap_or(&serde_json::Value::Null)
+                .as_u64()
+                .unwrap_or(0),
+            body.get("confidence")
+                .unwrap_or(&serde_json::Value::Null)
                 .as_f64()
                 .map(|value| format!("{value:.2}"))
                 .unwrap_or_else(|| "—".into())
         ),
         "failed" => format!(
             "#{sequence} · failed · {}",
-            body.get("error").unwrap_or(&serde_json::Value::Null).as_str().unwrap_or("unknown error")
+            body.get("error")
+                .unwrap_or(&serde_json::Value::Null)
+                .as_str()
+                .unwrap_or("unknown error")
         ),
         _ => unreachable!(),
     };
@@ -1605,7 +1691,13 @@ mod decision_fan_tests {
                 "retreat": 0.07, "high_punch": 0.05, "jump_kick": 0.03, "low_punch": 0.03
             }}}});
         }
-        Envelope::new("home", "mac-studio-speedy-umk3", None, "", Message::new("rlcd.decision.v1", body))
+        Envelope::new(
+            "home",
+            "mac-studio-speedy-umk3",
+            None,
+            "",
+            Message::new("rlcd.decision.v1", body),
+        )
     }
 
     fn fan_envelope(liveness: &mut Liveness, envelope: &Envelope) -> StreamEnvelope {
@@ -1633,8 +1725,15 @@ mod decision_fan_tests {
             "the pick is named outright, not left to be inferred from a shade"
         );
 
-        let considered: Vec<_> = nodes.iter().filter(|n| n["group"] == "considered").collect();
-        assert_eq!(considered.len(), FAN_WIDTH - 1, "the rest fan out around it");
+        let considered: Vec<_> = nodes
+            .iter()
+            .filter(|n| n["group"] == "considered")
+            .collect();
+        assert_eq!(
+            considered.len(),
+            FAN_WIDTH - 1,
+            "the rest fan out around it"
+        );
         let block = considered
             .iter()
             .find(|n| n["label"] == "block 20%")
@@ -1652,7 +1751,10 @@ mod decision_fan_tests {
         let mut liveness = Liveness::default();
         let payload = fan(&mut liveness, &decision(1, "completed", Some("uppercut")));
         let edges = payload["widget"]["edges"].as_array().unwrap();
-        let alternatives: Vec<_> = edges.iter().filter(|e| e["to"].as_str().unwrap().starts_with('a')).collect();
+        let alternatives: Vec<_> = edges
+            .iter()
+            .filter(|e| e["to"].as_str().unwrap().starts_with('a'))
+            .collect();
         assert!(
             alternatives.iter().all(|e| e["from"] == "d1"),
             "every considered action hangs off the live decision, nothing deeper"
@@ -1665,7 +1767,10 @@ mod decision_fan_tests {
         let mut liveness = Liveness::default();
         let mut payload = serde_json::Value::Null;
         for sequence in 1..=(FAN_TRUNK_DEPTH as u64 + 4) {
-            payload = fan(&mut liveness, &decision(sequence, "completed", Some("block")));
+            payload = fan(
+                &mut liveness,
+                &decision(sequence, "completed", Some("block")),
+            );
         }
         let nodes = payload["widget"]["nodes"].as_array().unwrap();
         let trunk: Vec<_> = nodes.iter().filter(|n| n["group"] == "decided").collect();
@@ -1682,9 +1787,15 @@ mod decision_fan_tests {
         // Order still reads left to right, and only the live node drops the
         // word for its choice.
         let labels: Vec<&str> = trunk.iter().map(|n| n["label"].as_str().unwrap()).collect();
-        assert_eq!(labels.last().copied(), Some("#8"), "live node is bare: {labels:?}");
+        assert_eq!(
+            labels.last().copied(),
+            Some("#8"),
+            "live node is bare: {labels:?}"
+        );
         assert!(
-            labels[..labels.len() - 1].iter().all(|label| label.ends_with(" block")),
+            labels[..labels.len() - 1]
+                .iter()
+                .all(|label| label.ends_with(" block")),
             "history says what it settled on: {labels:?}"
         );
     }
@@ -1695,13 +1806,21 @@ mod decision_fan_tests {
     fn an_in_flight_decision_becomes_its_result() {
         let mut liveness = Liveness::default();
         let pending = fan(&mut liveness, &decision(7, "requested", None));
-        let thinking: Vec<_> = pending["widget"]["nodes"].as_array().unwrap().iter()
-            .filter(|n| n["label"] == "#7 deciding…").collect();
+        let thinking: Vec<_> = pending["widget"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|n| n["label"] == "#7 deciding…")
+            .collect();
         assert_eq!(thinking.len(), 1);
 
         let done = fan(&mut liveness, &decision(7, "completed", Some("sweep")));
-        let trunk: Vec<_> = done["widget"]["nodes"].as_array().unwrap().iter()
-            .filter(|n| n["group"] == "decided").collect();
+        let trunk: Vec<_> = done["widget"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|n| n["group"] == "decided")
+            .collect();
         assert_eq!(trunk.len(), 1, "the same decision, not two");
         // The live decision carries only its number: its answer is exploded
         // directly beneath it, ticked, so naming it twice read as two things.
@@ -1759,7 +1878,13 @@ mod rlcd_robustness_tests {
     use canvas_core::unibus::Message;
 
     fn envelope(body: serde_json::Value) -> Envelope {
-        Envelope::new("home", "mac-studio-speedy-smb", None, "", Message::new("rlcd.decision.v1", body))
+        Envelope::new(
+            "home",
+            "mac-studio-speedy-smb",
+            None,
+            "",
+            Message::new("rlcd.decision.v1", body),
+        )
     }
 
     /// A decision event missing `confidence` took canvas-edge down: the body is
@@ -1828,8 +1953,16 @@ mod prompt_spool_tests {
     #[test]
     fn prompts_drain_in_submission_order() {
         let directory = scratch("order");
-        spool(&directory, "0000000000002-000001-transmog.json", &usable("transmog", "second"));
-        spool(&directory, "0000000000001-000001-transmog.json", &usable("transmog", "first"));
+        spool(
+            &directory,
+            "0000000000002-000001-transmog.json",
+            &usable("transmog", "second"),
+        );
+        spool(
+            &directory,
+            "0000000000001-000001-transmog.json",
+            &usable("transmog", "first"),
+        );
 
         let texts: Vec<String> = spooled_prompts(&directory)
             .iter()
@@ -1843,8 +1976,16 @@ mod prompt_spool_tests {
     #[test]
     fn only_json_is_drained() {
         let directory = scratch("ext");
-        spool(&directory, "0000000000001-000001-transmog.json", &usable("transmog", "yes"));
-        spool(&directory, "0000000000002-000001-transmog.json.tmp", &usable("transmog", "partial"));
+        spool(
+            &directory,
+            "0000000000001-000001-transmog.json",
+            &usable("transmog", "yes"),
+        );
+        spool(
+            &directory,
+            "0000000000002-000001-transmog.json.tmp",
+            &usable("transmog", "partial"),
+        );
         // An atomic write lands via a temporary name; draining it would publish
         // a half-written file.
         assert_eq!(spooled_prompts(&directory).len(), 1);
@@ -1855,20 +1996,37 @@ mod prompt_spool_tests {
     #[test]
     fn unusable_spool_files_are_rejected_not_retried() {
         assert!(parse_prompt(b"not json at all").is_none());
-        assert!(parse_prompt(serde_json::json!({"text": "no target"}).to_string().as_bytes()).is_none());
-        assert!(parse_prompt(serde_json::json!({"target": "transmog"}).to_string().as_bytes()).is_none());
+        assert!(
+            parse_prompt(
+                serde_json::json!({"text": "no target"})
+                    .to_string()
+                    .as_bytes()
+            )
+            .is_none()
+        );
+        assert!(
+            parse_prompt(
+                serde_json::json!({"target": "transmog"})
+                    .to_string()
+                    .as_bytes()
+            )
+            .is_none()
+        );
         assert!(
             parse_prompt(usable("transmog", "   ").as_bytes()).is_none(),
             "whitespace is not a prompt"
         );
         let huge = usable("transmog", &"x".repeat(MAX_PROMPT_SPOOL_BYTES as usize + 1));
-        assert!(parse_prompt(huge.as_bytes()).is_none(), "oversize never came from the wall");
+        assert!(
+            parse_prompt(huge.as_bytes()).is_none(),
+            "oversize never came from the wall"
+        );
     }
 
     #[test]
     fn a_usable_prompt_keeps_its_target_and_text() {
-        let body = parse_prompt(usable("transmog", "a bracket 40mm tall").as_bytes())
-            .expect("usable");
+        let body =
+            parse_prompt(usable("transmog", "a bracket 40mm tall").as_bytes()).expect("usable");
         assert_eq!(body["target"], "transmog");
         assert_eq!(body["text"], "a bracket 40mm tall");
     }

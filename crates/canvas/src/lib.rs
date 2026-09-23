@@ -34,9 +34,9 @@ pub mod project_switcher;
 pub mod reconcile;
 pub mod runtime_config;
 pub mod screensaver;
-pub mod stream_contract;
 #[cfg(feature = "lua-scenes")]
 pub mod stream_binding;
+pub mod stream_contract;
 pub mod theme_pack;
 pub mod theme_picker;
 pub mod view;
@@ -1247,10 +1247,7 @@ impl WorkspaceDocument {
                         format!("Invalid prompt target: {target}"),
                     )?;
                     if let Some(placeholder) = placeholder {
-                        check(
-                            visible(placeholder),
-                            "Prompt placeholder must be printable",
-                        )?;
+                        check(visible(placeholder), "Prompt placeholder must be printable")?;
                     }
                     if let Some(session) = session {
                         // Printable rather than `identifier`: session ids come
@@ -1298,10 +1295,7 @@ impl WorkspaceDocument {
 
         let mut placed = BTreeSet::new();
         self.layout.validate(&surface_ids, &mut placed)?;
-        check(
-            self.pages.len() < MAX_ITEMS,
-            "Workspace has too many pages",
-        )?;
+        check(self.pages.len() < MAX_ITEMS, "Workspace has too many pages")?;
         for page in &self.pages {
             check(visible(&page.name), "Page name must be printable")?;
             // A fresh `placed` per page: the set exists to catch one surface
@@ -2272,7 +2266,11 @@ mod page_tests {
         document.pages = vec![page("Games", "second")];
 
         assert_eq!(document.step_page(1), 1);
-        assert_eq!(document.step_page(1), 0, "past the last page comes the first");
+        assert_eq!(
+            document.step_page(1),
+            0,
+            "past the last page comes the first"
+        );
         assert_eq!(document.step_page(-1), 1, "and back the other way");
     }
 
@@ -2400,7 +2398,10 @@ mod surface_kind_parity_tests {
             session: None,
         };
         let json = serde_json::to_value(&unpinned).expect("serializes");
-        assert!(json.get("session").is_none(), "unpinned must be absent: {json}");
+        assert!(
+            json.get("session").is_none(),
+            "unpinned must be absent: {json}"
+        );
     }
 
     /// A kind from a newer build still degrades to one placeholder tile rather
