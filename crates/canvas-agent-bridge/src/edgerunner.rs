@@ -58,8 +58,14 @@ pub fn parse_session(value: &serde_json::Value, now_ms: u64) -> Option<Session> 
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
         state: classify(raw_state, awaiting),
+        // `updated_at` is what edgerunner actually sends; the other spellings
+        // are kept because guessing wrong here is silent — every session would
+        // be stamped "now", ties would break by id, and unpinned selection
+        // would pick an arbitrary session while looking like it chose the
+        // newest.
         updated_at_ms: value
-            .get("updated_at_unix_ms")
+            .get("updated_at")
+            .or_else(|| value.get("updated_at_unix_ms"))
             .or_else(|| value.get("updated_at_ms"))
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(now_ms),
@@ -224,6 +230,65 @@ mod tests {
         assert_eq!(parsed.updated_at_ms, 77, "falls back to now, not zero");
     }
 
+
+    /// Shaped from a real `/v1/sessions` reply rather than invented, because the
+    /// field this build first guessed at (`updated_at_unix_ms`) is not the one
+    /// edgerunner sends, and the guess failed silently: everything stamped
+    /// "now", ordering lost, unpinned selection arbitrary.
+    #[test]
+    fn a_live_edgerunner_payload_parses_with_its_real_field_names() {
+        let listed = serde_json::json!({
+            "completed_at": 1789452772431u64,
+            "created_at": 1789452135311u64,
+            "id": "sess_1a0ac5e4a5e0003",
+            "labels": {"edgerunner.session_id": "sess_1a0ac5e4a5e0003"},
+            "run_id": "1a0ac5e4a5e0003",
+            "status": "running",
+            "title": "tui: Hello-World",
+            "updated_at": 1789452777618u64,
+            "vm_status": "online"
+        });
+        let parsed = parse_session(&listed, 1).expect("parses");
+        assert_eq!(parsed.id, "sess_1a0ac5e4a5e0003");
+        assert_eq!(parsed.state, SessionState::Working);
+        assert_eq!(parsed.title, "tui: Hello-World");
+        assert_eq!(
+            parsed.updated_at_ms, 1789452777618,
+            "the real timestamp must survive, not fall back to now"
+        );
+    }
+
+    /// Most of a real listing is terminal, and "canceled" is the spelling in
+    /// use — a near miss here would leave 38 dead sessions looking promptable.
+    #[test]
+    fn a_canceled_session_from_a_real_listing_is_ended() {
+        let listed = serde_json::json!({
+            "id": "sess_1a0a3a8ab8f0000", "status": "canceled",
+            "updated_at": 1789452772431u64, "vm_status": "offline"
+        });
+        let parsed = parse_session(&listed, 0).expect("parses");
+        assert!(!parsed.state.accepts_prompts());
+
+        // A session with no title is normal in a real listing.
+        assert_eq!(parsed.title, "session");
+    }
+
+    /// The selection that matters against real data: 72 sessions, 8 of them
+    /// running, and the newest running one must win.
+    #[test]
+    fn the_newest_running_session_wins_against_a_mostly_dead_listing() {
+        let mut listed: Vec<Session> = (0..38)
+            .map(|index| session(&format!("dead{index:02}"), SessionState::Ended, 9_000 + index))
+            .collect();
+        listed.push(session("sess_old_running", SessionState::Working, 100));
+        listed.push(session("sess_new_running", SessionState::Working, 200));
+
+        assert_eq!(
+            choose_session(&listed, None).unwrap(),
+            "sess_new_running",
+            "a terminal session must never win on recency alone"
+        );
+    }
     #[test]
     fn a_session_without_an_id_is_skipped() {
         assert!(parse_session(&serde_json::json!({"state": "running"}), 0).is_none());

@@ -16,6 +16,16 @@ use canvas_agent_bridge::{AdapterKind, BridgeConfig, Prompt, Session, Target, ed
 
 const PROMPT_KIND: &str = "canvas.prompt.v1";
 const WIDGET_CONTRACT: &str = "canvas.widget.snapshot.v1";
+
+/// Owner named on locally-published roster snapshots.
+///
+/// Deliberately a fixed logical name rather than this machine's bus producer
+/// id. A binding names its publisher, so using the producer id would make one
+/// board work on the machine it was written for and silently show nothing on
+/// every other one — which is exactly what a mirrored board must not do. The
+/// local stream socket is owner-only, so this field is for matching, not
+/// identity.
+const LOCAL_OWNER: &str = "canvas-agent-bridge";
 const RECONNECT_MIN: Duration = Duration::from_secs(1);
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
 
@@ -28,9 +38,17 @@ fn main() -> Result<()> {
         .nth(1)
         .context("usage: canvas-agent-bridge <bridge-config.json>")?;
     let config = Arc::new(BridgeConfig::read(std::path::Path::new(&path))?);
+    let clients = Arc::new(Clients::new(&config)?);
+
+    // Rosters are published straight to the local Canvas, so they do not need
+    // the hub at all. Started before the bus and outside the reconnect loop so
+    // an unreachable hub costs you prompts but not the sight of what your
+    // agents are doing — and so one poller exists however often the bus drops.
+    start_roster_polling(Arc::clone(&config), Arc::clone(&clients));
+
     let mut backoff = RECONNECT_MIN;
     loop {
-        match run(Arc::clone(&config)) {
+        match run(Arc::clone(&config), Arc::clone(&clients)) {
             Ok(()) => eprintln!("canvas-agent-bridge: hub connection closed; reconnecting"),
             Err(error) => eprintln!("canvas-agent-bridge: {error:#}"),
         }
@@ -39,7 +57,7 @@ fn main() -> Result<()> {
     }
 }
 
-fn run(config: Arc<BridgeConfig>) -> Result<()> {
+fn run(config: Arc<BridgeConfig>, clients: Arc<Clients>) -> Result<()> {
     let bus = Arc::new(
         Bus::connect(config.bus.clone())
             .with_context(|| format!("connect hub {}", config.bus.hub_endpoint))?,
@@ -53,9 +71,6 @@ fn run(config: Arc<BridgeConfig>) -> Result<()> {
             .map(|target| target.name.as_str())
             .collect::<Vec<_>>()
     );
-    let clients = Arc::new(Clients::new(&config)?);
-    start_roster_polling(Arc::clone(&config), Arc::clone(&clients));
-
     loop {
         match bus.try_read() {
             Ok(Some((envelope, _payload))) => {
@@ -291,7 +306,7 @@ fn start_roster_polling(config: Arc<BridgeConfig>, clients: Arc<Clients>) {
                     };
                     let stamp = now_ms();
                     let widget_id = format!("{}-sessions", target.name);
-                    let spec = roster::widget(&widget_id, &target.name, &sessions, stamp);
+                    let payload = roster::snapshot(&widget_id, &target.name, &sessions, stamp);
                     let sequence = {
                         let mut held = sequences.lock().expect("roster sequences");
                         let counter = held.entry(target.name.clone()).or_insert(0);
@@ -300,18 +315,28 @@ fn start_roster_polling(config: Arc<BridgeConfig>, clients: Arc<Clients>) {
                     };
                     let envelope = StreamEnvelope {
                         schema_version: STREAM_SCHEMA_VERSION,
-                        owner: config.bus.producer_id.clone(),
+                        owner: LOCAL_OWNER.to_string(),
                         stream: widget_id.clone(),
                         contract: WIDGET_CONTRACT.into(),
                         sequence,
                         emitted_at_ms: stamp,
                         project_id: target.project.clone(),
-                        payload: serde_json::json!({
-                            "widget": serde_json::to_value(&spec).unwrap_or_default(),
-                        }),
+                        payload,
                     };
-                    if let Err(error) = publish_local(&envelope) {
-                        eprintln!("canvas-agent-bridge: roster publish failed: {error:#}");
+                    // Says what it published, not only when it fails. A bridge
+                    // that is silent when healthy is indistinguishable from one
+                    // that is doing nothing, which is exactly the state this
+                    // was debugged in.
+                    match publish_local(&envelope) {
+                        Ok(()) => eprintln!(
+                            "canvas-agent-bridge: {} roster -> {} session(s), {} byte(s)",
+                            target.name,
+                            sessions.len(),
+                            serde_json::to_vec(&envelope).map(|b| b.len()).unwrap_or(0)
+                        ),
+                        Err(error) => {
+                            eprintln!("canvas-agent-bridge: roster publish failed: {error:#}")
+                        }
                     }
                 }
                 thread::sleep(interval);

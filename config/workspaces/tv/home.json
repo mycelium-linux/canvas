@@ -1,45 +1,246 @@
 {
-  "schema_version": 1,
-  "id": "home-workspace",
-  "project_id": "home",
-  "revision": 4,
-  "theme": { "source": "project" },
-  "background": { "kind": "shader", "shader_id": "smoke-rings", "speed": 0.6 },
-  "chrome": { "title": "hidden", "canvas_padding": 24, "surface_gap": 14 },
-  "surfaces": [
-    {
-      "id": "clock",
-      "title": "Clock",
-      "content": {
-        "kind": "widget",
-        "spec": {
-          "schema_version": 2,
-          "id": "clock",
-          "kind": "clock",
-          "format": "%H:%M:%S",
-          "mode": "analog",
-          "theme": null,
-          "refresh_ms": 16,
-          "chrome": "frameless",
-          "data": { "state": "ready", "source": null, "observed_at": null, "window": null, "detail": null, "provenance": "live" }
-        }
-      },
-      "inputs": []
-    },
-    {
-      "id": "hyperspace",
-      "title": "Hyperspace",
-      "content": { "kind": "live_video", "source_id": "hyperspace", "width": 480, "height": 270 },
-      "inputs": []
+ "schema_version": 1,
+ "id": "home-workspace",
+ "project_id": "home",
+ "revision": 6,
+ "theme": {
+  "source": "project"
+ },
+ "background": {
+  "kind": "shader",
+  "shader_id": "smoke-rings",
+  "speed": 0.6
+ },
+ "chrome": {
+  "title": "hidden",
+  "canvas_padding": 24,
+  "surface_gap": 14
+ },
+ "surfaces": [
+  {
+   "id": "clock",
+   "title": "Clock",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "clock",
+     "kind": "clock",
+     "format": "%H:%M:%S",
+     "mode": "analog",
+     "theme": null,
+     "refresh_ms": 16,
+     "chrome": "frameless",
+     "data": {
+      "state": "ready",
+      "source": null,
+      "observed_at": null,
+      "window": null,
+      "detail": null,
+      "provenance": "live"
+     }
     }
-  ],
-  "layout": {
+   },
+   "inputs": []
+  },
+  {
+   "id": "hyperspace",
+   "title": "Hyperspace",
+   "content": {
+    "kind": "live_video",
+    "source_id": "hyperspace",
+    "width": 480,
+    "height": 270
+   },
+   "inputs": []
+  },
+  {
+   "id": "now-playing-art",
+   "title": "Now playing artwork source",
+   "content": {
+    "kind": "live_image",
+    "source_id": "now-playing-art"
+   },
+   "inputs": []
+  },
+  {
+   "id": "now-playing",
+   "title": "Now playing",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "now-playing",
+     "kind": "media_card",
+     "title": "Waiting for playback",
+     "artist": "No active source",
+     "album": null,
+     "source": "Media",
+     "artwork_source": "now-playing-art",
+     "elapsed_seconds": 0.0,
+     "duration_seconds": 0.0,
+     "observed_at_ms": 0,
+     "playing": false,
+     "theme": null,
+     "refresh_ms": 1000,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "media",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "media",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "operator-sessions",
+   "title": "Operator sessions",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "operator-sessions",
+     "kind": "status_list",
+     "title": "Operator sessions",
+     "nodes": [],
+     "theme": null,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:canvas-agent-bridge:canvas.widget.snapshot.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "sessions",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "operator-ask",
+   "title": "Ask operator",
+   "content": {
+    "kind": "prompt",
+    "target": "operator",
+    "placeholder": "Type to the newest running session"
+   },
+   "inputs": []
+  }
+ ],
+ "layout": {
+  "kind": "canvas",
+  "placements": [
+   {
+    "surface_id": "clock",
+    "bounds": {
+     "x": 0.03,
+     "y": 0.1,
+     "width": 0.34,
+     "height": 0.8
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "hyperspace",
+    "bounds": {
+     "x": 0.39,
+     "y": 0.06,
+     "width": 0.58,
+     "height": 0.54
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "now-playing",
+    "bounds": {
+     "x": 0.39,
+     "y": 0.63,
+     "width": 0.58,
+     "height": 0.31
+    },
+    "layer": 0
+   }
+  ]
+ },
+ "bindings": [
+  {
+   "id": "now-playing-media",
+   "source": {
+    "owner": "home-pi-media",
+    "stream": "now-playing",
+    "contract": "canvas.music.nowplaying.v1"
+   },
+   "target": {
+    "surface_id": "now-playing",
+    "input_id": "media"
+   },
+   "adapter": "music-nowplaying-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "operator-sessions-live",
+   "source": {
+    "owner": "canvas-agent-bridge",
+    "stream": "operator-sessions",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "operator-sessions",
+    "input_id": "sessions"
+   },
+   "adapter": "widget-snapshot-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  }
+ ],
+ "focused_surface_id": null,
+ "pages": [
+  {
+   "name": "Agents",
+   "layout": {
     "kind": "canvas",
     "placements": [
-      { "surface_id": "clock", "bounds": { "x": 0.03, "y": 0.10, "width": 0.34, "height": 0.80 }, "layer": 0 },
-      { "surface_id": "hyperspace", "bounds": { "x": 0.39, "y": 0.16, "width": 0.58, "height": 0.68 }, "layer": 0 }
+     {
+      "surface_id": "operator-sessions",
+      "bounds": {
+       "x": 0.02,
+       "y": 0.05,
+       "width": 0.62,
+       "height": 0.78
+      },
+      "layer": 0
+     },
+     {
+      "surface_id": "operator-ask",
+      "bounds": {
+       "x": 0.66,
+       "y": 0.05,
+       "width": 0.32,
+       "height": 0.2
+      },
+      "layer": 0
+     }
     ]
-  },
-  "bindings": [],
-  "focused_surface_id": null
+   }
+  }
+ ],
+ "active_page": 0
 }

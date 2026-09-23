@@ -6,7 +6,7 @@
 //! designed and the provenance badge disappears on its own once the values are
 //! real — the badge going away *is* the signal that it worked.
 
-use canvas_core::working_set::{AgentState, Attention, WorkingSet};
+use canvas_core::working_set::{AgentState, Attention, Freshness, Roster, Slot};
 use canvas_widgets::{Provenance, WidgetSpec, roster::node_summary};
 
 use crate::{Session, SessionState};
@@ -47,26 +47,73 @@ pub fn attention(target: &str, session: &Session, sequence: u64) -> Attention {
     }
 }
 
+/// The payload of a `canvas.widget.snapshot.v1` event for these sessions.
+///
+/// `widget` carries the tagged widget *kind* and nothing else. A whole
+/// `WidgetSpec` is refused — "unknown field `schema_version`, expected `title`
+/// or `nodes`" — because Canvas owns the surface's identity, chrome and theme
+/// and a producer may replace only the kind body and the source-health block.
+/// Sending the spec was silently dropping every snapshot.
+pub fn snapshot(id: &str, target: &str, sessions: &[Session], now_ms: u64) -> serde_json::Value {
+    let spec = widget(id, target, sessions, now_ms);
+    serde_json::json!({
+        "widget": serde_json::to_value(&spec.kind).unwrap_or_default(),
+        "data": serde_json::to_value(&spec.data).unwrap_or_default(),
+    })
+}
+
 /// Build the roster widget for a set of live sessions.
 ///
 /// `Provenance::Live` because these came from a control plane. Marking real
 /// values as Demo would be as wrong as the reverse: the badge is the contract
 /// that tells a viewer whether to believe the tile.
 pub fn widget(id: &str, target: &str, sessions: &[Session], now_ms: u64) -> WidgetSpec {
-    let mut working = WorkingSet::new(ROSTER_CAPACITY);
-    // Most recently updated first, so the capacity cut keeps what is moving
-    // rather than whatever the control plane happened to list first.
+    // The roster is built directly rather than through `WorkingSet`, whose
+    // EVICT_AFTER_MS drops anything unheard-from for two minutes. That is right
+    // for attention heartbeats and wrong for agent sessions, which live for
+    // days: pushed through it, 72 real sessions rendered as an empty tile
+    // because every one of them was last updated long ago.
     let mut ordered: Vec<&Session> = sessions.iter().collect();
     ordered.sort_by(|left, right| {
+        // Live before finished, then newest first. A wall has room for a
+        // handful, and eight running sessions matter more than the eight most
+        // recently abandoned ones.
         right
-            .updated_at_ms
-            .cmp(&left.updated_at_ms)
+            .state
+            .accepts_prompts()
+            .cmp(&left.state.accepts_prompts())
+            .then_with(|| right.updated_at_ms.cmp(&left.updated_at_ms))
             .then_with(|| left.id.cmp(&right.id))
     });
-    for (sequence, session) in ordered.iter().enumerate() {
-        working.observe(attention(target, session, sequence as u64), now_ms);
-    }
-    node_summary(id, &working.roster(now_ms), Provenance::Live, now_ms)
+
+    let known = ordered.len();
+    let slots: Vec<Slot> = ordered
+        .iter()
+        .take(ROSTER_CAPACITY)
+        .enumerate()
+        .map(|(index, session)| Slot {
+            index,
+            attention: attention(target, session, index as u64),
+            // The same threshold decides "is this current" — it just does not
+            // delete. A session nobody has touched in minutes is shown, and
+            // shown as stale, which is what the widget already draws neutrally
+            // rather than shouting a state it cannot vouch for.
+            freshness: if now_ms.saturating_sub(session.updated_at_ms)
+                <= canvas_core::working_set::EVICT_AFTER_MS
+            {
+                Freshness::Fresh
+            } else {
+                Freshness::Stale
+            },
+        })
+        .collect();
+
+    let roster = Roster {
+        not_shown: known.saturating_sub(slots.len()),
+        known,
+        slots,
+    };
+    node_summary(id, &roster, Provenance::Live, now_ms)
 }
 
 #[cfg(test)]
@@ -144,6 +191,89 @@ mod tests {
         );
     }
 
+
+    /// Canvas owns the surface; a producer replaces the kind body only. Sending
+    /// a whole WidgetSpec was rejected on every tick with "unknown field
+    /// `schema_version`" and the tile sat on "loading" forever.
+    #[test]
+    fn a_snapshot_carries_the_tagged_kind_and_not_a_whole_spec() {
+        let payload = snapshot(
+            "operator-sessions",
+            "operator",
+            &[session("s1", SessionState::Working, 10)],
+            20,
+        );
+        let widget = &payload["widget"];
+        assert_eq!(widget["kind"], "status_list");
+        assert!(widget["title"].is_string());
+        assert!(widget["nodes"].is_array());
+
+        for forbidden in ["schema_version", "id", "chrome", "theme", "refresh_ms", "data"] {
+            assert!(
+                widget.get(forbidden).is_none(),
+                "{forbidden} belongs to the surface, not the snapshot: {widget}"
+            );
+        }
+        // Source health travels beside the kind, not inside it.
+        assert_eq!(payload["data"]["provenance"], "live");
+    }
+
+    #[test]
+    fn a_snapshot_lists_the_sessions_it_was_given() {
+        let payload = snapshot(
+            "operator-sessions",
+            "operator",
+            &[
+                session("s1", SessionState::Working, 10),
+                session("s2", SessionState::Blocked, 20),
+            ],
+            30,
+        );
+        let nodes = payload["widget"]["nodes"].as_array().expect("nodes");
+        assert_eq!(nodes.len(), 2);
+        assert!(
+            nodes.iter().any(|node| node["label"]
+                .as_str()
+                .is_some_and(|label| label.contains("s2"))),
+            "{nodes:?}"
+        );
+    }
+
+    /// The bug this replaced: pushed through WorkingSet, sessions last touched
+    /// days ago were evicted and 72 real sessions rendered as an empty tile.
+    #[test]
+    fn sessions_older_than_the_eviction_window_are_still_shown() {
+        let ancient = session("sess_old", SessionState::Working, 1_000);
+        let now = 1_000 + canvas_core::working_set::EVICT_AFTER_MS * 100;
+        let payload = snapshot("operator-sessions", "operator", &[ancient], now);
+        let nodes = payload["widget"]["nodes"].as_array().expect("nodes");
+        assert_eq!(nodes.len(), 1, "an old session is stale, not absent");
+        assert_eq!(
+            nodes[0]["state"], "neutral",
+            "stale must not shout a state it cannot vouch for"
+        );
+    }
+
+    /// A wall has room for a handful, so the handful must be the useful one.
+    #[test]
+    fn live_sessions_outrank_recently_finished_ones() {
+        let mut sessions: Vec<Session> = (0..ROSTER_CAPACITY)
+            .map(|index| session(&format!("done{index}"), SessionState::Ended, 9_000 + index as u64))
+            .collect();
+        sessions.push(session("sess_running", SessionState::Working, 10));
+
+        let payload = snapshot("operator-sessions", "operator", &sessions, 9_100);
+        let labels: Vec<&str> = payload["widget"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| node["label"].as_str().unwrap())
+            .collect();
+        assert!(
+            labels[0].contains("sess_running"),
+            "the one live session must lead, despite being the oldest: {labels:?}"
+        );
+    }
     #[test]
     fn an_empty_roster_still_renders() {
         let spec = widget("agents", "operator", &[], 10);
