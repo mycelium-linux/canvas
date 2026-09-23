@@ -4,8 +4,12 @@
     "producer_id": "mac-studio-agent-bridge",
     "hub_endpoint": "127.0.0.1:18791",
     "token_file": "/Users/ajmwagar/.config/unibus/tokens/mac-studio-agent-bridge.token",
-    "zones": ["living-room"],
-    "capabilities": [],
+    "zones": [
+      "living-room"
+    ],
+    "capabilities": [
+      "canvas.agent"
+    ],
     "screen_anchors": [],
     "schema_version": 1
   },
@@ -13,8 +17,7 @@
     {
       "name": "operator",
       "kind": "edgerunner",
-      "base_url": "https://edgerunner.fpl.dev",
-      "token_env": "EDGERUNNER_TOKEN"
+      "base_url": "http://100.80.85.86:8087"
     }
   ],
   "roster_interval_ms": 5000
