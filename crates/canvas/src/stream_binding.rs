@@ -191,37 +191,7 @@ pub use canvas_core::{DECLARED_CONTRACTS, is_declared_contract};
 
 pub use crate::stream_contract::{STREAM_SCHEMA_VERSION, StreamEnvelope};
 
-impl StreamEnvelope {
-    pub fn validate(&self) -> Result<()> {
-        if self.schema_version != STREAM_SCHEMA_VERSION {
-            return Err(Error("unsupported stream schema version".into()));
-        }
-        for (name, value) in [("owner", &self.owner), ("stream", &self.stream)] {
-            if value.is_empty()
-                || value.len() > 64
-                || !value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-            {
-                return Err(Error(format!("invalid stream {name}")));
-            }
-        }
-        if self.contract.is_empty() || self.contract.len() > 128 {
-            return Err(Error("invalid stream contract".into()));
-        }
-        if !is_declared_contract(&self.contract) {
-            return Err(Error(format!(
-                "undeclared stream contract: {}; add it to DECLARED_CONTRACTS in stream_binding.rs",
-                self.contract
-            )));
-        }
-        Ok(())
-    }
 
-    pub fn age_ms(&self, now_ms: u64) -> u64 {
-        now_ms.saturating_sub(self.emitted_at_ms)
-    }
-}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StreamStats {
@@ -796,7 +766,7 @@ fn lua_error(error: mlua::Error) -> Error {
 /// The stream contract a briefing producer emits. Each envelope's payload
 /// carries `{ beat: <index>, briefing: "<name>" }`; the binder renders the
 /// beat into a `BriefingBeat` with workspace patches and optional TTS text.
-pub const BRIEFING_CONTRACT: &str = "canvas.briefing.beat.v1";
+pub use crate::stream_contract::BRIEFING_CONTRACT;
 
 /// Run a briefing Lua binder against one beat event.
 ///

@@ -2,10 +2,10 @@
 
 use anyhow::{Context, Result, ensure};
 use canvas::bus::{Bus, BusConfig};
-use canvas::stream_binding::{BRIEFING_CONTRACT, STREAM_SCHEMA_VERSION, StreamEnvelope};
+use canvas::stream_contract::{BRIEFING_CONTRACT, STREAM_SCHEMA_VERSION, StreamEnvelope};
 use canvas_media_edge::{
-    DecodePolicy, HardwareDecoder, gstreamer_raw_plan, now_unix_ms,
-    write_detections, write_raw_frame,
+    DecodePolicy, HardwareDecoder, gstreamer_raw_plan, now_unix_ms, write_detections,
+    write_raw_frame,
 };
 use serde::Deserialize;
 use std::{
@@ -111,15 +111,19 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
     );
     let mut decoders = DecoderSet::new(config.gst_launch.clone(), config.ffmpeg.clone(), policy);
     let mut speedy_games = BTreeMap::<String, u64>::new();
-    let mut roster_sequence = 0_u64;
+    let mut last_beat = 0_u64;
     loop {
         let now = now_unix_ms();
         decoders.expire(now);
         let before = speedy_games.len();
         speedy_games.retain(|_, valid_until| *valid_until > now);
-        if speedy_games.len() != before {
-            roster_sequence = roster_sequence.saturating_add(1);
-            publish_speedy_roster(&config.bus.producer_id, roster_sequence, &speedy_games)?;
+        // Republish when the clock turns the beat over, or when the roster
+        // itself changed. A roster change recomposes the board around the same
+        // spotlight, because the beat does not depend on it.
+        let beat = spotlight_beat(now);
+        if speedy_games.len() != before || (beat != last_beat && !speedy_games.is_empty()) {
+            last_beat = beat;
+            publish_speedy_roster(&config.bus.producer_id, beat, &speedy_games)?;
         }
         match bus.try_read()? {
             Some((envelope, _payload)) if envelope.message.kind == CAMERA_STREAM_CONTRACT => {
@@ -160,10 +164,12 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
                     // Departures are handled by the expiry sweep above.
                     let joined = speedy_games.insert(stream_id, valid_until).is_none();
                     if joined {
-                        roster_sequence = roster_sequence.saturating_add(1);
+                        // A new game recomposes the board, but under the
+                        // spotlight the clock already chose — joining must not
+                        // advance the rotation.
                         publish_speedy_roster(
                             &config.bus.producer_id,
-                            roster_sequence,
+                            spotlight_beat(now_unix_ms()),
                             &speedy_games,
                         )?;
                     }
@@ -185,11 +191,22 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
     }
 }
 
-fn publish_speedy_roster(
-    owner: &str,
-    sequence: u64,
-    games: &BTreeMap<String, u64>,
-) -> Result<()> {
+/// How long a game holds the Speedy spotlight before the next takes it.
+const SPOTLIGHT_DWELL_MS: u64 = 20_000;
+
+/// Which game holds the spotlight, derived from the clock rather than counted.
+///
+/// Every display runs its own media edge, and the boards are mirrored — so a
+/// per-process counter meant three machines each rotating on their own beat and
+/// overwriting one another's layout through the mirror, which reads as the
+/// spotlight flickering through every game at once. Deriving the beat from wall
+/// time makes all three compute the same board at the same moment, so the
+/// mirror has nothing to fight about and the cadence is exactly the dwell.
+fn spotlight_beat(now_unix_ms: u64) -> u64 {
+    now_unix_ms / SPOTLIGHT_DWELL_MS
+}
+
+fn publish_speedy_roster(owner: &str, sequence: u64, games: &BTreeMap<String, u64>) -> Result<()> {
     let path = canvas_core::stream_socket_path().context("Canvas stream socket unavailable")?;
     let event = StreamEnvelope {
         schema_version: STREAM_SCHEMA_VERSION,
