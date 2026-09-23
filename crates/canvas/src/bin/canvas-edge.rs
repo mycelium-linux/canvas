@@ -38,6 +38,12 @@ const RECONNECT_MAX: Duration = Duration::from_secs(15);
 /// headroom so every local stream snapshot remains portable across hosts.
 const MAX_LOCAL_STREAM_DATAGRAM: usize = 1_900;
 
+/// Retries before a snapshot is dropped when Canvas has not drained the socket.
+///
+/// Small on purpose: the next decision is already on its way, so a snapshot
+/// worth waiting long for is a snapshot already out of date.
+const STREAM_SEND_ATTEMPTS: u32 = 4;
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EdgeConfig {
@@ -710,13 +716,22 @@ fn read_document() -> Result<canvas::WorkspaceDocument> {
 fn publish_rlcd_decision(liveness: &mut Liveness, envelope: &Envelope) -> Result<()> {
     let path = canvas_core::stream_socket_path().context("Canvas stream socket is unavailable")?;
     let socket = UnixDatagram::unbound().context("open Canvas stream datagram")?;
+    // The event log is the decision; the probability bars and the fan are
+    // extra views of it. An extra view that cannot be built degrades itself
+    // and nothing else — propagating its error here discarded the log that
+    // was already in hand, so one odd event blanked every Speedy widget at
+    // once. Same reasoning as the oversize guard below.
     let log = rlcd_decision_event(liveness, envelope)?;
     let mut events = vec![log];
-    if let Some(probabilities) = rlcd_probability_event(envelope)? {
-        events.push(probabilities);
+    match rlcd_probability_event(envelope) {
+        Ok(Some(probabilities)) => events.push(probabilities),
+        Ok(None) => {}
+        Err(error) => eprintln!("canvas-edge: no probability view for this decision: {error:#}"),
     }
-    if let Some(fan) = rlcd_decision_fan_event(liveness, envelope)? {
-        events.push(fan);
+    match rlcd_decision_fan_event(liveness, envelope) {
+        Ok(Some(fan)) => events.push(fan),
+        Ok(None) => {}
+        Err(error) => eprintln!("canvas-edge: no decision fan for this decision: {error:#}"),
     }
     for event in events {
         let bytes = serde_json::to_vec(&event).context("encode Canvas RLCD event")?;
@@ -732,9 +747,35 @@ fn publish_rlcd_decision(liveness: &mut Liveness, envelope: &Envelope) -> Result
             );
             continue;
         }
-        socket
-            .send_to(&bytes, &path)
-            .with_context(|| format!("send RLCD event to {}", path.display()))?;
+        // ENOBUFS means Canvas has not drained the socket yet, which is
+        // transient — four games deciding at once burst faster than one frame
+        // consumes. Retry briefly, then drop this one snapshot. Propagating
+        // the error abandoned the rest of the decision, which is how a busy
+        // moment used to blank the widgets that were working.
+        let mut attempt = 0;
+        loop {
+            match socket.send_to(&bytes, &path) {
+                Ok(_) => break,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        || error.raw_os_error() == Some(libc::ENOBUFS) =>
+                {
+                    attempt += 1;
+                    if attempt > STREAM_SEND_ATTEMPTS {
+                        eprintln!(
+                            "canvas-edge: dropped {} snapshot after {} attempts: {error}",
+                            event.stream, STREAM_SEND_ATTEMPTS
+                        );
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(u64::from(2 * attempt)));
+                }
+                Err(error) => {
+                    eprintln!("canvas-edge: dropped {} snapshot: {error}", event.stream);
+                    break;
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -976,11 +1017,17 @@ fn rlcd_probability_event(envelope: &Envelope) -> Result<Option<StreamEnvelope>>
         .get("selected")
         .unwrap_or(&serde_json::Value::Null)
         .as_str();
-    let values = body
+    // Absent probabilities means a producer that does not report them, not a
+    // malformed event. Treating it as an error aborted the whole decision —
+    // including the event log already built — so every Speedy widget stopped
+    // updating and showed Disconnected.
+    let Some(values) = body
         .get("response")
         .and_then(|value| value.pointer("/answers/action/probabilities"))
         .and_then(serde_json::Value::as_object)
-        .context("completed RLCD event lacks action probabilities")?;
+    else {
+        return Ok(None);
+    };
     let mut bars: Vec<_> = values
         .iter()
         .filter_map(|(label, value)| {
@@ -1825,6 +1872,32 @@ mod decision_fan_tests {
         // The live decision carries only its number: its answer is exploded
         // directly beneath it, ticked, so naming it twice read as two things.
         assert_eq!(trunk[0]["label"], "#7");
+    }
+
+    /// A producer that reports no probabilities is normal, not broken. This
+    /// used to return Err, and the caller's `?` discarded the decision's event
+    /// log along with it — so one such event left every Speedy widget showing
+    /// Disconnected until something else happened to refresh them.
+    #[test]
+    fn a_completed_decision_without_probabilities_is_not_an_error() {
+        // `decision` attaches probabilities only alongside `selected`, so a
+        // completed decision with none is exactly this shape.
+        let mut envelope = decision(7, "completed", Some("left"));
+        envelope.message.body.remove("response");
+
+        assert!(
+            rlcd_probability_event(&envelope)
+                .expect("absent probabilities must not be an error")
+                .is_none(),
+            "no probabilities means no bar chart, not a failed decision"
+        );
+
+        // The part that matters: the decision itself still produces a log.
+        let mut liveness = Liveness::default();
+        assert!(
+            rlcd_decision_event(&mut liveness, &envelope).is_ok(),
+            "the event log must survive a decision with no probabilities"
+        );
     }
 
     /// Canvas's stream socket is a Unix datagram; macOS caps it at 2048 and the
