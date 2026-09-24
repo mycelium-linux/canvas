@@ -1324,6 +1324,14 @@ pub mod model_camera {
         /// True while a pointer is down. A held camera never expires, however
         /// long someone spends studying one angle.
         pub grabbed: bool,
+        /// Discrete view selections land on the next rendered frame. Pointer
+        /// drags leave this false so uneven network samples remain smoothed.
+        #[serde(default)]
+        pub instant: bool,
+        /// Optional viewer-selected solid paint. None restores the scene's
+        /// authored material or scalar-field colouring.
+        #[serde(default)]
+        pub paint: Option<[u8; 3]>,
         pub at_unix_ms: u64,
     }
 
@@ -1347,8 +1355,15 @@ pub mod model_camera {
                 pitch_degrees: clamp_finite(pitch, -MAX_PITCH_DEGREES, MAX_PITCH_DEGREES),
                 distance: clamp_finite(distance, MIN_DISTANCE, MAX_DISTANCE),
                 grabbed,
+                instant: false,
+                paint: None,
                 at_unix_ms,
             }
+        }
+
+        pub fn with_instant(mut self) -> Self {
+            self.instant = true;
+            self
         }
 
         /// Unit eye direction, right-handed with +Y up.
@@ -1594,6 +1609,26 @@ mod model_camera_tests {
         assert!(
             serde_json::from_str::<ViewerCamera>(&text.replace("{", "{\"roll_degrees\":3.0,"))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn old_camera_messages_default_to_smoothed_auto_paint() {
+        let old = r#"{"schema_version":1,"stream_id":"m","yaw_degrees":0.0,"pitch_degrees":0.0,"distance":1.0,"grabbed":false,"at_unix_ms":5}"#;
+        let camera: ViewerCamera =
+            serde_json::from_str(old).expect("old camera contract remains valid");
+        assert!(!camera.instant);
+        assert_eq!(camera.paint, None);
+    }
+
+    #[test]
+    fn a_discrete_painted_pose_survives_the_wire() {
+        let mut camera = ViewerCamera::new("m", 90.0, 0.0, 1.0, false, 5).with_instant();
+        camera.paint = Some([255, 158, 48]);
+        let encoded = serde_json::to_vec(&camera).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<ViewerCamera>(&encoded).unwrap(),
+            camera
         );
     }
 }

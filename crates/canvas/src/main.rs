@@ -404,6 +404,10 @@ enum Message {
         stream_id: String,
         action: ::canvas::model_orbit::OrbitAction,
     },
+    ModelPaint {
+        stream_id: String,
+        paint: Option<[u8; 3]>,
+    },
     WindowReady(iced::window::Id),
     WindowEvent(iced::window::Id, iced::window::Event),
     MouseEvent(iced::window::Id, iced::mouse::Event),
@@ -1434,6 +1438,7 @@ impl App {
             Message::ModelOrbitAction { stream_id, action } => {
                 self.apply_orbit_action(&stream_id, action)
             }
+            Message::ModelPaint { stream_id, paint } => self.apply_model_paint(&stream_id, paint),
             Message::Tick => {
                 if self
                     .focus_emphasis_started
@@ -5971,7 +5976,7 @@ impl App {
         if !action.apply(controller) {
             return Task::none();
         }
-        let pose = controller.pose(stream_id, unix_ms());
+        let pose = controller.pose(stream_id, unix_ms()).with_instant();
         let described = controller
             .named_view()
             .map(str::to_string)
@@ -5982,6 +5987,26 @@ impl App {
         self.orbit_published
             .insert(stream_id.to_string(), Instant::now());
         self.status = format!("{stream_id}: {described}");
+        self.bump();
+        Task::none()
+    }
+
+    fn apply_model_paint(&mut self, stream_id: &str, paint: Option<[u8; 3]>) -> Task<Message> {
+        use ::canvas::model_orbit::OrbitController;
+        let controller = self
+            .orbits
+            .entry(stream_id.to_string())
+            .or_insert_with(OrbitController::default);
+        if !controller.set_paint(paint) {
+            return Task::none();
+        }
+        let pose = controller.pose(stream_id, unix_ms()).with_instant();
+        if let Err(error) = publish_model_camera(&pose) {
+            eprintln!("Canvas: could not publish paint for {stream_id}: {error:#}");
+        }
+        self.orbit_published
+            .insert(stream_id.to_string(), Instant::now());
+        self.status = format!("{stream_id}: paint updated");
         self.bump();
         Task::none()
     }
@@ -6670,7 +6695,29 @@ impl App {
             row![face("B", "back"), face("D", "bottom")].spacing(1),
         ]
         .spacing(1);
-        container(cube)
+        let selected_paint = self.orbits.get(stream_id).and_then(|orbit| orbit.paint());
+        let paint = |label: &'static str, value: Option<[u8; 3]>| {
+            button(text(label).size(9))
+                .padding([3, 5])
+                .on_press(Message::ModelPaint {
+                    stream_id: stream_id.to_string(),
+                    paint: value,
+                })
+                .style(if selected_paint == value {
+                    button::primary
+                } else {
+                    button::secondary
+                })
+        };
+        let palette = row![
+            paint("AUTO", None),
+            paint("CYAN", Some([0, 220, 255])),
+            paint("AMBER", Some([255, 158, 48])),
+            paint("MAG", Some([255, 64, 190])),
+            paint("WHITE", Some([235, 240, 255])),
+        ]
+        .spacing(2);
+        container(column![cube, palette].spacing(5))
             .width(Length::Fill)
             .height(Length::Fill)
             .padding(8)

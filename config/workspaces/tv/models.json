@@ -12,12 +12,19 @@
       "title": "3DBenchy",
       "content": { "kind": "live_video", "source_id": "model-benchy", "width": 320, "height": 180, "orbitable": true },
       "inputs": []
+    },
+    {
+      "id": "model-transmog",
+      "title": "Transmog build",
+      "content": { "kind": "live_video", "source_id": "transmog-step", "width": 1280, "height": 720, "orbitable": true },
+      "inputs": []
     }
   ],
   "layout": {
     "kind": "canvas",
     "placements": [
-      { "surface_id": "model-benchy", "bounds": { "x": 0.10, "y": 0.10, "width": 0.80, "height": 0.80 }, "layer": 0 }
+      { "surface_id": "model-benchy", "bounds": { "x": 0.04, "y": 0.10, "width": 0.44, "height": 0.80 }, "layer": 0 },
+      { "surface_id": "model-transmog", "bounds": { "x": 0.52, "y": 0.10, "width": 0.44, "height": 0.80 }, "layer": 0 }
     ]
   },
   "bindings": [],
