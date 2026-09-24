@@ -10,11 +10,11 @@
     <!-- transmog's stream directory (its stream flag): step-0.stl, step-1.stl, … as it builds.
          The scene reads whichever is newest; nothing rewrites the scene. -->
     <string>/Users/ajmwagar/.cache/dock/canvas/transmog-steps</string>
-    <!-- Both screens that show the painter, comma separated: loopback for this
-         Mac's own media edge, and macbook-neo over the tailnet. Kept here and
-         not only on the installed copy, because installing this file is what
-         silently dropped neo the last time. -->
-    <string>udp://127.0.0.1:55207,udp://100.120.101.5:55207</string>
+    <!-- Every screen that shows the painter, comma separated: loopback for this
+         Mac's own media edge, macbook-neo over the tailnet, and home-pi over
+         the studio LAN. Kept here and not only on the installed copy, because
+         installing this file has silently dropped destinations before. -->
+    <string>udp://127.0.0.1:55207,udp://100.120.101.5:55207,udp://192.168.20.13:55207</string>
     <!-- 1280x720 at 24fps. Measured on this Mac: the render and the
          VideoToolbox encode hold 20fps at 720p exactly as they did at 320x180,
          so the small frame was buying nothing. Bitrate is derived from the
