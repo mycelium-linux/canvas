@@ -478,6 +478,15 @@ fn spawn_encoder(
             command.args([
                 "-c:v",
                 "h264_videotoolbox",
+                // The Pi's stateless V4L2 decoder accepts High-profile caps
+                // but never emits a frame for this VideoToolbox stream. The
+                // same hardware path is proven with Baseline on every other
+                // low-latency Canvas stream, so make that compatibility part
+                // of the encoder contract instead of a receiver workaround.
+                "-profile:v",
+                "baseline",
+                "-level:v",
+                "3.1",
                 "-allow_sw",
                 "0",
                 "-realtime",
