@@ -255,9 +255,13 @@ fn wanted_video() -> Option<BTreeSet<String>> {
 
 /// How stale a game's last frame may be before the board stops showing it.
 ///
-/// Generous enough that a hiccup does not make a tile vanish, short enough that
-/// a crashed game is gone before anyone reads its frozen picture.
-const GAME_FRAME_GRACE_MS: u64 = 8_000;
+/// Sized from what the streams actually do, not from what they ought to:
+/// umk3 delivers in bursts roughly every 25-30 seconds while smb, smk and
+/// tetris update every second. At eight seconds umk3 fell out of the roster
+/// and returned on every burst, so its tile appeared and vanished repeatedly —
+/// worse to watch than a slow tile. A dead game is stale by minutes, so this
+/// still removes one well before anyone reads a frozen picture.
+const GAME_FRAME_GRACE_MS: u64 = 45_000;
 
 /// The announced games that are actually producing pictures right now.
 ///
@@ -608,9 +612,14 @@ mod roster_liveness_tests {
     /// makes a tile vanish and reappear.
     #[test]
     fn the_grace_is_far_longer_than_a_frame() {
-        assert!(GAME_FRAME_GRACE_MS >= 2_000, "a stutter must not hide a game");
+        // umk3 bursts every 25-30 seconds, so anything tighter than that
+        // makes its tile flicker in and out.
         assert!(
-            GAME_FRAME_GRACE_MS <= 15_000,
+            GAME_FRAME_GRACE_MS >= 35_000,
+            "a slow stream must not be mistaken for a dead one"
+        );
+        assert!(
+            GAME_FRAME_GRACE_MS <= 90_000,
             "a dead game must go before anyone reads its frozen picture"
         );
     }
