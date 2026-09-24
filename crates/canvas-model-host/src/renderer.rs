@@ -110,7 +110,11 @@ impl Renderer {
         let depth = depth_texture.create_view(&Default::default());
         let padded_row_bytes = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let readbacks = (0..3)
+        // Interactive model viewing values recency over throughput. One slot
+        // means the next submission collects the immediately previous frame;
+        // three slots multiplied by several render workers retained a visibly
+        // stale queue before encoding even began.
+        let readbacks = (0..1)
             .map(|_| ReadbackSlot {
                 buffer: device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("model-readback"),

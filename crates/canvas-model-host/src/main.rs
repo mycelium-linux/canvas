@@ -220,9 +220,11 @@ fn main() -> Result<()> {
         .recv_timeout(Duration::from_secs(60))
         .context("initial model bake timed out")?
         .result?;
-    let render_workers = std::thread::available_parallelism()
-        .map_or(4, usize::from)
-        .clamp(3, 6);
+    // One retained renderer keeps presentation ordered and bounds latency to
+    // one GPU readback. Multiple renderers raised throughput by letting each
+    // hold several old frames, but at 24fps that made interaction trail the
+    // pointer by hundreds of milliseconds.
+    let render_workers = 1;
     let mut renderers = RenderPool::new(width, height, Arc::new(baked), render_workers)?;
     let mut encoder = spawn_encoder(endpoint, width, height, fps, &args[6])?;
     let mut stdin = encoder.stdin.take().context("encoder stdin unavailable")?;
@@ -241,6 +243,11 @@ fn main() -> Result<()> {
     let mut camera_distance = 1.0_f32;
     let camera_path = canvas_core::model_camera::camera_file(&stream_id)
         .context("stream id cannot address a camera file")?;
+    let local_frame_path = canvas_core::video_frame_file(&stream_id)
+        .context("stream id cannot address a local frame")?;
+    let local_size_path = canvas_core::video_frame_size_file(&stream_id)
+        .context("stream id cannot address a local frame size")?;
+    canvas_core::write_atomic(&local_size_path, format!("{width}x{height}").as_bytes())?;
     let frame_interval = Duration::from_secs_f64(1.0 / f64::from(fps));
     let mut frame_count = 0u64;
     let mut submitted = 0u64;
@@ -369,6 +376,10 @@ fn main() -> Result<()> {
         }
         while let Some(frame) = completed.remove(&next_output) {
             let frame = frame?;
+            // A co-located Canvas consumes this uncompressed frame directly;
+            // the same bytes continue to VideoToolbox for remote/TV fanout.
+            canvas_core::write_atomic(&local_frame_path, &frame)
+                .context("publish local model frame")?;
             if let Err(error) = stdin.write_all(&frame) {
                 let _ = encoder.kill();
                 return Err(error).context("write RGBA frame to hardware encoder");
