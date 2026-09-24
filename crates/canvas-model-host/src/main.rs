@@ -478,15 +478,6 @@ fn spawn_encoder(
             command.args([
                 "-c:v",
                 "h264_videotoolbox",
-                // The Pi's stateless V4L2 decoder accepts High-profile caps
-                // but never emits a frame for this VideoToolbox stream. The
-                // same hardware path is proven with Baseline on every other
-                // low-latency Canvas stream, so make that compatibility part
-                // of the encoder contract instead of a receiver workaround.
-                "-profile:v",
-                "baseline",
-                "-level:v",
-                "3.1",
                 "-allow_sw",
                 "0",
                 "-realtime",
@@ -505,8 +496,6 @@ fn spawn_encoder(
         .args([
             "-g",
             &rate,
-            "-force_key_frames",
-            "expr:gte(t,n_forced*1)",
             "-bf",
             "0",
             "-b:v",
@@ -515,12 +504,6 @@ fn spawn_encoder(
             &maxrate,
             "-bufsize",
             &bufsize,
-            // MPEG-TS receivers may join at any keyframe. VideoToolbox keeps
-            // SPS/PPS in codec extradata instead of repeating it in-band, so
-            // insert that data before every keyframe; otherwise a restarted
-            // TV decoder sees slices forever but cannot initialize them.
-            "-bsf:v",
-            "h264_mp4toannexb,dump_extra=freq=keyframe",
             "-muxdelay",
             "0",
             "-muxpreload",
