@@ -505,6 +505,8 @@ fn spawn_encoder(
         .args([
             "-g",
             &rate,
+            "-force_key_frames",
+            "expr:gte(t,n_forced*1)",
             "-bf",
             "0",
             "-b:v",
