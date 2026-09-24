@@ -62,10 +62,38 @@ if count == 0 then
   }
 end
 
--- The beat picks the spotlight, so rotation needs no state here: the same beat
--- always composes the same board, which is what lets three screens agree.
-local hero_index = (math.floor(payload.beat or 0) % count) + 1
-local hero = games[hero_index]
+-- Rotate over a fixed order, not over whatever happens to be live.
+--
+-- Picking the spotlight with `beat % count` remapped every game the moment a
+-- roster changed size, so one flaky stream dropping in and out made the
+-- spotlight jump backwards and forwards out of order. The turn order is a
+-- property of the wall, not of who is up right now: step through the full
+-- roster on the beat, then walk forward to the first game that is actually
+-- live. A game that is down costs its turn and nothing else.
+local order = {}
+for _, prefix in pairs(prefixes) do table.insert(order, prefix) end
+table.sort(order)
+
+local live = {}
+for _, prefix in ipairs(games) do live[prefix] = true end
+
+local start = math.floor(payload.beat or 0) % #order
+local hero = nil
+for step = 0, #order - 1 do
+  local candidate = order[((start + step) % #order) + 1]
+  if live[candidate] then
+    hero = candidate
+    break
+  end
+end
+-- Every game in `games` is live by construction, so this cannot be nil; the
+-- fallback exists so a future caller cannot make it one silently.
+hero = hero or games[1]
+
+local hero_index = 1
+for index, prefix in ipairs(games) do
+  if prefix == hero then hero_index = index end
+end
 
 if count == 1 then
   -- Alone in the spotlight, with the whole wall to itself.

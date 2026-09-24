@@ -30,6 +30,15 @@ use unibus_media::{
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EdgeConfig {
+    /// Decode only the sources Canvas says it is displaying.
+    ///
+    /// Off by default because it can blank a display: a host whose Canvas is
+    /// showing the wrong board, or has not published a list yet, would stop
+    /// decoding everything it is not asking for. Enable it per machine, once
+    /// that machine's board is known good.
+    #[serde(default)]
+    decode_only_displayed: bool,
+
     bus: BusConfig,
     #[serde(default)]
     runtime_dir: Option<PathBuf>,
@@ -113,9 +122,10 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
     let mut decoders = DecoderSet::new(config.gst_launch.clone(), config.ffmpeg.clone(), policy);
     let mut speedy_games = BTreeMap::<String, u64>::new();
     let mut last_beat = 0_u64;
+    let mut last_live = BTreeSet::new();
     loop {
         let now = now_unix_ms();
-        let wanted = wanted_video();
+        let wanted = config.decode_only_displayed.then(wanted_video).flatten();
         decoders.expire(now);
         decoders.retain_wanted(wanted.as_ref());
         let before = speedy_games.len();
@@ -123,8 +133,12 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
         // Republish when the clock turns the beat over, or when the roster
         // itself changed. A roster change recomposes the board around the same
         // spotlight, because the beat does not depend on it.
+        // Recomputed every pass, so a game that breaks drops off the board and
+        // one that recovers returns without anyone touching anything.
+        let live = streaming_now(&speedy_games, now);
         let beat = spotlight_beat(now);
-        if speedy_games.len() != before || (beat != last_beat && !speedy_games.is_empty()) {
+        if live != last_live || (beat != last_beat && !live.is_empty()) {
+            last_live = live.clone();
             last_beat = beat;
             // Canvas owns the stream socket, and on a machine that starts this
             // edge first the socket does not exist yet. Propagating that error
@@ -132,7 +146,7 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
             // never decoded anything until Canvas happened to win the race.
             // A roster nobody can receive yet is a reason to try again later,
             // not a reason to stop decoding video.
-            if let Err(error) = publish_speedy_roster(&config.bus.producer_id, beat, &speedy_games)
+            if let Err(error) = publish_speedy_roster(&config.bus.producer_id, beat, &live)
             {
                 eprintln!("canvas-media-edge: roster not published yet: {error:#}");
             }
@@ -182,13 +196,9 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
                         // A new game recomposes the board, but under the
                         // spotlight the clock already chose — joining must not
                         // advance the rotation.
-                        if let Err(error) = publish_speedy_roster(
-                            &config.bus.producer_id,
-                            spotlight_beat(now_unix_ms()),
-                            &speedy_games,
-                        ) {
-                            eprintln!("canvas-media-edge: roster not published yet: {error:#}");
-                        }
+                        // Nothing to publish yet — a game is added to the
+                        // board once it is actually producing frames, which the
+                        // next pass notices.
                     }
                 }
             }
@@ -242,7 +252,45 @@ fn wanted_video() -> Option<BTreeSet<String>> {
     (!wanted.is_empty()).then_some(wanted)
 }
 
-fn publish_speedy_roster(owner: &str, sequence: u64, games: &BTreeMap<String, u64>) -> Result<()> {
+
+/// How stale a game's last frame may be before the board stops showing it.
+///
+/// Generous enough that a hiccup does not make a tile vanish, short enough that
+/// a crashed game is gone before anyone reads its frozen picture.
+const GAME_FRAME_GRACE_MS: u64 = 8_000;
+
+/// The announced games that are actually producing pictures right now.
+///
+/// A lease says a session intends to stream; a fresh frame says it is. FreeDoom
+/// announces and then segfaults, so on announcements alone the board kept a
+/// seat for a game that was showing a frozen image. Filtering on frames means a
+/// game that breaks disappears and a game that recovers comes back with no
+/// intervention, because this is recomputed every pass.
+fn streaming_now(games: &BTreeMap<String, u64>, now: u64) -> BTreeSet<String> {
+    games
+        .keys()
+        .filter(|id| {
+            let Some(path) = canvas_core::video_frame_file(id) else {
+                return false;
+            };
+            let Ok(meta) = fs::metadata(&path) else {
+                // No frame yet: nothing to show, so nothing to place.
+                return false;
+            };
+            let age = meta
+                .modified()
+                .ok()
+                .and_then(|at| at.elapsed().ok())
+                .map(|elapsed| elapsed.as_millis() as u64)
+                .unwrap_or(u64::MAX);
+            let _ = now;
+            age <= GAME_FRAME_GRACE_MS
+        })
+        .cloned()
+        .collect()
+}
+
+fn publish_speedy_roster(owner: &str, sequence: u64, games: &BTreeSet<String>) -> Result<()> {
     let path = canvas_core::stream_socket_path().context("Canvas stream socket unavailable")?;
     let event = StreamEnvelope {
         schema_version: STREAM_SCHEMA_VERSION,
@@ -255,7 +303,7 @@ fn publish_speedy_roster(owner: &str, sequence: u64, games: &BTreeMap<String, u6
         payload: serde_json::json!({
             "briefing": "speedy-layout",
             "beat": sequence,
-            "games": games.keys().collect::<Vec<_>>()
+            "games": games.iter().collect::<Vec<_>>()
         }),
     };
     event.validate().map_err(anyhow::Error::msg)?;
@@ -536,5 +584,43 @@ mod wanted_video_tests {
         let wanted = parse("  retro-smb  \n\tcat\t\n").expect("a real list");
         assert!(wanted.contains("retro-smb"));
         assert!(wanted.contains("cat"));
+    }
+}
+
+#[cfg(test)]
+mod roster_liveness_tests {
+    use super::*;
+
+    /// A lease says a session intends to stream; a frame says it is. FreeDoom
+    /// announces and then segfaults, so a board built on announcements alone
+    /// kept showing its last frozen picture.
+    #[test]
+    fn a_game_with_no_frame_is_not_on_the_board() {
+        let mut games = BTreeMap::new();
+        games.insert("retro-nothing-here".to_string(), u64::MAX);
+        assert!(
+            streaming_now(&games, 0).is_empty(),
+            "an announcement without a frame is an intention, not a picture"
+        );
+    }
+
+    /// The grace has to exceed a frame interval by a wide margin, or a hiccup
+    /// makes a tile vanish and reappear.
+    #[test]
+    fn the_grace_is_far_longer_than_a_frame() {
+        assert!(GAME_FRAME_GRACE_MS >= 2_000, "a stutter must not hide a game");
+        assert!(
+            GAME_FRAME_GRACE_MS <= 15_000,
+            "a dead game must go before anyone reads its frozen picture"
+        );
+    }
+
+    /// An unsafe id has no frame path, so it can never be placed — the same
+    /// guard that stops a document steering the host at arbitrary files.
+    #[test]
+    fn an_unsafe_source_id_is_never_placed() {
+        let mut games = BTreeMap::new();
+        games.insert("../../etc/passwd".to_string(), u64::MAX);
+        assert!(streaming_now(&games, 0).is_empty());
     }
 }
