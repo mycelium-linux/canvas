@@ -8,7 +8,9 @@
     <string>/Users/ajmwagar/.local/bin/canvas-model-host</string>
     <string>/Users/ajmwagar/.config/dock/canvas/model-scenes/benchy.lua</string>
     <string>/Users/ajmwagar/.cache/dock/canvas/model-assets</string>
-    <string>tcp://127.0.0.1:55006</string>
+    <!-- Direct fanout keeps the model alive without requiring a TCP listener
+         to connect first, and gives every screen the same low-latency path. -->
+    <string>udp://127.0.0.1:55206,udp://100.120.101.5:55206,udp://192.168.20.13:55206</string>
     <string>320</string>
     <string>180</string>
     <string>24</string>
