@@ -128,11 +128,30 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
             "!".into(),
             "v4l2h264dec".into(),
             "!".into(),
-            // The Pi exposes fewer V4L2 converter contexts than decoder
-            // contexts. Four tiny game streams can decode concurrently but
-            // deadlock when each reserves a converter. Keep H.264 in hardware
-            // and perform only the inexpensive pixel-format conversion here.
-            "videoconvert".into(),
+            // Converting in hardware too. This previously used videoconvert
+            // because concurrent streams deadlocked when each reserved a
+            // V4L2 converter alongside its decoder, and on the assumption
+            // that pixel-format conversion was cheap next to decoding.
+            //
+            // Measured on the Pi, the second half is not true. One 704x480
+            // RGBA stream costs 29.8% of a core in videoconvert and 7.1% in
+            // v4l2convert; eleven of them were spending 108% -- more than a
+            // whole core of four -- on colour conversion alone, on a host
+            // that is also the room's audio endpoint. RGBA is four bytes a
+            // pixel and the decoder hands over YUV, so every frame was being
+            // rewritten by the CPU.
+            //
+            // The deadlock no longer reproduces: four concurrent
+            // v4l2h264dec + v4l2convert pipelines on a live stream ran
+            // twenty seconds at 13% total with none stalling, and six
+            // standalone converters scaled linearly. Kernel and firmware
+            // have moved since that note was written.
+            //
+            // If it returns it will present as a stream that decodes and
+            // then stops producing frames rather than as an error, so it is
+            // worth knowing that videoconvert is the fallback and costs
+            // roughly four times as much.
+            "v4l2convert".into(),
         ]),
         HardwareDecoder::VideoToolbox => argv.extend([
             "!".into(),
@@ -626,8 +645,11 @@ mod tests {
         assert_eq!(visible.len(), 852 * 480 * 4);
         assert!(visible.iter().all(|byte| *byte == 7));
         assert!(plan.argv.iter().any(|arg| arg == "v4l2h264dec"));
-        assert!(plan.argv.iter().any(|arg| arg == "videoconvert"));
-        assert!(!plan.argv.iter().any(|arg| arg == "v4l2convert"));
+        // Colour conversion belongs in hardware alongside the decode. It was
+        // measured at 29.8% of a Pi core in videoconvert against 7.1% in
+        // v4l2convert for one 704x480 RGBA stream, and the Pi runs eleven.
+        assert!(plan.argv.iter().any(|arg| arg == "v4l2convert"));
+        assert!(!plan.argv.iter().any(|arg| arg == "videoconvert"));
         assert!(!plan.argv.iter().any(|arg| arg.contains("avdec")));
         assert!(!plan.argv.iter().any(|arg| arg == "sh" || arg == "-c"));
 
