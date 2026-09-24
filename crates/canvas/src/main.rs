@@ -354,6 +354,15 @@ fn orbit_action(event: &iced::keyboard::Event) -> Option<::canvas::model_orbit::
     ::canvas::model_orbit::action_for_key(name)
 }
 
+/// Whether a press belongs to interactive content rather than surface layout.
+///
+/// Model video uses the whole visible frame for orbit, including the strip
+/// that would otherwise be treated as an invisible title bar on a frameless
+/// surface. Edge handles remain available for deliberate resizing.
+fn content_claims_surface_drag(region: HitRegion, orbitable: bool) -> bool {
+    orbitable && matches!(region, HitRegion::Body | HitRegion::TopBar)
+}
+
 /// How often a camera pose is written while a drag is in flight. 30 a second
 /// is finer than the 24fps the model renders at, so the renderer never waits
 /// on the pointer.
@@ -5263,6 +5272,40 @@ impl App {
             return;
         };
         let surfaces = self.interaction_surfaces();
+        if phase == PointerPhase::Press
+            && let Ok(Some(target)) = hit_test(
+                &surfaces,
+                position,
+                SURFACE_RESIZE_HANDLE_SIZE,
+                f64::from(self.window_chrome().titlebar_height),
+            )
+            && self.decoded.get(&target.surface_id).is_some_and(|surface| {
+                content_claims_surface_drag(
+                    target.region,
+                    matches!(
+                        &surface.source,
+                        ContentSource::LiveVideo {
+                            orbitable: true,
+                            ..
+                        }
+                    ),
+                )
+            })
+        {
+            // Focus and z-order are still ordinary surface concerns, but no
+            // layout gesture is captured: subsequent movement belongs solely
+            // to the retained-video orbit hook.
+            self.desktop_focused = false;
+            self.apply_interaction_intents(vec![
+                InteractionIntent::Focus {
+                    surface_id: target.surface_id.clone(),
+                },
+                InteractionIntent::PromoteToFront {
+                    surface_id: target.surface_id,
+                },
+            ]);
+            return;
+        }
         match self.interaction.handle(
             PointerEvent {
                 pointer_id: 0,
@@ -13181,6 +13224,19 @@ mod tests {
         assert_eq!(placements[0].bounds.width, 0.4);
         assert_eq!(placements[0].bounds.height, 0.4);
         assert!(app.runtime_revision > before);
+    }
+
+    #[test]
+    fn orbitable_content_claims_direct_move_but_leaves_resize_handles() {
+        assert!(content_claims_surface_drag(HitRegion::Body, true));
+        assert!(content_claims_surface_drag(HitRegion::TopBar, true));
+        assert!(!content_claims_surface_drag(
+            HitRegion::Resize {
+                handle: ResizeHandle::SouthEast,
+            },
+            true,
+        ));
+        assert!(!content_claims_surface_drag(HitRegion::Body, false));
     }
 
     #[test]
