@@ -18,6 +18,10 @@
   <dict>
     <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
+  <!-- Same reason as the transmog painter: without this launchd runs the job
+       at background QoS on the efficiency cores, at roughly a third of the
+       frame rate the same binary reaches from a shell. -->
+  <key>ProcessType</key><string>Interactive</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>5</integer>

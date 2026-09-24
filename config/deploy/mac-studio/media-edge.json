@@ -4,15 +4,21 @@
     "producer_id": "mac-studio-media",
     "hub_endpoint": "127.0.0.1:18791",
     "token_file": "/Users/ajmwagar/.config/unibus/tokens/mac-studio-media.token",
-    "zones": ["living-room"],
-    "capabilities": ["canvas.media"],
-    "screen_anchors": ["screen-studio"],
+    "zones": [
+      "living-room"
+    ],
+    "capabilities": [
+      "canvas.media"
+    ],
+    "screen_anchors": [
+      "screen-studio"
+    ],
     "schema_version": 1
   },
   "runtime_dir": "/Users/ajmwagar/Library/Application Support/Dock/canvas",
   "gst_launch": "/opt/homebrew/bin/gst-launch-1.0",
   "ffmpeg": "/opt/homebrew/bin/ffmpeg",
-  "max_height": 480,
+  "max_height": 720,
   "max_fps": 24.0,
   "hardware_decoder": "videotoolbox"
 }

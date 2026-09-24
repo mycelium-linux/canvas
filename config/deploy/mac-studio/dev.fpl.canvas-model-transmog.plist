@@ -7,14 +7,20 @@
   <array>
     <string>/Users/ajmwagar/.local/bin/canvas-model-host</string>
     <string>/Users/ajmwagar/.config/dock/canvas/model-scenes/transmog-build.lua</string>
-    <!-- transmog's --stream directory: step-0.stl, step-1.stl, … as it builds.
+    <!-- transmog's stream directory (its stream flag): step-0.stl, step-1.stl, … as it builds.
          The scene reads whichever is newest; nothing rewrites the scene. -->
     <string>/Users/ajmwagar/.cache/dock/canvas/transmog-steps</string>
-    <!-- UDP to loopback so this Mac's own media edge binds and decodes it.
-         The tcp:// model lane is forwarded to the Pi instead. -->
-    <string>udp://127.0.0.1:55207</string>
-    <string>320</string>
-    <string>180</string>
+    <!-- Both screens that show the painter, comma separated: loopback for this
+         Mac's own media edge, and macbook-neo over the tailnet. Kept here and
+         not only on the installed copy, because installing this file is what
+         silently dropped neo the last time. -->
+    <string>udp://127.0.0.1:55207,udp://100.120.101.5:55207</string>
+    <!-- 1280x720 at 24fps. Measured on this Mac: the render and the
+         VideoToolbox encode hold 20fps at 720p exactly as they did at 320x180,
+         so the small frame was buying nothing. Bitrate is derived from the
+         frame size by the host, not set here. -->
+    <string>1280</string>
+    <string>720</string>
     <string>24</string>
     <string>videotoolbox</string>
   </array>
@@ -22,6 +28,12 @@
   <dict>
     <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
+  <!-- Interactive, because without it launchd gives this job background QoS
+       and macOS parks it on the efficiency cores: measured 7-8fps under
+       launchd against a flat 20fps for the same binary and arguments from a
+       shell, with no memory growth in either. The render is not the
+       bottleneck; the scheduler was. -->
+  <key>ProcessType</key><string>Interactive</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>5</integer>

@@ -284,6 +284,61 @@ fn modified(path: &Path) -> Result<SystemTime> {
     std::fs::metadata(path)?.modified().map_err(Into::into)
 }
 
+
+/// FFmpeg output arguments for one or several destinations.
+///
+/// One destination is a plain mpegts output. Several go through the `tee`
+/// muxer, which has two traps worth naming: it needs an explicit `-map`,
+/// because tee does not inherit default stream selection, and muxer-private
+/// options like `mpegts_flags` belong inside each slot while mux latency
+/// options are AVFormat-level and must stay outside. `resend_headers` is per
+/// slot so a receiver that joins late still gets a decodable stream.
+fn mpegts_output_args(destinations: &[&str]) -> Vec<String> {
+    if let [only] = destinations {
+        return vec![
+            "-mpegts_flags".into(),
+            "+resend_headers".into(),
+            "-f".into(),
+            "mpegts".into(),
+            (*only).to_string(),
+        ];
+    }
+    let slots = destinations
+        .iter()
+        .map(|destination| format!("[f=mpegts:mpegts_flags=+resend_headers]{destination}"))
+        .collect::<Vec<_>>()
+        .join("|");
+    vec![
+        "-map".into(),
+        "0:v:0".into(),
+        "-f".into(),
+        "tee".into(),
+        slots,
+    ]
+}
+
+/// Bitrate derived from the frame size, not pinned to one.
+///
+/// A fixed 1800k was tuned for 320x180 and starved anything larger: raising the
+/// render resolution without raising the budget just spends the extra pixels on
+/// blocking artefacts. Scaled per pixel per second so a resolution change needs
+/// no second edit here.
+///
+/// 0.12 bits per pixel per frame is generous for an orbiting model on a flat
+/// background — most of the frame is unchanged between frames — and the floor
+/// keeps small renders from looking worse than they did at a fixed 1800k.
+fn bitrate_args(width: u32, height: u32, fps: u32) -> (String, String, String) {
+    let pixels_per_second = u64::from(width) * u64::from(height) * u64::from(fps);
+    let kbps = (pixels_per_second * 12 / 100 / 1000).clamp(1_800, 12_000);
+    (
+        format!("{kbps}k"),
+        // Headroom for the step where the model changes and every macroblock is
+        // new, then twice that buffered so the peak does not clip.
+        format!("{}k", kbps * 4 / 3),
+        format!("{}k", kbps * 2),
+    )
+}
+
 fn spawn_encoder(
     endpoint: &str,
     width: u32,
@@ -291,16 +346,25 @@ fn spawn_encoder(
     fps: u32,
     encoder: &str,
 ) -> Result<Child> {
-    anyhow::ensure!(
-        endpoint.starts_with("tcp://") || endpoint.starts_with("udp://"),
-        "endpoint must be tcp:// or udp://"
-    );
+    let destinations: Vec<&str> = endpoint
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect();
+    anyhow::ensure!(!destinations.is_empty(), "no endpoint given");
+    for destination in &destinations {
+        anyhow::ensure!(
+            destination.starts_with("tcp://") || destination.starts_with("udp://"),
+            "endpoint must be tcp:// or udp://"
+        );
+    }
     anyhow::ensure!(
         !endpoint.contains(['\n', '\r', '\0']),
         "endpoint contains control characters"
     );
     let size = format!("{width}x{height}");
     let rate = fps.to_string();
+    let (bitrate, maxrate, bufsize) = bitrate_args(width, height, fps);
     let mut command = Command::new("ffmpeg");
     command.args([
         "-hide_banner",
@@ -347,26 +411,94 @@ fn spawn_encoder(
             "-bf",
             "0",
             "-b:v",
-            "1800k",
+            &bitrate,
             "-maxrate",
-            "2400k",
+            &maxrate,
             "-bufsize",
-            "3600k",
-            "-mpegts_flags",
-            "+resend_headers",
+            &bufsize,
             "-muxdelay",
             "0",
             "-muxpreload",
             "0",
             "-flush_packets",
             "1",
-            "-f",
-            "mpegts",
-            endpoint,
         ])
+        .args(mpegts_output_args(&destinations))
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()
         .context("spawn FFmpeg hardware encoder")
+}
+
+#[cfg(test)]
+mod bitrate_tests {
+    use super::bitrate_args;
+
+    /// The budget has to follow the frame size; this is the whole point of
+    /// deriving it, and 720p on the old fixed 1800k looked like a JPEG.
+    #[test]
+    fn a_bigger_frame_gets_a_bigger_budget() {
+        let (small, _, _) = bitrate_args(320, 180, 24);
+        let (large, _, _) = bitrate_args(1280, 720, 24);
+        assert_eq!(small, "1800k", "a small frame keeps the old floor");
+        assert_eq!(large, "2654k");
+    }
+
+    /// Frame rate is part of the pixel budget, not a separate axis.
+    #[test]
+    fn frame_rate_counts_as_much_as_area() {
+        assert_eq!(bitrate_args(1280, 720, 12).0, bitrate_args(640, 720, 24).0);
+    }
+
+    #[test]
+    fn peak_and_buffer_stay_above_the_average() {
+        let (average, maxrate, bufsize) = bitrate_args(1920, 1080, 24);
+        assert_eq!(average, "5971k");
+        assert_eq!(maxrate, "7961k");
+        assert_eq!(bufsize, "11942k");
+    }
+
+    /// Both ends are clamped: a tiny render must not drop below what already
+    /// looked acceptable, and a 4K scene must not try to push 30 Mbps over UDP.
+    #[test]
+    fn the_budget_is_clamped_at_both_ends() {
+        assert_eq!(bitrate_args(64, 64, 1).0, "1800k");
+        assert_eq!(bitrate_args(3840, 2160, 30).0, "12000k");
+    }
+}
+
+#[cfg(test)]
+mod fanout_tests {
+    use super::mpegts_output_args;
+
+    #[test]
+    fn one_destination_stays_a_plain_mpegts_output() {
+        let args = mpegts_output_args(&["udp://127.0.0.1:55207"]);
+        assert_eq!(args.last().unwrap(), "udp://127.0.0.1:55207");
+        assert!(args.iter().any(|a| a == "mpegts"));
+        assert!(!args.iter().any(|a| a == "tee"), "no tee for a single output");
+    }
+
+    /// tee does not inherit default stream selection, so without -map it
+    /// produces an output with no video at all.
+    #[test]
+    fn several_destinations_tee_with_an_explicit_map() {
+        let args = mpegts_output_args(&["udp://127.0.0.1:55207", "udp://100.120.101.5:55207"]);
+        let joined = args.join(" ");
+        assert!(joined.contains("-map 0:v:0"), "tee needs an explicit map: {joined}");
+        assert!(args.iter().any(|a| a == "tee"));
+        assert!(joined.contains("100.120.101.5:55207"));
+        assert!(joined.contains("127.0.0.1:55207"));
+    }
+
+    /// Muxer-private options go inside the slot; mux latency options are
+    /// AVFormat-level and must stay outside it, or FFmpeg rejects the slot.
+    #[test]
+    fn resend_headers_is_per_slot_and_latency_options_are_not() {
+        let args = mpegts_output_args(&["udp://a:1", "udp://b:2"]);
+        let slots = args.last().unwrap();
+        assert_eq!(slots.matches("mpegts_flags=+resend_headers").count(), 2);
+        assert!(!slots.contains("muxdelay"), "latency options belong outside the slot");
+    }
 }

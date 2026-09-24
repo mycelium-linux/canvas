@@ -479,6 +479,8 @@ struct App {
     catalog: Catalog,
     document: WorkspaceDocument,
     runtime_revision: u64,
+    /// Last list written, so an unchanged set costs nothing.
+    last_wanted_video: Option<String>,
     frame: Rect,
     display_frames: Vec<Rect>,
     displays: Vec<DisplayInfo>,
@@ -868,6 +870,7 @@ impl App {
         let mut app = Self {
             catalog,
             document,
+            last_wanted_video: None,
             runtime_revision: 1,
             frame: desktop_frame,
             display_frames,
@@ -5407,6 +5410,11 @@ impl App {
 
     fn bump(&mut self) {
         self.runtime_revision = self.runtime_revision.saturating_add(1);
+        // Every document change lands here, which is the only place that sees
+        // all of them: applying a board, switching project and paging all
+        // change what is on screen, and hooking them individually missed the
+        // one that mattered. Cheap because it only writes when the set differs.
+        self.publish_wanted_video();
         #[cfg(unix)]
         self.workspace_mirror.publish_if_changed(&self.document);
     }
@@ -5755,6 +5763,10 @@ impl App {
         wanted.sort_unstable();
         wanted.dedup();
         let body = wanted.join("\n");
+        if self.last_wanted_video.as_deref() == Some(body.as_str()) {
+            return;
+        }
+        self.last_wanted_video = Some(body.clone());
         if let Err(error) =
             canvas_core::write_atomic(&root.join("state/wanted-video"), body.as_bytes())
         {
