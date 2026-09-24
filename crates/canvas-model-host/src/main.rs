@@ -518,7 +518,7 @@ fn spawn_encoder(
             // insert that data before every keyframe; otherwise a restarted
             // TV decoder sees slices forever but cannot initialize them.
             "-bsf:v",
-            "dump_extra=freq=keyframe",
+            "h264_mp4toannexb,dump_extra=freq=keyframe",
             "-muxdelay",
             "0",
             "-muxpreload",
