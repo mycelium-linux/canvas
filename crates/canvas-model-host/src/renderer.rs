@@ -2,7 +2,7 @@
 //! replace buffers after background baking has completed.
 
 use crate::{
-    CameraFlight, Material, Orbit,
+    Material,
     mesh::{PreparedMesh, Vertex},
 };
 use anyhow::{Context, Result};
@@ -264,10 +264,17 @@ impl Renderer {
     /// Submit one frame and return the frame that completed three submissions
     /// earlier. This overlaps render, GPU->CPU transfer, and VideoToolbox input
     /// instead of forcing a Metal map round-trip into every render frame.
+    /// `eye_direction` is where the camera sits, already decided.
+    ///
+    /// The renderer used to sample the flight and apply the orbit itself,
+    /// which left no room for a third source of camera motion. A viewer
+    /// dragging one is exactly that, and it has to blend with the other two
+    /// rather than race them, so the host now settles on a direction and this
+    /// draws it.
     pub fn render(
         &mut self,
-        flight: CameraFlight,
-        orbit: Option<Orbit>,
+        eye_direction: Vec3,
+        distance_scale: f32,
         model_rotation_degrees: [f32; 3],
         material: &Material,
         field: Option<&crate::Field>,
@@ -277,14 +284,16 @@ impl Renderer {
         let slot_index = self.next_readback;
         let completed = self.collect_slot(slot_index)?;
         let mesh = self.mesh.as_ref().context("no model uploaded")?;
-        let (mut direction, distance_scale) = flight.sample(elapsed);
-        if let Some(orbit) = orbit {
-            let axis = Vec3::from_array(orbit.axis).normalize();
-            direction =
-                glam::Quat::from_axis_angle(axis, orbit.degrees_per_second.to_radians() * elapsed)
-                    * direction;
-        }
-        let eye = direction * 3.2 * distance_scale;
+        // A zero or non-finite direction would put the eye on the model and
+        // produce a degenerate view matrix; fall back to the front rather than
+        // render a frame nobody can interpret.
+        let direction = eye_direction.normalize_or_zero();
+        let direction = if direction.length_squared() < 0.5 {
+            Vec3::Z
+        } else {
+            direction
+        };
+        let eye = direction * 3.2 * distance_scale.clamp(0.2, 4.0);
         let up = if direction.dot(Vec3::Y).abs() > 0.98 {
             Vec3::Z
         } else {

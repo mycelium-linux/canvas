@@ -24,7 +24,8 @@
         "kind": "live_video",
         "source_id": "transmog-step",
         "width": 1280,
-        "height": 720
+        "height": 720,
+        "orbitable": true
       },
       "inputs": []
     },

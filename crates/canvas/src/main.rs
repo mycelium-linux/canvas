@@ -247,6 +247,7 @@ enum ContentSource {
         path: PathBuf,
         width: u32,
         height: u32,
+        orbitable: bool,
         seen: Option<(std::time::SystemTime, u64)>,
     },
     Widget {
@@ -325,9 +326,75 @@ struct LoadedBackground {
     handle: iced::widget::image::Handle,
 }
 
+/// The view change a key press asks for, if any.
+///
+/// Modified presses are left alone: Ctrl-arrow already pages the workspace,
+/// and a model surface must not steal it just because it has focus.
+fn orbit_action(event: &iced::keyboard::Event) -> Option<::canvas::model_orbit::OrbitAction> {
+    use iced::keyboard::Event;
+    let Event::KeyPressed {
+        key,
+        modifiers,
+        text,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    if modifiers.command() || modifiers.control() || modifiers.alt() {
+        return None;
+    }
+    let name = match key {
+        iced::keyboard::Key::Named(iced::keyboard::key::Named::ArrowLeft) => "ArrowLeft",
+        iced::keyboard::Key::Named(iced::keyboard::key::Named::ArrowRight) => "ArrowRight",
+        iced::keyboard::Key::Named(iced::keyboard::key::Named::ArrowUp) => "ArrowUp",
+        iced::keyboard::Key::Named(iced::keyboard::key::Named::ArrowDown) => "ArrowDown",
+        _ => text.as_ref().map(|text| text.as_str())?,
+    };
+    ::canvas::model_orbit::action_for_key(name)
+}
+
+/// How often a camera pose is written while a drag is in flight. 30 a second
+/// is finer than the 24fps the model renders at, so the renderer never waits
+/// on the pointer.
+const ORBIT_PUBLISH_INTERVAL: Duration = Duration::from_millis(33);
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+/// Write a pose where the renderer, or an edge forwarding to it, will find it.
+///
+/// Latest-value, not a queue: the file is replaced whole. An older pose
+/// arriving late would drag the camera backwards, so there is deliberately
+/// nowhere for one to wait.
+fn publish_model_camera(pose: &canvas_core::model_camera::ViewerCamera) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    let path = canvas_core::model_camera::camera_file(&pose.stream_id)
+        .context("stream id cannot address a camera file")?;
+    let body = serde_json::to_vec(pose).context("serialise camera pose")?;
+    canvas_core::write_atomic(&path, &body).context("write camera pose")?;
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 enum Message {
     Tick,
+    /// A gesture on a model surface. Carries the stream rather than the
+    /// surface: the camera belongs to the thing being rendered, so two
+    /// surfaces showing the same model turn together.
+    ModelOrbit {
+        stream_id: String,
+        event: retained_video::OrbitEvent,
+    },
+    /// A discrete face/corner chosen from the model's view cube.
+    ModelOrbitAction {
+        stream_id: String,
+        action: ::canvas::model_orbit::OrbitAction,
+    },
     WindowReady(iced::window::Id),
     WindowEvent(iced::window::Id, iced::window::Event),
     MouseEvent(iced::window::Id, iced::mouse::Event),
@@ -481,6 +548,12 @@ struct App {
     runtime_revision: u64,
     /// Last list written, so an unchanged set costs nothing.
     last_wanted_video: Option<String>,
+    /// Camera pose per model stream, keyed by stream rather than surface so
+    /// two surfaces showing one model agree.
+    orbits: BTreeMap<String, ::canvas::model_orbit::OrbitController>,
+    /// When each stream's pose was last written, to keep a drag from writing
+    /// a file per pointer sample.
+    orbit_published: BTreeMap<String, Instant>,
     frame: Rect,
     display_frames: Vec<Rect>,
     displays: Vec<DisplayInfo>,
@@ -871,6 +944,8 @@ impl App {
             catalog,
             document,
             last_wanted_video: None,
+            orbits: BTreeMap::new(),
+            orbit_published: BTreeMap::new(),
             runtime_revision: 1,
             frame: desktop_frame,
             display_frames,
@@ -1343,6 +1418,13 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::ModelOrbit { stream_id, event } => {
+                self.handle_model_orbit(&stream_id, event);
+                Task::none()
+            }
+            Message::ModelOrbitAction { stream_id, action } => {
+                self.apply_orbit_action(&stream_id, action)
+            }
             Message::Tick => {
                 if self
                     .focus_emphasis_started
@@ -1754,6 +1836,15 @@ impl App {
                 }
                 if let Some(ordinal) = display_shortcut(&kbd_event) {
                     return self.toggle_display_ordinal(ordinal);
+                }
+                // A focused model takes the view keys. Gated on focus because
+                // these are bare digits and arrows: claimed unconditionally
+                // they would eat what someone is typing into the prompt on
+                // the same board.
+                if let Some(stream) = self.focused_model_stream()
+                    && let Some(action) = orbit_action(&kbd_event)
+                {
+                    return self.apply_orbit_action(&stream, action);
                 }
                 // A focused prompt takes the keys before the terminal arm,
                 // so typing lands in the prompt rather than being swallowed.
@@ -4319,6 +4410,7 @@ impl App {
                     source_id: source_id.clone(),
                     width,
                     height,
+                    orbitable: false,
                 };
                 let Some(path) = canvas_core::video_frame_file(&source_id) else {
                     self.fail(pending, Failure::invalid("Invalid live video source id"));
@@ -5659,16 +5751,19 @@ impl App {
                             source_id,
                             width,
                             height,
+                            orbitable,
                         } => matches!(
                             &decoded.source,
                             ContentSource::LiveVideo {
                                 source_id: decoded_source_id,
                                 width: decoded_width,
                                 height: decoded_height,
+                                orbitable: decoded_orbitable,
                                 ..
                             } if decoded_source_id == source_id
                                 && decoded_width == width
                                 && decoded_height == height
+                                && decoded_orbitable == orbitable
                         ),
                         // Identity is the target, never the draft: the draft is
                         // runtime state the document does not carry, so
@@ -5744,6 +5839,110 @@ impl App {
     /// project is published. An empty or missing file means "no preference",
     /// never "nothing" — a reader that cannot find this must keep decoding
     /// rather than blank the wall.
+    /// Apply a gesture to a model's camera and publish the result.
+    ///
+    /// The pose is written at most `ORBIT_PUBLISH_INTERVAL` apart, because a
+    /// drag produces a pointer sample per frame and the renderer only ever
+    /// wants the newest. The release is always written regardless of the
+    /// throttle: it is the one that clears `grabbed`, and dropping it would
+    /// leave the renderer believing a pointer is still down and holding the
+    /// camera against the scene forever.
+    fn handle_model_orbit(&mut self, stream_id: &str, event: retained_video::OrbitEvent) {
+        use ::canvas::model_orbit::OrbitController;
+        use retained_video::OrbitEvent;
+
+        let controller = self
+            .orbits
+            .entry(stream_id.to_string())
+            .or_insert_with(OrbitController::default);
+        let (moved, force) = match event {
+            OrbitEvent::Press(at) => {
+                controller.press(at);
+                // Publishes immediately so the renderer stops its idle orbit
+                // the moment the pointer goes down, rather than fighting the
+                // first part of the drag.
+                (true, true)
+            }
+            OrbitEvent::Drag(to, surface) => (controller.drag(to, surface), false),
+            OrbitEvent::Release => {
+                controller.release();
+                (true, true)
+            }
+            OrbitEvent::Zoom(steps) => (controller.zoom(steps), false),
+        };
+        if !moved {
+            return;
+        }
+        let now = Instant::now();
+        if !force
+            && self
+                .orbit_published
+                .get(stream_id)
+                .is_some_and(|last| now.duration_since(*last) < ORBIT_PUBLISH_INTERVAL)
+        {
+            return;
+        }
+        self.orbit_published.insert(stream_id.to_string(), now);
+        let pose = controller.pose(stream_id, unix_ms());
+        if let Err(error) = publish_model_camera(&pose) {
+            eprintln!("Canvas: could not publish camera for {stream_id}: {error:#}");
+        }
+        self.status = match controller.named_view() {
+            Some(view) => format!("{stream_id}: {view} view"),
+            None => format!(
+                "{stream_id}: {:.0} deg, {:.0} deg up",
+                controller.yaw(),
+                controller.pitch()
+            ),
+        };
+    }
+
+    /// The model stream the focused surface is showing, if it is showing one.
+    fn focused_model_stream(&self) -> Option<String> {
+        let id = self.document.focused_surface_id.as_ref()?;
+        match &self.decoded.get(id)?.source {
+            ContentSource::LiveVideo {
+                source_id,
+                orbitable: true,
+                ..
+            } => Some(source_id.clone()),
+            _ => None,
+        }
+    }
+
+    /// Apply a keyed view change and publish it.
+    ///
+    /// Always published, never throttled: these arrive one key press at a
+    /// time, so there is no burst to thin out, and dropping one would leave
+    /// the screen showing a view the renderer was never told about.
+    fn apply_orbit_action(
+        &mut self,
+        stream_id: &str,
+        action: ::canvas::model_orbit::OrbitAction,
+    ) -> Task<Message> {
+        use ::canvas::model_orbit::OrbitController;
+        let controller = self
+            .orbits
+            .entry(stream_id.to_string())
+            .or_insert_with(OrbitController::default);
+        if !action.apply(controller) {
+            return Task::none();
+        }
+        let pose = controller.pose(stream_id, unix_ms());
+        let described = controller
+            .named_view()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{:.0} deg", controller.yaw()));
+        if let Err(error) = publish_model_camera(&pose) {
+            eprintln!("Canvas: could not publish camera for {stream_id}: {error:#}");
+        }
+        self.orbit_published
+            .insert(stream_id.to_string(), Instant::now());
+        self.status = format!("{stream_id}: {described}");
+        self.bump();
+        Task::none()
+    }
+
     fn publish_wanted_video(&mut self) {
         let Some(root) = canvas_core::runtime_root() else {
             return;
@@ -5922,6 +6121,7 @@ impl App {
                     source_id,
                     width,
                     height,
+                    orbitable,
                 } => {
                     let Some(path) = canvas_core::video_frame_file(source_id) else {
                         continue;
@@ -5933,6 +6133,7 @@ impl App {
                             path,
                             width: *width,
                             height: *height,
+                            orbitable: *orbitable,
                             seen: None,
                         },
                     )
@@ -6317,8 +6518,23 @@ impl App {
                         path,
                         width: frame_width,
                         height: frame_height,
+                        source_id,
+                        orbitable,
                         ..
-                    } => retained_video::view(path.clone(), *frame_width, *frame_height),
+                    } => {
+                        let stream = source_id.clone();
+                        retained_video::view(
+                            path.clone(),
+                            *frame_width,
+                            *frame_height,
+                            orbitable.then(|| {
+                                std::sync::Arc::new(move |event| Message::ModelOrbit {
+                                    stream_id: stream.clone(),
+                                    event,
+                                }) as _
+                            }),
+                        )
+                    }
                     _ => {
                         let mut image = image_widget(surface.handle.clone())
                             .content_fit(ContentFit::Contain)
@@ -6348,6 +6564,14 @@ impl App {
                         .into(),
                     );
                 }
+                if let ContentSource::LiveVideo {
+                    source_id,
+                    orbitable: true,
+                    ..
+                } = &surface.source
+                {
+                    layers.push(self.model_view_cube(source_id));
+                }
                 if let Some(view) = view
                     && let Some(attention) = &view.attention
                 {
@@ -6368,6 +6592,48 @@ impl App {
                 stack(layers).into()
             }
         }
+    }
+
+    /// Compact CAD-style view cube over a streamed model.
+    ///
+    /// The visible faces and corners are all aliases for the same named poses
+    /// used by keyboard input; the overlay owns no camera arithmetic.
+    fn model_view_cube<'a>(&self, stream_id: &'a str) -> Element<'a, Message> {
+        use ::canvas::model_orbit::OrbitAction;
+
+        let selected = self
+            .orbits
+            .get(stream_id)
+            .and_then(|orbit| orbit.named_view());
+        let face = |label: &'static str, view: &'static str| {
+            let message = Message::ModelOrbitAction {
+                stream_id: stream_id.to_string(),
+                action: OrbitAction::Snap(view),
+            };
+            button(text(label).size(9))
+                .width(Length::Fixed(28.0))
+                .height(Length::Fixed(24.0))
+                .padding(0)
+                .on_press(message)
+                .style(if selected == Some(view) {
+                    button::primary
+                } else {
+                    button::secondary
+                })
+        };
+        let cube = column![
+            row![face("IR", "iso_rear"), face("T", "top"), face("I", "iso")].spacing(1),
+            row![face("L", "left"), face("F", "front"), face("R", "right")].spacing(1),
+            row![face("B", "back"), face("D", "bottom")].spacing(1),
+        ]
+        .spacing(1);
+        container(cube)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(8)
+            .align_x(iced::alignment::Horizontal::Right)
+            .align_y(iced::alignment::Vertical::Top)
+            .into()
     }
 
     fn surface_controls<'a>(

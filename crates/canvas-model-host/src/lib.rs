@@ -4,6 +4,7 @@
 //! state; they never submit shaders, paths, commands, or per-frame callbacks.
 
 use anyhow::{Result, ensure};
+pub use glam;
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

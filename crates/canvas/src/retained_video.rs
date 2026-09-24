@@ -107,16 +107,58 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-#[derive(Debug, Clone)]
-struct Program {
+/// What the surface saw, in surface coordinates. The widget reports gestures
+/// and refuses to interpret them: where the camera ends up is decided by the
+/// orbit controller, which is testable without a window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OrbitEvent {
+    Press(iced::Point),
+    Drag(iced::Point, iced::Size),
+    Release,
+    Zoom(f32),
+}
+
+/// Emits an application message for a gesture. `Arc` rather than a plain
+/// closure because iced rebuilds the widget tree constantly and the hook is
+/// cloned with it.
+type OrbitHook<Message> = std::sync::Arc<dyn Fn(OrbitEvent) -> Message + Send + Sync>;
+
+struct Program<Message> {
     path: PathBuf,
     width: u32,
     height: u32,
+    /// `None` for a surface that is only being watched, such as a camera.
+    on_orbit: Option<OrbitHook<Message>>,
+}
+
+impl<Message> std::fmt::Debug for Program<Message> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Program")
+            .field("path", &self.path)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("orbitable", &self.on_orbit.is_some())
+            .finish()
+    }
+}
+
+impl<Message> Clone for Program<Message> {
+    fn clone(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            width: self.width,
+            height: self.height,
+            on_orbit: self.on_orbit.clone(),
+        }
+    }
 }
 
 #[derive(Debug)]
 struct State {
     ticket: u64,
+    /// Whether the press that began a drag landed on this surface.
+    dragging: bool,
 }
 
 impl Default for State {
@@ -124,6 +166,7 @@ impl Default for State {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         Self {
             ticket: NEXT.fetch_add(1, Ordering::Relaxed),
+            dragging: false,
         }
     }
 }
@@ -211,7 +254,7 @@ impl Pipeline {
     }
 }
 
-impl<Message> shader::Program<Message> for Program {
+impl<Message> shader::Program<Message> for Program<Message> {
     type State = State;
     type Primitive = Primitive;
 
@@ -225,10 +268,55 @@ impl<Message> shader::Program<Message> for Program {
         // A file changing does not itself wake iced. Let the presentation
         // primitive own its redraw cadence, just like the animated background,
         // without mutating the workspace revision on every video frame.
+        if let iced::Event::Window(iced::window::Event::RedrawRequested(now)) = event {
+            return Some(iced::widget::Action::request_redraw_at(
+                *now + REDRAW_INTERVAL,
+            ));
+        }
+        let Some(hook) = self.on_orbit.as_ref() else {
+            return None;
+        };
+        let surface = iced::Size::new(_bounds.width, _bounds.height);
+        // Only gestures that started on this surface are followed. A press
+        // elsewhere that happens to drag across a model must not seize its
+        // camera, and the button release that ends such a drag arrives here
+        // too -- releasing a grab this surface never took would be harmless
+        // but releasing one it *did* take, because another surface saw the
+        // press, would strand the camera mid-turn.
         match event {
-            iced::Event::Window(iced::window::Event::RedrawRequested(now)) => Some(
-                iced::widget::Action::request_redraw_at(*now + REDRAW_INTERVAL),
-            ),
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
+                let position = _cursor.position_in(_bounds)?;
+                _state.dragging = true;
+                Some(iced::widget::Action::publish(hook(OrbitEvent::Press(
+                    position,
+                ))))
+            }
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. }) if _state.dragging => {
+                // Deliberately not `position_in`: a drag that leaves the
+                // surface keeps turning the model until the button comes up,
+                // which is what makes a long sweep possible on a small tile.
+                let position = _cursor.position()?;
+                let local = iced::Point::new(position.x - _bounds.x, position.y - _bounds.y);
+                Some(iced::widget::Action::publish(hook(OrbitEvent::Drag(
+                    local, surface,
+                ))))
+            }
+            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left))
+                if _state.dragging =>
+            {
+                _state.dragging = false;
+                Some(iced::widget::Action::publish(hook(OrbitEvent::Release)))
+            }
+            iced::Event::Mouse(iced::mouse::Event::WheelScrolled { delta }) => {
+                _cursor.position_in(_bounds)?;
+                let steps = match delta {
+                    iced::mouse::ScrollDelta::Lines { y, .. } => *y,
+                    // Pixel deltas are far finer grained than a notched wheel;
+                    // scaled so a trackpad swipe is a comparable amount of zoom.
+                    iced::mouse::ScrollDelta::Pixels { y, .. } => *y / 50.0,
+                };
+                (steps != 0.0).then(|| iced::widget::Action::publish(hook(OrbitEvent::Zoom(steps))))
+            }
             _ => None,
         }
     }
@@ -470,11 +558,17 @@ impl shader::Primitive for Primitive {
     }
 }
 
-pub fn view<'a, Message: 'a>(path: PathBuf, width: u32, height: u32) -> Element<'a, Message> {
+pub fn view<'a, Message: 'a>(
+    path: PathBuf,
+    width: u32,
+    height: u32,
+    on_orbit: Option<OrbitHook<Message>>,
+) -> Element<'a, Message> {
     Shader::new(Program {
         path,
         width,
         height,
+        on_orbit,
     })
     .width(Length::Fill)
     .height(Length::Fill)

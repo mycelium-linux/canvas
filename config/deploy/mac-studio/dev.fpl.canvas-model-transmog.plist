@@ -23,6 +23,7 @@
     <string>720</string>
     <string>24</string>
     <string>videotoolbox</string>
+    <string>transmog-step</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

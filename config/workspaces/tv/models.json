@@ -10,7 +10,7 @@
     {
       "id": "model-benchy",
       "title": "3DBenchy",
-      "content": { "kind": "live_video", "source_id": "model-benchy", "width": 320, "height": 180 },
+      "content": { "kind": "live_video", "source_id": "model-benchy", "width": 320, "height": 180, "orbitable": true },
       "inputs": []
     }
   ],

@@ -1,7 +1,9 @@
 use anyhow::{Context, Result, bail};
 use canvas_core::VisualTheme;
 use canvas_core::{Accent, ThemeMode, ThemeSelection};
-use canvas_model_host::{CameraFlight, Material, Orbit, SceneContext, SceneState, lua, mesh, renderer::Renderer};
+use canvas_model_host::{
+    CameraFlight, Material, SceneContext, SceneState, glam::Vec3, lua, mesh, renderer::Renderer,
+};
 use std::{
     collections::{BTreeMap, VecDeque},
     io::Write,
@@ -18,8 +20,9 @@ use std::{
 #[derive(Clone)]
 struct RenderJob {
     sequence: u64,
-    flight: CameraFlight,
-    orbit: Option<Orbit>,
+    /// Where the camera sits this frame, already settled by the host.
+    direction: Vec3,
+    distance_scale: f32,
     rotation: [f32; 3],
     material: Material,
     field: Option<canvas_model_host::Field>,
@@ -62,8 +65,8 @@ impl RenderPool {
                             WorkerCommand::Render(job) => {
                                 sequences.push_back(job.sequence);
                                 match renderer.render(
-                                    job.flight,
-                                    job.orbit,
+                                    job.direction,
+                                    job.distance_scale,
                                     job.rotation,
                                     &job.material,
                                     job.field.as_ref(),
@@ -129,11 +132,56 @@ impl RenderPool {
     }
 }
 
+/// How much of the remaining distance to the target the camera closes each
+/// frame. At 24fps this settles a large move in about a fifth of a second:
+/// fast enough to feel attached to the hand that moved it, slow enough to
+/// absorb poses arriving unevenly across a network.
+const CAMERA_EASING: f32 = 0.25;
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+/// Move a direction part of the way toward another along the sphere.
+fn ease_toward(from: Vec3, to: Vec3, fraction: f32) -> Vec3 {
+    let from = from.normalize_or_zero();
+    let to = to.normalize_or_zero();
+    if to.length_squared() < 0.5 {
+        return from;
+    }
+    if from.length_squared() < 0.5 {
+        return to;
+    }
+    // Opposite directions have no unique path between them, and lerping
+    // through the origin would collapse the view matrix on the way. Nudge off
+    // the antipode and let the next frame continue normally.
+    let blended = if from.dot(to) < -0.999 {
+        (from + Vec3::Y * 0.01).lerp(to, fraction)
+    } else {
+        from.lerp(to, fraction)
+    };
+    blended.normalize_or_zero()
+}
+
+/// The pose a screen last published for this stream, if it still stands.
+///
+/// Every failure here means the same thing -- no one is driving -- so they all
+/// return None and the scene keeps the camera. That includes a file that does
+/// not exist yet, which is the normal case and not worth a line of log.
+fn read_viewer_camera(path: &Path, now_ms: u64) -> Option<canvas_core::model_camera::ViewerCamera> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let camera: canvas_core::model_camera::ViewerCamera = serde_json::from_str(&text).ok()?;
+    camera.is_current(now_ms).then_some(camera)
+}
+
 fn main() -> Result<()> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
-    if args.len() != 7 {
+    if args.len() != 8 {
         bail!(
-            "usage: canvas-model-host <scene.lua> <asset-root> <endpoint> <width> <height> <fps> <videotoolbox|nvenc|vaapi>"
+            "usage: canvas-model-host <scene.lua> <asset-root> <endpoint> <width> <height> <fps> <videotoolbox|nvenc|vaapi> <stream-id>"
         );
     }
     let scene_path = PathBuf::from(&args[0]);
@@ -142,6 +190,11 @@ fn main() -> Result<()> {
     let width: u32 = args[3].parse().context("invalid width")?;
     let height: u32 = args[4].parse().context("invalid height")?;
     let fps: u32 = args[5].parse().context("invalid fps")?;
+    // The id the frames arrive under on every screen. It is what a screen
+    // names when it sends a camera pose back, so the host has to be told which
+    // stream it is producing -- it can see its encoder and its endpoint, but
+    // neither of those is the name anyone else uses for it.
+    let stream_id = args[7].clone();
     anyhow::ensure!((1..=30).contains(&fps), "fps must be 1..=30");
 
     // A scene cannot look at the asset root itself, so the host enumerates it
@@ -180,6 +233,12 @@ fn main() -> Result<()> {
     );
     let mut transition_started = Instant::now();
     let started = Instant::now();
+    // Seeded from the scene so the very first frame is the view the scene
+    // asked for, not an ease in from somewhere arbitrary.
+    let mut camera_direction = scene.camera.direction();
+    let mut camera_distance = 1.0_f32;
+    let camera_path = canvas_core::model_camera::camera_file(&stream_id)
+        .context("stream id cannot address a camera file")?;
     let frame_interval = Duration::from_secs_f64(1.0 / f64::from(fps));
     let mut frame_count = 0u64;
     let mut submitted = 0u64;
@@ -237,18 +296,47 @@ fn main() -> Result<()> {
                 }
             }
         }
+        // Three things can move this camera: the scene's fly-in, its idle
+        // orbit, and someone dragging it on a screen somewhere. The viewer
+        // outranks the other two while their pose is current, and the result
+        // is eased rather than assigned, which covers three problems with one
+        // rule: taking over does not snap, poses arriving unevenly over a
+        // network do not stutter, and handing back to the scene drifts home
+        // instead of cutting.
+        let elapsed_seconds = transition_started
+            .elapsed()
+            .as_secs_f32()
+            .min(started.elapsed().as_secs_f32());
+        let now_ms = unix_ms();
+        let viewer = read_viewer_camera(&camera_path, now_ms);
+        let (target_direction, target_distance) = match &viewer {
+            Some(camera) => (Vec3::from_array(camera.direction()), camera.distance),
+            None => {
+                let (direction, distance_scale) = flight.sample(elapsed_seconds);
+                let direction = match scene.orbit {
+                    Some(orbit) => {
+                        let axis = Vec3::from_array(orbit.axis).normalize_or_zero();
+                        glam::Quat::from_axis_angle(
+                            axis,
+                            orbit.degrees_per_second.to_radians() * elapsed_seconds,
+                        ) * direction
+                    }
+                    None => direction,
+                };
+                (direction, distance_scale)
+            }
+        };
+        camera_direction = ease_toward(camera_direction, target_direction, CAMERA_EASING);
+        camera_distance += (target_distance - camera_distance) * CAMERA_EASING;
         renderers.submit(RenderJob {
             sequence: submitted,
-            flight,
-            orbit: scene.orbit,
+            direction: camera_direction,
+            distance_scale: camera_distance,
             rotation: scene.model_rotation_degrees,
             material: scene.material.clone(),
             field: scene.field.clone(),
             theme,
-            elapsed: transition_started
-                .elapsed()
-                .as_secs_f32()
-                .min(started.elapsed().as_secs_f32()),
+            elapsed: elapsed_seconds,
         })?;
         submitted += 1;
         while let Ok(result) = renderers.results.try_recv() {
@@ -283,7 +371,6 @@ fn read_scene(path: &Path, assets: &SceneContext) -> Result<SceneState> {
 fn modified(path: &Path) -> Result<SystemTime> {
     std::fs::metadata(path)?.modified().map_err(Into::into)
 }
-
 
 /// FFmpeg output arguments for one or several destinations.
 ///
@@ -477,7 +564,10 @@ mod fanout_tests {
         let args = mpegts_output_args(&["udp://127.0.0.1:55207"]);
         assert_eq!(args.last().unwrap(), "udp://127.0.0.1:55207");
         assert!(args.iter().any(|a| a == "mpegts"));
-        assert!(!args.iter().any(|a| a == "tee"), "no tee for a single output");
+        assert!(
+            !args.iter().any(|a| a == "tee"),
+            "no tee for a single output"
+        );
     }
 
     /// tee does not inherit default stream selection, so without -map it
@@ -486,7 +576,10 @@ mod fanout_tests {
     fn several_destinations_tee_with_an_explicit_map() {
         let args = mpegts_output_args(&["udp://127.0.0.1:55207", "udp://100.120.101.5:55207"]);
         let joined = args.join(" ");
-        assert!(joined.contains("-map 0:v:0"), "tee needs an explicit map: {joined}");
+        assert!(
+            joined.contains("-map 0:v:0"),
+            "tee needs an explicit map: {joined}"
+        );
         assert!(args.iter().any(|a| a == "tee"));
         assert!(joined.contains("100.120.101.5:55207"));
         assert!(joined.contains("127.0.0.1:55207"));
@@ -499,6 +592,56 @@ mod fanout_tests {
         let args = mpegts_output_args(&["udp://a:1", "udp://b:2"]);
         let slots = args.last().unwrap();
         assert_eq!(slots.matches("mpegts_flags=+resend_headers").count(), 2);
-        assert!(!slots.contains("muxdelay"), "latency options belong outside the slot");
+        assert!(
+            !slots.contains("muxdelay"),
+            "latency options belong outside the slot"
+        );
+    }
+}
+
+#[cfg(test)]
+mod camera_tests {
+    use super::{CAMERA_EASING, ease_toward};
+    use canvas_model_host::glam::Vec3;
+
+    /// Easing must actually arrive. A rule that only ever closes a fraction of
+    /// the gap still has to converge, or a camera handed back to the scene
+    /// would sit slightly off its mark forever.
+    #[test]
+    fn easing_converges_on_its_target() {
+        let target = Vec3::new(1.0, 0.8, 1.0).normalize();
+        let mut direction = Vec3::Z;
+        for _ in 0..48 {
+            direction = ease_toward(direction, target, CAMERA_EASING);
+        }
+        assert!(direction.distance(target) < 1e-3, "{direction} vs {target}");
+    }
+
+    /// One step must be partial, or takeover is a snap and there was no point
+    /// easing at all.
+    #[test]
+    fn a_single_step_does_not_jump_to_the_target() {
+        let stepped = ease_toward(Vec3::Z, Vec3::X, CAMERA_EASING);
+        assert!(stepped.distance(Vec3::X) > 0.1, "arrived in one frame");
+        assert!(stepped.distance(Vec3::Z) > 0.01, "did not move at all");
+        assert!((stepped.length() - 1.0).abs() < 1e-5, "stays on the sphere");
+    }
+
+    /// Turning to the exact opposite side has no unique path, and lerping
+    /// straight there passes through the origin -- a zero-length eye vector and
+    /// a collapsed view matrix.
+    #[test]
+    fn the_antipode_does_not_collapse_the_view() {
+        let stepped = ease_toward(Vec3::Z, Vec3::NEG_Z, CAMERA_EASING);
+        assert!((stepped.length() - 1.0).abs() < 1e-5, "{stepped}");
+        assert!(stepped.is_finite());
+    }
+
+    /// A target that carries no direction leaves the camera where it is,
+    /// rather than easing toward nothing.
+    #[test]
+    fn a_degenerate_target_is_ignored() {
+        assert_eq!(ease_toward(Vec3::Z, Vec3::ZERO, CAMERA_EASING), Vec3::Z);
+        assert_eq!(ease_toward(Vec3::ZERO, Vec3::X, CAMERA_EASING), Vec3::X);
     }
 }

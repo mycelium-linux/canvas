@@ -28,6 +28,7 @@ pub mod map;
 #[cfg(all(feature = "mcp", unix))]
 pub mod mcp;
 pub mod media;
+pub mod model_orbit;
 pub mod operational_views;
 pub mod project_picker;
 pub mod project_switcher;
@@ -505,6 +506,11 @@ pub enum SurfaceContent {
         source_id: String,
         width: u32,
         height: u32,
+        /// This producer accepts `canvas.model.camera.v1` poses.
+        /// Defaults false so cameras, games and browser video do not expose
+        /// controls that cannot affect them.
+        #[serde(default, skip_serializing_if = "is_false")]
+        orbitable: bool,
     },
     /// A line of text the wall can send somewhere.
     ///
@@ -535,6 +541,10 @@ pub enum SurfaceContent {
     /// Content from a newer Canvas, kept exactly as written.
     #[serde(untagged)]
     Unsupported(serde_json::Value),
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// The `kind` tags this build can render. Anything else is a newer Canvas.
@@ -654,6 +664,8 @@ enum Known {
         source_id: String,
         width: u32,
         height: u32,
+        #[serde(default)]
+        orbitable: bool,
     },
     Prompt {
         target: String,
@@ -681,10 +693,12 @@ impl Known {
                 source_id,
                 width,
                 height,
+                orbitable,
             } => SurfaceContent::LiveVideo {
                 source_id,
                 width,
                 height,
+                orbitable,
             },
             Self::Prompt {
                 target,
@@ -1260,6 +1274,7 @@ impl WorkspaceDocument {
                     source_id,
                     width,
                     height,
+                    ..
                 } => {
                     check(
                         identifier(source_id),

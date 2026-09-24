@@ -137,8 +137,10 @@ pub fn video_frame_size_file(source_id: &str) -> Option<PathBuf> {
 /// Canvas holds the frame path rather than the source id, and re-deriving the
 /// id from the filename would be a second place to get the mapping wrong.
 pub fn video_frame_size_file_for(frame: &Path) -> Option<PathBuf> {
-    (frame.extension().is_some_and(|extension| extension == "rgba"))
-        .then(|| frame.with_extension("size"))
+    (frame
+        .extension()
+        .is_some_and(|extension| extension == "rgba"))
+    .then(|| frame.with_extension("size"))
 }
 
 /// Parse a size sidecar. Anything unparseable is `None` — the reader then
@@ -1058,19 +1060,24 @@ mod tests {
         Catalog::bundled().unwrap()
     }
     #[test]
-    #[test]
     fn the_size_sidecar_sits_beside_its_frame() {
         let frame = video_frame_file("transmog-step").expect("frame path");
         let size = video_frame_size_file("transmog-step").expect("size path");
         assert_eq!(size.parent(), frame.parent());
         assert_eq!(size.file_name().unwrap(), "transmog-step.size");
-        assert!(video_frame_size_file("..").is_none(), "same id guard as the frame");
+        assert!(
+            video_frame_size_file("..").is_none(),
+            "same id guard as the frame"
+        );
     }
 
     #[test]
     fn the_sidecar_can_be_found_from_the_frame_path_alone() {
         let frame = video_frame_file("cat").expect("frame path");
-        assert_eq!(video_frame_size_file_for(&frame), video_frame_size_file("cat"));
+        assert_eq!(
+            video_frame_size_file_for(&frame),
+            video_frame_size_file("cat")
+        );
         // Anything that is not a frame has no sidecar, so a stray path cannot
         // be turned into one by adding an extension.
         assert!(video_frame_size_file_for(Path::new("/tmp/cat.png")).is_none());
@@ -1268,5 +1275,325 @@ mod tests {
         fs::remove_file(path.with_extension("lock")).unwrap();
         fs::remove_file(&path).unwrap();
         fs::remove_dir(path.parent().unwrap()).unwrap();
+    }
+}
+
+/// A viewer-driven camera pose for a streamed model, and where it is published.
+///
+/// Orbiting a model that is rendered on another machine means the pointer and
+/// the renderer are several hops apart: Canvas sees the drag, the renderer owns
+/// the camera, and a video stream connects them in one direction only. What
+/// travels back is this — an *absolute* pose, never a delta.
+///
+/// Absolute matters more than it looks. A dropped or reordered delta leaves the
+/// camera permanently out of step with the hand that moved it, and nothing ever
+/// corrects it; a dropped absolute pose is invisible the moment the next one
+/// lands. It also makes the channel idempotent, so the same pose can be
+/// re-sent, replayed on reconnect, or written by two screens without harm.
+pub mod model_camera {
+    use serde::{Deserialize, Serialize};
+    use std::path::PathBuf;
+
+    /// Contract carrying a pose from a screen back to a renderer.
+    pub const CAMERA_CONTRACT: &str = "canvas.model.camera.v1";
+
+    /// How long a released camera keeps its pose before the scene takes back
+    /// over. Long enough to look at what you just turned towards, short enough
+    /// that a wall left alone returns to presenting itself.
+    pub const HOLD_MS: u64 = 45_000;
+
+    /// Pitch stops short of the poles: at exactly vertical the up vector is
+    /// undefined and the view rolls unpredictably through the flip.
+    pub const MAX_PITCH_DEGREES: f32 = 85.0;
+
+    /// Distance multiplier bounds, against the scene's resting distance.
+    pub const MIN_DISTANCE: f32 = 0.45;
+    pub const MAX_DISTANCE: f32 = 3.0;
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct ViewerCamera {
+        pub schema_version: u32,
+        /// The video stream being driven — the same id the frames arrive under,
+        /// so a screen needs to know nothing about scenes to aim a drag.
+        pub stream_id: String,
+        pub yaw_degrees: f32,
+        pub pitch_degrees: f32,
+        /// Multiplier on the scene's resting camera distance.
+        pub distance: f32,
+        /// True while a pointer is down. A held camera never expires, however
+        /// long someone spends studying one angle.
+        pub grabbed: bool,
+        pub at_unix_ms: u64,
+    }
+
+    impl ViewerCamera {
+        /// A pose with its angles brought into range.
+        ///
+        /// Clamped rather than rejected: a pointer dragged off the top of a
+        /// surface should stop at the pole, not drop the whole pose and freeze.
+        pub fn new(
+            stream_id: impl Into<String>,
+            yaw: f32,
+            pitch: f32,
+            distance: f32,
+            grabbed: bool,
+            at_unix_ms: u64,
+        ) -> Self {
+            Self {
+                schema_version: 1,
+                stream_id: stream_id.into(),
+                yaw_degrees: normalize_degrees(yaw),
+                pitch_degrees: clamp_finite(pitch, -MAX_PITCH_DEGREES, MAX_PITCH_DEGREES),
+                distance: clamp_finite(distance, MIN_DISTANCE, MAX_DISTANCE),
+                grabbed,
+                at_unix_ms,
+            }
+        }
+
+        /// Unit eye direction, right-handed with +Y up.
+        ///
+        /// Yaw 0, pitch 0 looks from +Z so that a zeroed pose is the front
+        /// view, matching the renderer's `Front` preset rather than an
+        /// arbitrary corner.
+        pub fn direction(&self) -> [f32; 3] {
+            let yaw = self.yaw_degrees.to_radians();
+            let pitch = self.pitch_degrees.to_radians();
+            [
+                yaw.sin() * pitch.cos(),
+                pitch.sin(),
+                yaw.cos() * pitch.cos(),
+            ]
+        }
+
+        /// The angles that reproduce a direction, so a drag can begin from
+        /// wherever the scene had already placed the camera instead of
+        /// snapping to the front on first touch.
+        pub fn angles_of(direction: [f32; 3]) -> (f32, f32) {
+            let [x, y, z] = direction;
+            let length = (x * x + y * y + z * z).sqrt();
+            if !length.is_finite() || length < 1e-6 {
+                return (0.0, 0.0);
+            }
+            let (x, y, z) = (x / length, y / length, z / length);
+            (
+                x.atan2(z).to_degrees(),
+                y.clamp(-1.0, 1.0).asin().to_degrees(),
+            )
+        }
+
+        /// Whether this pose should still override the scene.
+        pub fn is_current(&self, now_ms: u64) -> bool {
+            self.grabbed || now_ms.saturating_sub(self.at_unix_ms) < HOLD_MS
+        }
+    }
+
+    fn clamp_finite(value: f32, low: f32, high: f32) -> f32 {
+        if value.is_finite() {
+            value.clamp(low, high)
+        } else {
+            low.max(0.0_f32.min(high))
+        }
+    }
+
+    /// Wrap yaw into -180..180 so a long drag in one direction stays a small
+    /// number rather than growing without bound.
+    fn normalize_degrees(value: f32) -> f32 {
+        if !value.is_finite() {
+            return 0.0;
+        }
+        let wrapped = value % 360.0;
+        if wrapped > 180.0 {
+            wrapped - 360.0
+        } else if wrapped < -180.0 {
+            wrapped + 360.0
+        } else {
+            wrapped
+        }
+    }
+
+    /// The named views a view cube offers, in the order a cube presents them.
+    ///
+    /// Angles rather than vectors because this is what a screen manipulates: a
+    /// cube click, a keybind and a drag all end up setting the same two
+    /// numbers, so there is one definition of "front" for all three instead of
+    /// a preset enum on one side and free angles on the other.
+    pub const NAMED_VIEWS: [(&str, f32, f32); 8] = [
+        ("front", 0.0, 0.0),
+        ("back", 180.0, 0.0),
+        ("right", 90.0, 0.0),
+        ("left", -90.0, 0.0),
+        ("top", 0.0, MAX_PITCH_DEGREES),
+        ("bottom", 0.0, -MAX_PITCH_DEGREES),
+        // The two corners a CAD tool opens on: turned 45 degrees and looking
+        // slightly down, so three faces are visible at once.
+        ("iso", 45.0, 35.264),
+        ("iso_rear", -135.0, 35.264),
+    ];
+
+    /// Angles for a named view, or `None` if this build does not know it.
+    pub fn named_view(name: &str) -> Option<(f32, f32)> {
+        NAMED_VIEWS
+            .iter()
+            .find(|(view, _, _)| *view == name)
+            .map(|(_, yaw, pitch)| (*yaw, *pitch))
+    }
+
+    /// The named view a pose is sitting on, within a degree.
+    ///
+    /// Lets a view cube highlight the face you are actually looking down
+    /// without the screen tracking how the pose was last set.
+    pub fn view_at(yaw: f32, pitch: f32) -> Option<&'static str> {
+        NAMED_VIEWS
+            .iter()
+            .find(|(_, view_yaw, view_pitch)| {
+                let yaw_delta = normalize_degrees(yaw - view_yaw).abs();
+                (yaw_delta < 1.0 || yaw_delta > 359.0) && (pitch - view_pitch).abs() < 1.0
+            })
+            .map(|(name, _, _)| *name)
+    }
+
+    /// Where a screen's camera pose is written for the renderer to read.
+    ///
+    /// One file per stream, overwritten in place: this is latest-value state,
+    /// not a queue. A drag produces tens of poses a second and only the newest
+    /// is ever wanted, so spooling them would build a backlog whose only
+    /// possible use is to replay a movement that already finished.
+    #[cfg(unix)]
+    pub fn camera_file(source_id: &str) -> Option<PathBuf> {
+        if !super::is_safe_frame_id(source_id) {
+            return None;
+        }
+        super::video_frame_file(source_id)
+            .and_then(|frame| frame.parent().map(|dir| dir.to_path_buf()))
+            .map(|dir| dir.join(format!("{source_id}.camera")))
+    }
+}
+
+#[cfg(test)]
+mod model_camera_tests {
+    use super::model_camera::*;
+
+    /// A zeroed pose must be the front view, not an arbitrary corner: it is
+    /// what a screen sends before it has learned anything about the scene.
+    #[test]
+    fn a_zeroed_pose_looks_from_the_front() {
+        let camera = ViewerCamera::new("m", 0.0, 0.0, 1.0, false, 0);
+        let [x, y, z] = camera.direction();
+        assert!(x.abs() < 1e-5 && y.abs() < 1e-5, "{x} {y}");
+        assert!((z - 1.0).abs() < 1e-5, "{z}");
+    }
+
+    #[test]
+    fn every_named_view_round_trips_through_a_direction() {
+        for (name, yaw, pitch) in NAMED_VIEWS {
+            let camera = ViewerCamera::new("m", yaw, pitch, 1.0, false, 0);
+            let (back_yaw, back_pitch) = ViewerCamera::angles_of(camera.direction());
+            assert!(
+                (back_pitch - pitch).abs() < 0.01,
+                "{name}: pitch {pitch} -> {back_pitch}"
+            );
+            // Yaw is undefined looking straight down a pole, so it is only
+            // meaningful where the view is not vertical. Compared as an
+            // angular separation because 180 and -180 name the same direction
+            // and a round trip may legitimately return either.
+            if pitch.abs() < MAX_PITCH_DEGREES - 1.0 {
+                let separation = (back_yaw - yaw).abs() % 360.0;
+                let separation = separation.min(360.0 - separation);
+                assert!(separation < 0.01, "{name}: yaw {yaw} -> {back_yaw}");
+            }
+            assert_eq!(view_at(yaw, pitch), Some(name), "{name} should name itself");
+        }
+    }
+
+    #[test]
+    fn iso_shows_three_faces() {
+        let (yaw, pitch) = named_view("iso").expect("iso is a named view");
+        let [x, y, z] = ViewerCamera::new("m", yaw, pitch, 1.0, false, 0).direction();
+        // All three components positive is exactly what "three faces visible"
+        // means for a box at the origin.
+        assert!(x > 0.3 && y > 0.3 && z > 0.3, "{x} {y} {z}");
+        assert!(
+            named_view("corner-42").is_none(),
+            "unknown views are not invented"
+        );
+    }
+
+    /// A pointer dragged past the top must stop at the pole. Letting pitch pass
+    /// vertical rolls the view through a flip that reads as the model spinning
+    /// on a second axis.
+    #[test]
+    fn pitch_stops_short_of_the_poles_and_yaw_wraps() {
+        let camera = ViewerCamera::new("m", 0.0, 400.0, 1.0, true, 0);
+        assert_eq!(camera.pitch_degrees, MAX_PITCH_DEGREES);
+        assert_eq!(
+            ViewerCamera::new("m", -400.0, 0.0, 1.0, true, 0).pitch_degrees,
+            0.0
+        );
+        // 540 degrees of dragging is a turn and a half, not a large number.
+        assert_eq!(
+            ViewerCamera::new("m", 540.0, 0.0, 1.0, true, 0).yaw_degrees,
+            180.0
+        );
+        assert_eq!(
+            ViewerCamera::new("m", 370.0, 0.0, 1.0, true, 0).yaw_degrees,
+            10.0
+        );
+    }
+
+    #[test]
+    fn distance_is_bounded_and_nonsense_does_not_escape() {
+        assert_eq!(
+            ViewerCamera::new("m", 0.0, 0.0, 99.0, false, 0).distance,
+            MAX_DISTANCE
+        );
+        assert_eq!(
+            ViewerCamera::new("m", 0.0, 0.0, 0.0, false, 0).distance,
+            MIN_DISTANCE
+        );
+        let broken = ViewerCamera::new("m", f32::NAN, f32::INFINITY, f32::NAN, false, 0);
+        assert!(broken.yaw_degrees.is_finite() && broken.pitch_degrees.is_finite());
+        assert!(
+            broken.distance.is_finite(),
+            "a NaN must not reach the renderer"
+        );
+    }
+
+    /// A held camera never expires: someone studying one angle for a minute
+    /// must not have the scene pull the view out from under them.
+    #[test]
+    fn a_held_pose_outlives_the_hold_window() {
+        let held = ViewerCamera::new("m", 0.0, 0.0, 1.0, true, 1_000);
+        assert!(held.is_current(1_000 + HOLD_MS * 10));
+
+        let released = ViewerCamera::new("m", 0.0, 0.0, 1.0, false, 1_000);
+        assert!(released.is_current(1_000 + HOLD_MS - 1));
+        assert!(
+            !released.is_current(1_000 + HOLD_MS),
+            "then the scene takes over"
+        );
+    }
+
+    #[test]
+    fn the_camera_file_sits_with_the_frames_and_refuses_a_bad_id() {
+        let camera = camera_file("transmog-step").expect("camera path");
+        let frame = super::video_frame_file("transmog-step").expect("frame path");
+        assert_eq!(camera.parent(), frame.parent());
+        assert_eq!(camera.file_name().unwrap(), "transmog-step.camera");
+        assert!(camera_file("../escape").is_none());
+    }
+
+    #[test]
+    fn a_pose_survives_the_wire() {
+        let camera = ViewerCamera::new("transmog-step", 45.0, 35.264, 1.0, true, 1_700_000_000_000);
+        let text = serde_json::to_string(&camera).expect("serialises");
+        assert_eq!(serde_json::from_str::<ViewerCamera>(&text).unwrap(), camera);
+        // deny_unknown_fields: a field this build does not know is a contract
+        // change, and guessing at it would mean acting on a pose it cannot see
+        // all of.
+        assert!(
+            serde_json::from_str::<ViewerCamera>(&text.replace("{", "{\"roll_degrees\":3.0,"))
+                .is_err()
+        );
     }
 }

@@ -10,7 +10,7 @@
 //!   actor's identity, and always answered with a `canvas.result` receipt so
 //!   the central learns what *executed*, not just what was delivered.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
@@ -138,11 +138,20 @@ fn run(config: &EdgeConfig) -> Result<()> {
     let mirror_runtime = Arc::new(Mutex::new(MirrorRuntime::default()));
     let _mirror_socket =
         start_workspace_mirror(config, Arc::clone(&bus), Arc::clone(&mirror_runtime))?;
+    let camera_seen: CameraSeen = Arc::new(Mutex::new(BTreeMap::new()));
+    start_camera_bridge(config, Arc::clone(&bus), Arc::clone(&camera_seen))?;
     start_prompt_bridge(config, Arc::clone(&bus))?;
     loop {
         match bus.try_read() {
             Ok(Some((envelope, _payload))) => {
-                if let Err(e) = ingest(&bus, config, &mut liveness, &mirror_runtime, &envelope) {
+                if let Err(e) = ingest(
+                    &bus,
+                    config,
+                    &mut liveness,
+                    &mirror_runtime,
+                    &camera_seen,
+                    &envelope,
+                ) {
                     eprintln!("canvas-edge: rejected {}: {e:#}", envelope.message.kind);
                 }
             }
@@ -221,6 +230,7 @@ fn ingest(
     config: &EdgeConfig,
     liveness: &mut Liveness,
     mirror_runtime: &Arc<Mutex<MirrorRuntime>>,
+    camera_seen: &CameraSeen,
     envelope: &Envelope,
 ) -> Result<()> {
     match envelope.message.kind.as_str() {
@@ -287,6 +297,7 @@ fn ingest(
             }
             receipt(bus, envelope, &request_id, outcome.0, outcome.1)
         }
+        CAMERA_KIND => apply_camera_pose(camera_seen, envelope),
         "audio_level" | "audio.level" => publish_audio_level(envelope),
         "rlcd.decision.v1" => publish_rlcd_decision(liveness, envelope),
         "spatial_tracks" | "spatial.tracks" => publish_spatial_tracks(envelope),
@@ -373,6 +384,142 @@ const MAX_PROMPT_SPOOL_BYTES: u64 = 16 * 1024;
 /// names a target ("transmog") and not an address. Interested services filter
 /// on `target`; resolving it here would put a routing table in the display
 /// path and break whenever a tool moved.
+/// Camera poses are forwarded, not spooled.
+///
+/// One file per stream holding the newest pose, republished when it changes.
+/// A queue would be wrong here in a way that is worth being explicit about:
+/// every pose supersedes the one before it, so a backlog can only ever deliver
+/// a camera movement that already finished.
+const CAMERA_KIND: &str = "canvas.model.camera.v1";
+
+/// Fast enough to keep up with a 30-a-second drag without the poll itself
+/// costing anything: the check is one directory read and a string compare.
+const CAMERA_POLL: Duration = Duration::from_millis(40);
+
+const MAX_CAMERA_BYTES: u64 = 4 * 1024;
+
+/// The last pose seen for each stream, whether this host published it or
+/// received it.
+///
+/// Shared between the forwarder and the receiver, and this is what stops the
+/// echo: without it, a host that receives a pose writes it to the same file
+/// the forwarder is watching, sees a change, and publishes it straight back.
+/// Two screens showing one model would then trade the same pose forever.
+type CameraSeen = Arc<Mutex<BTreeMap<String, String>>>;
+
+fn start_camera_bridge(config: &EdgeConfig, bus: Arc<Bus>, seen: CameraSeen) -> Result<()> {
+    let Some(directory) = canvas_core::video_frame_file("probe")
+        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+    else {
+        eprintln!("canvas-edge: no runtime frames directory; camera poses will not be forwarded");
+        return Ok(());
+    };
+    fs::create_dir_all(&directory).context("create video frame directory")?;
+    let zone = config
+        .bus
+        .zones
+        .first()
+        .cloned()
+        .context("forwarding camera poses requires a zone")?;
+    thread::Builder::new()
+        .name("canvas-camera-bridge".into())
+        .spawn(move || {
+            loop {
+                forward_cameras(&directory, &bus, &zone, &seen);
+                thread::sleep(CAMERA_POLL);
+            }
+        })
+        .context("spawn camera bridge")?;
+    Ok(())
+}
+
+/// Every `.camera` file whose pose has changed since it was last seen.
+fn changed_cameras(directory: &std::path::Path, seen: &CameraSeen) -> Vec<(String, String)> {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut changed = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path
+            .extension()
+            .is_none_or(|extension| extension != "camera")
+        {
+            continue;
+        }
+        if entry
+            .metadata()
+            .is_ok_and(|meta| meta.len() > MAX_CAMERA_BYTES)
+        {
+            continue;
+        }
+        let Some(stream) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let Ok(body) = fs::read_to_string(&path) else {
+            continue;
+        };
+        // Parsed before forwarding so a half-written or malformed pose never
+        // reaches the bus, and so an unchanged pose written twice is still
+        // recognised as unchanged.
+        let Ok(pose) = serde_json::from_str::<canvas_core::model_camera::ViewerCamera>(&body)
+        else {
+            continue;
+        };
+        let Ok(canonical) = serde_json::to_string(&pose) else {
+            continue;
+        };
+        let mut seen = match seen.lock() {
+            Ok(seen) => seen,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if seen.get(stream) == Some(&canonical) {
+            continue;
+        }
+        seen.insert(stream.to_string(), canonical.clone());
+        changed.push((stream.to_string(), canonical));
+    }
+    changed
+}
+
+fn forward_cameras(directory: &std::path::Path, bus: &Bus, zone: &str, seen: &CameraSeen) {
+    for (stream, body) in changed_cameras(directory, seen) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
+            continue;
+        };
+        let message = canvas_core::unibus::Message::new(CAMERA_KIND, value);
+        if let Err(error) = bus
+            .to_destination(zone, message)
+            .and_then(|envelope| bus.send(&envelope, &[]))
+        {
+            // Not retried, and deliberately so: another pose is moments away,
+            // and re-sending this one later would move the camera backwards.
+            eprintln!("canvas-edge: camera pose for {stream} not forwarded: {error:#}");
+        }
+    }
+}
+
+/// A pose from another screen, landed where this host's renderer reads it.
+fn apply_camera_pose(seen: &CameraSeen, envelope: &Envelope) -> Result<()> {
+    let pose: canvas_core::model_camera::ViewerCamera =
+        serde_json::from_value(serde_json::to_value(&envelope.message.body)?)
+            .context("camera pose does not match the contract")?;
+    let path = canvas_core::model_camera::camera_file(&pose.stream_id)
+        .context("camera pose names a stream that cannot address a file")?;
+    let canonical = serde_json::to_string(&pose).context("re-serialise camera pose")?;
+    // Recorded before the write, so the forwarder sees its own arrival as
+    // already-seen rather than as a local change to publish back.
+    {
+        let mut seen = match seen.lock() {
+            Ok(seen) => seen,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        seen.insert(pose.stream_id.clone(), canonical.clone());
+    }
+    canvas_core::write_atomic(&path, canonical.as_bytes()).context("write camera pose")?;
+    Ok(())
+}
+
 fn start_prompt_bridge(config: &EdgeConfig, bus: Arc<Bus>) -> Result<()> {
     let Some(root) = canvas_core::runtime_root() else {
         eprintln!("canvas-edge: no runtime root; prompts will not be published");
@@ -2146,5 +2293,144 @@ mod prompt_spool_tests {
             parse_prompt(usable("transmog", "a bracket 40mm tall").as_bytes()).expect("usable");
         assert_eq!(body["target"], "transmog");
         assert_eq!(body["text"], "a bracket 40mm tall");
+    }
+}
+
+#[cfg(test)]
+mod camera_bridge_tests {
+    use super::{CameraSeen, changed_cameras};
+    use canvas_core::model_camera::ViewerCamera;
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    fn seen() -> CameraSeen {
+        Arc::new(Mutex::new(BTreeMap::new()))
+    }
+
+    fn write(directory: &std::path::Path, stream: &str, pose: &ViewerCamera) {
+        std::fs::write(
+            directory.join(format!("{stream}.camera")),
+            serde_json::to_vec(pose).expect("serialises"),
+        )
+        .expect("writes");
+    }
+
+    #[test]
+    fn a_new_pose_is_forwarded_once_and_then_stays_quiet() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let seen = seen();
+        let pose = ViewerCamera::new("transmog-step", 45.0, 20.0, 1.0, true, 10);
+        write(directory.path(), "transmog-step", &pose);
+
+        let first = changed_cameras(directory.path(), &seen);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].0, "transmog-step");
+
+        // Same pose, still on disk: forwarding it again would be pure traffic.
+        assert!(changed_cameras(directory.path(), &seen).is_empty());
+    }
+
+    /// The echo guard. Without it a host that receives a pose writes it to the
+    /// file the forwarder watches, reads back a change, and publishes it
+    /// straight home -- two screens trading one pose forever.
+    #[test]
+    fn a_pose_written_by_a_receiver_is_not_published_back() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let seen = seen();
+        let pose = ViewerCamera::new("transmog-step", 10.0, 5.0, 1.0, false, 99);
+
+        // Exactly what apply_camera_pose does: record, then write.
+        seen.lock().unwrap().insert(
+            "transmog-step".into(),
+            serde_json::to_string(&pose).unwrap(),
+        );
+        write(directory.path(), "transmog-step", &pose);
+
+        assert!(
+            changed_cameras(directory.path(), &seen).is_empty(),
+            "an arriving pose must not be forwarded back to its sender"
+        );
+    }
+
+    #[test]
+    fn a_later_pose_for_the_same_stream_is_forwarded() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let seen = seen();
+        write(
+            directory.path(),
+            "transmog-step",
+            &ViewerCamera::new("transmog-step", 0.0, 0.0, 1.0, true, 1),
+        );
+        assert_eq!(changed_cameras(directory.path(), &seen).len(), 1);
+        write(
+            directory.path(),
+            "transmog-step",
+            &ViewerCamera::new("transmog-step", 30.0, 0.0, 1.0, true, 2),
+        );
+        assert_eq!(
+            changed_cameras(directory.path(), &seen).len(),
+            1,
+            "a moved camera is news"
+        );
+    }
+
+    /// A pose is written by replacing the file, so a reader can catch it
+    /// mid-flight. Anything that does not parse is skipped rather than
+    /// forwarded, and skipping must not mark it seen -- the real pose arrives
+    /// under the same name a moment later.
+    #[test]
+    fn an_unparseable_file_is_skipped_and_not_remembered() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let seen = seen();
+        std::fs::write(directory.path().join("transmog-step.camera"), b"{\"yaw\"").unwrap();
+        assert!(changed_cameras(directory.path(), &seen).is_empty());
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "junk must not be remembered as seen"
+        );
+
+        write(
+            directory.path(),
+            "transmog-step",
+            &ViewerCamera::new("transmog-step", 5.0, 5.0, 1.0, true, 3),
+        );
+        assert_eq!(changed_cameras(directory.path(), &seen).len(), 1);
+    }
+
+    /// The frames directory is full of .rgba and .size files written many times
+    /// a second. Reading those as poses would be constant wasted work.
+    #[test]
+    fn only_camera_files_are_considered() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let seen = seen();
+        std::fs::write(directory.path().join("cat.rgba"), vec![0_u8; 64]).unwrap();
+        std::fs::write(directory.path().join("cat.size"), b"1280x720").unwrap();
+        assert!(changed_cameras(directory.path(), &seen).is_empty());
+    }
+
+    #[test]
+    fn two_streams_are_tracked_separately() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let seen = seen();
+        write(
+            directory.path(),
+            "model-a",
+            &ViewerCamera::new("model-a", 1.0, 0.0, 1.0, true, 1),
+        );
+        write(
+            directory.path(),
+            "model-b",
+            &ViewerCamera::new("model-b", 2.0, 0.0, 1.0, true, 1),
+        );
+        assert_eq!(changed_cameras(directory.path(), &seen).len(), 2);
+
+        write(
+            directory.path(),
+            "model-a",
+            &ViewerCamera::new("model-a", 9.0, 0.0, 1.0, true, 2),
+        );
+        let changed = changed_cameras(directory.path(), &seen);
+        assert_eq!(changed.len(), 1, "only the stream that moved");
+        assert_eq!(changed[0].0, "model-a");
     }
 }

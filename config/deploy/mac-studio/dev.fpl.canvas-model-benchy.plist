@@ -13,6 +13,7 @@
     <string>180</string>
     <string>24</string>
     <string>videotoolbox</string>
+    <string>model-benchy</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
