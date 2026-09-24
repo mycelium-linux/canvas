@@ -133,10 +133,11 @@ impl RenderPool {
 }
 
 /// How much of the remaining distance to the target the camera closes each
-/// frame. At 24fps this settles a large move in about a fifth of a second:
-/// fast enough to feel attached to the hand that moved it, slow enough to
-/// absorb poses arriving unevenly across a network.
-const CAMERA_EASING: f32 = 0.25;
+/// frame. Viewer poses already arrive as latest-value state at 30Hz, so the
+/// renderer only needs a little interpolation to hide uneven network arrival.
+/// At the measured 20fps, 0.65 reaches 90% of a move in about 110ms; the old
+/// 0.25 took about 400ms and made direct manipulation feel detached.
+const CAMERA_EASING: f32 = 0.65;
 
 fn unix_ms() -> u64 {
     std::time::SystemTime::now()
@@ -625,6 +626,16 @@ mod camera_tests {
         assert!(stepped.distance(Vec3::X) > 0.1, "arrived in one frame");
         assert!(stepped.distance(Vec3::Z) > 0.01, "did not move at all");
         assert!((stepped.length() - 1.0).abs() < 1e-5, "stays on the sphere");
+    }
+
+    /// Direct manipulation has to outrun the video pipeline rather than add a
+    /// second, visible lag stage. At the measured 20fps, three frames are
+    /// 150ms; by then distance easing should have closed at least 95% of a
+    /// move while the first frame remains interpolated by the test above.
+    #[test]
+    fn interactive_easing_reaches_ninety_five_percent_within_three_frames() {
+        let remaining = (1.0 - CAMERA_EASING).powi(3);
+        assert!(remaining <= 0.05, "{remaining:.3} of the move remains");
     }
 
     /// Turning to the exact opposite side has no unique path, and lerping
