@@ -38,17 +38,8 @@ return {
     wireframe = false,
     opacity = 0.9,
   },
-  -- Thermal, as a closed form: a hot boss at the origin falling off with
-  -- distance. Cheap enough to evaluate while the mesh bakes, and deliberately
-  -- the same shape a solver will later fill in — when batch FEA arrives it
-  -- replaces `source` and nothing else here changes.
-  field = {
-    name = "thermal",
-    unit = "C",
-    range = { 20, 180 },
-    colormap = "inferno",
-    source = { kind = "point_heat", at = { 0, 0, 0 }, power = 160, falloff = 1.4 },
-  },
+  -- Paint is engineering evidence, not decoration. Transmog's stream does not
+  -- yet publish a sampled closed-form result, so use the neutral material.
   transition_ms = 260,
   -- Each step is a cut, not a camera re-fly: re-flying on every step would
   -- spend the whole build swooping and never settle.

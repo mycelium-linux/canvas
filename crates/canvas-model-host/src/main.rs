@@ -334,20 +334,13 @@ fn main() -> Result<()> {
             camera_direction = ease_toward(camera_direction, target_direction, CAMERA_EASING);
             camera_distance += (target_distance - camera_distance) * CAMERA_EASING;
         }
-        let mut material = scene.material.clone();
-        let paint = viewer.as_ref().and_then(|camera| camera.paint);
-        if let Some(paint) = paint {
-            material.color = Some(paint);
-        }
         renderers.submit(RenderJob {
             sequence: submitted,
             direction: camera_direction,
             distance_scale: camera_distance,
             rotation: scene.model_rotation_degrees,
-            material,
-            // An explicit solid paint replaces the scene's scalar-field
-            // colormap; AUTO restores the authored field on the next pose.
-            field: paint.is_none().then(|| scene.field.clone()).flatten(),
+            material: scene.material.clone(),
+            field: scene.field.clone(),
             theme,
             elapsed: elapsed_seconds,
         })?;

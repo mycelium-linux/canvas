@@ -38,7 +38,6 @@ pub struct OrbitController {
     yaw: f32,
     pitch: f32,
     distance: f32,
-    paint: Option<[u8; 3]>,
     /// Where the pointer was at the last movement, while a drag is in flight.
     anchor: Option<Point>,
 }
@@ -51,7 +50,6 @@ impl Default for OrbitController {
             yaw,
             pitch,
             distance: 1.0,
-            paint: None,
             anchor: None,
         }
     }
@@ -72,18 +70,6 @@ impl OrbitController {
 
     pub fn is_grabbed(&self) -> bool {
         self.anchor.is_some()
-    }
-
-    pub fn paint(&self) -> Option<[u8; 3]> {
-        self.paint
-    }
-
-    pub fn set_paint(&mut self, paint: Option<[u8; 3]>) -> bool {
-        if self.paint == paint {
-            return false;
-        }
-        self.paint = paint;
-        true
     }
 
     /// The named view currently being looked down, for a cube to highlight.
@@ -166,16 +152,14 @@ impl OrbitController {
 
     /// The pose to publish. Stamped by the caller, which owns the clock.
     pub fn pose(&self, stream_id: &str, at_unix_ms: u64) -> ViewerCamera {
-        let mut pose = ViewerCamera::new(
+        ViewerCamera::new(
             stream_id,
             self.yaw,
             self.pitch,
             self.distance,
             self.is_grabbed(),
             at_unix_ms,
-        );
-        pose.paint = self.paint;
-        pose
+        )
     }
 }
 
@@ -439,18 +423,6 @@ mod tests {
         assert_eq!(held.at_unix_ms, 5);
         controller.release();
         assert!(!controller.pose("m", 6).grabbed);
-    }
-
-    #[test]
-    fn paint_is_absolute_and_travels_with_every_pose() {
-        let mut controller = OrbitController::default();
-        assert!(controller.set_paint(Some([0, 220, 255])));
-        assert!(!controller.set_paint(Some([0, 220, 255])));
-        assert_eq!(controller.pose("m", 5).paint, Some([0, 220, 255]));
-        controller.snap("right");
-        assert_eq!(controller.pose("m", 6).paint, Some([0, 220, 255]));
-        assert!(controller.set_paint(None));
-        assert_eq!(controller.pose("m", 7).paint, None);
     }
 
     /// Whatever the input, the pose handed to the renderer is in range.
