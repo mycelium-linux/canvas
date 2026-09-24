@@ -449,6 +449,9 @@ impl DecoderWorker {
         plan: canvas_media_edge::RawVideoPlan,
     ) -> Result<Self> {
         let frame_bytes = plan.frame_bytes()?;
+        // Before the first frame, not after: a reader that adopts the wrong
+        // size discards every frame and shows a still picture with no error.
+        canvas_media_edge::publish_frame_size(&stream.camera_id, plan.width, plan.height)?;
         let mut process = Command::new(&program)
             .args(&plan.argv)
             .stdin(Stdio::null())

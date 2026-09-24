@@ -226,6 +226,17 @@ pub fn ffmpeg_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result<Ra
     })
 }
 
+/// State the pixel size of the frames about to be written.
+///
+/// Called once when a decoder starts, before any frame: a reader that adopts
+/// the wrong size drops every frame silently, so the size must be on disk
+/// before the first frame it describes.
+pub fn publish_frame_size(source_id: &str, width: u32, height: u32) -> Result<PathBuf> {
+    let path = canvas_core::video_frame_size_file(source_id).context("unsafe video source id")?;
+    write_atomic(&path, format!("{width}x{height}").as_bytes())?;
+    Ok(path)
+}
+
 pub fn write_raw_frame(source_id: &str, expected_bytes: usize, bytes: &[u8]) -> Result<PathBuf> {
     ensure!(bytes.len() == expected_bytes, "invalid RGBA frame size");
     ensure!(

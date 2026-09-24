@@ -144,6 +144,9 @@ struct TextureState {
     height: u32,
     stamp: Option<(SystemTime, u64)>,
     generation: u64,
+    /// Last (expected, actual) byte count reported, so a persistent mismatch
+    /// is one line rather than one per frame.
+    reported_mismatch: Option<(usize, usize)>,
 }
 
 struct Pipeline {
@@ -203,6 +206,7 @@ impl Pipeline {
             height,
             stamp: None,
             generation: self.generation,
+            reported_mismatch: None,
         }
     }
 }
@@ -337,6 +341,22 @@ impl shader::Pipeline for Pipeline {
     }
 }
 
+impl Primitive {
+    /// The size to read frames at: what the decoder published, or what the
+    /// document guessed if it has not published yet.
+    ///
+    /// The decoder wins because it is the process that chose the size. The
+    /// document's value is only a starting guess, and when the two disagreed
+    /// the old behaviour was to keep believing the document and discard every
+    /// frame — a surface frozen on its last good picture with nothing logged.
+    fn resolved_size(&self) -> (u32, u32) {
+        canvas_core::video_frame_size_file_for(&self.path)
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|text| canvas_core::parse_frame_size(&text))
+            .unwrap_or((self.width, self.height))
+    }
+}
+
 impl shader::Primitive for Primitive {
     type Pipeline = Pipeline;
 
@@ -348,16 +368,17 @@ impl shader::Primitive for Primitive {
         bounds: &Rectangle,
         _viewport: &shader::Viewport,
     ) {
+        let (source_width, source_height) = self.resolved_size();
         let needs_texture = pipeline
             .textures
             .get(&self.ticket)
-            .is_none_or(|state| state.width != self.width || state.height != self.height);
+            .is_none_or(|state| state.width != source_width || state.height != source_height);
         // iced may preserve shader widget state when a workspace inserts or
         // replaces a surface at the same tree position. The retained ticket is
         // therefore stable across a source-size change; recreate the texture
         // before uploading instead of asking wgpu to overrun the old extent.
         if needs_texture {
-            let state = pipeline.texture_state(device, self.width, self.height);
+            let state = pipeline.texture_state(device, source_width, source_height);
             pipeline.textures.insert(self.ticket, state);
         }
         let state = pipeline
@@ -377,8 +398,8 @@ impl shader::Primitive for Primitive {
         let uniforms = [
             bounds.width,
             bounds.height,
-            self.width as f32,
-            self.height as f32,
+            source_width as f32,
+            source_height as f32,
             staleness,
             0.0,
             0.0,
@@ -395,13 +416,27 @@ impl shader::Primitive for Primitive {
         if state.stamp == Some(stamp) {
             return;
         }
-        let expected = self.width as usize * self.height as usize * 4;
+        let expected = source_width as usize * source_height as usize * 4;
         let Ok(bytes) = std::fs::read(&self.path) else {
             return;
         };
         if bytes.len() != expected {
+            // Reported once per distinct mismatch rather than per frame: at 24
+            // frames a second a per-frame line is a log flood, and staying
+            // quiet is what let a 720p stream sit invisible behind a 320x180
+            // declaration.
+            if state.reported_mismatch != Some((expected, bytes.len())) {
+                state.reported_mismatch = Some((expected, bytes.len()));
+                eprintln!(
+                    "Canvas retained video {}: frame is {} bytes, expected {} for {source_width}x{source_height} — dropping frames until the sizes agree",
+                    self.path.display(),
+                    bytes.len(),
+                    expected
+                );
+            }
             return;
         }
+        state.reported_mismatch = None;
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &state.texture,
@@ -412,12 +447,12 @@ impl shader::Primitive for Primitive {
             &bytes,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(self.width * 4),
-                rows_per_image: Some(self.height),
+                bytes_per_row: Some(source_width * 4),
+                rows_per_image: Some(source_height),
             },
             wgpu::Extent3d {
-                width: self.width,
-                height: self.height,
+                width: source_width,
+                height: source_height,
                 depth_or_array_layers: 1,
             },
         );

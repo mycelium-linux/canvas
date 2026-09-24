@@ -116,6 +116,40 @@ pub fn video_frame_file(source_id: &str) -> Option<PathBuf> {
     )
 }
 
+/// Where the decoder publishes the true pixel size of the frames it is
+/// writing, as `"<width>x<height>"`.
+///
+/// The frame file is raw RGBA with no header, so a reader cannot tell 1280x720
+/// from 320x180 by looking at it — it can only check that the byte count
+/// matches the size it already believed. That belief used to live only in the
+/// workspace document, four hops from the process that actually chose the
+/// size, and when the two disagreed every frame was silently discarded and the
+/// surface simply stopped moving. The decoder knows the answer, so the decoder
+/// states it; the document's size is a hint for sizing a texture before the
+/// first frame lands.
+#[cfg(unix)]
+pub fn video_frame_size_file(source_id: &str) -> Option<PathBuf> {
+    video_frame_file(source_id).map(|path| path.with_extension("size"))
+}
+
+/// The size sidecar belonging to a frame path already in hand.
+///
+/// Canvas holds the frame path rather than the source id, and re-deriving the
+/// id from the filename would be a second place to get the mapping wrong.
+pub fn video_frame_size_file_for(frame: &Path) -> Option<PathBuf> {
+    (frame.extension().is_some_and(|extension| extension == "rgba"))
+        .then(|| frame.with_extension("size"))
+}
+
+/// Parse a size sidecar. Anything unparseable is `None` — the reader then
+/// keeps the size it already had rather than guessing at a truncated write.
+pub fn parse_frame_size(text: &str) -> Option<(u32, u32)> {
+    let (width, height) = text.trim().split_once('x')?;
+    let width = width.parse().ok().filter(|value| *value > 0)?;
+    let height = height.parse().ok().filter(|value| *value > 0)?;
+    Some((width, height))
+}
+
 /// Where a media edge publishes the current canonical
 /// `camera.detections.v1` snapshot for a named camera. The document is a
 /// complete latest-value replacement and carries its own expiry timestamp.
@@ -1023,6 +1057,37 @@ mod tests {
     fn catalog() -> Catalog {
         Catalog::bundled().unwrap()
     }
+    #[test]
+    #[test]
+    fn the_size_sidecar_sits_beside_its_frame() {
+        let frame = video_frame_file("transmog-step").expect("frame path");
+        let size = video_frame_size_file("transmog-step").expect("size path");
+        assert_eq!(size.parent(), frame.parent());
+        assert_eq!(size.file_name().unwrap(), "transmog-step.size");
+        assert!(video_frame_size_file("..").is_none(), "same id guard as the frame");
+    }
+
+    #[test]
+    fn the_sidecar_can_be_found_from_the_frame_path_alone() {
+        let frame = video_frame_file("cat").expect("frame path");
+        assert_eq!(video_frame_size_file_for(&frame), video_frame_size_file("cat"));
+        // Anything that is not a frame has no sidecar, so a stray path cannot
+        // be turned into one by adding an extension.
+        assert!(video_frame_size_file_for(Path::new("/tmp/cat.png")).is_none());
+    }
+
+    #[test]
+    fn a_size_round_trips_and_junk_does_not() {
+        assert_eq!(parse_frame_size("1280x720"), Some((1280, 720)));
+        assert_eq!(parse_frame_size(" 320x180\n"), Some((320, 180)));
+        // A half-written or empty file must leave the reader on its old size
+        // rather than resizing a texture to nothing.
+        assert_eq!(parse_frame_size("1280x"), None);
+        assert_eq!(parse_frame_size("0x720"), None);
+        assert_eq!(parse_frame_size(""), None);
+        assert_eq!(parse_frame_size("1280"), None);
+    }
+
     #[test]
     fn native_video_frame_paths_are_available_and_bounded() {
         assert!(video_frame_file("browser-agent-one").is_some());
