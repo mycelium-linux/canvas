@@ -46,6 +46,13 @@
    }
   },
   {
+   "kind": "canvas.model.camera.v1",
+   "target": {
+    "mode": "any_holder",
+    "name": "canvas.model"
+   }
+  },
+  {
    "kind": "canvas.workspace_state.v1",
    "target": {
     "mode": "capability",
@@ -184,7 +191,8 @@
     "display",
     "canvas.display",
     "canvas.rlcd",
-    "canvas.workspace_mirror"
+    "canvas.workspace_mirror",
+    "canvas.model"
    ],
    "screen_anchors": [
     "screen-studio"
