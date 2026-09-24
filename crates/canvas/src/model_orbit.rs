@@ -35,6 +35,7 @@ const ZOOM_STEP: f32 = 1.12;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrbitController {
+    enabled: bool,
     yaw: f32,
     pitch: f32,
     distance: f32,
@@ -48,6 +49,7 @@ impl Default for OrbitController {
         // Opens where a CAD tool opens: the corner that shows three faces.
         let (yaw, pitch) = named_view("iso").unwrap_or((45.0, 35.264));
         Self {
+            enabled: false,
             yaw,
             pitch,
             distance: 1.0,
@@ -58,6 +60,18 @@ impl Default for OrbitController {
 }
 
 impl OrbitController {
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn toggle_enabled(&mut self) -> bool {
+        self.enabled = !self.enabled;
+        if !self.enabled {
+            self.anchor = None;
+        }
+        self.enabled
+    }
+
     pub fn yaw(&self) -> f32 {
         self.yaw
     }
@@ -470,6 +484,17 @@ mod tests {
         assert!(controller.follow_latest());
         assert_eq!(controller.pose("m", 4).steps_back, Some(0));
         assert!(!controller.follow_latest());
+    }
+
+    #[test]
+    fn orbit_capture_is_an_explicit_toggle_and_disabling_releases_it() {
+        let mut controller = OrbitController::default();
+        assert!(!controller.enabled());
+        assert!(controller.toggle_enabled());
+        controller.press(Point::new(10.0, 10.0));
+        assert!(controller.is_grabbed());
+        assert!(!controller.toggle_enabled());
+        assert!(!controller.is_grabbed());
     }
 
     /// Whatever the input, the pose handed to the renderer is in range.

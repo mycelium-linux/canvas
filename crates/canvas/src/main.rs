@@ -412,6 +412,9 @@ enum Message {
         stream_id: String,
         action: ::canvas::model_orbit::OrbitAction,
     },
+    ModelOrbitToggle {
+        stream_id: String,
+    },
     ModelTimeline {
         stream_id: String,
         action: TimelineAction,
@@ -1445,6 +1448,10 @@ impl App {
             }
             Message::ModelOrbitAction { stream_id, action } => {
                 self.apply_orbit_action(&stream_id, action)
+            }
+            Message::ModelOrbitToggle { stream_id } => {
+                self.toggle_model_orbit(&stream_id);
+                Task::none()
             }
             Message::ModelTimeline { stream_id, action } => {
                 self.apply_model_timeline(&stream_id, action)
@@ -5296,16 +5303,18 @@ impl App {
                 f64::from(self.window_chrome().titlebar_height),
             )
             && self.decoded.get(&target.surface_id).is_some_and(|surface| {
-                content_claims_surface_drag(
-                    target.region,
-                    matches!(
-                        &surface.source,
-                        ContentSource::LiveVideo {
-                            orbitable: true,
-                            ..
-                        }
-                    ),
-                )
+                let orbit_enabled = match &surface.source {
+                    ContentSource::LiveVideo {
+                        source_id,
+                        orbitable: true,
+                        ..
+                    } => self
+                        .orbits
+                        .get(source_id)
+                        .is_some_and(|controller| controller.enabled()),
+                    _ => false,
+                };
+                content_claims_surface_drag(target.region, orbit_enabled)
             })
         {
             // Focus and z-order are still ordinary surface concerns, but no
@@ -6029,6 +6038,15 @@ impl App {
         Task::none()
     }
 
+    fn toggle_model_orbit(&mut self, stream_id: &str) {
+        use ::canvas::model_orbit::OrbitController;
+        self.orbits
+            .entry(stream_id.to_string())
+            .or_insert_with(OrbitController::default)
+            .toggle_enabled();
+        self.bump();
+    }
+
     fn publish_wanted_video(&mut self) {
         let Some(root) = canvas_core::runtime_root() else {
             return;
@@ -6611,11 +6629,16 @@ impl App {
                         ..
                     } => {
                         let stream = source_id.clone();
+                        let orbit_enabled = *orbitable
+                            && self
+                                .orbits
+                                .get(source_id)
+                                .is_some_and(|controller| controller.enabled());
                         retained_video::view(
                             path.clone(),
                             *frame_width,
                             *frame_height,
-                            orbitable.then(|| {
+                            orbit_enabled.then(|| {
                                 std::sync::Arc::new(move |event| Message::ModelOrbit {
                                     stream_id: stream.clone(),
                                     event,
@@ -6652,22 +6675,6 @@ impl App {
                         .into(),
                     );
                 }
-                if let ContentSource::LiveVideo {
-                    source_id,
-                    orbitable: true,
-                    ..
-                } = &surface.source
-                {
-                    layers.push(self.model_view_cube(source_id));
-                }
-                if let ContentSource::LiveVideo {
-                    source_id,
-                    timeline: true,
-                    ..
-                } = &surface.source
-                {
-                    layers.push(self.model_timeline(source_id));
-                }
                 if let Some(view) = view
                     && let Some(attention) = &view.attention
                 {
@@ -6685,87 +6692,103 @@ impl App {
                         .into(),
                     );
                 }
-                stack(layers).into()
+                let visual: Element<'_, Message> = stack(layers).into();
+                if let ContentSource::LiveVideo {
+                    source_id,
+                    orbitable,
+                    timeline,
+                    ..
+                } = &surface.source
+                    && (*orbitable || *timeline)
+                {
+                    column![
+                        container(visual).width(Length::Fill).height(Length::Fill),
+                        self.model_toolbar(source_id, *orbitable, *timeline),
+                    ]
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into()
+                } else {
+                    visual
+                }
             }
         }
     }
 
-    /// Compact CAD-style view cube over a streamed model.
-    ///
-    /// The visible faces and corners are all aliases for the same named poses
-    /// used by keyboard input; the overlay owns no camera arithmetic.
-    fn model_view_cube<'a>(&self, stream_id: &'a str) -> Element<'a, Message> {
+    /// Native controls adjacent to the video rather than burned into or laid
+    /// over its pixels. This keeps the model readable and gives pointer capture
+    /// an explicit, visible mode.
+    fn model_toolbar<'a>(
+        &self,
+        stream_id: &'a str,
+        orbitable: bool,
+        timeline: bool,
+    ) -> Element<'a, Message> {
         use ::canvas::model_orbit::OrbitAction;
-
-        let selected = self
-            .orbits
-            .get(stream_id)
-            .and_then(|orbit| orbit.named_view());
-        let face = |label: &'static str, view: &'static str| {
-            let message = Message::ModelOrbitAction {
-                stream_id: stream_id.to_string(),
-                action: OrbitAction::Snap(view),
+        let controller = self.orbits.get(stream_id);
+        let orbit_enabled = controller.is_some_and(|controller| controller.enabled());
+        let selected = controller.and_then(|controller| controller.named_view());
+        let mut controls = iced::widget::Row::new()
+            .spacing(3)
+            .align_y(iced::Alignment::Center);
+        if orbitable {
+            controls = controls.push(
+                button(text(if orbit_enabled { "ORBIT ON" } else { "ORBIT" }).size(11))
+                    .padding([5, 9])
+                    .on_press(Message::ModelOrbitToggle {
+                        stream_id: stream_id.to_string(),
+                    })
+                    .style(if orbit_enabled {
+                        button::primary
+                    } else {
+                        button::secondary
+                    }),
+            );
+            for (label, view) in [("ISO", "iso"), ("F", "front"), ("R", "right"), ("T", "top")] {
+                controls = controls.push(
+                    button(text(label).size(11))
+                        .padding([5, 8])
+                        .on_press(Message::ModelOrbitAction {
+                            stream_id: stream_id.to_string(),
+                            action: OrbitAction::Snap(view),
+                        })
+                        .style(if selected == Some(view) {
+                            button::primary
+                        } else {
+                            button::secondary
+                        }),
+                );
+            }
+        }
+        if timeline {
+            let steps_back = controller
+                .and_then(|controller| controller.steps_back())
+                .unwrap_or(0);
+            let position = if steps_back == 0 {
+                "LIVE".to_string()
+            } else {
+                format!("−{steps_back}")
             };
-            button(text(label).size(9))
-                .width(Length::Fixed(28.0))
-                .height(Length::Fixed(24.0))
-                .padding(0)
-                .on_press(message)
-                .style(if selected == Some(view) {
-                    button::primary
-                } else {
-                    button::secondary
-                })
-        };
-        let cube = column![
-            row![face("IR", "iso_rear"), face("T", "top"), face("I", "iso")].spacing(1),
-            row![face("L", "left"), face("F", "front"), face("R", "right")].spacing(1),
-            row![face("B", "back"), face("D", "bottom")].spacing(1),
-        ]
-        .spacing(1);
-        container(cube)
+            for (label, action) in [
+                ("◀", TimelineAction::Older),
+                (position.as_str(), TimelineAction::Latest),
+                ("▶", TimelineAction::Newer),
+            ] {
+                controls = controls.push(
+                    button(text(label.to_string()).size(11))
+                        .padding([5, 9])
+                        .on_press(Message::ModelTimeline {
+                            stream_id: stream_id.to_string(),
+                            action,
+                        })
+                        .style(button::secondary),
+                );
+            }
+        }
+        container(controls)
             .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(8)
-            .align_x(iced::alignment::Horizontal::Right)
-            .align_y(iced::alignment::Vertical::Top)
-            .into()
-    }
-
-    fn model_timeline<'a>(&self, stream_id: &'a str) -> Element<'a, Message> {
-        let steps_back = self
-            .orbits
-            .get(stream_id)
-            .and_then(|orbit| orbit.steps_back())
-            .unwrap_or(0);
-        let command = |label: &'static str, action| {
-            button(text(label).size(11))
-                .padding([4, 9])
-                .on_press(Message::ModelTimeline {
-                    stream_id: stream_id.to_string(),
-                    action,
-                })
-                .style(button::secondary)
-        };
-        let position = if steps_back == 0 {
-            "LATEST".to_string()
-        } else {
-            format!("LATEST - {steps_back}")
-        };
-        let strip = row![
-            command("◀", TimelineAction::Older),
-            container(text(position).size(11)).padding([4, 10]),
-            command("▶", TimelineAction::Newer),
-            command("LIVE", TimelineAction::Latest),
-        ]
-        .spacing(3)
-        .align_y(iced::Alignment::Center);
-        container(strip)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(8)
+            .padding([5, 7])
             .align_x(iced::alignment::Horizontal::Center)
-            .align_y(iced::alignment::Vertical::Bottom)
             .into()
     }
 
