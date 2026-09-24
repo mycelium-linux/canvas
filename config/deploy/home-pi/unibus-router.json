@@ -175,7 +175,8 @@
     "screen-neo"
    ],
    "publishes": [
-    "canvas.workspace_state.v1"
+    "canvas.workspace_state.v1",
+    "canvas.model.camera.v1"
    ],
    "publish_zones": [
     "living-room"
