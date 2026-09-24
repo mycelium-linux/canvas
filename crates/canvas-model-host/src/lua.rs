@@ -115,6 +115,55 @@ mod tests {
         assert_eq!(unadapted.model_rotation_degrees, [0.0, 0.0, 0.0]);
     }
 
+    /// A scene declares a field the same way it declares a material — through
+    /// serde — so painting needs no binding code of its own. This is the check
+    /// that the Lua spelling and the Rust shape actually line up.
+    #[test]
+    fn lua_declares_a_thermal_field() {
+        let scene = evaluate(
+            r#"
+            return {
+              scene_id = "thermal",
+              asset = "step-7.stl",
+              camera = "iso",
+              material = { glow = 1.2, wireframe = false, opacity = 0.9 },
+              field = {
+                name = "thermal",
+                unit = "C",
+                range = {20, 180},
+                colormap = "inferno",
+                source = { kind = "point_heat", at = {0, 0, 0}, power = 160 },
+              },
+              transition_ms = 260,
+              fly_in = false,
+            }
+            "#,
+        )
+        .expect("scene evaluates");
+
+        let field = scene.field.expect("field declared");
+        assert_eq!(field.name, "thermal");
+        assert_eq!(field.colormap, crate::Colormap::Inferno);
+        // Defaults fill in: ambient 20C, falloff 1.
+        assert!((field.sample([0.0, 0.0, 0.0]) - 180.0).abs() < 1e-3);
+        assert_eq!(field.normalize(180.0), 1.0);
+    }
+
+    #[test]
+    fn a_scene_without_a_field_paints_nothing() {
+        let scene = evaluate(
+            r#"
+            return {
+              scene_id = "plain", asset = "a.stl", camera = "iso",
+              material = { glow = 1.0, wireframe = false, opacity = 1.0 },
+              transition_ms = 0, fly_in = false,
+            }
+            "#,
+        )
+        .expect("scene evaluates");
+        assert!(scene.field.is_none(), "painting must be opt-in");
+    }
+
     #[test]
     fn lua_has_no_process_or_filesystem_surface() {
         assert!(evaluate("return os.execute('id')").is_err());

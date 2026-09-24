@@ -19,6 +19,7 @@ struct Uniforms {
     model: [[f32; 4]; 4],
     color: [f32; 4],
     params: [f32; 4],
+    field_params: [f32; 4],
 }
 
 struct GpuMesh {
@@ -177,6 +178,11 @@ impl Renderer {
                                 offset: 12,
                                 shader_location: 1,
                             },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32,
+                                offset: 24,
+                                shader_location: 2,
+                            },
                         ],
                     }],
                 },
@@ -264,6 +270,7 @@ impl Renderer {
         orbit: Option<Orbit>,
         model_rotation_degrees: [f32; 3],
         material: &Material,
+        field: Option<&crate::Field>,
         theme: &VisualTheme,
         elapsed: f32,
     ) -> Result<Option<Vec<u8>>> {
@@ -305,6 +312,15 @@ impl Renderer {
                 material.glow,
                 material.opacity,
                 material.wireframe as u8 as f32,
+            ],
+            // The mesh carries a value per vertex whether or not a field is
+            // declared; this is what decides whether it is shown, so the
+            // scene can drop the ramp without rebaking.
+            field_params: [
+                field.is_some() as u8 as f32,
+                field.map(|f| f.colormap.shader_index()).unwrap_or(0.0),
+                0.0,
+                0.0,
             ],
         };
         self.queue

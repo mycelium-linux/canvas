@@ -22,6 +22,7 @@ struct RenderJob {
     orbit: Option<Orbit>,
     rotation: [f32; 3],
     material: Material,
+    field: Option<canvas_model_host::Field>,
     theme: VisualTheme,
     elapsed: f32,
 }
@@ -65,6 +66,7 @@ impl RenderPool {
                                     job.orbit,
                                     job.rotation,
                                     &job.material,
+                                    job.field.as_ref(),
                                     &job.theme,
                                     job.elapsed,
                                 ) {
@@ -156,6 +158,7 @@ fn main() -> Result<()> {
     pool.submit(mesh::BakeRequest {
         generation,
         asset: scene.resolve_asset(&asset_root)?,
+        field: scene.field.clone(),
     })?;
     let baked = pool
         .results
@@ -216,6 +219,7 @@ fn main() -> Result<()> {
                         if let Err(error) = pool.submit(mesh::BakeRequest {
                             generation,
                             asset: next.resolve_asset(&asset_root)?,
+                            field: next.field.clone(),
                         }) {
                             eprintln!("canvas-model-host: {error}");
                         }
@@ -239,6 +243,7 @@ fn main() -> Result<()> {
             orbit: scene.orbit,
             rotation: scene.model_rotation_degrees,
             material: scene.material.clone(),
+            field: scene.field.clone(),
             theme,
             elapsed: transition_started
                 .elapsed()

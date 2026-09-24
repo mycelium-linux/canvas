@@ -100,6 +100,144 @@ impl Default for Material {
     }
 }
 
+/// A scalar quantity painted onto the mesh, one value per vertex.
+///
+/// The renderer only ever sees the resulting array, which is the point: a cheap
+/// closed form today and a batch FEA or CFD solve later produce the same thing,
+/// so swapping the source changes nothing downstream. Values are in the field's
+/// own unit; `range` is what gets mapped across the colormap, and anything
+/// outside it clamps rather than wrapping, because a hotspot that wrapped to
+/// "cold" would be a lie about the part.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Field {
+    /// What is being shown, e.g. "thermal" or "von mises".
+    pub name: String,
+    /// The unit the values carry, e.g. "C" or "MPa". Displayed, never converted.
+    #[serde(default)]
+    pub unit: String,
+    /// Value range mapped across the colormap, low to high.
+    pub range: [f32; 2],
+    #[serde(default)]
+    pub colormap: Colormap,
+    pub source: FieldSource,
+}
+
+/// How the per-vertex values are obtained.
+///
+/// Closed forms are evaluated while the mesh is baked, off the render loop, so
+/// painting costs nothing per frame. A solved field will arrive as sampled data
+/// and join this enum without the shader or the vertex format changing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FieldSource {
+    /// Steady-state heat from a point, falling off with distance.
+    ///
+    /// `ambient + power / (1 + falloff * r^2)` — not physics, but the right
+    /// shape for "this boss runs hot" at no cost.
+    PointHeat {
+        at: [f32; 3],
+        power: f32,
+        #[serde(default = "default_ambient")]
+        ambient: f32,
+        #[serde(default = "default_falloff")]
+        falloff: f32,
+    },
+    /// Linear ramp along one axis, for a thermal gradient or a bending stress.
+    Gradient { axis: Axis, from: f32, to: f32 },
+    /// Distance from a point, scaled — a stand-in for stress concentration
+    /// around a feature until a solver says otherwise.
+    Radial { at: [f32; 3], scale: f32 },
+}
+
+fn default_ambient() -> f32 {
+    20.0
+}
+
+fn default_falloff() -> f32 {
+    1.0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Axis {
+    X,
+    Y,
+    Z,
+}
+
+/// Perceptually ordered colour ramps.
+///
+/// All three are monotonic in lightness so a reader can rank two points by eye.
+/// A rainbow ramp is deliberately absent: it invents banding that looks like
+/// structure in the data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Colormap {
+    #[default]
+    Inferno,
+    Viridis,
+    Magma,
+}
+
+impl Colormap {
+    /// Index the shader uses. Kept beside the enum so the two cannot drift.
+    pub fn shader_index(self) -> f32 {
+        match self {
+            Self::Inferno => 0.0,
+            Self::Viridis => 1.0,
+            Self::Magma => 2.0,
+        }
+    }
+}
+
+impl Field {
+    /// Evaluate the field at one point, in the field's own unit.
+    pub fn sample(&self, position: [f32; 3]) -> f32 {
+        match &self.source {
+            FieldSource::PointHeat {
+                at,
+                power,
+                ambient,
+                falloff,
+            } => {
+                let squared = (0..3).map(|i| (position[i] - at[i]).powi(2)).sum::<f32>();
+                ambient + power / (1.0 + falloff.max(0.0) * squared)
+            }
+            FieldSource::Gradient { axis, from, to } => {
+                let value = position[axis.index()];
+                from + (to - from) * value
+            }
+            FieldSource::Radial { at, scale } => {
+                let squared = (0..3).map(|i| (position[i] - at[i]).powi(2)).sum::<f32>();
+                squared.sqrt() * scale
+            }
+        }
+    }
+
+    /// Where a value sits across the colormap, clamped to 0..=1.
+    ///
+    /// A degenerate range collapses to the low end rather than dividing by
+    /// zero: a flat field should read as uniformly cold, not as NaN.
+    pub fn normalize(&self, value: f32) -> f32 {
+        let [low, high] = self.range;
+        if (high - low).abs() < f32::EPSILON {
+            return 0.0;
+        }
+        ((value - low) / (high - low)).clamp(0.0, 1.0)
+    }
+}
+
+impl Axis {
+    pub fn index(self) -> usize {
+        match self {
+            Self::X => 0,
+            Self::Y => 1,
+            Self::Z => 2,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SceneState {
@@ -116,6 +254,9 @@ pub struct SceneState {
     pub orbit: Option<Orbit>,
     #[serde(default)]
     pub material: Material,
+    /// Optional scalar field painted across the mesh.
+    #[serde(default)]
+    pub field: Option<Field>,
     #[serde(default = "default_fly_in_ms")]
     pub transition_ms: u32,
     #[serde(default = "default_true")]
@@ -303,6 +444,7 @@ mod tests {
             model_rotation_degrees: [0.0; 3],
             camera: CameraPreset::Iso,
             orbit: None,
+            field: None,
             material: Material::default(),
             transition_ms: 850,
             fly_in: true,
@@ -400,5 +542,116 @@ mod scene_context_tests {
             .expect("shipped transmog scene evaluates");
         assert_eq!(scene.asset, "step-2.stl");
         assert!(!scene.fly_in, "each step is a cut, not a camera re-fly");
+    }
+}
+
+#[cfg(test)]
+mod field_tests {
+    use super::*;
+
+    fn thermal(source: FieldSource, range: [f32; 2]) -> Field {
+        Field {
+            name: "thermal".into(),
+            unit: "C".into(),
+            range,
+            colormap: Colormap::Inferno,
+            source,
+        }
+    }
+
+    #[test]
+    fn point_heat_is_hottest_at_the_source_and_decays_with_distance() {
+        let field = thermal(
+            FieldSource::PointHeat {
+                at: [0.0, 0.0, 0.0],
+                power: 160.0,
+                ambient: 20.0,
+                falloff: 1.0,
+            },
+            [20.0, 180.0],
+        );
+        let at_source = field.sample([0.0, 0.0, 0.0]);
+        let near = field.sample([1.0, 0.0, 0.0]);
+        let far = field.sample([8.0, 0.0, 0.0]);
+
+        assert!((at_source - 180.0).abs() < 1e-3, "ambient + full power");
+        assert!(near < at_source && far < near, "monotonic with distance");
+        assert!(far > 20.0, "never colder than ambient");
+    }
+
+    /// A value past the end of the range must saturate. Wrapping would paint a
+    /// hotspot with the colour of the coldest region — the one failure that
+    /// makes a reader confidently wrong about the part.
+    #[test]
+    fn values_outside_the_range_clamp_rather_than_wrap() {
+        let field = thermal(
+            FieldSource::Gradient {
+                axis: Axis::Z,
+                from: 0.0,
+                to: 1.0,
+            },
+            [0.0, 100.0],
+        );
+        assert_eq!(field.normalize(-50.0), 0.0);
+        assert_eq!(field.normalize(150.0), 1.0);
+        assert!((field.normalize(50.0) - 0.5).abs() < 1e-6);
+    }
+
+    /// A uniform field has no range to speak of; dividing by it would produce
+    /// NaN and paint the mesh with whatever that becomes.
+    #[test]
+    fn a_flat_range_reads_as_the_low_end_not_as_nan() {
+        let field = thermal(
+            FieldSource::Radial {
+                at: [0.0, 0.0, 0.0],
+                scale: 1.0,
+            },
+            [42.0, 42.0],
+        );
+        let value = field.normalize(42.0);
+        assert!(value.is_finite());
+        assert_eq!(value, 0.0);
+    }
+
+    #[test]
+    fn a_gradient_runs_along_the_axis_it_names() {
+        let field = thermal(
+            FieldSource::Gradient {
+                axis: Axis::Y,
+                from: 10.0,
+                to: 20.0,
+            },
+            [10.0, 20.0],
+        );
+        assert!((field.sample([0.0, 0.0, 0.0]) - 10.0).abs() < 1e-6);
+        assert!((field.sample([0.0, 1.0, 0.0]) - 20.0).abs() < 1e-6);
+        assert!(
+            (field.sample([9.0, 0.0, 9.0]) - 10.0).abs() < 1e-6,
+            "the other axes must not contribute"
+        );
+    }
+
+    /// The shader selects the ramp by index, so these must stay in step with
+    /// the branches in model.wgsl.
+    #[test]
+    fn colormap_indices_match_the_shader_branches() {
+        assert_eq!(Colormap::Inferno.shader_index(), 0.0);
+        assert_eq!(Colormap::Viridis.shader_index(), 1.0);
+        assert_eq!(Colormap::Magma.shader_index(), 2.0);
+        assert_eq!(Colormap::default(), Colormap::Inferno);
+    }
+
+    #[test]
+    fn a_field_round_trips_through_a_scene_declaration() {
+        let declared = serde_json::json!({
+            "name": "von mises",
+            "unit": "MPa",
+            "range": [0.0, 250.0],
+            "colormap": "viridis",
+            "source": {"kind": "radial", "at": [0.0, 0.0, 0.0], "scale": 12.0}
+        });
+        let field: Field = serde_json::from_value(declared).expect("parses");
+        assert_eq!(field.colormap, Colormap::Viridis);
+        assert!((field.sample([1.0, 0.0, 0.0]) - 12.0).abs() < 1e-6);
     }
 }

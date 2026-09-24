@@ -17,6 +17,12 @@ use std::{
 pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
+    /// Field value at this vertex, already normalised to 0..=1.
+    ///
+    /// Normalised on the CPU rather than in the shader so the GPU never needs
+    /// the field's unit or range, and so a solved field and a closed form look
+    /// identical by the time they reach it.
+    pub field: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -30,6 +36,13 @@ pub struct PreparedMesh {
 }
 
 pub fn bake_stl(path: &Path) -> Result<PreparedMesh> {
+    bake_stl_with_field(path, None)
+}
+
+pub fn bake_stl_with_field(
+    path: &Path,
+    field: Option<&crate::Field>,
+) -> Result<PreparedMesh> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mesh = stl_io::read_stl(&mut BufReader::new(file))
         .with_context(|| format!("parse {}", path.display()))?;
@@ -90,6 +103,12 @@ pub fn bake_stl(path: &Path) -> Result<PreparedMesh> {
         .iter()
         .zip(normals)
         .map(|(position, normal)| Vertex {
+            // Sampled in the part's own coordinates, before the mesh is
+            // recentred for display: a heat source sits where the designer put
+            // it, not where the viewport happens to place the model.
+            field: field
+                .map(|spec| spec.normalize(spec.sample(position.to_array())))
+                .unwrap_or(0.0),
             position: ((*position - center) / extent * 2.0).to_array(),
             normal: normal.normalize_or_zero().to_array(),
         })
@@ -112,6 +131,10 @@ pub fn bake_stl(path: &Path) -> Result<PreparedMesh> {
 pub struct BakeRequest {
     pub generation: u64,
     pub asset: PathBuf,
+    /// Painted while the mesh is baked, on the worker thread. Changing the
+    /// field therefore costs a rebake, which is the right trade: it keeps every
+    /// frame free of it.
+    pub field: Option<crate::Field>,
 }
 
 #[derive(Debug)]
@@ -144,7 +167,8 @@ impl BakePool {
                             Ok(request) => request,
                             Err(_) => break,
                         };
-                        let result = bake_stl(&request.asset);
+                        let result =
+                            bake_stl_with_field(&request.asset, request.field.as_ref());
                         if results
                             .send(BakeResult {
                                 generation: request.generation,
