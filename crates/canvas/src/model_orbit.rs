@@ -38,6 +38,7 @@ pub struct OrbitController {
     yaw: f32,
     pitch: f32,
     distance: f32,
+    steps_back: Option<u32>,
     /// Where the pointer was at the last movement, while a drag is in flight.
     anchor: Option<Point>,
 }
@@ -50,6 +51,7 @@ impl Default for OrbitController {
             yaw,
             pitch,
             distance: 1.0,
+            steps_back: None,
             anchor: None,
         }
     }
@@ -70,6 +72,35 @@ impl OrbitController {
 
     pub fn is_grabbed(&self) -> bool {
         self.anchor.is_some()
+    }
+
+    pub fn steps_back(&self) -> Option<u32> {
+        self.steps_back
+    }
+
+    pub fn step_older(&mut self) -> bool {
+        let next = self.steps_back.unwrap_or(0).saturating_add(1);
+        if self.steps_back == Some(next) {
+            return false;
+        }
+        self.steps_back = Some(next);
+        true
+    }
+
+    pub fn step_newer(&mut self) -> bool {
+        let Some(current) = self.steps_back else {
+            return false;
+        };
+        self.steps_back = Some(current.saturating_sub(1));
+        true
+    }
+
+    pub fn follow_latest(&mut self) -> bool {
+        if self.steps_back == Some(0) {
+            return false;
+        }
+        self.steps_back = Some(0);
+        true
     }
 
     /// The named view currently being looked down, for a cube to highlight.
@@ -152,14 +183,16 @@ impl OrbitController {
 
     /// The pose to publish. Stamped by the caller, which owns the clock.
     pub fn pose(&self, stream_id: &str, at_unix_ms: u64) -> ViewerCamera {
-        ViewerCamera::new(
+        let mut pose = ViewerCamera::new(
             stream_id,
             self.yaw,
             self.pitch,
             self.distance,
             self.is_grabbed(),
             at_unix_ms,
-        )
+        );
+        pose.steps_back = self.steps_back;
+        pose
     }
 }
 
@@ -423,6 +456,20 @@ mod tests {
         assert_eq!(held.at_unix_ms, 5);
         controller.release();
         assert!(!controller.pose("m", 6).grabbed);
+    }
+
+    #[test]
+    fn timeline_cursor_is_absolute_from_the_latest_step() {
+        let mut controller = OrbitController::default();
+        assert_eq!(controller.pose("m", 1).steps_back, None);
+        assert!(controller.step_older());
+        assert!(controller.step_older());
+        assert_eq!(controller.pose("m", 2).steps_back, Some(2));
+        assert!(controller.step_newer());
+        assert_eq!(controller.pose("m", 3).steps_back, Some(1));
+        assert!(controller.follow_latest());
+        assert_eq!(controller.pose("m", 4).steps_back, Some(0));
+        assert!(!controller.follow_latest());
     }
 
     /// Whatever the input, the pose handed to the renderer is in range.

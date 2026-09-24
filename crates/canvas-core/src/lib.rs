@@ -1332,6 +1332,12 @@ pub mod model_camera {
         /// authored material or scalar-field colouring.
         #[serde(default)]
         pub paint: Option<[u8; 3]>,
+        /// Optional build-history cursor. Zero follows the newest available
+        /// step; larger values walk backward from it. Relative-to-latest keeps
+        /// the control absolute and idempotent without requiring the screen to
+        /// know how many steps exist on the renderer's machine.
+        #[serde(default)]
+        pub steps_back: Option<u32>,
         pub at_unix_ms: u64,
     }
 
@@ -1357,6 +1363,7 @@ pub mod model_camera {
                 grabbed,
                 instant: false,
                 paint: None,
+                steps_back: None,
                 at_unix_ms,
             }
         }

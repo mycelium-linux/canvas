@@ -511,6 +511,10 @@ pub enum SurfaceContent {
         /// controls that cannot affect them.
         #[serde(default, skip_serializing_if = "is_false")]
         orbitable: bool,
+        /// Show build-history controls for model streams that accept a step
+        /// cursor in their camera state.
+        #[serde(default, skip_serializing_if = "is_false")]
+        timeline: bool,
     },
     /// A line of text the wall can send somewhere.
     ///
@@ -666,6 +670,8 @@ enum Known {
         height: u32,
         #[serde(default)]
         orbitable: bool,
+        #[serde(default)]
+        timeline: bool,
     },
     Prompt {
         target: String,
@@ -694,11 +700,13 @@ impl Known {
                 width,
                 height,
                 orbitable,
+                timeline,
             } => SurfaceContent::LiveVideo {
                 source_id,
                 width,
                 height,
                 orbitable,
+                timeline,
             },
             Self::Prompt {
                 target,

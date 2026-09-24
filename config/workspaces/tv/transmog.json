@@ -25,7 +25,8 @@
         "source_id": "transmog-step",
         "width": 1280,
         "height": 720,
-        "orbitable": true
+        "orbitable": true,
+        "timeline": true
       },
       "inputs": []
     },

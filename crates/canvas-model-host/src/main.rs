@@ -209,9 +209,10 @@ fn main() -> Result<()> {
         .clamp(1, 8);
     let pool = mesh::BakePool::new(workers);
     let mut generation = 1;
+    let mut requested_asset = scene.resolve_asset(&asset_root)?;
     pool.submit(mesh::BakeRequest {
         generation,
-        asset: scene.resolve_asset(&asset_root)?,
+        asset: requested_asset.clone(),
         field: scene.field.clone(),
     })?;
     let baked = pool
@@ -276,9 +277,10 @@ fn main() -> Result<()> {
                     transition_started = Instant::now();
                     if asset_changed {
                         generation += 1;
+                        requested_asset = next.resolve_asset(&asset_root)?;
                         if let Err(error) = pool.submit(mesh::BakeRequest {
                             generation,
-                            asset: next.resolve_asset(&asset_root)?,
+                            asset: requested_asset.clone(),
                             field: next.field.clone(),
                         }) {
                             eprintln!("canvas-model-host: {error}");
@@ -310,6 +312,23 @@ fn main() -> Result<()> {
             .min(started.elapsed().as_secs_f32());
         let now_ms = unix_ms();
         let viewer = read_viewer_camera(&camera_path, now_ms);
+        let selected_asset = viewer
+            .as_ref()
+            .and_then(|camera| camera.steps_back)
+            .and_then(|back| assets.steps.iter().rev().nth(back as usize))
+            .map(|name| asset_root.join(name))
+            .unwrap_or(scene.resolve_asset(&asset_root)?);
+        if selected_asset != requested_asset {
+            generation += 1;
+            requested_asset = selected_asset;
+            if let Err(error) = pool.submit(mesh::BakeRequest {
+                generation,
+                asset: requested_asset.clone(),
+                field: scene.field.clone(),
+            }) {
+                eprintln!("canvas-model-host: {error}");
+            }
+        }
         let (target_direction, target_distance) = match &viewer {
             Some(camera) => (Vec3::from_array(camera.direction()), camera.distance),
             None => {

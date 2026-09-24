@@ -16,7 +16,7 @@
     {
       "id": "model-transmog",
       "title": "Transmog build",
-      "content": { "kind": "live_video", "source_id": "transmog-step", "width": 1280, "height": 720, "orbitable": true },
+      "content": { "kind": "live_video", "source_id": "transmog-step", "width": 1280, "height": 720, "orbitable": true, "timeline": true },
       "inputs": []
     }
   ],

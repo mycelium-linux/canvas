@@ -248,6 +248,7 @@ enum ContentSource {
         width: u32,
         height: u32,
         orbitable: bool,
+        timeline: bool,
         seen: Option<(std::time::SystemTime, u64)>,
     },
     Widget {
@@ -389,6 +390,13 @@ fn publish_model_camera(pose: &canvas_core::model_camera::ViewerCamera) -> anyho
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+enum TimelineAction {
+    Older,
+    Newer,
+    Latest,
+}
+
 #[derive(Debug, Clone)]
 enum Message {
     Tick,
@@ -403,6 +411,10 @@ enum Message {
     ModelOrbitAction {
         stream_id: String,
         action: ::canvas::model_orbit::OrbitAction,
+    },
+    ModelTimeline {
+        stream_id: String,
+        action: TimelineAction,
     },
     WindowReady(iced::window::Id),
     WindowEvent(iced::window::Id, iced::window::Event),
@@ -1433,6 +1445,9 @@ impl App {
             }
             Message::ModelOrbitAction { stream_id, action } => {
                 self.apply_orbit_action(&stream_id, action)
+            }
+            Message::ModelTimeline { stream_id, action } => {
+                self.apply_model_timeline(&stream_id, action)
             }
             Message::Tick => {
                 if self
@@ -4420,6 +4435,7 @@ impl App {
                     width,
                     height,
                     orbitable: false,
+                    timeline: false,
                 };
                 let Some(path) = canvas_core::video_frame_file(&source_id) else {
                     self.fail(pending, Failure::invalid("Invalid live video source id"));
@@ -5795,6 +5811,7 @@ impl App {
                             width,
                             height,
                             orbitable,
+                            timeline,
                         } => matches!(
                             &decoded.source,
                             ContentSource::LiveVideo {
@@ -5802,11 +5819,13 @@ impl App {
                                 width: decoded_width,
                                 height: decoded_height,
                                 orbitable: decoded_orbitable,
+                                timeline: decoded_timeline,
                                 ..
                             } if decoded_source_id == source_id
                                 && decoded_width == width
                                 && decoded_height == height
                                 && decoded_orbitable == orbitable
+                                && decoded_timeline == timeline
                         ),
                         // Identity is the target, never the draft: the draft is
                         // runtime state the document does not carry, so
@@ -5982,6 +6001,30 @@ impl App {
         self.orbit_published
             .insert(stream_id.to_string(), Instant::now());
         self.status = format!("{stream_id}: {described}");
+        self.bump();
+        Task::none()
+    }
+
+    fn apply_model_timeline(&mut self, stream_id: &str, action: TimelineAction) -> Task<Message> {
+        use ::canvas::model_orbit::OrbitController;
+        let controller = self
+            .orbits
+            .entry(stream_id.to_string())
+            .or_insert_with(OrbitController::default);
+        let changed = match action {
+            TimelineAction::Older => controller.step_older(),
+            TimelineAction::Newer => controller.step_newer(),
+            TimelineAction::Latest => controller.follow_latest(),
+        };
+        if !changed {
+            return Task::none();
+        }
+        let pose = controller.pose(stream_id, unix_ms()).with_instant();
+        if let Err(error) = publish_model_camera(&pose) {
+            eprintln!("Canvas: could not publish timeline cursor for {stream_id}: {error:#}");
+        }
+        self.orbit_published
+            .insert(stream_id.to_string(), Instant::now());
         self.bump();
         Task::none()
     }
@@ -6165,6 +6208,7 @@ impl App {
                     width,
                     height,
                     orbitable,
+                    timeline,
                 } => {
                     let Some(path) = canvas_core::video_frame_file(source_id) else {
                         continue;
@@ -6177,6 +6221,7 @@ impl App {
                             width: *width,
                             height: *height,
                             orbitable: *orbitable,
+                            timeline: *timeline,
                             seen: None,
                         },
                     )
@@ -6615,6 +6660,14 @@ impl App {
                 {
                     layers.push(self.model_view_cube(source_id));
                 }
+                if let ContentSource::LiveVideo {
+                    source_id,
+                    timeline: true,
+                    ..
+                } = &surface.source
+                {
+                    layers.push(self.model_timeline(source_id));
+                }
                 if let Some(view) = view
                     && let Some(attention) = &view.attention
                 {
@@ -6676,6 +6729,43 @@ impl App {
             .padding(8)
             .align_x(iced::alignment::Horizontal::Right)
             .align_y(iced::alignment::Vertical::Top)
+            .into()
+    }
+
+    fn model_timeline<'a>(&self, stream_id: &'a str) -> Element<'a, Message> {
+        let steps_back = self
+            .orbits
+            .get(stream_id)
+            .and_then(|orbit| orbit.steps_back())
+            .unwrap_or(0);
+        let command = |label: &'static str, action| {
+            button(text(label).size(11))
+                .padding([4, 9])
+                .on_press(Message::ModelTimeline {
+                    stream_id: stream_id.to_string(),
+                    action,
+                })
+                .style(button::secondary)
+        };
+        let position = if steps_back == 0 {
+            "LATEST".to_string()
+        } else {
+            format!("LATEST - {steps_back}")
+        };
+        let strip = row![
+            command("◀", TimelineAction::Older),
+            container(text(position).size(11)).padding([4, 10]),
+            command("▶", TimelineAction::Newer),
+            command("LIVE", TimelineAction::Latest),
+        ]
+        .spacing(3)
+        .align_y(iced::Alignment::Center);
+        container(strip)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(8)
+            .align_x(iced::alignment::Horizontal::Center)
+            .align_y(iced::alignment::Vertical::Bottom)
             .into()
     }
 
