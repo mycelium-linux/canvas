@@ -12,8 +12,8 @@ use std::os::unix::{
 };
 use std::path::PathBuf;
 use std::sync::{
-    Arc, Mutex,
     atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -81,10 +81,10 @@ impl ArtifactManifest {
             return Self::parse(&bytes, id);
         }
         // 2. Global user state directory
-        if let Some(global_path) = global_artifact_path(id)
-            && let Ok(bytes) = std::fs::read(&global_path)
-        {
-            return Self::parse(&bytes, id);
+        if let Some(global_path) = global_artifact_path(id) {
+            if let Ok(bytes) = std::fs::read(&global_path) {
+                return Self::parse(&bytes, id);
+            }
         }
         // 3. Built-in: compiled into the binary
         let built_in = match id {
@@ -187,11 +187,9 @@ fn global_artifact_path(id: &str) -> Option<PathBuf> {
 /// Re-exported from canvas-core so stream_binding callers can validate
 /// without a separate import. See DECLARED_CONTRACTS and is_declared_contract
 /// in canvas-core for the canonical registry.
-pub use canvas_core::{DECLARED_CONTRACTS, is_declared_contract};
+pub use canvas_core::{is_declared_contract, DECLARED_CONTRACTS};
 
-pub use crate::stream_contract::{STREAM_SCHEMA_VERSION, StreamEnvelope};
-
-
+pub use crate::stream_contract::{StreamEnvelope, STREAM_SCHEMA_VERSION};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StreamStats {
@@ -426,6 +424,10 @@ pub fn apply_named_adapter_batch(
 /// added without registering it here too.
 const BUILT_IN_BINDERS: &[(&str, &str)] = &[
     (
+        "trader-backtest-v1",
+        include_str!("../../../config/binders/trader-backtest-v1.lua"),
+    ),
+    (
         "activity-grid-v1",
         include_str!("../../../config/binders/activity-grid-v1.lua"),
     ),
@@ -476,6 +478,10 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
     (
         "service-topology-v1",
         include_str!("../../../config/binders/service-topology-v1.lua"),
+    ),
+    (
+        "mycelium-topology-v1",
+        include_str!("../../../config/binders/mycelium-topology-v1.lua"),
     ),
     (
         "span-timeline-v1",
@@ -578,6 +584,14 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/market-ohlcv-v1.lua"),
     ),
     (
+        "market-order-book-v1",
+        include_str!("../../../config/binders/market-order-book-v1.lua"),
+    ),
+    (
+        "market-trade-v1",
+        include_str!("../../../config/binders/market-trade-v1.lua"),
+    ),
+    (
         "alfalfa-activity-v1",
         include_str!("../../../config/binders/alfalfa-activity-v1.lua"),
     ),
@@ -618,6 +632,10 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/alfalfa-project-reviewers-v1.lua"),
     ),
     (
+        "alfalfa-manifest-search-v1",
+        include_str!("../../../config/binders/alfalfa-manifest-search-v1.lua"),
+    ),
+    (
         "agent-attention-v1",
         include_str!("../../../config/binders/agent-attention-v1.lua"),
     ),
@@ -634,10 +652,34 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/widget-snapshot-v1.lua"),
     ),
     (
+        "transmog-build-v1",
+        include_str!("../../../config/binders/transmog-build-v1.lua"),
+    ),
+    (
+        "eval-watch-v1",
+        include_str!("../../../config/binders/eval-watch-v1.lua"),
+    ),
+    (
+        "run-tree-v1",
+        include_str!("../../../config/binders/run-tree-v1.lua"),
+    ),
+    (
+        "lob-pipeline-v1",
+        include_str!("../../../config/binders/lob-pipeline-v1.lua"),
+    ),
+    (
         "music-nowplaying-v1",
         // Retained construction: Lua runs only when media state changes; the
         // resulting media card is rendered by Rust until the next snapshot.
         include_str!("../../../config/binders/music-nowplaying-v1.lua"),
+    ),
+    (
+        "mpd-lyrics-v1",
+        include_str!("../../../config/binders/mpd-lyrics-v1.lua"),
+    ),
+    (
+        "jarvis-notifications-v1",
+        include_str!("../../../config/binders/jarvis-notifications-v1.lua"),
     ),
 ];
 
@@ -662,6 +704,60 @@ pub fn apply_lua_adapter_batch(
     events: &[&StreamEnvelope],
     target: &mut WidgetSpec,
 ) -> Result<()> {
+    let values = run_lua_adapter_values(source, events)?;
+    let mut next = target.clone();
+    for value in values {
+        let mutation: WidgetMutation = serde_json::from_value(value.clone()).map_err(|error| {
+            Error(format!(
+                "Canvas Lua adapter output is invalid: {error}; output={value}"
+            ))
+        })?;
+        next.apply_mutation(mutation)
+            .map_err(|error| Error(error.to_string()))?;
+    }
+    *target = next;
+    Ok(())
+}
+
+/// Run a named Lua binder for a model timeline. The Lua owns tool semantics
+/// (operation names, glyphs and component grouping); Rust receives only the
+/// generic viewer contract.
+pub fn apply_named_timeline_adapter(
+    adapter: &str,
+    event: &StreamEnvelope,
+) -> Result<canvas_model_viewer::state::Timeline> {
+    let relative = PathBuf::from("binders").join(format!("{adapter}.lua"));
+    let owned;
+    let source =
+        if let Some(bytes) = crate::runtime_config::read(&relative, MAX_ADAPTER_BYTES as u64)? {
+            owned = String::from_utf8(bytes)
+                .map_err(|error| Error(format!("Canvas adapter is not UTF-8: {error}")))?;
+            owned.as_str()
+        } else {
+            built_in_adapter_source(adapter)
+                .ok_or_else(|| Error(format!("unknown stream adapter: {adapter}")))?
+        };
+    apply_lua_timeline_adapter(source, event)
+}
+
+pub fn apply_lua_timeline_adapter(
+    source: &str,
+    event: &StreamEnvelope,
+) -> Result<canvas_model_viewer::state::Timeline> {
+    let value = run_lua_adapter_values(source, &[event])?
+        .pop()
+        .expect("one input produces one output");
+    serde_json::from_value(value.clone()).map_err(|error| {
+        Error(format!(
+            "Canvas Lua timeline output is invalid: {error}; output={value}"
+        ))
+    })
+}
+
+fn run_lua_adapter_values(
+    source: &str,
+    events: &[&StreamEnvelope],
+) -> Result<Vec<serde_json::Value>> {
     if source.is_empty() || source.len() > MAX_ADAPTER_BYTES {
         return Err(Error("Lua adapter must contain 1-32768 bytes".into()));
     }
@@ -738,25 +834,14 @@ pub fn apply_lua_adapter_batch(
         .set_name("canvas-stream-adapter")
         .eval()
         .map_err(lua_error)?;
-    let mut next = target.clone();
+    let mut outputs = Vec::with_capacity(events.len());
     for event in events {
         let value: mlua::Value = binder
             .call(lua.to_value(*event).map_err(lua_error)?)
             .map_err(lua_error)?;
-        let diagnostic = lua.from_value::<serde_json::Value>(value.clone()).ok();
-        let mutation: WidgetMutation = lua.from_value(value).map_err(|error| {
-            Error(format!(
-                "Canvas Lua adapter output is invalid: {error}; output={}",
-                diagnostic
-                    .as_ref()
-                    .map_or_else(|| "<unavailable>".into(), serde_json::Value::to_string)
-            ))
-        })?;
-        next.apply_mutation(mutation)
-            .map_err(|error| Error(error.to_string()))?;
+        outputs.push(lua.from_value(value).map_err(lua_error)?);
     }
-    *target = next;
-    Ok(())
+    Ok(outputs)
 }
 
 fn lua_error(error: mlua::Error) -> Error {
@@ -840,8 +925,11 @@ pub fn apply_briefing_binder(source: &str, event: &StreamEnvelope) -> Result<Bri
 mod tests {
     use super::*;
     use canvas_widgets::{
-        WIDGET_SCHEMA_VERSION, WidgetChrome, WidgetKind,
-        quant::{Candle, QuantWidget},
+        quant::{
+            BacktestEvidence, BacktestPoint, BacktestSeries, BacktestSeriesRole, Candle,
+            QuantWidget,
+        },
+        WidgetChrome, WidgetKind, WIDGET_SCHEMA_VERSION,
     };
 
     #[test]
@@ -911,6 +999,64 @@ mod tests {
     }
 
     #[test]
+    fn eval_watch_binder_projects_one_run_into_cohesive_views() {
+        let payload = serde_json::json!({
+            "schema":"canvas.run.watch.v1", "revision":4, "state":"running",
+            "run":{"model":"Jev","harness":"Transmog","benchmark":"cad"},
+            "artifactCount":2, "omittedEvents":0,
+            "events":[
+                {"id":"d1","kind":"decision","title":"wall strategy","confidence":0.8},
+                {"id":"b1","kind":"build","title":"Extrude","detail":"400 triangles"},
+                {"id":"v1","kind":"verification","title":"bounds","verdict":"pass"}
+            ]
+        });
+        for (stream, kind) in [
+            ("eval-summary", "status_list"),
+            ("eval-decisions", "dag_graph"),
+            ("eval-events", "event_log"),
+            ("eval-verification", "status_list"),
+        ] {
+            let initial = match kind {
+                "dag_graph" => WidgetKind::DagGraph {
+                    title: "waiting".into(),
+                    nodes: vec![],
+                    edges: vec![],
+                },
+                "event_log" => WidgetKind::EventLog {
+                    title: "waiting".into(),
+                    entries: vec![],
+                    query: None,
+                    paused: false,
+                    follow: true,
+                },
+                _ => WidgetKind::StatusList {
+                    title: "waiting".into(),
+                    nodes: vec![],
+                },
+            };
+            let mut target = test_spec(initial);
+            let event = StreamEnvelope {
+                schema_version: STREAM_SCHEMA_VERSION,
+                owner: "eval-studio".into(),
+                stream: stream.into(),
+                contract: "canvas.run.watch.v1".into(),
+                sequence: 4,
+                emitted_at_ms: now_ms(),
+                project_id: Some("eval".into()),
+                payload: payload.clone(),
+            };
+            apply_named_adapter("eval-watch-v1", &event, &mut target)
+                .expect("eval run view renders");
+            assert!(match (kind, &target.kind) {
+                ("status_list", WidgetKind::StatusList { .. })
+                | ("dag_graph", WidgetKind::DagGraph { .. })
+                | ("event_log", WidgetKind::EventLog { .. }) => true,
+                _ => false,
+            });
+        }
+    }
+
+    #[test]
     fn activity_grid_binder_builds_a_retained_themed_heatmap() {
         let mut target = test_spec(WidgetKind::Heatmap {
             title: "Waiting".into(),
@@ -942,6 +1088,62 @@ mod tests {
         };
         assert_eq!(style, canvas_widgets::HeatmapStyle::Activity);
         assert_eq!(values[1][1], 8.0);
+    }
+
+    #[test]
+    fn trader_backtest_binder_preserves_evidence_and_research_metrics() {
+        let mut target = test_spec(WidgetKind::Quant {
+            widget: QuantWidget::Backtest {
+                title: "Waiting".into(),
+                evidence: BacktestEvidence::SyntheticProof,
+                market: vec![],
+                series: vec![BacktestSeries {
+                    label: "Waiting".into(),
+                    role: BacktestSeriesRole::Strategy,
+                    points: vec![BacktestPoint {
+                        time: 0,
+                        value: 0.0,
+                    }],
+                }],
+                trades: vec![],
+                stats: vec![],
+            },
+        });
+        let fixed = |mantissa| serde_json::json!({"mantissa":mantissa,"scale":4});
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "trader".into(),
+            stream: "backtest".into(),
+            contract: "fpl.trader.backtest-visualization/v1".into(),
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            project_id: Some("trader".into()),
+            payload: serde_json::json!({
+                "schema":"fpl.trader.backtest-visualization/v1", "strategy_name":"SMA crossover",
+                "equity_curve":[{"sequence":1,"equity":10000.0,"cash":0,"market_value":10000},{"sequence":2,"equity":10125.0,"cash":0,"market_value":10125}],
+                "summary":{"run_id":"sha256:research-proof","execution_count":4,"report":{"evidence":"synthetic_proof","strategy":{"total_return":fixed(125),"maximum_drawdown":fixed(-75),"sharpe_ratio":fixed(15100),"sortino_ratio":null,"closed_trades":2},"benchmark":{"total_return":fixed(50)},"strategy_minus_benchmark":{"total_return":fixed(75)}}}
+            }),
+        };
+        apply_named_adapter("trader-backtest-v1", &event, &mut target)
+            .expect("Trader projection renders");
+        let WidgetKind::Quant {
+            widget:
+                QuantWidget::Backtest {
+                    evidence,
+                    series,
+                    stats,
+                    ..
+                },
+        } = target.kind
+        else {
+            panic!("backtest binder changed widget family")
+        };
+        assert_eq!(
+            evidence,
+            canvas_widgets::quant::BacktestEvidence::SyntheticProof
+        );
+        assert_eq!(series[0].points.len(), 2);
+        assert_eq!(stats[0].value, "+1.25%");
     }
 
     #[test]
@@ -1291,6 +1493,78 @@ mod tests {
     }
 
     #[test]
+    fn mycelium_topology_binder_preserves_network_domains() {
+        let mut target = test_spec(WidgetKind::NetworkTopology {
+            title: "Waiting".into(),
+            segments: Vec::new(),
+            nodes: Vec::new(),
+            links: Vec::new(),
+            conflicts: 0,
+        });
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "mycelium".into(),
+            stream: "topology".into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            project_id: Some("home".into()),
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "segments": {
+                    "pris/vlan:35":{"id":"pris/vlan:35","kind":"vlan","vlan":35,"origins":["pris/router:config"]},
+                    "pris/192.168.35.0/24":{"id":"pris/192.168.35.0/24","kind":"lan","subnet":["192.168.35.0",24],"gw":"192.168.35.1","origins":["pris/router:config"]},
+                    "titan/vlan:35":{"id":"titan/vlan:35","kind":"vlan","vlan":35,"origins":["titan/router:config"]},
+                    "titan/192.168.35.0/24":{"id":"titan/192.168.35.0/24","kind":"lan","subnet":["192.168.35.0",24],"gw":"192.168.35.1","origins":["titan/router:config"]}
+                },
+                "nodes": {
+                    "pris-router":{"id":"pris-router","device":true,"sites":["pris"],"ips":{"192.168.35.1":{"addr":"192.168.35.1","origins":["pris/router:ip"]}},"hostnames":["pris-router"],"ports":{}},
+                    "titan-router":{"id":"titan-router","device":true,"sites":["titan"],"ips":{"192.168.35.1":{"addr":"192.168.35.1","origins":["titan/router:ip"]}},"hostnames":["titan-router"],"ports":{}}
+                },
+                "conflicts": []
+            }),
+        };
+        apply_lua_adapter(
+            include_str!("../../../config/binders/mycelium-topology-v1.lua"),
+            &event,
+            &mut target,
+        )
+        .expect("Mycelium topology renders");
+        let WidgetKind::NetworkTopology {
+            segments, nodes, ..
+        } = target.kind
+        else {
+            panic!("Mycelium binder changed widget family")
+        };
+        assert_eq!(
+            segments.len(),
+            2,
+            "site-local subnet views fold into their VLANs: {segments:#?}"
+        );
+        let pris_segment = segments
+            .iter()
+            .find(|segment| segment.site.as_deref() == Some("pris"))
+            .expect("pris segment");
+        let titan_segment = segments
+            .iter()
+            .find(|segment| segment.site.as_deref() == Some("titan"))
+            .expect("titan segment");
+        assert_eq!(pris_segment.id, "pris/vlan:35");
+        assert_eq!(titan_segment.id, "titan/vlan:35");
+        let pris_node = nodes
+            .iter()
+            .find(|node| node.id == "pris-router")
+            .expect("pris node");
+        let titan_node = nodes
+            .iter()
+            .find(|node| node.id == "titan-router")
+            .expect("titan node");
+        assert_eq!(pris_node.sites, ["pris"]);
+        assert_eq!(pris_node.segments, ["pris/vlan:35"]);
+        assert_eq!(titan_node.sites, ["titan"]);
+        assert_eq!(titan_node.segments, ["titan/vlan:35"]);
+    }
+
+    #[test]
     fn span_timeline_binder_selects_semantics_without_owning_frames() {
         let mut target = test_spec(WidgetKind::SpanTimeline {
             title: "Waiting".into(),
@@ -1408,6 +1682,36 @@ mod tests {
     }
 
     #[test]
+    fn alfalfa_manifest_search_is_presented_by_lua() {
+        let mut target = test_spec(WidgetKind::Table {
+            title: "Files".into(),
+            columns: Vec::new(),
+            rows: Vec::new(),
+        });
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "canvas-artifact-index".into(),
+            stream: "transmog-artifacts".into(),
+            contract: canvas_core::project_browser::SEARCH_CONTRACT.into(),
+            project_id: Some("transmog".into()),
+            sequence: 8,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "project_id":"transmog", "revision":"r9", "query":"pdf",
+                "matched":1,
+                "results":[{"id":"drawing","path":"drawings/case.pdf","display_name":"Case drawing","cid":"bafycase","media_type":"application/pdf","bytes":2048,"modified_at_ms":7}]
+            }),
+        };
+        apply_named_adapter("alfalfa-manifest-search-v1", &event, &mut target).unwrap();
+        let WidgetKind::Table { title, rows, .. } = target.kind else {
+            panic!("manifest search binder changed widget family")
+        };
+        assert_eq!(title, "pdf");
+        assert_eq!(rows[0], ["Case drawing", "PDF", "drawings", "2 KB"]);
+        assert_eq!(target.data.window.as_deref(), Some("revision r9"));
+    }
+
+    #[test]
     fn music_binder_constructs_a_retained_media_card_on_event_only() {
         let mut target = test_spec(WidgetKind::MediaCard {
             title: "Waiting for playback".into(),
@@ -1483,7 +1787,9 @@ mod tests {
         let WidgetKind::Quant { widget } = target.kind else {
             panic!("quant")
         };
-        let QuantWidget::Candlestick { candles, .. } = widget;
+        let QuantWidget::Candlestick { candles, .. } = widget else {
+            unreachable!()
+        };
         assert_eq!(candles.len(), 1);
         assert_eq!(candles[0].close, 100.5);
     }
@@ -2305,5 +2611,41 @@ mod tests {
             1,
             "reader retired itself on a transient error and never ingested the event"
         );
+    }
+
+    #[test]
+    fn transmog_lua_normalizes_operation_icons_for_model_timeline() {
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "mac-studio-transmog".into(),
+            stream: "transmog-timeline".into(),
+            contract: "transmog.build.status.v1".into(),
+            project_id: Some("transmog".into()),
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "total": 3,
+                "done": 3,
+                "complete": true,
+                "source": "draft.ron",
+                "material": "PETG",
+                "process": "FDM",
+                "stream_id": "transmog-step",
+                "steps": [
+                    {"index": 2, "kind": "Cut", "feature": 9},
+                    {"index": 1, "kind": "Extrude", "feature": 8}
+                ]
+            }),
+        };
+        let timeline = apply_lua_timeline_adapter(
+            include_str!("../../../config/binders/transmog-build-v1.lua"),
+            &event,
+        )
+        .expect("timeline renders");
+        assert_eq!(timeline.stream_id, "transmog-step");
+        assert_eq!(timeline.items[0].glyph, "↥");
+        assert_eq!(timeline.items[0].steps_back, 1);
+        assert_eq!(timeline.items[1].glyph, "−");
+        assert_eq!(timeline.items[1].steps_back, 0);
     }
 }

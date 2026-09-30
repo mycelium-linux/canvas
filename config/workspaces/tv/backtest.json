@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "id": "trader-backtest",
+  "project_id": "trader",
+  "revision": 1,
+  "theme": { "source": "project" },
+  "background": { "kind": "solid", "color": [7, 11, 18, 255] },
+  "chrome": { "title": "hidden", "canvas_padding": 16, "surface_gap": 8 },
+  "surfaces": [{
+    "id": "research-chart",
+    "title": "TRADER · STRATEGY LAB",
+    "content": { "kind": "widget", "spec": {
+      "schema_version": 2,
+      "id": "research-chart",
+      "kind": "quant",
+      "widget": {
+        "visualization": "backtest",
+        "title": "Strategy research",
+        "evidence": "synthetic_proof",
+        "series": [{"label":"Awaiting result","role":"strategy","points":[{"time":0,"value":10000.0},{"time":1,"value":10000.0}]}],
+        "trades": [],
+        "stats": [{"label":"Evidence","value":"SYNTHETIC","tone":"neutral"}]
+      },
+      "chrome": "drag_only",
+      "data": { "state": "loading", "source": "unibus:trader", "window": "full run", "detail": "Awaiting deterministic backtest evidence · synthetic proof only", "provenance": "sample" }
+    }},
+    "inputs": [{ "id": "result", "contract": "fpl.trader.backtest-visualization/v2" }]
+  }],
+  "layout": { "kind": "canvas", "placements": [
+    { "surface_id": "research-chart", "bounds": { "x": 0.01, "y": 0.02, "width": 0.98, "height": 0.96 }, "layer": 0 }
+  ]},
+  "bindings": [{
+    "id": "latest-backtest",
+    "source": { "owner": "trader", "stream": "backtest", "contract": "fpl.trader.backtest-visualization/v2" },
+    "target": { "surface_id": "research-chart", "input_id": "result" },
+    "adapter": "trader-backtest-v1",
+    "delivery": { "mode": "latest" }
+  }],
+  "focused_surface_id": "research-chart"
+}

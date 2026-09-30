@@ -16,6 +16,10 @@ pub mod display_watch;
 pub mod global_hotkey;
 pub mod layout;
 pub mod manifest_query;
+pub mod notification;
+pub mod part_inspector;
+pub mod project_browser;
+pub mod task;
 pub mod theme_file;
 pub mod unibus;
 pub mod working_set;
@@ -31,6 +35,7 @@ pub mod working_set;
 /// Adding a contract is a data change to this constant, not a rebuild of
 /// validation logic: [`is_declared_contract`] checks membership here.
 pub const DECLARED_CONTRACTS: &[&str] = &[
+    "canvas.artifact.search.v1",
     "canvas.agent.activity.v1",
     "canvas.agent.attention.v1",
     "canvas.briefing.beat.v1",
@@ -39,11 +44,19 @@ pub const DECLARED_CONTRACTS: &[&str] = &[
     "canvas.prometheus.v1",
     "canvas.quant.candle.v1",
     "canvas.sse.v1",
+    "canvas.task.status.v1",
     "canvas.widget.snapshot.v1",
+    "fpl.trader.backtest-visualization/v1",
+    "fpl.trader.backtest-visualization/v2",
+    "canvas.run.watch.v1",
     "jarvis.presence.v1",
+    "lob.pipeline.status.v1",
     "map.v1",
     "market.ohlcv.raw.v1",
+    "market.order_book.v1",
+    "market.trade.v1",
     "panopticon.map.v1",
+    "transmog.build.status.v1",
 ];
 
 /// Whether a contract name is declared in the registry. Used by both
@@ -167,9 +180,56 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let temp = path.with_extension("jpg.tmp");
+    // Preserve the complete target name in the sibling temporary path. Using
+    // one fixed extension here made `part.rgba` and `part.camera` both stage
+    // through `part.jpg.tmp`; concurrent frame and camera writers could then
+    // rename each other's bytes into the wrong target.
+    let mut temp_name = path.file_name().unwrap_or_default().to_os_string();
+    temp_name.push(".tmp");
+    let temp = path.with_file_name(temp_name);
     std::fs::write(&temp, bytes)?;
     std::fs::rename(&temp, path)
+}
+
+#[cfg(test)]
+mod atomic_write_tests {
+    use super::write_atomic;
+
+    #[test]
+    fn same_stem_different_targets_do_not_share_a_temporary_file() {
+        let root = std::env::temp_dir().join(format!(
+            "canvas-atomic-targets-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let rgba = root.join("part.rgba");
+        let camera = root.join("part.camera");
+        let frame = vec![0x5a; 128 * 1024];
+        let pose = br#"{"stream_id":"part"}"#.to_vec();
+        let rgba_thread = {
+            let rgba = rgba.clone();
+            let frame = frame.clone();
+            std::thread::spawn(move || {
+                for _ in 0..32 {
+                    write_atomic(&rgba, &frame).unwrap();
+                }
+            })
+        };
+        let camera_thread = {
+            let camera = camera.clone();
+            let pose = pose.clone();
+            std::thread::spawn(move || {
+                for _ in 0..32 {
+                    write_atomic(&camera, &pose).unwrap();
+                }
+            })
+        };
+        rgba_thread.join().unwrap();
+        camera_thread.join().unwrap();
+        assert_eq!(std::fs::read(&rgba).unwrap(), frame);
+        assert_eq!(std::fs::read(&camera).unwrap(), pose);
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 /// Filesystem location of the Canvas `stream.sock` UNIX datagram socket.
@@ -277,6 +337,7 @@ pub enum Host {
     Mac,
     AgoraOne,
     EdgeRunner,
+    HomePi,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1338,6 +1399,11 @@ pub mod model_camera {
         /// know how many steps exist on the renderer's machine.
         #[serde(default)]
         pub steps_back: Option<u32>,
+        /// Whether the renderer should continue its authored idle orbit from
+        /// this camera pose. Manual manipulation clears it; the explicit
+        /// Orbit toggle sets it, so UI state and rendered motion agree.
+        #[serde(default)]
+        pub auto_orbit: bool,
         pub at_unix_ms: u64,
     }
 
@@ -1364,6 +1430,7 @@ pub mod model_camera {
                 instant: false,
                 paint: None,
                 steps_back: None,
+                auto_orbit: false,
                 at_unix_ms,
             }
         }
@@ -1406,7 +1473,11 @@ pub mod model_camera {
 
         /// Whether this pose should still override the scene.
         pub fn is_current(&self, now_ms: u64) -> bool {
-            self.grabbed || now_ms.saturating_sub(self.at_unix_ms) < HOLD_MS
+            // `auto_orbit` is the original wire name for the viewer's ORBIT
+            // mode. While that mode is enabled, this commanded camera remains
+            // authoritative; letting it expire would hand control back to a
+            // renderer-local scene orbit that the view cube cannot observe.
+            self.grabbed || self.auto_orbit || now_ms.saturating_sub(self.at_unix_ms) < HOLD_MS
         }
     }
 
@@ -1440,7 +1511,7 @@ pub mod model_camera {
     /// cube click, a keybind and a drag all end up setting the same two
     /// numbers, so there is one definition of "front" for all three instead of
     /// a preset enum on one side and free angles on the other.
-    pub const NAMED_VIEWS: [(&str, f32, f32); 8] = [
+    pub const NAMED_VIEWS: [(&str, f32, f32); 26] = [
         ("front", 0.0, 0.0),
         ("back", 180.0, 0.0),
         ("right", 90.0, 0.0),
@@ -1451,6 +1522,24 @@ pub mod model_camera {
         // slightly down, so three faces are visible at once.
         ("iso", 45.0, 35.264),
         ("iso_rear", -135.0, 35.264),
+        ("iso_front_left", -45.0, 35.264),
+        ("iso_back_right", 135.0, 35.264),
+        ("iso_bottom", 45.0, -35.264),
+        ("iso_bottom_left", -45.0, -35.264),
+        ("iso_bottom_back_right", 135.0, -35.264),
+        ("iso_bottom_rear", -135.0, -35.264),
+        ("front_right", 45.0, 0.0),
+        ("front_left", -45.0, 0.0),
+        ("back_right", 135.0, 0.0),
+        ("back_left", -135.0, 0.0),
+        ("top_front", 0.0, 45.0),
+        ("top_right", 90.0, 45.0),
+        ("top_back", 180.0, 45.0),
+        ("top_left", -90.0, 45.0),
+        ("bottom_front", 0.0, -45.0),
+        ("bottom_right", 90.0, -45.0),
+        ("bottom_back", 180.0, -45.0),
+        ("bottom_left", -90.0, -45.0),
     ];
 
     /// Angles for a named view, or `None` if this build does not know it.
@@ -1594,6 +1683,13 @@ mod model_camera_tests {
             !released.is_current(1_000 + HOLD_MS),
             "then the scene takes over"
         );
+    }
+
+    #[test]
+    fn orbit_mode_keeps_the_commanded_pose_authoritative() {
+        let mut camera = ViewerCamera::new("m", 90.0, 0.0, 1.0, false, 1_000);
+        camera.auto_orbit = true;
+        assert!(camera.is_current(1_000 + HOLD_MS * 10));
     }
 
     #[test]
