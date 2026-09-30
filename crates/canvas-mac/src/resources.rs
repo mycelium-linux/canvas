@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::process::Command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
@@ -198,12 +199,21 @@ pub fn project_entries(id: &str) -> Result<Vec<Entry>, String> {
 }
 
 pub fn load() -> Result<Index, String> {
-    let projects = super::alfalfa::list()?;
-    let projects = projects.as_array().ok_or("Invalid Alfalfa catalog")?;
     let mut index = Index::default();
+    let projects = match super::alfalfa::list() {
+        Ok(projects) => projects,
+        Err(_) => {
+            index.warnings.push(
+                "Alfalfa is unavailable; showing resources from the other project owners. Command-R to retry."
+                    .into(),
+            );
+            add_engineering_catalogs(&mut index);
+            return Ok(index);
+        }
+    };
+    let projects = projects.as_array().ok_or("Invalid Alfalfa catalog")?;
     match super::alfalfa::companies().and_then(companies) {
         Ok(companies) => index.companies = companies,
-        Err(error) if error == super::alfalfa::AUTHORIZATION_DENIED => return Err(error),
         Err(_) => index.warnings.push(
             "Company folders are unavailable; showing Unassigned workspaces. Command-R to retry."
                 .into(),
@@ -239,13 +249,6 @@ pub fn load() -> Result<Index, String> {
             }
         });
     }
-    if index
-        .warnings
-        .iter()
-        .any(|e| e == super::alfalfa::AUTHORIZATION_DENIED)
-    {
-        return Err(super::alfalfa::AUTHORIZATION_DENIED.into());
-    }
     if index.entries.iter().any(|e| {
         e.company_id
             .as_ref()
@@ -255,14 +258,169 @@ pub fn load() -> Result<Index, String> {
             .warnings
             .push("Some project companies are not in the current verified membership list.".into());
     }
+    add_engineering_catalogs(&mut index);
     match super::alfalfa::activity() {
         Ok(activity) => add_observations(&mut index, &activity)?,
-        Err(error) if error == super::alfalfa::AUTHORIZATION_DENIED => return Err(error),
         Err(_) => index
             .warnings
             .push("My agents is unavailable; showing registered projects.".into()),
     }
     Ok(index)
+}
+
+fn add_engineering_catalogs(index: &mut Index) {
+    let transmog = std::env::var("CANVAS_TRANSMOG_VIEWER_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:4173".into());
+    let lob =
+        std::env::var("CANVAS_LOB_VIEWER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".into());
+    let reads = std::thread::scope(|scope| {
+        let transmog = scope.spawn(|| owner_json(&transmog, "/api/state"));
+        let lob = scope.spawn(|| owner_json(&lob, "/api/circuits"));
+        (transmog.join(), lob.join())
+    });
+    match reads.0 {
+        Ok(Ok(value)) => match transmog_entries(&value, &transmog) {
+            Ok(entries) => index.entries.extend(entries),
+            Err(error) => index.warnings.push(error),
+        },
+        _ => index.warnings.push(
+            "Transmog is unavailable; models are not listed. Start `transmog serve` and refresh."
+                .into(),
+        ),
+    }
+    match reads.1 {
+        Ok(Ok(value)) => match lob_entries(&value, &lob) {
+            Ok(entries) => index.entries.extend(entries),
+            Err(error) => index.warnings.push(error),
+        },
+        _ => index.warnings.push(
+            "legion-of-bom is unavailable; circuits are not listed. Start `lob serve` and refresh."
+                .into(),
+        ),
+    }
+}
+
+fn owner_json(base: &str, path: &str) -> Result<Value, String> {
+    let mut url = safe_viewer_base(base).ok_or("Invalid engineering viewer URL")?;
+    url.path_segments_mut()
+        .map_err(|_| "Invalid engineering catalog URL")?
+        .pop_if_empty()
+        .extend(path.trim_matches('/').split('/'));
+    let output = super::bounded_output(
+        Command::new("/usr/bin/curl").args([
+            "--silent",
+            "--show-error",
+            "--noproxy",
+            "*",
+            "--connect-timeout",
+            "1",
+            "--max-time",
+            "3",
+            "--max-filesize",
+            "4194304",
+            "--fail",
+            "--header",
+            "Accept: application/json",
+            "--",
+            url.as_str(),
+        ]),
+        8,
+    )?;
+    serde_json::from_slice(&output.stdout).map_err(|_| "Owner returned invalid JSON".into())
+}
+
+fn owner_parent(project: &str, name: &str, purpose: &str, home: &str) -> Entry {
+    Entry {
+        company_id: None,
+        workspace_id: None,
+        project: project.into(),
+        project_name: name.into(),
+        id: "@home".into(),
+        title: name.into(),
+        kind: "project".into(),
+        uri: home.into(),
+        note: None,
+        home: home.into(),
+        status: "active".into(),
+        purpose: purpose.into(),
+    }
+}
+
+fn transmog_entries(value: &Value, base: &str) -> Result<Vec<Entry>, String> {
+    if value["schema"] != "transmog.viewer-index.v1" {
+        return Err("Transmog returned an unsupported catalog format.".into());
+    }
+    let projects = value["projects"]
+        .as_array()
+        .ok_or("Transmog catalog has no project list.")?;
+    let mut result = vec![owner_parent(
+        "owner-transmog",
+        "Transmog",
+        "Mechanical parts and assemblies",
+        base,
+    )];
+    let mut seen = std::collections::HashSet::new();
+    for project in projects.iter().take(256) {
+        let (Some(id), Some(name)) = (project["id"].as_str(), project["name"].as_str()) else {
+            continue;
+        };
+        if !owner_identifier(id) || !seen.insert(id) {
+            continue;
+        }
+        let count = project["parts"].as_array().map_or(0, Vec::len);
+        result.push(Entry {
+            company_id: None,
+            workspace_id: None,
+            project: "owner-transmog".into(),
+            project_name: "Transmog".into(),
+            id: id.into(),
+            title: name.into(),
+            kind: "model".into(),
+            uri: format!("transmog://projects/{id}"),
+            note: Some(format!("{count} parts/assemblies")),
+            home: base.into(),
+            status: "active".into(),
+            purpose: String::new(),
+        });
+    }
+    Ok(result)
+}
+
+fn lob_entries(value: &Value, base: &str) -> Result<Vec<Entry>, String> {
+    let circuits = value
+        .as_array()
+        .ok_or("legion-of-bom catalog has an unsupported format.")?;
+    let mut result = vec![owner_parent(
+        "owner-lob",
+        "legion-of-bom",
+        "Circuits, PCBs, BOMs, and source files",
+        base,
+    )];
+    let mut seen = std::collections::HashSet::new();
+    for circuit in circuits.iter().take(256) {
+        let Some(name) = circuit["name"].as_str() else {
+            continue;
+        };
+        if !owner_identifier(name) || !seen.insert(name) {
+            continue;
+        }
+        let artifacts = circuit["artifacts"].as_array().map_or(0, Vec::len);
+        result.push(Entry {
+            company_id: None,
+            workspace_id: None,
+            project: "owner-lob".into(),
+            project_name: "legion-of-bom".into(),
+            id: name.into(),
+            title: name.replace(['-', '_'], " "),
+            kind: "circuit".into(),
+            uri: format!("lob://circuits/{name}"),
+            note: Some(format!("{artifacts} tracked artifacts")),
+            home: base.into(),
+            status: "active".into(),
+            purpose: String::new(),
+        });
+    }
+    Ok(result)
 }
 
 fn repository_key(uri: &str) -> Option<String> {
@@ -476,7 +634,7 @@ fn owner_view_url_with_bases(entry: &Entry, transmog: &str, lob: &str) -> Option
         .path_segments()?
         .filter(|part| !part.is_empty())
         .collect();
-    if segments.len() != 1 || !super::session_identifier(segments[0]) {
+    if segments.len() != 1 || !owner_identifier(segments[0]) {
         return None;
     }
     let id = segments[0];
@@ -497,6 +655,15 @@ fn owner_view_url_with_bases(entry: &Entry, transmog: &str, lob: &str) -> Option
         }
         _ => None,
     }
+}
+
+fn owner_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 
 fn safe_viewer_base(value: &str) -> Option<url::Url> {
@@ -577,6 +744,50 @@ mod tests {
             .as_deref(),
             Some("https://lob.example/viewer/c/controller-board")
         );
+    }
+
+    #[test]
+    fn engineering_owner_catalogs_become_browsable_resources() {
+        let models = transmog_entries(
+            &serde_json::json!({
+                "schema":"transmog.viewer-index.v1",
+                "projects":[
+                    {"id":"fixie","name":"Fixie frame","parts":[{},{}]},
+                    {"id":"../escape","name":"Unsafe","parts":[]}
+                ]
+            }),
+            "http://127.0.0.1:4173",
+        )
+        .unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].project, "owner-transmog");
+        assert_eq!(models[0].kind, "project");
+        assert_eq!(models[1].uri, "transmog://projects/fixie");
+        assert_eq!(models[1].note.as_deref(), Some("2 parts/assemblies"));
+        assert_eq!(target(&models[1]), "http://127.0.0.1:4173/#/p/fixie");
+
+        let circuits = lob_entries(
+            &serde_json::json!([
+                {"name":"slew_limiter","artifacts":[{},{},{}]},
+                {"name":"bad/name","artifacts":[]}
+            ]),
+            "http://127.0.0.1:8080",
+        )
+        .unwrap();
+        assert_eq!(circuits.len(), 2);
+        assert_eq!(circuits[1].title, "slew limiter");
+        assert_eq!(circuits[1].uri, "lob://circuits/slew_limiter");
+        assert_eq!(target(&circuits[1]), "http://127.0.0.1:8080/c/slew_limiter");
+    }
+
+    #[test]
+    fn engineering_catalog_parsers_reject_wrong_owner_shapes() {
+        assert!(transmog_entries(
+            &serde_json::json!({"schema":"other","projects":[]}),
+            "http://127.0.0.1:4173"
+        )
+        .is_err());
+        assert!(lob_entries(&serde_json::json!({"circuits":[]}), "http://127.0.0.1:8080").is_err());
     }
 
     #[test]
