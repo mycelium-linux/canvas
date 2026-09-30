@@ -33,6 +33,9 @@ use ::canvas::{
 use base64::Engine as _;
 use canvas_core::display_watch::{DisplayWatch, WatchStatus};
 use canvas_core::global_hotkey::{GlobalHotkey, HotkeySpec};
+use canvas_core::project_browser::{
+    BrowserAction, BrowserModel, BrowserState, ManifestEntry, ProjectManifest,
+};
 use canvas_core::{Catalog, ThemePalette, VisualTheme, desktop::WallpaperRequest, layout::Rect};
 use iced::mouse;
 use iced::widget::canvas::Canvas;
@@ -449,6 +452,8 @@ enum Message {
     ShellForward,
     ShellProjects,
     ShellNewTask,
+    EngineeringBrowser(BrowserAction),
+    EngineeringArtifactLoaded(Box<Result<LoadedContent, Failure>>),
     /// A gesture on a model surface. Carries the stream rather than the
     /// surface: the camera belongs to the thing being rendered, so two
     /// surfaces showing the same model turn together.
@@ -628,6 +633,25 @@ fn surface_title_visible(mode: SurfaceTitleMode, focused: bool) -> bool {
     }
 }
 
+#[derive(Debug, Clone)]
+enum EngineeringArtifact {
+    Local(PathBuf),
+    Unavailable(String),
+}
+
+#[derive(Debug, Clone)]
+struct EngineeringProject {
+    manifest: ProjectManifest,
+    artifacts: BTreeMap<String, EngineeringArtifact>,
+}
+
+#[derive(Debug, Clone)]
+struct EngineeringBrowser {
+    project: EngineeringProject,
+    state: BrowserState,
+    model: BrowserModel,
+}
+
 struct App {
     catalog: Catalog,
     document: WorkspaceDocument,
@@ -675,10 +699,12 @@ struct App {
     background_picker: Option<::canvas::background_picker::BackgroundPicker>,
     theme_picker: Option<::canvas::theme_picker::ThemePicker>,
     project_picker: Option<::canvas::project_picker::ProjectPicker>,
-    /// Ctrl-P entries supplied by their engineering owners. The catalog holds
-    /// presentation identity; this map holds the narrow action for that exact
-    /// synthetic entry so owner URLs never become generic workspace state.
-    engineering_project_urls: BTreeMap<String, String>,
+    /// Ctrl-P entries and artifact manifests supplied by their engineering
+    /// owners. Canvas owns navigation and presentation; owners retain artifact
+    /// identity and storage.
+    engineering_projects: BTreeMap<String, EngineeringProject>,
+    engineering_browser: Option<EngineeringBrowser>,
+    engineering_thumbnails: BTreeMap<String, iced::widget::image::Handle>,
     project_switcher: Option<::canvas::project_switcher::ProjectSwitcher>,
     jarvis_visible: bool,
     hud_visible: bool,
@@ -783,6 +809,50 @@ struct App {
 }
 
 impl App {
+    fn install_loaded_content(&mut self, loaded: LoadedContent) {
+        let id = loaded.snapshot.id.clone();
+        let title = loaded.snapshot.title.clone();
+        let shared_view = shared_view_for_loaded(&loaded);
+        let surface = Surface {
+            id: id.clone(),
+            title,
+            content: SurfaceContent::Asset {
+                asset: loaded.asset,
+            },
+            inputs: Vec::new(),
+        };
+        if let Some(existing) = self
+            .document
+            .surfaces
+            .iter_mut()
+            .find(|candidate| candidate.id == id)
+        {
+            *existing = surface;
+        } else {
+            self.document.surfaces.push(surface);
+        }
+        self.decoded.insert(
+            id.clone(),
+            RuntimeSurface {
+                snapshot: loaded.snapshot.clone(),
+                source: loaded.source,
+                handle: loaded.handle,
+                source_pixels: loaded.source_pixels,
+                media_plan: loaded.media_plan,
+                upload_pixels: loaded.upload_pixels,
+            },
+        );
+        if let Some(view) = shared_view {
+            self.shared_views.insert(id.clone(), view);
+        } else {
+            self.shared_views.remove(&id);
+        }
+        self.document.focused_surface_id = Some(id);
+        self.rebuild_stack();
+        self.status = format!("Opened {}.", loaded.snapshot.title);
+        self.emit_event(format!("surface_opened {}", loaded.snapshot.id));
+    }
+
     fn new(
         receiver: PendingReceiver,
         socket: SocketGuard,
@@ -811,8 +881,7 @@ impl App {
         // not just the 2 bundled ones. New projects get a default Coherence theme;
         // bundled projects keep their configured theme.
         Self::merge_alfalfa_projects(&mut catalog);
-        let (engineering_project_urls, engineering_notes) =
-            merge_engineering_projects(&mut catalog);
+        let (engineering_projects, engineering_notes) = merge_engineering_projects(&mut catalog);
         store_notes.extend(engineering_notes);
         let mut project_id = std::env::var("CANVAS_BOOT_PROJECT")
             .ok()
@@ -1077,7 +1146,9 @@ impl App {
             background_picker: None,
             theme_picker: None,
             project_picker: None,
-            engineering_project_urls,
+            engineering_projects,
+            engineering_browser: None,
+            engineering_thumbnails: BTreeMap::new(),
             project_switcher: None,
             jarvis_visible: true,
             hud_visible: false,
@@ -1550,6 +1621,51 @@ impl App {
                 Task::none()
             }
             Message::ShellProjects => self.toggle_project_picker(),
+            Message::EngineeringBrowser(action) => {
+                let Some(browser) = self.engineering_browser.as_mut() else {
+                    return Task::none();
+                };
+                match browser.project.manifest.apply(&mut browser.state, action) {
+                    Ok(Some(entry)) => match browser.project.artifacts.get(&entry.id).cloned() {
+                        Some(EngineeringArtifact::Local(path)) => {
+                            let viewport = self.media_viewport();
+                            let scale_factor = self.scale_factor;
+                            let surface_id = format!("artifact-{}", entry.id);
+                            let title = Some(entry.display_name);
+                            self.engineering_browser = None;
+                            return Task::perform(
+                                async move {
+                                    load_content(surface_id, path, title, viewport, scale_factor)
+                                },
+                                |result| Message::EngineeringArtifactLoaded(Box::new(result)),
+                            );
+                        }
+                        Some(EngineeringArtifact::Unavailable(reason)) => {
+                            self.status = reason;
+                        }
+                        None => {
+                            self.status = "The owner did not provide an artifact locator.".into()
+                        }
+                    },
+                    Ok(None) => {}
+                    Err(error) => self.status = error.to_string(),
+                }
+                if let Some(browser) = self.engineering_browser.as_mut()
+                    && let Ok(model) = browser.project.manifest.browse(&browser.state, 512)
+                {
+                    browser.model = model;
+                }
+                self.bump();
+                Task::none()
+            }
+            Message::EngineeringArtifactLoaded(result) => {
+                match *result {
+                    Ok(loaded) => self.install_loaded_content(loaded),
+                    Err(failure) => self.status = failure.message,
+                }
+                self.bump();
+                Task::none()
+            }
             Message::ShellNewTask => {
                 let prompt = self.decoded.iter().find_map(|(id, surface)| {
                     matches!(
@@ -1917,6 +2033,20 @@ impl App {
                 Task::none()
             }
             Message::TerminalInput(kbd_event) => {
+                if self.engineering_browser.is_some()
+                    && matches!(
+                        &kbd_event,
+                        iced::keyboard::Event::KeyPressed {
+                            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+                            ..
+                        }
+                    )
+                {
+                    self.engineering_browser = None;
+                    self.status = "Closed the project artifacts view.".into();
+                    self.bump();
+                    return Task::none();
+                }
                 // Canvas-native text input to JARVIS. The text appears on the
                 // wall as an overlay, not a macOS dialog.
                 if self.jarvis_text_visible {
@@ -1979,24 +2109,29 @@ impl App {
                         }
                         Action::Apply(project) => {
                             self.project_picker = None;
-                            if let Some(url) = self.engineering_project_urls.get(&project).cloned()
+                            if let Some(owner_project) =
+                                self.engineering_projects.get(&project).cloned()
                             {
-                                return match open_engineering_view(&url) {
-                                    Ok(()) => {
-                                        // Canvas owns borderless display-sized windows. Leaving
-                                        // them visible while LaunchServices activates the owner
-                                        // viewer produces a black wall in front of the browser.
-                                        // Dismiss only after launch succeeds; Ctrl-Option-C
-                                        // restores Canvas normally.
-                                        self.set_canvas_visible(false)
+                                let state = BrowserState::default();
+                                match owner_project.manifest.browse(&state, 512) {
+                                    Ok(model) => {
+                                        self.engineering_browser = Some(EngineeringBrowser {
+                                            project: owner_project,
+                                            state,
+                                            model,
+                                        });
                                     }
                                     Err(error) => {
-                                        self.status = error;
+                                        self.status = error.to_string();
                                         self.bump();
-                                        Task::none()
+                                        return Task::none();
                                     }
-                                };
+                                }
+                                self.status = "Browsing project artifacts in Canvas.".into();
+                                self.bump();
+                                return Task::none();
                             }
+                            self.engineering_browser = None;
                             return self.switch_project(project);
                         }
                         Action::Cancel => {
@@ -3535,8 +3670,8 @@ impl App {
             self.catalog.projects.retain(|project| {
                 !project.id.starts_with("owner-transmog-") && !project.id.starts_with("owner-lob-")
             });
-            let (urls, notes) = merge_engineering_projects(&mut self.catalog);
-            self.engineering_project_urls = urls;
+            let (projects, notes) = merge_engineering_projects(&mut self.catalog);
+            self.engineering_projects = projects;
             for note in notes {
                 self.events
                     .push(format!("engineering_catalog_unavailable {note}"));
@@ -8638,6 +8773,15 @@ impl App {
         if let Some(picker) = self.project_picker.as_ref() {
             layers.push(picker.view(&self.catalog, &self.document.project_id));
         }
+        if let Some(browser) = self.engineering_browser.as_ref() {
+            layers.push(canvas_widgets::live::project_browser::view(
+                &browser.model,
+                &browser.state,
+                &self.engineering_thumbnails,
+                visual_theme,
+                Message::EngineeringBrowser,
+            ));
+        }
         if let Some(dock) = self.minimized_dock() {
             layers.push(dock);
         }
@@ -9396,7 +9540,9 @@ fn hostname() -> String {
 }
 
 /// One owner-local HTTP GET for Alfalfa discovery: fresh connection, bounded
-fn merge_engineering_projects(catalog: &mut Catalog) -> (BTreeMap<String, String>, Vec<String>) {
+fn merge_engineering_projects(
+    catalog: &mut Catalog,
+) -> (BTreeMap<String, EngineeringProject>, Vec<String>) {
     let transmog = std::env::var("CANVAS_TRANSMOG_VIEWER_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:4173".into());
     let lob =
@@ -9405,7 +9551,8 @@ fn merge_engineering_projects(catalog: &mut Catalog) -> (BTreeMap<String, String
     let reads = std::thread::scope(|scope| {
         let transmog_read = scope.spawn(|| owner_get(&transmog, "/api/state", timeout));
         let lob_read = scope.spawn(|| owner_get(&lob, "/api/circuits", timeout));
-        (transmog_read.join(), lob_read.join())
+        let lob_repo = scope.spawn(|| owner_get(&lob, "/api/repo", timeout));
+        (transmog_read.join(), lob_read.join(), lob_repo.join())
     });
     let mut targets = BTreeMap::new();
     let mut warnings = Vec::new();
@@ -9417,9 +9564,9 @@ fn merge_engineering_projects(catalog: &mut Catalog) -> (BTreeMap<String, String
         }
         _ => warnings.push("Transmog is unavailable".into()),
     }
-    match reads.1 {
-        Ok(Some(body)) => {
-            if !merge_lob_body(catalog, &mut targets, &lob, &body) {
+    match (reads.1, reads.2) {
+        (Ok(Some(body)), Ok(Some(repo))) => {
+            if !merge_lob_body(catalog, &mut targets, &body, &repo) {
                 warnings.push("legion-of-bom returned an unsupported catalog".into());
             }
         }
@@ -9460,8 +9607,8 @@ fn engineering_project_id(owner: &str, identity: &str) -> String {
 
 fn merge_transmog_body(
     catalog: &mut Catalog,
-    targets: &mut BTreeMap<String, String>,
-    base: &str,
+    targets: &mut BTreeMap<String, EngineeringProject>,
+    _base: &str,
     body: &str,
 ) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
@@ -9473,7 +9620,6 @@ fn merge_transmog_body(
     let Some(projects) = value["projects"].as_array() else {
         return false;
     };
-    let base = base.trim_end_matches('/');
     for project in projects.iter().take(256) {
         let (Some(identity), Some(name)) = (project["id"].as_str(), project["name"].as_str())
         else {
@@ -9484,21 +9630,67 @@ fn merge_transmog_body(
         }
         let id = engineering_project_id("transmog", identity);
         push_catalog_project(catalog, id.clone(), format!("{name} · Transmog model"));
-        targets.insert(id, format!("{base}/#/p/{identity}"));
+        let mut entries = Vec::new();
+        let mut artifacts = BTreeMap::new();
+        for part in project["parts"].as_array().into_iter().flatten().take(512) {
+            let (Some(part_id), Some(bundle)) = (part["id"].as_str(), part["bundle"].as_str())
+            else {
+                continue;
+            };
+            if !engineering_identifier(part_id) || bundle.contains("..") {
+                continue;
+            }
+            let entry_id = format!("{identity}-{part_id}-report");
+            entries.push(ManifestEntry {
+                id: entry_id.clone(),
+                path: format!("{part_id}/report.json"),
+                display_name: format!("{} report", part_id.replace(['-', '_'], " ")),
+                cid: format!("transmog:{bundle}/report.json"),
+                media_type: "application/json".into(),
+                bytes: 0,
+                modified_at_ms: None,
+            });
+            artifacts.insert(
+                entry_id,
+                EngineeringArtifact::Unavailable(
+                    "This Transmog bundle is GLB/JSON. Canvas has kept it in the project view, but a native GLB surface is not available yet.".into(),
+                ),
+            );
+        }
+        targets.insert(
+            id,
+            EngineeringProject {
+                manifest: ProjectManifest {
+                    schema_version: ProjectManifest::SCHEMA_VERSION,
+                    project_id: identity.into(),
+                    revision: "live".into(),
+                    entries,
+                },
+                artifacts,
+            },
+        );
     }
     true
 }
 
 fn merge_lob_body(
     catalog: &mut Catalog,
-    targets: &mut BTreeMap<String, String>,
-    base: &str,
+    targets: &mut BTreeMap<String, EngineeringProject>,
     body: &str,
+    repo_body: &str,
 ) -> bool {
     let Ok(circuits) = serde_json::from_str::<Vec<serde_json::Value>>(body) else {
         return false;
     };
-    let base = base.trim_end_matches('/');
+    let Ok(repo) = serde_json::from_str::<serde_json::Value>(repo_body) else {
+        return false;
+    };
+    let Some(root) = repo["root"].as_str().map(PathBuf::from) else {
+        return false;
+    };
+    let Ok(root) = root.canonicalize() else {
+        return false;
+    };
     for circuit in circuits.iter().take(256) {
         let Some(identity) = circuit["name"].as_str() else {
             continue;
@@ -9509,24 +9701,83 @@ fn merge_lob_body(
         let id = engineering_project_id("lob", identity);
         let name = identity.replace(['-', '_'], " ");
         push_catalog_project(catalog, id.clone(), format!("{name} · LOB circuit"));
-        targets.insert(id, format!("{base}/c/{identity}"));
+        let mut entries = Vec::new();
+        let mut artifacts = BTreeMap::new();
+        let mut revision = 0_u64;
+        for artifact in circuit["artifacts"].as_array().into_iter().flatten() {
+            if artifact["status"] == "missing" {
+                continue;
+            }
+            let (Some(label), Some(relative)) =
+                (artifact["label"].as_str(), artifact["path"].as_str())
+            else {
+                continue;
+            };
+            let candidate = root.join(relative);
+            let Ok(path) = candidate.canonicalize() else {
+                continue;
+            };
+            if !path.starts_with(&root) || !path.is_file() {
+                continue;
+            }
+            let metadata = path.metadata().ok();
+            let bytes = metadata.as_ref().map_or(0, std::fs::Metadata::len);
+            let modified = artifact["mtime_ms"].as_u64();
+            revision = revision.max(modified.unwrap_or(0));
+            let entry_id = format!("{identity}-{label}");
+            let media_type = media_type_for_path(&path);
+            entries.push(ManifestEntry {
+                id: entry_id.clone(),
+                path: relative.replace('\\', "/"),
+                display_name: label.replace(['-', '_'], " "),
+                cid: format!("lob:{relative}:{}", modified.unwrap_or(0)),
+                media_type: media_type.into(),
+                bytes,
+                modified_at_ms: modified,
+            });
+            let locator = match media_type {
+                "application/pdf" | "image/png" | "image/jpeg" | "text/markdown" => {
+                    EngineeringArtifact::Local(path)
+                }
+                _ => EngineeringArtifact::Unavailable(format!(
+                    "{} is in this project, but Canvas does not yet have a native {} surface.",
+                    label, media_type
+                )),
+            };
+            artifacts.insert(entry_id, locator);
+        }
+        targets.insert(
+            id,
+            EngineeringProject {
+                manifest: ProjectManifest {
+                    schema_version: ProjectManifest::SCHEMA_VERSION,
+                    project_id: identity.into(),
+                    revision: revision.to_string(),
+                    entries,
+                },
+                artifacts,
+            },
+        );
     }
     true
 }
 
-fn open_engineering_view(url: &str) -> Result<(), String> {
-    if !(url.starts_with("http://127.0.0.1:") || url.starts_with("http://localhost:")) {
-        return Err("Refusing an untrusted engineering owner URL.".into());
+fn media_type_for_path(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+    {
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "md" | "markdown" => "text/markdown",
+        "csv" => "text/csv",
+        "kicad_pcb" => "application/x-kicad-pcb",
+        "zip" => "application/zip",
+        "html" => "text/html",
+        _ => "application/octet-stream",
     }
-    Process::new("/usr/bin/open")
-        .arg("--")
-        .arg(url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map(|_| ())
-        .map_err(|_| "DockCanvas could not open the engineering owner view.".into())
 }
 
 /// by both connect and read timeouts, because this runs on the daemon's main
@@ -14336,17 +14587,25 @@ mod tests {
     fn engineering_owner_catalogs_extend_the_native_project_picker() {
         let mut catalog = Catalog::bundled().unwrap();
         let mut targets = BTreeMap::new();
+        let root = std::env::temp_dir().join(format!(
+            "canvas-owner-test-{}-{}",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        let artifact = root.join("out/slew_limiter/slew_limiter-guide.pdf");
+        std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+        std::fs::write(&artifact, b"%PDF-test").unwrap();
         assert!(merge_transmog_body(
             &mut catalog,
             &mut targets,
             "http://127.0.0.1:4173",
-            r#"{"schema":"transmog.viewer-index.v1","projects":[{"id":"fixie","name":"Fixie frame"},{"id":"../unsafe","name":"Unsafe"}]}"#,
+            r#"{"schema":"transmog.viewer-index.v1","projects":[{"id":"fixie","name":"Fixie frame","parts":[{"id":"assembly","bundle":"fixie/assembly"}]},{"id":"../unsafe","name":"Unsafe"}]}"#,
         ));
         assert!(merge_lob_body(
             &mut catalog,
             &mut targets,
-            "http://127.0.0.1:8080",
-            r#"[{"name":"slew_limiter"},{"name":"bad/name"}]"#,
+            r#"[{"name":"slew_limiter","artifacts":[{"label":"guide-pdf","path":"out/slew_limiter/slew_limiter-guide.pdf","status":"fresh","mtime_ms":42}]},{"name":"bad/name"}]"#,
+            &format!(r#"{{"root":{}}}"#, serde_json::to_string(&root).unwrap()),
         ));
         assert_eq!(targets.len(), 2);
         assert!(
@@ -14361,16 +14620,14 @@ mod tests {
                 .iter()
                 .any(|project| project.name == "slew limiter · LOB circuit")
         );
-        assert!(
-            targets
-                .values()
-                .any(|url| url == "http://127.0.0.1:4173/#/p/fixie")
-        );
-        assert!(
-            targets
-                .values()
-                .any(|url| url == "http://127.0.0.1:8080/c/slew_limiter")
-        );
+        assert!(targets.values().any(|project| {
+            project
+                .manifest
+                .entries
+                .iter()
+                .any(|entry| entry.media_type == "application/pdf")
+        }));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -14386,8 +14643,8 @@ mod tests {
         assert!(!merge_lob_body(
             &mut catalog,
             &mut targets,
-            "http://127.0.0.1:8080",
             r#"{"circuits":[]}"#,
+            r#"{"root":"/not/real"}"#,
         ));
         assert!(targets.is_empty());
     }

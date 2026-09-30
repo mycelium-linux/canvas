@@ -28,6 +28,7 @@ use iced::{Color, ContentFit, Element, Length, Point, Rectangle, Renderer, Size,
 
 pub mod app_chrome;
 mod clock;
+pub mod project_browser;
 mod quality;
 mod quant;
 mod signal_scene;
