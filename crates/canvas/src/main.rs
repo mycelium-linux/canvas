@@ -1981,12 +1981,21 @@ impl App {
                             self.project_picker = None;
                             if let Some(url) = self.engineering_project_urls.get(&project).cloned()
                             {
-                                self.status = match open_engineering_view(&url) {
-                                    Ok(()) => "Opened the engineering owner view.".into(),
-                                    Err(error) => error,
+                                return match open_engineering_view(&url) {
+                                    Ok(()) => {
+                                        // Canvas owns borderless display-sized windows. Leaving
+                                        // them visible while LaunchServices activates the owner
+                                        // viewer produces a black wall in front of the browser.
+                                        // Dismiss only after launch succeeds; Ctrl-Option-C
+                                        // restores Canvas normally.
+                                        self.set_canvas_visible(false)
+                                    }
+                                    Err(error) => {
+                                        self.status = error;
+                                        self.bump();
+                                        Task::none()
+                                    }
                                 };
-                                self.bump();
-                                return Task::none();
                             }
                             return self.switch_project(project);
                         }
