@@ -96,7 +96,6 @@ const SNAP_LAYOUT_KEYS: &str = "Ctrl-Option-L";
 const FIT_LAYOUT_KEYS: &str = "Ctrl-Option-F";
 const JARVIS_TOGGLE_KEYS: &str = "Ctrl-Option-J";
 const JARVIS_TEXT_KEYS: &str = "Ctrl-Option-T";
-const RESOURCE_PALETTE_KEYS: &str = "Ctrl-Option-R";
 const JUMP_BACK_KEYS: &str = "Ctrl-O";
 const JUMP_FORWARD_KEYS: &str = "Ctrl-Shift-O";
 const SHORTCUT_HELP_KEYS: &str = "Ctrl-Option-?";
@@ -653,7 +652,6 @@ struct App {
     visibility_hotkey: Option<GlobalHotkey>,
     snap_hotkey: Option<GlobalHotkey>,
     fit_hotkey: Option<GlobalHotkey>,
-    resource_hotkey: Option<GlobalHotkey>,
     /// The active view's own answer to whether a display change reflows its
     /// arrangement. Views default to reflow; a hand-arranged workspace can
     /// declare `fixed` and keep its geometry while displays reveal parts of it.
@@ -1005,19 +1003,6 @@ impl App {
                 None
             }
         };
-        let resource_hotkey = match GlobalHotkey::register(HotkeySpec {
-            signature: *b"CnvR",
-            id: 8,
-            key_code: 0x0F,                   // kVK_ANSI_R
-            modifiers: (1 << 11) | (1 << 12), // optionKey | controlKey
-            label: RESOURCE_PALETTE_KEYS,
-        }) {
-            Ok(hotkey) => Some(hotkey),
-            Err(error) => {
-                shortcut_errors.push(error);
-                None
-            }
-        };
         let (theme_packs, theme_notes) = ::canvas::theme_pack::load();
         for note in theme_notes {
             store_notes.push(format!("theme pack unusable: {note}"));
@@ -1069,7 +1054,6 @@ impl App {
             visibility_hotkey,
             snap_hotkey,
             fit_hotkey,
-            resource_hotkey,
             layout_policy,
             snapped_view,
             free_layout: None,
@@ -1669,10 +1653,6 @@ impl App {
                     .fit_hotkey
                     .as_ref()
                     .is_some_and(GlobalHotkey::poll_pressed);
-                let open_resources = self
-                    .resource_hotkey
-                    .as_ref()
-                    .is_some_and(GlobalHotkey::poll_pressed);
                 let toggle_shortcuts = self
                     .shortcuts_hotkey
                     .as_ref()
@@ -1723,13 +1703,6 @@ impl App {
                 }
                 if fit_layout {
                     self.fit_layout_to_displays();
-                }
-                if open_resources {
-                    match open_resource_palette() {
-                        Ok(()) => self.status = "Opening project resources…".into(),
-                        Err(error) => self.status = error,
-                    }
-                    self.bump();
                 }
                 if toggle_shortcuts {
                     tasks.push(self.toggle_shortcut_help());
@@ -9207,7 +9180,6 @@ fn shortcut_help<'a>(
          F3                     Toggle diagnostics\n\
          F4                     Choose theme / palette\n\
          Ctrl-P                 Find project\n\
-         {RESOURCE_PALETTE_KEYS:<22} Open project resources\n\
          Ctrl-1 / 2 / 3         Toggle left / center / right display\n\
          Ctrl-0                 Show Canvas on every display\n\
          {SNAP_LAYOUT_KEYS:<22} Snap layout to saved view (again to restore)\n\
@@ -9246,30 +9218,6 @@ fn shortcut_help<'a>(
         .height(Length::Fill)
         .center(Length::Fill)
         .into()
-}
-
-fn open_resource_palette() -> Result<(), String> {
-    let executable = std::env::current_exe()
-        .map_err(|_| "Cannot locate the DockCanvas application bundle.".to_owned())?;
-    let directory = executable
-        .parent()
-        .ok_or_else(|| "Cannot locate the DockCanvas application bundle.".to_owned())?;
-    let bundled = directory.join("canvas-resources");
-    let development = directory.join("canvas-mac");
-    let helper = if bundled.is_file() {
-        bundled
-    } else if development.is_file() {
-        development
-    } else {
-        return Err("Project resources are not installed in this DockCanvas build.".into());
-    };
-    std::process::Command::new(helper)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map(|_| ())
-        .map_err(|_| "DockCanvas could not open project resources.".into())
 }
 
 fn render_mermaid(source: &Path, surface_id: &str) -> Result<PathBuf, Failure> {
