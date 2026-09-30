@@ -1141,14 +1141,7 @@ mod tests {
 
     #[test]
     fn mev_scene_binder_builds_the_full_bleed_quant_instrument() {
-        let mut target = test_spec(WidgetKind::Stat {
-            label: "Waiting".into(),
-            value: 0.0,
-            unit: None,
-            change: None,
-            state: None,
-            history: vec![],
-        });
+        let mut target = spec();
         let event = StreamEnvelope {
             schema_version: STREAM_SCHEMA_VERSION,
             owner: "mev-observer".into(),
