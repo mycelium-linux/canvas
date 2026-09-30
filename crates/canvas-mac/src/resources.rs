@@ -395,6 +395,9 @@ pub fn matching(index: &Index, query: &str) -> Vec<usize> {
 /// User-activated targets only. Custom schemes and relative paths are delegated
 /// to the project page, rather than executed as local app commands.
 pub fn target(entry: &Entry) -> String {
+    if let Some(view) = owner_view_url(entry) {
+        return view;
+    }
     match url::Url::parse(&entry.uri) {
         Ok(url)
             if matches!(url.scheme(), "https" | "http")
@@ -438,6 +441,81 @@ pub fn target(entry: &Entry) -> String {
     }
 }
 
+/// Resolve engineering resources through the web view owned by their native
+/// tool. The Alfalfa URI keeps durable owner identity; the configured base is
+/// only where this Canvas host can currently reach that owner.
+pub fn owner_view_url(entry: &Entry) -> Option<String> {
+    let transmog = std::env::var("CANVAS_TRANSMOG_VIEWER_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:4173".into());
+    let lob =
+        std::env::var("CANVAS_LOB_VIEWER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".into());
+    owner_view_url_with_bases(entry, &transmog, &lob)
+}
+
+fn owner_view_url_with_bases(entry: &Entry, transmog: &str, lob: &str) -> Option<String> {
+    // `url` correctly normalizes dot segments, but an owner locator is an
+    // identity, not a navigation request. Reject spelling that would change
+    // identity during parsing (including percent-encoded spellings).
+    if entry.uri.contains('%')
+        || entry
+            .uri
+            .split('/')
+            .any(|segment| matches!(segment, "." | ".."))
+    {
+        return None;
+    }
+    let locator = url::Url::parse(&entry.uri).ok()?;
+    if !locator.username().is_empty()
+        || locator.password().is_some()
+        || locator.query().is_some()
+        || locator.fragment().is_some()
+    {
+        return None;
+    }
+    let segments: Vec<_> = locator
+        .path_segments()?
+        .filter(|part| !part.is_empty())
+        .collect();
+    if segments.len() != 1 || !super::session_identifier(segments[0]) {
+        return None;
+    }
+    let id = segments[0];
+    match (entry.kind.as_str(), locator.scheme(), locator.host_str()) {
+        ("model", "transmog", Some("projects")) => {
+            let mut base = safe_viewer_base(transmog)?;
+            let encoded: String = url::form_urlencoded::byte_serialize(id.as_bytes()).collect();
+            base.set_fragment(Some(&format!("/p/{encoded}")));
+            Some(base.into())
+        }
+        ("circuit", "lob", Some("circuits")) => {
+            let mut base = safe_viewer_base(lob)?;
+            base.path_segments_mut()
+                .ok()?
+                .pop_if_empty()
+                .extend(["c", id]);
+            Some(base.into())
+        }
+        _ => None,
+    }
+}
+
+fn safe_viewer_base(value: &str) -> Option<url::Url> {
+    let mut url = url::Url::parse(value).ok()?;
+    let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
+    if !((url.scheme() == "https" && url.host_str().is_some())
+        || (url.scheme() == "http" && loopback))
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url)
+}
+
 pub fn open(entry: &Entry) -> Result<(), String> {
     let output = super::bounded_output(
         std::process::Command::new("/usr/bin/open")
@@ -458,6 +536,75 @@ mod tests {
     use super::*;
     fn fixture() -> Value {
         serde_json::json!({"definition":{"project":{"id":"business","name":"Studio business"},"resource":[{"id":"notes","title":"Weekly notes","kind":"note","uri":"notes.md","context_path":"notes.md"},{"id":"sales","title":"Sales dashboard","kind":"artifact","uri":"https://example.test/sales"}]},"sources":[{"path":"notes.md","content":"A real owner note"},{"path":"private.md","content":"Not included"}]})
+    }
+
+    fn engineering(kind: &str, uri: &str) -> Entry {
+        Entry {
+            company_id: None,
+            workspace_id: None,
+            project: "vehicle".into(),
+            project_name: "Vehicle".into(),
+            id: "design".into(),
+            title: "Design".into(),
+            kind: kind.into(),
+            uri: uri.into(),
+            note: None,
+            home: "https://alfalfa.example/projects/vehicle".into(),
+            status: "active".into(),
+            purpose: String::new(),
+        }
+    }
+
+    #[test]
+    fn engineering_resources_resolve_to_their_owner_web_views() {
+        let model = engineering("model", "transmog://projects/front-suspension");
+        assert_eq!(
+            owner_view_url_with_bases(
+                &model,
+                "https://transmog.example/viewer",
+                "https://lob.example"
+            )
+            .as_deref(),
+            Some("https://transmog.example/viewer#/p/front-suspension")
+        );
+        let circuit = engineering("circuit", "lob://circuits/controller-board");
+        assert_eq!(
+            owner_view_url_with_bases(
+                &circuit,
+                "https://transmog.example",
+                "https://lob.example/viewer/"
+            )
+            .as_deref(),
+            Some("https://lob.example/viewer/c/controller-board")
+        );
+    }
+
+    #[test]
+    fn owner_view_resolution_fails_closed() {
+        for (kind, locator) in [
+            ("model", "transmog://projects/a/b"),
+            ("model", "transmog://projects/../secret"),
+            ("model", "transmog://other/design"),
+            ("circuit", "lob://circuits/board?token=secret"),
+            ("file", "transmog://projects/design"),
+        ] {
+            let entry = engineering(kind, locator);
+            assert!(
+                owner_view_url_with_bases(
+                    &entry,
+                    "https://transmog.example",
+                    "https://lob.example"
+                )
+                .is_none(),
+                "{locator} must not resolve"
+            );
+        }
+        let model = engineering("model", "transmog://projects/design");
+        assert!(
+            owner_view_url_with_bases(&model, "http://transmog.example", "https://lob.example")
+                .is_none(),
+            "plain HTTP is allowed only on loopback"
+        );
     }
     #[test]
     fn canvas_workspace_identity_is_distinct_from_company_identity() {
