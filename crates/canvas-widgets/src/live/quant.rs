@@ -7,8 +7,9 @@ use crate::{
 };
 use canvas_core::VisualTheme;
 use iced::mouse;
-use iced::widget::{Canvas, canvas, column, container, row, space, text};
+use iced::widget::{Canvas, canvas, column, row, space, text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{CacheState, Key};
 
@@ -167,125 +168,31 @@ pub(super) fn element<'a, Message: 'a>(
         } => {
             let p = visual.palette;
             let m = visual.metrics;
-            let signal = if *profitable { p.success } else { p.danger };
-            let verdict = if *profitable {
-                "EXECUTABLE EDGE"
-            } else {
-                "NO EDGE · STAND DOWN"
-            };
-            let short_hash = if block_hash.len() > 20 {
-                format!(
-                    "{}…{}",
-                    &block_hash[..10],
-                    &block_hash[block_hash.len() - 8..]
-                )
-            } else {
-                block_hash.clone()
-            };
-            let rule = || {
-                container(space::vertical().height(Length::Fixed(2.0)))
-                    .width(Length::Fill)
-                    .style(move |_| iced::widget::container::Style {
-                        background: Some(rgb(signal).into()),
-                        ..Default::default()
-                    })
-            };
-            let route_flow = row![
-                column![
-                    text("CAPITAL IN").size(m.micro).color(rgb(p.text_muted)),
-                    text(format!("{amount_in:.6} {token}"))
-                        .size(m.title)
-                        .color(rgb(p.text)),
-                ]
-                .spacing(m.space_1)
-                .width(Length::FillPortion(2)),
-                text("━━▶").size(m.title).color(rgb(p.info)),
-                column![
-                    text(route[0].to_uppercase())
-                        .size(m.micro)
-                        .color(rgb(p.info)),
-                    text(format!("{amount_after_first:.2} INTERMEDIATE"))
-                        .size(m.body)
-                        .color(rgb(p.text)),
-                ]
-                .spacing(m.space_1)
-                .width(Length::FillPortion(2)),
-                text("━━▶").size(m.title).color(rgb(signal)),
-                column![
-                    text(route[1].to_uppercase())
-                        .size(m.micro)
-                        .color(rgb(signal)),
-                    text(format!("{amount_out:.6} {token}"))
-                        .size(m.title)
-                        .color(rgb(p.text)),
-                ]
-                .spacing(m.space_1)
-                .width(Length::FillPortion(2)),
-            ]
-            .spacing(m.space_3)
-            .align_y(iced::Alignment::Center);
-            let evidence = row![
-                evidence_item("GROSS", format!("{gross_profit:+.6}"), signal, visual),
-                evidence_item("GAS", format!("-{gas_cost:.6}"), p.warning, visual),
-                evidence_item(
-                    "BUILDER",
-                    format!("-{builder_payment:.6}"),
-                    p.text_muted,
-                    visual
-                ),
-                evidence_item(
-                    "SEARCH",
-                    format!("{evaluated_candidates} SIZES"),
-                    p.info,
-                    visual
-                ),
-                evidence_item("BLOCK", block_number.to_string(), p.text, visual),
-            ]
-            .spacing(m.space_5);
-            column![
-                row![
-                    column![
-                        text(format!("ETHEREUM / CHAIN {chain_id}"))
-                            .size(m.micro)
-                            .color(rgb(p.text_muted)),
-                        text("ATOMIC ROUTE INTELLIGENCE")
-                            .size(m.title)
-                            .color(rgb(p.text)),
-                    ]
-                    .spacing(m.space_1),
-                    space::horizontal(),
-                    column![
-                        text(verdict).size(m.small).color(rgb(signal)),
-                        text(short_hash).size(m.micro).color(rgb(p.text_muted)),
-                    ]
-                    .spacing(m.space_1)
-                    .align_x(iced::Alignment::End),
-                ]
-                .align_y(iced::Alignment::Center),
-                rule(),
-                space::vertical().height(Length::FillPortion(1)),
-                text(if *profitable { "CAPTURE" } else { "REJECT" })
-                    .size(m.micro)
-                    .color(rgb(signal)),
-                row![
-                    text(format!("{net_profit:+.6}"))
-                        .size(m.hero * 1.9)
-                        .color(rgb(signal)),
-                    text(token).size(m.title).color(rgb(p.text_muted)),
-                ]
-                .spacing(m.space_2)
-                .align_y(iced::Alignment::End),
-                text("NET AFTER GAS + BUILDER PAYMENT")
-                    .size(m.micro)
-                    .color(rgb(p.text_muted)),
-                space::vertical().height(Length::FillPortion(1)),
-                route_flow,
-                space::vertical().height(Length::FillPortion(1)),
-                rule(),
-                evidence,
-            ]
-            .padding([m.space_5, m.space_5])
-            .spacing(m.space_3)
+            Canvas::new(MevOpportunityProgram {
+                chain_id: *chain_id,
+                block_number: *block_number,
+                block_hash,
+                token,
+                route,
+                amount_in: *amount_in,
+                amount_after_first: *amount_after_first,
+                amount_out: *amount_out,
+                gross_profit: *gross_profit,
+                gas_cost: *gas_cost,
+                builder_payment: *builder_payment,
+                net_profit: *net_profit,
+                profitable: *profitable,
+                evaluated_candidates: *evaluated_candidates,
+                signal: rgb(if *profitable { p.success } else { p.danger }),
+                info: rgb(p.info),
+                warning: rgb(p.warning),
+                text: rgb(p.text),
+                muted: rgb(p.text_muted),
+                grid: alpha(rgb(p.border), visual.grid_opacity * 0.45),
+                label_size: m.micro,
+                body_size: m.body,
+                title_size: m.title,
+            })
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -386,22 +293,341 @@ pub(super) fn element<'a, Message: 'a>(
     }
 }
 
-fn evidence_item<'a, Message: 'a>(
-    label: &'a str,
-    value: String,
-    tone: [u8; 3],
-    visual: &VisualTheme,
-) -> Element<'a, Message> {
-    let m = visual.metrics;
-    column![
-        text(label)
-            .size(m.micro)
-            .color(rgb(visual.palette.text_muted)),
-        text(value).size(m.body).color(rgb(tone)),
-    ]
-    .spacing(m.space_1)
-    .width(Length::Fill)
-    .into()
+struct MevOpportunityProgram<'a> {
+    chain_id: u64,
+    block_number: u64,
+    block_hash: &'a str,
+    token: &'a str,
+    route: &'a [String],
+    amount_in: f64,
+    amount_after_first: f64,
+    amount_out: f64,
+    gross_profit: f64,
+    gas_cost: f64,
+    builder_payment: f64,
+    net_profit: f64,
+    profitable: bool,
+    evaluated_candidates: u32,
+    signal: Color,
+    info: Color,
+    warning: Color,
+    text: Color,
+    muted: Color,
+    grid: Color,
+    label_size: f32,
+    body_size: f32,
+    title_size: f32,
+}
+
+impl<Message> canvas::Program<Message> for MevOpportunityProgram<'_> {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        if bounds.width < 640.0 || bounds.height < 400.0 {
+            return Vec::new();
+        }
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as f32;
+        let phase = (now_ms % 4_000.0) / 4_000.0;
+        let margin = bounds.width * 0.035;
+        let top = bounds.height * 0.055;
+        let bottom = bounds.height * 0.93;
+
+        // A restrained operator grid gives motion and geometry a stable frame.
+        let grid_step = (bounds.width / 24.0).max(48.0);
+        let mut x = margin;
+        while x < bounds.width - margin {
+            frame.stroke(
+                &canvas::Path::line(Point::new(x, top), Point::new(x, bottom)),
+                canvas::Stroke::default()
+                    .with_width(1.0)
+                    .with_color(self.grid),
+            );
+            x += grid_step;
+        }
+        let mut y = top;
+        while y < bottom {
+            frame.stroke(
+                &canvas::Path::line(Point::new(margin, y), Point::new(bounds.width - margin, y)),
+                canvas::Stroke::default()
+                    .with_width(1.0)
+                    .with_color(self.grid),
+            );
+            y += grid_step;
+        }
+
+        // A live scan line makes time first-class without obscuring evidence.
+        let scan_x = margin + phase * (bounds.width - margin * 2.0);
+        frame.fill(
+            &canvas::Path::rectangle(Point::new(scan_x, top), Size::new(2.0, bottom - top)),
+            alpha(self.info, 0.18),
+        );
+
+        draw_text(
+            &mut frame,
+            "MEV / ROUTE PROCESSOR",
+            margin,
+            top,
+            self.label_size,
+            self.info,
+        );
+        draw_text(
+            &mut frame,
+            &format!(
+                "CHAIN {}  ·  SAFE BLOCK {}",
+                self.chain_id, self.block_number
+            ),
+            margin,
+            top + 28.0,
+            self.title_size,
+            self.text,
+        );
+        draw_text_right(
+            &mut frame,
+            if self.profitable {
+                "EDGE LOCKED"
+            } else {
+                "ROUTE REJECTED"
+            },
+            bounds.width - margin,
+            top + 4.0,
+            self.body_size,
+            self.signal,
+        );
+        draw_text_right(
+            &mut frame,
+            &short_hash(self.block_hash),
+            bounds.width - margin,
+            top + 32.0,
+            self.label_size,
+            self.muted,
+        );
+
+        // Net economics remains the dominant reading, but shares the field
+        // with route state rather than floating alone like a presentation KPI.
+        let hero_y = bounds.height * 0.24;
+        draw_text(
+            &mut frame,
+            "NET / GAS + BUILDER",
+            margin,
+            hero_y,
+            self.label_size,
+            self.muted,
+        );
+        draw_text(
+            &mut frame,
+            &format!("{:+.6}", self.net_profit),
+            margin,
+            hero_y + 64.0,
+            (bounds.height * 0.105).clamp(54.0, 126.0),
+            self.signal,
+        );
+        draw_text(
+            &mut frame,
+            self.token,
+            margin + bounds.width * 0.335,
+            hero_y + 62.0,
+            self.title_size,
+            self.muted,
+        );
+
+        let route_y = bounds.height * 0.59;
+        let node_x = [
+            bounds.width * 0.17,
+            bounds.width * 0.50,
+            bounds.width * 0.83,
+        ];
+        let node_colors = [self.info, self.warning, self.signal];
+        for (index, center_x) in node_x.iter().enumerate() {
+            let pulse = ((phase + index as f32 * 0.23) % 1.0 * core::f32::consts::TAU)
+                .sin()
+                .abs();
+            let center = Point::new(*center_x, route_y);
+            for ring in (1..=3).rev() {
+                frame.stroke(
+                    &canvas::Path::circle(center, 25.0 + ring as f32 * 10.0 + pulse * 5.0),
+                    canvas::Stroke::default()
+                        .with_width(1.0)
+                        .with_color(alpha(node_colors[index], 0.08 * (4 - ring) as f32)),
+                );
+            }
+            frame.fill(&canvas::Path::circle(center, 9.0), node_colors[index]);
+        }
+        for leg in 0..2 {
+            let start = node_x[leg] + 44.0;
+            let end = node_x[leg + 1] - 44.0;
+            frame.stroke(
+                &canvas::Path::line(Point::new(start, route_y), Point::new(end, route_y)),
+                canvas::Stroke::default()
+                    .with_width(2.0)
+                    .with_color(alpha(node_colors[leg], 0.55)),
+            );
+            for particle in 0..5 {
+                let t = (phase * 1.7 + particle as f32 / 5.0 + leg as f32 * 0.13) % 1.0;
+                let px = start + (end - start) * t;
+                frame.fill(
+                    &canvas::Path::circle(Point::new(px, route_y), 2.5 + 2.0 * (1.0 - t)),
+                    node_colors[leg],
+                );
+            }
+        }
+        let node_labels = [
+            ("CAPITAL", format!("{:.6} {}", self.amount_in, self.token)),
+            (
+                &self.route[0],
+                format!("{:.2} INTERMEDIATE", self.amount_after_first),
+            ),
+            (
+                &self.route[1],
+                format!("{:.6} {}", self.amount_out, self.token),
+            ),
+        ];
+        for (index, (label, value)) in node_labels.iter().enumerate() {
+            draw_text_center(
+                &mut frame,
+                &label.to_uppercase(),
+                node_x[index],
+                route_y + 62.0,
+                self.label_size,
+                node_colors[index],
+            );
+            draw_text_center(
+                &mut frame,
+                value,
+                node_x[index],
+                route_y + 88.0,
+                self.body_size,
+                self.text,
+            );
+        }
+
+        let rail_y = bounds.height * 0.83;
+        frame.stroke(
+            &canvas::Path::line(
+                Point::new(margin, rail_y),
+                Point::new(bounds.width - margin, rail_y),
+            ),
+            canvas::Stroke::default()
+                .with_width(1.0)
+                .with_color(alpha(self.info, 0.42)),
+        );
+        let metrics = [
+            ("GROSS", format!("{:+.6}", self.gross_profit), self.signal),
+            ("GAS", format!("-{:.6}", self.gas_cost), self.warning),
+            (
+                "BUILDER",
+                format!("-{:.6}", self.builder_payment),
+                self.muted,
+            ),
+            (
+                "SEARCH",
+                format!("{} SIZES", self.evaluated_candidates),
+                self.info,
+            ),
+            (
+                "STATUS",
+                if self.profitable {
+                    "CAPTURE".into()
+                } else {
+                    "REJECT".into()
+                },
+                self.signal,
+            ),
+        ];
+        let metric_width = (bounds.width - margin * 2.0) / metrics.len() as f32;
+        for (index, (label, value, color)) in metrics.iter().enumerate() {
+            let metric_x = margin + index as f32 * metric_width;
+            draw_text(
+                &mut frame,
+                label,
+                metric_x,
+                rail_y + 30.0,
+                self.label_size,
+                self.muted,
+            );
+            draw_text(
+                &mut frame,
+                value,
+                metric_x,
+                rail_y + 58.0,
+                self.body_size,
+                *color,
+            );
+        }
+        draw_text_right(
+            &mut frame,
+            "RPC PINNED  /  READ ONLY  /  NO SIGNER",
+            bounds.width - margin,
+            bottom,
+            self.label_size,
+            self.muted,
+        );
+        vec![frame.into_geometry()]
+    }
+}
+
+fn draw_text(frame: &mut canvas::Frame, content: &str, x: f32, y: f32, size: f32, color: Color) {
+    frame.fill_text(canvas::Text {
+        content: content.into(),
+        position: Point::new(x, y),
+        color,
+        size: iced::Pixels(size),
+        ..Default::default()
+    });
+}
+
+fn draw_text_center(
+    frame: &mut canvas::Frame,
+    content: &str,
+    x: f32,
+    y: f32,
+    size: f32,
+    color: Color,
+) {
+    frame.fill_text(canvas::Text {
+        content: content.into(),
+        position: Point::new(x, y),
+        color,
+        size: iced::Pixels(size),
+        align_x: iced::alignment::Horizontal::Center.into(),
+        ..Default::default()
+    });
+}
+
+fn draw_text_right(
+    frame: &mut canvas::Frame,
+    content: &str,
+    x: f32,
+    y: f32,
+    size: f32,
+    color: Color,
+) {
+    frame.fill_text(canvas::Text {
+        content: content.into(),
+        position: Point::new(x, y),
+        color,
+        size: iced::Pixels(size),
+        align_x: iced::alignment::Horizontal::Right.into(),
+        ..Default::default()
+    });
+}
+
+fn short_hash(value: &str) -> String {
+    if value.len() > 20 {
+        format!("{}…{}", &value[..10], &value[value.len() - 8..])
+    } else {
+        value.into()
+    }
 }
 
 struct OrderBookProgram<'a> {

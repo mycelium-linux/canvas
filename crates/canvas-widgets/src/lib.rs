@@ -160,6 +160,7 @@ pub enum WidgetChrome {
     #[default]
     Auto,
     Standard,
+    Integrated,
     DragOnly,
     Frameless,
 }
@@ -208,6 +209,7 @@ pub const KNOWN_WIDGET_KINDS: &[&str] = &[
     "event_log",
     "status_list",
     "neural_graph",
+    "network_topology",
     "dag_graph",
     "spatial_tracks",
     "chart",
@@ -215,6 +217,8 @@ pub const KNOWN_WIDGET_KINDS: &[&str] = &[
     "text",
     "module",
     "launcher",
+    "lyrics_display",
+    "cdg_viewer",
 ];
 
 /// Whether this build can render `tag`, or it belongs to a newer Canvas.
@@ -497,6 +501,16 @@ pub enum WidgetKind {
         #[serde(default)]
         edges: Vec<NeuralEdge>,
     },
+    /// Layer-2/3 topology with explicit LAN, VLAN, WAN, and point-to-point zones.
+    NetworkTopology {
+        title: String,
+        segments: Vec<NetworkSegment>,
+        nodes: Vec<NetworkNode>,
+        #[serde(default)]
+        links: Vec<NetworkLink>,
+        #[serde(default)]
+        conflicts: usize,
+    },
     /// Rooted execution lineage with deterministic parent-before-child layout.
     /// Intended for agents/sub-agents, Merkle trees, and workflow ancestry.
     DagGraph {
@@ -555,6 +569,57 @@ pub enum WidgetKind {
         pinned: Vec<String>,
         #[serde(default)]
         orientation: LauncherOrientation,
+    },
+    /// Hyperspace shader visualizer.
+    HyperspaceShader {
+        /// Shader name (e.g., "hyperspace_tunnel", "acid_worms").
+        shader_id: String,
+        /// Animation speed parameter.
+        speed: f32,
+        /// Resolution scale.
+        scale: f32,
+    },
+    /// CDG (CD+G) graphics viewer for karaoke. Renders CDG frames with timing.
+    CdgViewer {
+        title: String,
+        /// CDG file source (path or URL).
+        source: String,
+        /// Current frame index.
+        current_frame: u32,
+        /// Total frames.
+        total_frames: u32,
+        /// Playback position in ms.
+        position_ms: i64,
+        /// Total duration in ms.
+        duration_ms: i64,
+        /// Whether audio is playing.
+        playing: bool,
+        /// Scale factor for CDG rendering.
+        scale: f32,
+    },
+    /// Lyrics display with hyperspace animations and karaoke-style highlighting.
+    /// Producers push lyric lines with timestamps; renderer interpolates scroll
+    /// position between observations for smooth playback.
+    LyricsDisplay {
+        /// Current track metadata.
+        title: String,
+        artist: String,
+        /// Album art source handle (host-resolved).
+        #[serde(default)]
+        artwork_source: Option<String>,
+        /// Lyric lines: text with start/end in milliseconds and active state.
+        lines: Vec<LyricLine>,
+        /// Current playback position for determining active line.
+        position_ms: i64,
+        duration_ms: i64,
+        playing: bool,
+        /// Animation style for hyperspace effects.
+        #[serde(default)]
+        style: LyricsStyle,
+        /// Scroll offset in lines (floats for interpolation).
+        scroll_offset: f32,
+        /// Highlight intensity for active line (0..1, interpolated).
+        highlight_intensity: f32,
     },
 }
 
@@ -755,9 +820,12 @@ impl WidgetSpec {
     /// Window treatment after applying the widget kind's sane default.
     pub fn effective_chrome(&self) -> WidgetChrome {
         match (self.chrome, &self.kind) {
-            (WidgetChrome::Auto, WidgetKind::Clock { .. } | WidgetKind::MediaCard { .. }) => {
-                WidgetChrome::Frameless
-            }
+            (
+                WidgetChrome::Auto,
+                WidgetKind::Clock { .. }
+                | WidgetKind::MediaCard { .. }
+                | WidgetKind::LyricsDisplay { .. },
+            ) => WidgetChrome::Frameless,
             (WidgetChrome::Auto, _) => WidgetChrome::Standard,
             (explicit, _) => explicit,
         }
@@ -775,6 +843,9 @@ impl WidgetSpec {
                 ..
             } => Some(40),
             WidgetKind::MediaCard { playing: true, .. } => Some(40),
+            WidgetKind::Quant {
+                widget: quant::QuantWidget::MevOpportunity { .. },
+            } => Some(40),
             // Lua only replaces the retained samples when data changes. Rust
             // owns the short interpolation window between snapshots, using the
             // same 25 fps cadence as the analog clock.
@@ -822,6 +893,45 @@ impl WidgetSpec {
         }
         self.validate()
     }
+}
+/// A single lyric line with timing information.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LyricLine {
+    pub text: String,
+    pub start_ms: i64,
+    pub end_ms: i64,
+    #[serde(default)]
+    pub words: Vec<LyricWord>,
+}
+
+/// Word-level timing for karaoke.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LyricWord {
+    pub text: String,
+    pub start_ms: i64,
+    pub end_ms: i64,
+}
+
+/// Hyperspace animation style for lyrics display.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum LyricsStyle {
+    #[default]
+    /// Subtle pulse and fade effects.
+    Normal,
+    /// Glitchy, cyberpunk aesthetic with chromatic aberration.
+    Glitch,
+    /// Flowing wave animations with liquid transitions.
+    Flow,
+    /// Particles emanating from active line like stardust.
+    Particles,
+    /// Deep space expansion with parallax depth.
+    Hyperspace,
 }
 
 #[cfg(test)]
@@ -1371,6 +1481,86 @@ pub struct NeuralEdge {
     pub heat: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum NetworkSegmentKind {
+    Lan,
+    Vlan,
+    Wan,
+    PointToPoint,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct NetworkSegment {
+    pub id: String,
+    pub label: String,
+    pub kind: NetworkSegmentKind,
+    /// Observation site that owns this L2/L3 domain. Mycelium remains the
+    /// source of truth; Canvas uses this only to group the rendered map.
+    #[serde(default)]
+    pub site: Option<String>,
+    #[serde(default)]
+    pub vlan: Option<u16>,
+    #[serde(default)]
+    pub subnet: Option<String>,
+    #[serde(default)]
+    pub gateway: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum NetworkNodeKind {
+    Device,
+    Host,
+    Gateway,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct NetworkNode {
+    pub id: String,
+    pub label: String,
+    pub kind: NetworkNodeKind,
+    #[serde(default)]
+    pub segments: Vec<String>,
+    /// Sites from which this node was observed. More than one is meaningful
+    /// for infrastructure joining routing domains.
+    #[serde(default)]
+    pub sites: Vec<String>,
+    #[serde(default)]
+    pub detail: Option<String>,
+    #[serde(default = "neutral_status_level")]
+    pub state: StatusLevel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum NetworkLinkKind {
+    Access,
+    Trunk,
+    Uplink,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct NetworkLink {
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    pub kind: NetworkLinkKind,
+    #[serde(default = "neutral_status_level")]
+    pub state: StatusLevel,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1413,6 +1603,17 @@ pub enum StatusLevel {
 
 fn neutral_status_level() -> StatusLevel {
     StatusLevel::Neutral
+}
+
+fn validate_graph_id(id: &str, label: &str) -> Result<()> {
+    check(
+        !id.is_empty()
+            && id.len() <= 128
+            && id.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'/' | b'.')
+            }),
+        &format!("{label} requires a bounded identifier"),
+    )
 }
 
 fn validate_graph(
@@ -2319,6 +2520,63 @@ impl WidgetSpec {
                     )?;
                 }
             }
+            WidgetKind::NetworkTopology {
+                title,
+                segments,
+                nodes,
+                links,
+                conflicts,
+            } => {
+                bounded_label(title, "network topology title")?;
+                check(segments.len() <= 64, "network topology exceeds 64 segments")?;
+                check(nodes.len() <= 1024, "network topology exceeds 1024 nodes")?;
+                check(links.len() <= 4096, "network topology exceeds 4096 links")?;
+                check(
+                    *conflicts <= 1_000_000,
+                    "network topology conflict count is unreasonable",
+                )?;
+                let mut segment_ids = std::collections::BTreeSet::new();
+                for segment in segments {
+                    validate_graph_id(&segment.id, "network segment")?;
+                    check(
+                        segment_ids.insert(segment.id.as_str()),
+                        "network segment IDs must be unique",
+                    )?;
+                    bounded_label(&segment.label, "network segment label")?;
+                    optional_label(&segment.subnet, "network segment subnet")?;
+                    optional_label(&segment.gateway, "network segment gateway")?;
+                    if let Some(vlan) = segment.vlan {
+                        check((1..=4094).contains(&vlan), "VLAN id must be 1..=4094")?;
+                    }
+                }
+                let mut node_ids = std::collections::BTreeSet::new();
+                for node in nodes {
+                    validate_graph_id(&node.id, "network node")?;
+                    check(
+                        node_ids.insert(node.id.as_str()),
+                        "network node IDs must be unique",
+                    )?;
+                    bounded_label(&node.label, "network node label")?;
+                    optional_label(&node.detail, "network node detail")?;
+                    check(
+                        node.segments
+                            .iter()
+                            .all(|id| segment_ids.contains(id.as_str())),
+                        "network node references an unknown segment",
+                    )?;
+                }
+                let mut pairs = std::collections::BTreeSet::new();
+                for link in links {
+                    check(
+                        node_ids.contains(link.from.as_str())
+                            && node_ids.contains(link.to.as_str())
+                            && link.from != link.to
+                            && pairs.insert((link.from.as_str(), link.to.as_str())),
+                        "network links require distinct known nodes and unique pairs",
+                    )?;
+                    optional_label(&link.label, "network link label")?;
+                }
+            }
             WidgetKind::DagGraph {
                 title,
                 nodes,
@@ -2427,6 +2685,92 @@ impl WidgetSpec {
                         "launcher item label must be 1-64 characters",
                     )?;
                 }
+            }
+            WidgetKind::LyricsDisplay {
+                title,
+                artist,
+                lines,
+                position_ms,
+                duration_ms,
+                style: _,
+                scroll_offset,
+                highlight_intensity,
+                ..
+            } => {
+                check(
+                    !title.is_empty() && title.len() <= 128,
+                    "lyrics title exceeds 128 chars",
+                )?;
+                check(
+                    !artist.is_empty() && artist.len() <= 128,
+                    "lyrics artist exceeds 128 chars",
+                )?;
+                check(lines.len() <= 1024, "lyrics exceeds 1024 lines")?;
+                for line in lines {
+                    check(line.text.len() <= 256, "lyric line exceeds 256 chars")?;
+                    check(
+                        line.start_ms >= 0 && line.end_ms >= line.start_ms,
+                        "lyric timestamps invalid",
+                    )?;
+                    check(line.words.len() <= 64, "lyric line exceeds 64 words")?;
+                }
+                check(
+                    *position_ms >= 0 && *duration_ms > 0,
+                    "lyrics duration must be positive",
+                )?;
+                check(
+                    *scroll_offset >= 0.0 && *scroll_offset <= 100.0,
+                    "scroll offset out of range",
+                )?;
+                check(
+                    *highlight_intensity >= 0.0 && *highlight_intensity <= 1.0,
+                    "highlight intensity out of range",
+                )?;
+            }
+            WidgetKind::CdgViewer {
+                title,
+                source,
+                current_frame,
+                total_frames,
+                position_ms,
+                duration_ms,
+                scale,
+                ..
+            } => {
+                check(
+                    !title.is_empty() && title.len() <= 128,
+                    "CDG title exceeds 128 chars",
+                )?;
+                check(!source.is_empty(), "CDG source required")?;
+                check(source.len() <= 512, "CDG source exceeds 512 chars")?;
+                check(
+                    *current_frame <= *total_frames,
+                    "CDG current frame exceeds total",
+                )?;
+                check(*total_frames > 0, "CDG total frames must be positive")?;
+                check(*position_ms >= 0, "CDG position must be non-negative")?;
+                check(*duration_ms > 0, "CDG duration must be positive")?;
+                check(*scale > 0.0, "CDG scale must be positive")?;
+            }
+            WidgetKind::HyperspaceShader {
+                shader_id,
+                speed,
+                scale,
+                ..
+            } => {
+                check(
+                    !shader_id.is_empty() && shader_id.len() <= 64,
+                    "shader id exceeds 64 chars",
+                )?;
+                let scale = *scale;
+                check(
+                    speed.is_finite() && *speed > 0.0,
+                    "shader speed must be positive",
+                )?;
+                check(
+                    scale.is_finite() && (0.1..=4.0).contains(&scale),
+                    "shader scale must be 0.1-4.0",
+                )?;
             }
         }
         Ok(())
@@ -2675,6 +3019,7 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
             SizeHint::new(240.0, row * 4.0 + chrome, 420.0, row * 8.0 + chrome, 1.8)
         }
         WidgetKind::NeuralGraph { .. }
+        | WidgetKind::NetworkTopology { .. }
         | WidgetKind::DagGraph { .. }
         | WidgetKind::SpatialTracks { .. } => SizeHint::new(300.0, 180.0, 640.0, 380.0, 1.7),
         WidgetKind::Ticker { .. } => SizeHint::new(
@@ -2702,6 +3047,12 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
             SizeHint::new(220.0, 140.0, 420.0, 260.0, 1.6)
         }
         WidgetKind::Launcher { .. } => SizeHint::new(220.0, 40.0, 600.0, 60.0, 1.0),
+        WidgetKind::LyricsDisplay { .. } => SizeHint::new(400.0, 300.0, 800.0, 600.0, 2.0),
+        // Live preview surfaces (shaders and CD+G viewers) render their own
+        // content, so give them a generous, chart-shaped default.
+        WidgetKind::HyperspaceShader { .. } | WidgetKind::CdgViewer { .. } => {
+            SizeHint::new(300.0, 180.0, 560.0, 360.0, 2.0)
+        }
     }
 }
 
