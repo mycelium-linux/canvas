@@ -675,6 +675,10 @@ struct App {
     background_picker: Option<::canvas::background_picker::BackgroundPicker>,
     theme_picker: Option<::canvas::theme_picker::ThemePicker>,
     project_picker: Option<::canvas::project_picker::ProjectPicker>,
+    /// Ctrl-P entries supplied by their engineering owners. The catalog holds
+    /// presentation identity; this map holds the narrow action for that exact
+    /// synthetic entry so owner URLs never become generic workspace state.
+    engineering_project_urls: BTreeMap<String, String>,
     project_switcher: Option<::canvas::project_switcher::ProjectSwitcher>,
     jarvis_visible: bool,
     hud_visible: bool,
@@ -807,6 +811,9 @@ impl App {
         // not just the 2 bundled ones. New projects get a default Coherence theme;
         // bundled projects keep their configured theme.
         Self::merge_alfalfa_projects(&mut catalog);
+        let (engineering_project_urls, engineering_notes) =
+            merge_engineering_projects(&mut catalog);
+        store_notes.extend(engineering_notes);
         let mut project_id = std::env::var("CANVAS_BOOT_PROJECT")
             .ok()
             .filter(|id| !id.is_empty())
@@ -1070,6 +1077,7 @@ impl App {
             background_picker: None,
             theme_picker: None,
             project_picker: None,
+            engineering_project_urls,
             project_switcher: None,
             jarvis_visible: true,
             hud_visible: false,
@@ -1971,6 +1979,15 @@ impl App {
                         }
                         Action::Apply(project) => {
                             self.project_picker = None;
+                            if let Some(url) = self.engineering_project_urls.get(&project).cloned()
+                            {
+                                self.status = match open_engineering_view(&url) {
+                                    Ok(()) => "Opened the engineering owner view.".into(),
+                                    Err(error) => error,
+                                };
+                                self.bump();
+                                return Task::none();
+                            }
                             return self.switch_project(project);
                         }
                         Action::Cancel => {
@@ -2051,7 +2068,11 @@ impl App {
                     ));
                     return Task::none();
                 }
-                if self.desktop_focused && shortcut_help_requested(&kbd_event) {
+                // Receiving the key already means a Canvas window is focused.
+                // `desktop_focused` describes the empty desktop hit target, not
+                // application focus; gating on it made `?` stop working as soon
+                // as any surface had focus.
+                if shortcut_help_requested(&kbd_event) {
                     return self.toggle_shortcut_help();
                 }
                 if let Some(direction) = page_cycle_direction(&kbd_event) {
@@ -3502,6 +3523,15 @@ impl App {
             // Re-sync from the Alfalfa index so projects added while Canvas
             // was running appear in the picker without a restart.
             Self::merge_alfalfa_projects(&mut self.catalog);
+            self.catalog.projects.retain(|project| {
+                !project.id.starts_with("owner-transmog-") && !project.id.starts_with("owner-lob-")
+            });
+            let (urls, notes) = merge_engineering_projects(&mut self.catalog);
+            self.engineering_project_urls = urls;
+            for note in notes {
+                self.events
+                    .push(format!("engineering_catalog_unavailable {note}"));
+            }
         }
         self.status = if open {
             "Choose a project: type to filter, Enter to switch.".into()
@@ -9357,6 +9387,139 @@ fn hostname() -> String {
 }
 
 /// One owner-local HTTP GET for Alfalfa discovery: fresh connection, bounded
+fn merge_engineering_projects(catalog: &mut Catalog) -> (BTreeMap<String, String>, Vec<String>) {
+    let transmog = std::env::var("CANVAS_TRANSMOG_VIEWER_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:4173".into());
+    let lob =
+        std::env::var("CANVAS_LOB_VIEWER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".into());
+    let timeout = Duration::from_secs(2);
+    let reads = std::thread::scope(|scope| {
+        let transmog_read = scope.spawn(|| owner_get(&transmog, "/api/state", timeout));
+        let lob_read = scope.spawn(|| owner_get(&lob, "/api/circuits", timeout));
+        (transmog_read.join(), lob_read.join())
+    });
+    let mut targets = BTreeMap::new();
+    let mut warnings = Vec::new();
+    match reads.0 {
+        Ok(Some(body)) => {
+            if !merge_transmog_body(catalog, &mut targets, &transmog, &body) {
+                warnings.push("Transmog returned an unsupported catalog".into());
+            }
+        }
+        _ => warnings.push("Transmog is unavailable".into()),
+    }
+    match reads.1 {
+        Ok(Some(body)) => {
+            if !merge_lob_body(catalog, &mut targets, &lob, &body) {
+                warnings.push("legion-of-bom returned an unsupported catalog".into());
+            }
+        }
+        _ => warnings.push("legion-of-bom is unavailable".into()),
+    }
+    (targets, warnings)
+}
+
+fn owner_get(base: &str, path: &str, timeout: Duration) -> Option<String> {
+    let authority = base.strip_prefix("http://")?.trim_end_matches('/');
+    if authority.contains('/') || authority.contains('@') {
+        return None;
+    }
+    let socket = if let Some(port) = authority.strip_prefix("localhost:") {
+        format!("127.0.0.1:{port}")
+    } else {
+        authority.to_owned()
+    };
+    alfalfa_get(&socket, path, timeout)
+}
+
+fn engineering_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn engineering_project_id(owner: &str, identity: &str) -> String {
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(format!("{owner}:{identity}").as_bytes())
+    );
+    format!("owner-{owner}-{}", &digest[..12])
+}
+
+fn merge_transmog_body(
+    catalog: &mut Catalog,
+    targets: &mut BTreeMap<String, String>,
+    base: &str,
+    body: &str,
+) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    if value["schema"] != "transmog.viewer-index.v1" {
+        return false;
+    }
+    let Some(projects) = value["projects"].as_array() else {
+        return false;
+    };
+    let base = base.trim_end_matches('/');
+    for project in projects.iter().take(256) {
+        let (Some(identity), Some(name)) = (project["id"].as_str(), project["name"].as_str())
+        else {
+            continue;
+        };
+        if !engineering_identifier(identity) || name.trim().is_empty() {
+            continue;
+        }
+        let id = engineering_project_id("transmog", identity);
+        push_catalog_project(catalog, id.clone(), format!("{name} · Transmog model"));
+        targets.insert(id, format!("{base}/#/p/{identity}"));
+    }
+    true
+}
+
+fn merge_lob_body(
+    catalog: &mut Catalog,
+    targets: &mut BTreeMap<String, String>,
+    base: &str,
+    body: &str,
+) -> bool {
+    let Ok(circuits) = serde_json::from_str::<Vec<serde_json::Value>>(body) else {
+        return false;
+    };
+    let base = base.trim_end_matches('/');
+    for circuit in circuits.iter().take(256) {
+        let Some(identity) = circuit["name"].as_str() else {
+            continue;
+        };
+        if !engineering_identifier(identity) {
+            continue;
+        }
+        let id = engineering_project_id("lob", identity);
+        let name = identity.replace(['-', '_'], " ");
+        push_catalog_project(catalog, id.clone(), format!("{name} · LOB circuit"));
+        targets.insert(id, format!("{base}/c/{identity}"));
+    }
+    true
+}
+
+fn open_engineering_view(url: &str) -> Result<(), String> {
+    if !(url.starts_with("http://127.0.0.1:") || url.starts_with("http://localhost:")) {
+        return Err("Refusing an untrusted engineering owner URL.".into());
+    }
+    Process::new("/usr/bin/open")
+        .arg("--")
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|_| "DockCanvas could not open the engineering owner view.".into())
+}
+
 /// by both connect and read timeouts, because this runs on the daemon's main
 /// thread at startup and on picker open — an untimed read there wedges the
 /// whole wall the moment Alfalfa answers slowly.
@@ -14158,6 +14321,66 @@ mod tests {
         merge_repos_body(&mut catalog, r#"[{"id":"JARVIS"},{"id":"LibreChat"}]"#);
         assert_eq!(catalog.projects.len(), 3, "existing JARVIS not duplicated");
         assert!(catalog.projects.iter().any(|p| p.id == "LibreChat"));
+    }
+
+    #[test]
+    fn engineering_owner_catalogs_extend_the_native_project_picker() {
+        let mut catalog = Catalog::bundled().unwrap();
+        let mut targets = BTreeMap::new();
+        assert!(merge_transmog_body(
+            &mut catalog,
+            &mut targets,
+            "http://127.0.0.1:4173",
+            r#"{"schema":"transmog.viewer-index.v1","projects":[{"id":"fixie","name":"Fixie frame"},{"id":"../unsafe","name":"Unsafe"}]}"#,
+        ));
+        assert!(merge_lob_body(
+            &mut catalog,
+            &mut targets,
+            "http://127.0.0.1:8080",
+            r#"[{"name":"slew_limiter"},{"name":"bad/name"}]"#,
+        ));
+        assert_eq!(targets.len(), 2);
+        assert!(
+            catalog
+                .projects
+                .iter()
+                .any(|project| project.name == "Fixie frame · Transmog model")
+        );
+        assert!(
+            catalog
+                .projects
+                .iter()
+                .any(|project| project.name == "slew limiter · LOB circuit")
+        );
+        assert!(
+            targets
+                .values()
+                .any(|url| url == "http://127.0.0.1:4173/#/p/fixie")
+        );
+        assert!(
+            targets
+                .values()
+                .any(|url| url == "http://127.0.0.1:8080/c/slew_limiter")
+        );
+    }
+
+    #[test]
+    fn engineering_owner_catalogs_fail_closed() {
+        let mut catalog = Catalog::bundled().unwrap();
+        let mut targets = BTreeMap::new();
+        assert!(!merge_transmog_body(
+            &mut catalog,
+            &mut targets,
+            "http://127.0.0.1:4173",
+            r#"{"schema":"unknown","projects":[]}"#,
+        ));
+        assert!(!merge_lob_body(
+            &mut catalog,
+            &mut targets,
+            "http://127.0.0.1:8080",
+            r#"{"circuits":[]}"#,
+        ));
+        assert!(targets.is_empty());
     }
 
     #[test]
