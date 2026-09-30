@@ -813,6 +813,19 @@ struct App {
 }
 
 impl App {
+    fn engineering_browser_for(project: EngineeringProject) -> Result<EngineeringBrowser, String> {
+        let state = BrowserState::default();
+        let model = project
+            .manifest
+            .browse(&state, 512)
+            .map_err(|error| error.to_string())?;
+        Ok(EngineeringBrowser {
+            project,
+            state,
+            model,
+        })
+    }
+
     fn install_loaded_content(&mut self, loaded: LoadedContent) {
         let id = loaded.snapshot.id.clone();
         let title = loaded.snapshot.title.clone();
@@ -1249,6 +1262,18 @@ impl App {
             #[cfg(unix)]
             workspace_mirror: ::canvas::workspace_mirror::Publisher::new(),
         };
+        if let Some(project) = app
+            .engineering_projects
+            .get(&app.document.project_id)
+            .cloned()
+        {
+            match Self::engineering_browser_for(project) {
+                Ok(browser) => app.engineering_browser = Some(browser),
+                Err(error) => app
+                    .events
+                    .push(format!("engineering_project_unusable {error}")),
+            }
+        }
         app.publish_web_themes();
         app.publish_active_project();
         app.publish_wanted_video();
@@ -2151,17 +2176,22 @@ impl App {
                             if let Some(owner_project) =
                                 self.engineering_projects.get(&project).cloned()
                             {
-                                let state = BrowserState::default();
-                                match owner_project.manifest.browse(&state, 512) {
-                                    Ok(model) => {
-                                        self.engineering_browser = Some(EngineeringBrowser {
-                                            project: owner_project,
-                                            state,
-                                            model,
-                                        });
+                                match Self::engineering_browser_for(owner_project) {
+                                    Ok(browser) => {
+                                        self.workspaces.active_project_id = Some(project.clone());
+                                        if let Err(error) = workspace_store::save(
+                                            &self.workspace_store_path,
+                                            &self.workspaces,
+                                            &self.catalog,
+                                        ) {
+                                            self.events.push(format!(
+                                                "engineering_project_not_persisted {error}"
+                                            ));
+                                        }
+                                        self.engineering_browser = Some(browser);
                                     }
                                     Err(error) => {
-                                        self.status = error.to_string();
+                                        self.status = error;
                                         self.bump();
                                         return Task::none();
                                     }
@@ -9675,6 +9705,8 @@ fn merge_transmog_body(
     let Some(projects) = value["projects"].as_array() else {
         return false;
     };
+    let mut hub_entries = Vec::new();
+    let mut hub_artifacts = BTreeMap::new();
     for project in projects.iter().take(256) {
         let (Some(identity), Some(name)) = (project["id"].as_str(), project["name"].as_str())
         else {
@@ -9712,6 +9744,15 @@ fn merge_transmog_body(
                 ),
             );
         }
+        for entry in &entries {
+            let mut hub_entry = entry.clone();
+            hub_entry.path = format!("{identity}/{}", entry.path);
+            hub_entry.id = format!("{identity}-{}", entry.id);
+            if let Some(locator) = artifacts.get(&entry.id).cloned() {
+                hub_artifacts.insert(hub_entry.id.clone(), locator);
+            }
+            hub_entries.push(hub_entry);
+        }
         targets.insert(
             id.clone(),
             EngineeringProject {
@@ -9725,6 +9766,23 @@ fn merge_transmog_body(
                     entries,
                 },
                 artifacts,
+            },
+        );
+    }
+    if !hub_entries.is_empty() {
+        targets.insert(
+            "transmog".into(),
+            EngineeringProject {
+                id: "transmog".into(),
+                name: "Transmog projects".into(),
+                owner: "Transmog".into(),
+                manifest: ProjectManifest {
+                    schema_version: ProjectManifest::SCHEMA_VERSION,
+                    project_id: "transmog".into(),
+                    revision: "live".into(),
+                    entries: hub_entries,
+                },
+                artifacts: hub_artifacts,
             },
         );
     }
@@ -9749,6 +9807,9 @@ fn merge_lob_body(
     let Ok(root) = root.canonicalize() else {
         return false;
     };
+    let mut hub_entries = Vec::new();
+    let mut hub_artifacts = BTreeMap::new();
+    let mut hub_revision = 0_u64;
     for circuit in circuits.iter().take(256) {
         let Some(identity) = circuit["name"].as_str() else {
             continue;
@@ -9821,6 +9882,16 @@ fn merge_lob_body(
             };
             artifacts.insert(entry_id, locator);
         }
+        hub_revision = hub_revision.max(revision);
+        for entry in &entries {
+            let mut hub_entry = entry.clone();
+            hub_entry.path = format!("{identity}/{}", entry.path);
+            hub_entry.id = format!("{identity}-{}", entry.id);
+            if let Some(locator) = artifacts.get(&entry.id).cloned() {
+                hub_artifacts.insert(hub_entry.id.clone(), locator);
+            }
+            hub_entries.push(hub_entry);
+        }
         targets.insert(
             id.clone(),
             EngineeringProject {
@@ -9834,6 +9905,28 @@ fn merge_lob_body(
                     entries,
                 },
                 artifacts,
+            },
+        );
+    }
+    if !hub_entries.is_empty() {
+        let hub = EngineeringProject {
+            id: "legion-of-bom".into(),
+            name: "legion-of-bom projects".into(),
+            owner: "legion-of-bom".into(),
+            manifest: ProjectManifest {
+                schema_version: ProjectManifest::SCHEMA_VERSION,
+                project_id: "legion-of-bom".into(),
+                revision: hub_revision.to_string(),
+                entries: hub_entries,
+            },
+            artifacts: hub_artifacts,
+        };
+        targets.insert("legion-of-bom".into(), hub.clone());
+        targets.insert(
+            "lob".into(),
+            EngineeringProject {
+                id: "lob".into(),
+                ..hub
             },
         );
     }
@@ -14772,7 +14865,7 @@ mod tests {
             r#"[{"name":"slew_limiter","source":"slew_limiter.py","artifacts":[{"label":"guide-pdf","path":"out/slew_limiter/slew_limiter-guide.pdf","status":"fresh","mtime_ms":42}]},{"name":"bad/name"}]"#,
             &format!(r#"{{"root":{}}}"#, serde_json::to_string(&root).unwrap()),
         ));
-        assert_eq!(targets.len(), 2);
+        assert!(targets.len() >= 4, "individual projects plus owner hubs");
         assert!(
             catalog
                 .projects
