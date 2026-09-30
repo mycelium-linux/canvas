@@ -12,8 +12,8 @@ use std::os::unix::{
 };
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -187,9 +187,9 @@ fn global_artifact_path(id: &str) -> Option<PathBuf> {
 /// Re-exported from canvas-core so stream_binding callers can validate
 /// without a separate import. See DECLARED_CONTRACTS and is_declared_contract
 /// in canvas-core for the canonical registry.
-pub use canvas_core::{is_declared_contract, DECLARED_CONTRACTS};
+pub use canvas_core::{DECLARED_CONTRACTS, is_declared_contract};
 
-pub use crate::stream_contract::{StreamEnvelope, STREAM_SCHEMA_VERSION};
+pub use crate::stream_contract::{STREAM_SCHEMA_VERSION, StreamEnvelope};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StreamStats {
@@ -925,11 +925,11 @@ pub fn apply_briefing_binder(source: &str, event: &StreamEnvelope) -> Result<Bri
 mod tests {
     use super::*;
     use canvas_widgets::{
+        WIDGET_SCHEMA_VERSION, WidgetChrome, WidgetKind,
         quant::{
             BacktestEvidence, BacktestPoint, BacktestSeries, BacktestSeriesRole, Candle,
             QuantWidget,
         },
-        WidgetChrome, WidgetKind, WIDGET_SCHEMA_VERSION,
     };
 
     #[test]
@@ -1097,6 +1097,7 @@ mod tests {
                 title: "Waiting".into(),
                 evidence: BacktestEvidence::SyntheticProof,
                 market: vec![],
+                regimes: vec![],
                 series: vec![BacktestSeries {
                     label: "Waiting".into(),
                     role: BacktestSeriesRole::Strategy,

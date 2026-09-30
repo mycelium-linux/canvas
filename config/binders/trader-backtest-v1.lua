@@ -61,6 +61,12 @@ for i = 1, #(p.market or {}) do
   market[#market + 1] = {time=tonumber(candle.sequence), open=tonumber(candle.open), high=tonumber(candle.high), low=tonumber(candle.low), close=tonumber(candle.close), volume=tonumber(candle.volume)}
 end
 
+local regimes = canvas.array()
+for i = 1, #(p.regimes or {}) do
+  local regime = p.regimes[i]
+  regimes[#regimes + 1] = {time=tonumber(regime.sequence or regime.time), state=tonumber(regime.state), confidence=tonumber(regime.confidence)}
+end
+
 local trades = canvas.array()
 for i = 1, #(p.fills or p.trades or {}) do
   local trade = (p.fills or p.trades)[i]
@@ -74,7 +80,7 @@ end
 
 return {
   kind = "snapshot",
-  widget = {kind="quant", widget={visualization="backtest", title=tostring(p.title or "Strategy backtest"), evidence=tostring(report.evidence or "synthetic_proof"), market=market, series=series, trades=trades, stats=stats}},
+  widget = {kind="quant", widget={visualization="backtest", title=tostring(p.title or "Strategy backtest"), evidence=tostring(report.evidence or "synthetic_proof"), market=market, regimes=regimes, series=series, trades=trades, stats=stats}},
   data = {
     state="ready",
     source="trader",

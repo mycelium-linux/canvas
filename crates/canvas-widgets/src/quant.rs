@@ -1,6 +1,6 @@
 //! Typed, bounded trading and quantitative visualization primitives.
 
-use crate::{bounded_label, check, Result};
+use crate::{Result, bounded_label, check};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_CANDLES: usize = 2_048;
@@ -42,6 +42,8 @@ pub enum QuantWidget {
         /// producers may omit it, but dense research views should provide it.
         #[serde(default)]
         market: Vec<Candle>,
+        #[serde(default)]
+        regimes: Vec<BacktestRegime>,
         series: Vec<BacktestSeries>,
         #[serde(default)]
         trades: Vec<BacktestMarker>,
@@ -142,6 +144,15 @@ pub struct BacktestSeries {
 pub struct BacktestPoint {
     pub time: i64,
     pub value: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct BacktestRegime {
+    pub time: i64,
+    pub state: u8,
+    pub confidence: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,6 +260,7 @@ impl QuantWidget {
                 title,
                 evidence: _,
                 market,
+                regimes,
                 series,
                 trades,
                 stats,
@@ -265,6 +277,17 @@ impl QuantWidget {
                 check(
                     market.iter().all(Candle::is_valid),
                     "backtest candles require finite, consistent OHLCV",
+                )?;
+                check(
+                    regimes.len() <= MAX_CANDLES
+                        && regimes.windows(2).all(|pair| pair[0].time < pair[1].time)
+                        && regimes.iter().all(|item| {
+                            item.time >= 0
+                                && item.state < 8
+                                && item.confidence.is_finite()
+                                && (0.0..=1.0).contains(&item.confidence)
+                        }),
+                    "backtest regimes require ordered bounded states and confidence",
                 )?;
                 check(
                     !series.is_empty() && series.len() <= MAX_BACKTEST_SERIES,
@@ -505,11 +528,13 @@ mod tests {
             candles: vec![candle(2)],
             show_volume: true,
         };
-        assert!(widget
-            .apply(QuantMutation::AppendCandle { candle: candle(1) })
-            .unwrap_err()
-            .0
-            .contains("backwards"));
+        assert!(
+            widget
+                .apply(QuantMutation::AppendCandle { candle: candle(1) })
+                .unwrap_err()
+                .0
+                .contains("backwards")
+        );
     }
 
     #[test]
@@ -571,9 +596,10 @@ mod tests {
             venue: "Coinbase".into(),
             trades: vec![trade(2)],
         };
-        assert!(tape
-            .apply(QuantMutation::AppendTrade { trade: trade(1) })
-            .is_err());
+        assert!(
+            tape.apply(QuantMutation::AppendTrade { trade: trade(1) })
+                .is_err()
+        );
         tape.apply(QuantMutation::AppendTrade { trade: trade(3) })
             .unwrap();
         let QuantWidget::TimeAndSales { trades, .. } = tape else {
@@ -602,6 +628,7 @@ mod tests {
             title: "Backtest".into(),
             evidence: BacktestEvidence::SyntheticProof,
             market: vec![],
+            regimes: vec![],
             series: vec![series.clone()],
             trades: vec![BacktestMarker {
                 time: 2,
@@ -620,16 +647,19 @@ mod tests {
         reversed.points.reverse();
         let invalid = QuantWidget::Backtest {
             market: vec![],
+            regimes: vec![],
             title: "Backtest".into(),
             evidence: BacktestEvidence::Market,
             series: vec![reversed],
             trades: vec![],
             stats: vec![],
         };
-        assert!(invalid
-            .validate()
-            .unwrap_err()
-            .0
-            .contains("strictly increasing"));
+        assert!(
+            invalid
+                .validate()
+                .unwrap_err()
+                .0
+                .contains("strictly increasing")
+        );
     }
 }

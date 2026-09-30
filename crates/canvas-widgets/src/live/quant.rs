@@ -1,13 +1,13 @@
 use crate::{
-    quant::{
-        BacktestEvidence, BacktestMarker, BacktestMarkerSide, BacktestSeries, BacktestSeriesRole,
-        BacktestStatTone, BookLevel, Candle, QuantWidget, TradeSide,
-    },
     WidgetSpec,
+    quant::{
+        BacktestEvidence, BacktestMarker, BacktestMarkerSide, BacktestRegime, BacktestSeries,
+        BacktestSeriesRole, BacktestStatTone, BookLevel, Candle, QuantWidget, TradeSide,
+    },
 };
 use canvas_core::VisualTheme;
 use iced::mouse;
-use iced::widget::{canvas, column, row, space, text, Canvas};
+use iced::widget::{Canvas, canvas, column, row, space, text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 use super::{CacheState, Key};
@@ -153,6 +153,7 @@ pub(super) fn element<'a, Message: 'a>(
             title,
             evidence,
             market,
+            regimes,
             series,
             trades,
             stats,
@@ -167,28 +168,27 @@ pub(super) fn element<'a, Message: 'a>(
                 BacktestEvidence::SyntheticProof => p.warning,
                 BacktestEvidence::Market => p.success,
             };
-            let stat_rail = stats
-                .iter()
-                .take(12)
-                .fold(column![].spacing(m.space_2), |column, stat| {
-                    let tone = match stat.tone {
-                        BacktestStatTone::Positive => p.success,
-                        BacktestStatTone::Negative => p.danger,
-                        BacktestStatTone::Neutral => p.text,
-                    };
-                    column.push(
-                        row![
-                            text(stat.label.to_uppercase())
-                                .size(m.micro)
-                                .color(rgb(p.text_muted))
-                                .width(Length::Fill),
-                            text(&stat.value)
-                                .size(m.small)
-                                .color(rgb(tone))
-                        ]
-                        .align_y(iced::Alignment::Center),
-                    )
-                });
+            let stat_rail =
+                stats
+                    .iter()
+                    .take(12)
+                    .fold(column![].spacing(m.space_2), |column, stat| {
+                        let tone = match stat.tone {
+                            BacktestStatTone::Positive => p.success,
+                            BacktestStatTone::Negative => p.danger,
+                            BacktestStatTone::Neutral => p.text,
+                        };
+                        column.push(
+                            row![
+                                text(stat.label.to_uppercase())
+                                    .size(m.micro)
+                                    .color(rgb(p.text_muted))
+                                    .width(Length::Fill),
+                                text(&stat.value).size(m.small).color(rgb(tone))
+                            ]
+                            .align_y(iced::Alignment::Center),
+                        )
+                    });
             let header = row![
                 column![
                     text(title).size(m.title).color(rgb(p.text)),
@@ -203,6 +203,7 @@ pub(super) fn element<'a, Message: 'a>(
             .align_y(iced::Alignment::Center);
             let chart = Canvas::new(BacktestProgram {
                 market,
+                regimes,
                 series,
                 trades,
                 strategy: rgb(p.primary),
@@ -373,6 +374,7 @@ fn format_trade_time(time: i64) -> String {
 
 struct BacktestProgram<'a> {
     market: &'a [Candle],
+    regimes: &'a [BacktestRegime],
     series: &'a [BacktestSeries],
     trades: &'a [BacktestMarker],
     strategy: Color,
@@ -416,6 +418,7 @@ impl<Message> canvas::Program<Message> for BacktestProgram<'_> {
         let key = self.series.iter().fold(
             Key::new()
                 .add_usize(self.market.len())
+                .add_usize(self.regimes.len())
                 .add_usize(self.series.len())
                 .add_usize(self.trades.len()),
             |key, item| {
@@ -470,6 +473,25 @@ impl<Message> canvas::Program<Message> for BacktestProgram<'_> {
                         + ((price_high - value) / (price_high - price_low).max(f64::EPSILON)) as f32
                             * layout.price_height
                 };
+                for (index, regime) in self.regimes.iter().enumerate() {
+                    let start = x(regime.time);
+                    let end = self
+                        .regimes
+                        .get(index + 1)
+                        .map_or(layout.left + layout.width, |next| x(next.time));
+                    let color = match regime.state {
+                        0 => self.negative,
+                        1 => self.benchmark,
+                        _ => self.positive,
+                    };
+                    frame.fill(
+                        &canvas::Path::rectangle(
+                            Point::new(start, layout.price_top),
+                            Size::new((end - start).max(1.0), layout.price_height),
+                        ),
+                        alpha(color, (0.025 + regime.confidence as f32 * 0.075).min(0.10)),
+                    );
+                }
                 let candle_width = (layout.width / self.market.len() as f32 * 0.72).clamp(1.0, 7.0);
                 for candle in self.market {
                     let px = x(candle.time);
@@ -498,7 +520,10 @@ impl<Message> canvas::Program<Message> for BacktestProgram<'_> {
                 for tick in 0..=2 {
                     let fraction = tick as f32 / 2.0;
                     frame.fill_text(canvas::Text {
-                        content: format!("${:.2}", price_high - (price_high - price_low) * f64::from(fraction)),
+                        content: format!(
+                            "${:.2}",
+                            price_high - (price_high - price_low) * f64::from(fraction)
+                        ),
                         position: Point::new(
                             layout.left + layout.width + 8.0,
                             layout.price_top + fraction * layout.price_height - 6.0,
@@ -655,10 +680,11 @@ impl<Message> canvas::Program<Message> for BacktestProgram<'_> {
             for marker in self.trades {
                 let px = x(marker.time);
                 let Some((price_low, price_high)) = (!self.market.is_empty()).then(|| {
-                    self.market.iter().fold(
-                        (f64::INFINITY, f64::NEG_INFINITY),
-                        |range, candle| (range.0.min(candle.low), range.1.max(candle.high)),
-                    )
+                    self.market
+                        .iter()
+                        .fold((f64::INFINITY, f64::NEG_INFINITY), |range, candle| {
+                            (range.0.min(candle.low), range.1.max(candle.high))
+                        })
                 }) else {
                     continue;
                 };
