@@ -424,6 +424,10 @@ pub fn apply_named_adapter_batch(
 /// added without registering it here too.
 const BUILT_IN_BINDERS: &[(&str, &str)] = &[
     (
+        "mev-opportunity-scene-v1",
+        include_str!("../../../config/binders/mev-opportunity-scene-v1.lua"),
+    ),
+    (
         "mev-opportunity-profit-v1",
         include_str!("../../../config/binders/mev-opportunity-profit-v1.lua"),
     ),

@@ -2,24 +2,27 @@
   "schema_version": 1,
   "id": "mev-research",
   "project_id": "home",
-  "revision": 1,
+  "revision": 3,
   "theme": { "source": "project" },
-  "background": { "kind": "solid", "color": [5, 8, 14, 255] },
-  "chrome": { "title": "hidden", "canvas_padding": 16, "surface_gap": 10 },
-  "surfaces": [
-    {"id":"net","title":"MEV · NET","content":{"kind":"widget","spec":{"schema_version":2,"id":"net","kind":"stat","label":"NET OPPORTUNITY · WETH","value":0,"state":"neutral","chrome":"drag_only","data":{"state":"loading","source":"unibus:mev-observer","detail":"Awaiting block-pinned evidence","provenance":"sample"}}},"inputs":[{"id":"opportunity","contract":"mev.opportunity.v1"}]},
-    {"id":"route","title":"MEV · ROUTE","content":{"kind":"widget","spec":{"schema_version":2,"id":"route","kind":"status_list","title":"ATOMIC ROUTE","nodes":[{"label":"Observer","state":"neutral","detail":"Awaiting replay"}],"chrome":"drag_only","data":{"state":"loading","source":"unibus:mev-observer","provenance":"sample"}}},"inputs":[{"id":"opportunity","contract":"mev.opportunity.v1"}]},
-    {"id":"evidence","title":"MEV · EVIDENCE","content":{"kind":"widget","spec":{"schema_version":2,"id":"evidence","kind":"table","title":"BLOCK-PINNED EVIDENCE","columns":["Measure","Value","Evidence"],"rows":[["State","—","Awaiting replay"]],"chrome":"drag_only","data":{"state":"loading","source":"unibus:mev-observer","detail":"Read-only · no signer","provenance":"sample"}}},"inputs":[{"id":"opportunity","contract":"mev.opportunity.v1"}]}
-  ],
-  "layout":{"kind":"canvas","placements":[
-    {"surface_id":"net","bounds":{"x":0.02,"y":0.03,"width":0.28,"height":0.94},"layer":0},
-    {"surface_id":"route","bounds":{"x":0.31,"y":0.03,"width":0.31,"height":0.94},"layer":0},
-    {"surface_id":"evidence","bounds":{"x":0.63,"y":0.03,"width":0.35,"height":0.94},"layer":0}
+  "background": { "kind": "gradient", "angle_degrees": 125, "stops": [
+    {"offset":0.0,"color":[2,6,13,255]},
+    {"offset":0.48,"color":[7,14,24,255]},
+    {"offset":1.0,"color":[17,5,16,255]}
   ]},
-  "bindings":[
-    {"id":"mev-net","source":{"owner":"mev-observer","stream":"opportunities","contract":"mev.opportunity.v1"},"target":{"surface_id":"net","input_id":"opportunity"},"adapter":"mev-opportunity-profit-v1","delivery":{"mode":"latest"}},
-    {"id":"mev-route","source":{"owner":"mev-observer","stream":"opportunities","contract":"mev.opportunity.v1"},"target":{"surface_id":"route","input_id":"opportunity"},"adapter":"mev-opportunity-route-v1","delivery":{"mode":"latest"}},
-    {"id":"mev-evidence","source":{"owner":"mev-observer","stream":"opportunities","contract":"mev.opportunity.v1"},"target":{"surface_id":"evidence","input_id":"opportunity"},"adapter":"mev-opportunity-evidence-v1","delivery":{"mode":"latest"}}
-  ],
-  "focused_surface_id":"evidence"
+  "chrome": { "title": "hidden", "canvas_padding": 0, "surface_gap": 0 },
+  "surfaces": [{
+    "id":"mev-scene","title":"MEV · ATOMIC ROUTE",
+    "content":{"kind":"widget","spec":{
+      "schema_version":2,"id":"mev-scene","kind":"quant",
+      "widget":{"visualization":"mev_opportunity","chain_id":1,"block_number":0,"block_hash":"0x0000000000000000000000000000000000000000000000000000000000000000","token":"WETH","route":["AWAITING POOL A","AWAITING POOL B"],"amount_in":0.0,"amount_after_first":0.0,"amount_out":0.0,"gross_profit":0.0,"gas_cost":0.0,"builder_payment":0.0,"net_profit":0.0,"profitable":false,"evaluated_candidates":1},
+      "chrome":"frameless","data":{"state":"loading","source":"unibus:mev-observer","detail":"Awaiting block-pinned opportunity","provenance":"sample"}
+    }},
+    "inputs":[{"id":"opportunity","contract":"mev.opportunity.v1"}]
+  }],
+  "layout":{"kind":"canvas","placements":[{"surface_id":"mev-scene","bounds":{"x":0.0,"y":0.0,"width":1.0,"height":1.0},"layer":0}]},
+  "bindings":[{
+    "id":"mev-scene-live","source":{"owner":"mev-observer","stream":"opportunities","contract":"mev.opportunity.v1"},
+    "target":{"surface_id":"mev-scene","input_id":"opportunity"},"adapter":"mev-opportunity-scene-v1","delivery":{"mode":"latest"}
+  }],
+  "focused_surface_id":"mev-scene"
 }

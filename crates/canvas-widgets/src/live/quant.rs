@@ -7,7 +7,7 @@ use crate::{
 };
 use canvas_core::VisualTheme;
 use iced::mouse;
-use iced::widget::{Canvas, canvas, column, row, space, text};
+use iced::widget::{Canvas, canvas, column, container, row, space, text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 use super::{CacheState, Key};
@@ -149,6 +149,147 @@ pub(super) fn element<'a, Message: 'a>(
                 visual,
             )
         }
+        QuantWidget::MevOpportunity {
+            chain_id,
+            block_number,
+            block_hash,
+            token,
+            route,
+            amount_in,
+            amount_after_first,
+            amount_out,
+            gross_profit,
+            gas_cost,
+            builder_payment,
+            net_profit,
+            profitable,
+            evaluated_candidates,
+        } => {
+            let p = visual.palette;
+            let m = visual.metrics;
+            let signal = if *profitable { p.success } else { p.danger };
+            let verdict = if *profitable {
+                "EXECUTABLE EDGE"
+            } else {
+                "NO EDGE · STAND DOWN"
+            };
+            let short_hash = if block_hash.len() > 20 {
+                format!(
+                    "{}…{}",
+                    &block_hash[..10],
+                    &block_hash[block_hash.len() - 8..]
+                )
+            } else {
+                block_hash.clone()
+            };
+            let rule = || {
+                container(space::vertical().height(Length::Fixed(2.0)))
+                    .width(Length::Fill)
+                    .style(move |_| iced::widget::container::Style {
+                        background: Some(rgb(signal).into()),
+                        ..Default::default()
+                    })
+            };
+            let route_flow = row![
+                column![
+                    text("CAPITAL IN").size(m.micro).color(rgb(p.text_muted)),
+                    text(format!("{amount_in:.6} {token}"))
+                        .size(m.title)
+                        .color(rgb(p.text)),
+                ]
+                .spacing(m.space_1)
+                .width(Length::FillPortion(2)),
+                text("━━▶").size(m.title).color(rgb(p.info)),
+                column![
+                    text(route[0].to_uppercase())
+                        .size(m.micro)
+                        .color(rgb(p.info)),
+                    text(format!("{amount_after_first:.2} INTERMEDIATE"))
+                        .size(m.body)
+                        .color(rgb(p.text)),
+                ]
+                .spacing(m.space_1)
+                .width(Length::FillPortion(2)),
+                text("━━▶").size(m.title).color(rgb(signal)),
+                column![
+                    text(route[1].to_uppercase())
+                        .size(m.micro)
+                        .color(rgb(signal)),
+                    text(format!("{amount_out:.6} {token}"))
+                        .size(m.title)
+                        .color(rgb(p.text)),
+                ]
+                .spacing(m.space_1)
+                .width(Length::FillPortion(2)),
+            ]
+            .spacing(m.space_3)
+            .align_y(iced::Alignment::Center);
+            let evidence = row![
+                evidence_item("GROSS", format!("{gross_profit:+.6}"), signal, visual),
+                evidence_item("GAS", format!("-{gas_cost:.6}"), p.warning, visual),
+                evidence_item(
+                    "BUILDER",
+                    format!("-{builder_payment:.6}"),
+                    p.text_muted,
+                    visual
+                ),
+                evidence_item(
+                    "SEARCH",
+                    format!("{evaluated_candidates} SIZES"),
+                    p.info,
+                    visual
+                ),
+                evidence_item("BLOCK", block_number.to_string(), p.text, visual),
+            ]
+            .spacing(m.space_5);
+            column![
+                row![
+                    column![
+                        text(format!("ETHEREUM / CHAIN {chain_id}"))
+                            .size(m.micro)
+                            .color(rgb(p.text_muted)),
+                        text("ATOMIC ROUTE INTELLIGENCE")
+                            .size(m.title)
+                            .color(rgb(p.text)),
+                    ]
+                    .spacing(m.space_1),
+                    space::horizontal(),
+                    column![
+                        text(verdict).size(m.small).color(rgb(signal)),
+                        text(short_hash).size(m.micro).color(rgb(p.text_muted)),
+                    ]
+                    .spacing(m.space_1)
+                    .align_x(iced::Alignment::End),
+                ]
+                .align_y(iced::Alignment::Center),
+                rule(),
+                space::vertical().height(Length::FillPortion(1)),
+                text(if *profitable { "CAPTURE" } else { "REJECT" })
+                    .size(m.micro)
+                    .color(rgb(signal)),
+                row![
+                    text(format!("{net_profit:+.6}"))
+                        .size(m.hero * 1.9)
+                        .color(rgb(signal)),
+                    text(token).size(m.title).color(rgb(p.text_muted)),
+                ]
+                .spacing(m.space_2)
+                .align_y(iced::Alignment::End),
+                text("NET AFTER GAS + BUILDER PAYMENT")
+                    .size(m.micro)
+                    .color(rgb(p.text_muted)),
+                space::vertical().height(Length::FillPortion(1)),
+                route_flow,
+                space::vertical().height(Length::FillPortion(1)),
+                rule(),
+                evidence,
+            ]
+            .padding([m.space_5, m.space_5])
+            .spacing(m.space_3)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+        }
         QuantWidget::Backtest {
             title,
             evidence,
@@ -243,6 +384,24 @@ pub(super) fn element<'a, Message: 'a>(
             )
         }
     }
+}
+
+fn evidence_item<'a, Message: 'a>(
+    label: &'a str,
+    value: String,
+    tone: [u8; 3],
+    visual: &VisualTheme,
+) -> Element<'a, Message> {
+    let m = visual.metrics;
+    column![
+        text(label)
+            .size(m.micro)
+            .color(rgb(visual.palette.text_muted)),
+        text(value).size(m.body).color(rgb(tone)),
+    ]
+    .spacing(m.space_1)
+    .width(Length::Fill)
+    .into()
 }
 
 struct OrderBookProgram<'a> {

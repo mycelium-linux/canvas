@@ -33,6 +33,24 @@ pub enum QuantWidget {
         venue: String,
         trades: Vec<TradePrint>,
     },
+    /// Full-bleed MEV route instrument. Unlike dashboard primitives, this owns
+    /// one coherent visual hierarchy for signal, route, and evidence.
+    MevOpportunity {
+        chain_id: u64,
+        block_number: u64,
+        block_hash: String,
+        token: String,
+        route: Vec<String>,
+        amount_in: f64,
+        amount_after_first: f64,
+        amount_out: f64,
+        gross_profit: f64,
+        gas_cost: f64,
+        builder_payment: f64,
+        net_profit: f64,
+        profitable: bool,
+        evaluated_candidates: u32,
+    },
     /// A retained research result. Drawdown is derived from the primary
     /// equity curve by the renderer so the producer cannot drift two copies.
     Backtest {
@@ -254,6 +272,48 @@ impl QuantWidget {
                 check(
                     trades.iter().all(TradePrint::is_valid),
                     "trade tape prices and sizes must be finite and positive",
+                )
+            }
+            Self::MevOpportunity {
+                block_hash,
+                token,
+                route,
+                amount_in,
+                amount_after_first,
+                amount_out,
+                gross_profit,
+                gas_cost,
+                builder_payment,
+                net_profit,
+                evaluated_candidates,
+                ..
+            } => {
+                bounded_label(token, "MEV token")?;
+                bounded_label(block_hash, "MEV block hash")?;
+                check(
+                    route.len() == 2,
+                    "MEV opportunity requires exactly two route legs",
+                )?;
+                for venue in route {
+                    bounded_label(venue, "MEV venue")?;
+                }
+                check(
+                    *evaluated_candidates > 0,
+                    "MEV opportunity requires evaluated candidates",
+                )?;
+                check(
+                    [
+                        *amount_in,
+                        *amount_after_first,
+                        *amount_out,
+                        *gross_profit,
+                        *gas_cost,
+                        *builder_payment,
+                        *net_profit,
+                    ]
+                    .iter()
+                    .all(|value| value.is_finite()),
+                    "MEV opportunity values must be finite",
                 )
             }
             Self::Backtest {
