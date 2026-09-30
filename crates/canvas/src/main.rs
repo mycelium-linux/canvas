@@ -453,6 +453,7 @@ enum Message {
     ShellProjects,
     ShellNewTask,
     EngineeringBrowser(BrowserAction),
+    EngineeringBrowserClose,
     EngineeringArtifactLoaded(Box<Result<LoadedContent, Failure>>),
     /// A gesture on a model surface. Carries the stream rather than the
     /// surface: the camera belongs to the thing being rendered, so two
@@ -641,6 +642,9 @@ enum EngineeringArtifact {
 
 #[derive(Debug, Clone)]
 struct EngineeringProject {
+    id: String,
+    name: String,
+    owner: String,
     manifest: ProjectManifest,
     artifacts: BTreeMap<String, EngineeringArtifact>,
 }
@@ -1658,6 +1662,12 @@ impl App {
                 self.bump();
                 Task::none()
             }
+            Message::EngineeringBrowserClose => {
+                self.engineering_browser = None;
+                self.status = "Closed the project view.".into();
+                self.bump();
+                Task::none()
+            }
             Message::EngineeringArtifactLoaded(result) => {
                 match *result {
                     Ok(loaded) => self.install_loaded_content(loaded),
@@ -2046,6 +2056,35 @@ impl App {
                     self.status = "Closed the project artifacts view.".into();
                     self.bump();
                     return Task::none();
+                }
+                if self.engineering_browser.is_some() {
+                    use iced::keyboard::{Event, Key, key::Named};
+                    let action = match &kbd_event {
+                        Event::KeyPressed {
+                            key: Key::Named(Named::ArrowDown),
+                            repeat: false,
+                            ..
+                        } => Some(BrowserAction::SelectNext),
+                        Event::KeyPressed {
+                            key: Key::Named(Named::ArrowUp),
+                            repeat: false,
+                            ..
+                        } => Some(BrowserAction::SelectPrevious),
+                        Event::KeyPressed {
+                            key: Key::Named(Named::ArrowLeft | Named::Backspace),
+                            repeat: false,
+                            ..
+                        } => Some(BrowserAction::OpenParent),
+                        Event::KeyPressed {
+                            key: Key::Named(Named::Enter),
+                            repeat: false,
+                            ..
+                        } => Some(BrowserAction::OpenSelected),
+                        _ => None,
+                    };
+                    if let Some(action) = action {
+                        return self.update(Message::EngineeringBrowser(action));
+                    }
                 }
                 // Canvas-native text input to JARVIS. The text appears on the
                 // wall as an overlay, not a macOS dialog.
@@ -3651,7 +3690,12 @@ impl App {
             None => {
                 // LRU order for the empty-query view: what's open now leads,
                 // then recent departures (store already tracks them).
-                let mut recency = vec![self.document.project_id.clone()];
+                let mut recency = vec![
+                    self.engineering_browser
+                        .as_ref()
+                        .map(|browser| browser.project.id.clone())
+                        .unwrap_or_else(|| self.document.project_id.clone()),
+                ];
                 for recent in &self.workspaces.recent_project_ids {
                     if !recency.contains(recent) {
                         recency.push(recent.clone());
@@ -8774,12 +8818,17 @@ impl App {
             layers.push(picker.view(&self.catalog, &self.document.project_id));
         }
         if let Some(browser) = self.engineering_browser.as_ref() {
-            layers.push(canvas_widgets::live::project_browser::view(
+            layers.push(canvas_widgets::live::project_browser::project_view(
+                &browser.project.name,
+                &browser.project.owner,
+                &browser.project.manifest,
                 &browser.model,
                 &browser.state,
                 &self.engineering_thumbnails,
                 visual_theme,
                 Message::EngineeringBrowser,
+                Message::ShellProjects,
+                Message::EngineeringBrowserClose,
             ));
         }
         if let Some(dock) = self.minimized_dock() {
@@ -8862,7 +8911,13 @@ impl App {
         }
 
         if self.overlay_on_viewport(self.overlays.fpl_mark, viewport) {
-            let workspace_name = workspace_identity_name(&self.catalog, &self.document.project_id);
+            let workspace_name = self
+                .engineering_browser
+                .as_ref()
+                .map(|browser| browser.project.name.as_str())
+                .unwrap_or_else(|| {
+                    workspace_identity_name(&self.catalog, &self.document.project_id)
+                });
             let primary = color(palette.primary);
             // A wall is an appliance, not a tiny Mac. Present stable shell
             // identity and health instead of advertising a keyboard shortcut
@@ -9658,8 +9713,11 @@ fn merge_transmog_body(
             );
         }
         targets.insert(
-            id,
+            id.clone(),
             EngineeringProject {
+                id: id.clone(),
+                name: name.into(),
+                owner: "Transmog".into(),
                 manifest: ProjectManifest {
                     schema_version: ProjectManifest::SCHEMA_VERSION,
                     project_id: identity.into(),
@@ -9704,6 +9762,24 @@ fn merge_lob_body(
         let mut entries = Vec::new();
         let mut artifacts = BTreeMap::new();
         let mut revision = 0_u64;
+        for (field, folder, label) in [
+            ("source", "source", "Circuit source"),
+            ("panel", "source", "Panel definition"),
+            ("notes", "docs", "Design notes"),
+        ] {
+            if let Some(relative) = circuit[field].as_str() {
+                push_owner_file(
+                    &root,
+                    identity,
+                    folder,
+                    relative,
+                    label,
+                    &mut entries,
+                    &mut artifacts,
+                    &mut revision,
+                );
+            }
+        }
         for artifact in circuit["artifacts"].as_array().into_iter().flatten() {
             if artifact["status"] == "missing" {
                 continue;
@@ -9735,20 +9811,22 @@ fn merge_lob_body(
                 bytes,
                 modified_at_ms: modified,
             });
-            let locator = match media_type {
-                "application/pdf" | "image/png" | "image/jpeg" | "text/markdown" => {
-                    EngineeringArtifact::Local(path)
-                }
-                _ => EngineeringArtifact::Unavailable(format!(
+            let locator = if native_file_supported(media_type) {
+                EngineeringArtifact::Local(path)
+            } else {
+                EngineeringArtifact::Unavailable(format!(
                     "{} is in this project, but Canvas does not yet have a native {} surface.",
                     label, media_type
-                )),
+                ))
             };
             artifacts.insert(entry_id, locator);
         }
         targets.insert(
-            id,
+            id.clone(),
             EngineeringProject {
+                id: id.clone(),
+                name: name.clone(),
+                owner: "legion-of-bom".into(),
                 manifest: ProjectManifest {
                     schema_version: ProjectManifest::SCHEMA_VERSION,
                     project_id: identity.into(),
@@ -9762,6 +9840,57 @@ fn merge_lob_body(
     true
 }
 
+#[allow(clippy::too_many_arguments)]
+fn push_owner_file(
+    root: &Path,
+    identity: &str,
+    folder: &str,
+    relative: &str,
+    label: &str,
+    entries: &mut Vec<ManifestEntry>,
+    artifacts: &mut BTreeMap<String, EngineeringArtifact>,
+    revision: &mut u64,
+) {
+    let Ok(path) = root.join(relative).canonicalize() else {
+        return;
+    };
+    if !path.starts_with(root) || !path.is_file() {
+        return;
+    }
+    let Ok(metadata) = path.metadata() else {
+        return;
+    };
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as u64);
+    *revision = (*revision).max(modified.unwrap_or(0));
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(label);
+    let entry_id = format!("{identity}-{folder}-{file_name}");
+    let media_type = media_type_for_path(&path);
+    entries.push(ManifestEntry {
+        id: entry_id.clone(),
+        path: format!("{folder}/{file_name}"),
+        display_name: label.into(),
+        cid: format!("lob:{relative}:{}", modified.unwrap_or(0)),
+        media_type: media_type.into(),
+        bytes: metadata.len(),
+        modified_at_ms: modified,
+    });
+    let locator = if native_file_supported(media_type) {
+        EngineeringArtifact::Local(path)
+    } else {
+        EngineeringArtifact::Unavailable(format!(
+            "{label} is in this project, but Canvas does not yet have a native {media_type} surface."
+        ))
+    };
+    artifacts.insert(entry_id, locator);
+}
+
 fn media_type_for_path(path: &Path) -> &'static str {
     match path
         .extension()
@@ -9772,12 +9901,26 @@ fn media_type_for_path(path: &Path) -> &'static str {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "md" | "markdown" => "text/markdown",
+        "py" => "text/x-python",
+        "rs" => "text/x-rust",
+        "json" => "application/json",
+        "toml" => "text/x-toml",
+        "yaml" | "yml" => "text/yaml",
+        "txt" => "text/plain",
         "csv" => "text/csv",
         "kicad_pcb" => "application/x-kicad-pcb",
         "zip" => "application/zip",
         "html" => "text/html",
         _ => "application/octet-stream",
     }
+}
+
+fn native_file_supported(media_type: &str) -> bool {
+    media_type == "application/pdf"
+        || media_type == "application/json"
+        || media_type == "application/x-kicad-pcb"
+        || media_type.starts_with("image/")
+        || media_type.starts_with("text/")
 }
 
 /// by both connect and read timeouts, because this runs on the daemon's main
@@ -10413,10 +10556,31 @@ fn load_content(
             .unwrap_or("Untitled")
             .to_owned()
     });
-    if extension == "md" || extension == "markdown" {
+    let plain_text = matches!(
+        extension.as_str(),
+        "txt"
+            | "json"
+            | "toml"
+            | "yaml"
+            | "yml"
+            | "rs"
+            | "py"
+            | "js"
+            | "ts"
+            | "tsx"
+            | "jsx"
+            | "lua"
+            | "csv"
+            | "kicad_pcb"
+            | "kicad_sch"
+    );
+    if extension == "md" || extension == "markdown" || plain_text {
         let bytes = fs::read(&path).map_err(|error| Failure::invalid(error.to_string()))?;
-        let content = String::from_utf8(bytes)
+        let mut content = String::from_utf8(bytes)
             .map_err(|error| Failure::invalid(format!("Markdown must be valid UTF-8: {error}")))?;
+        if plain_text {
+            content = format!("```{extension}\n{}\n```", content.replace("```", "`` `"));
+        }
         let items: Vec<_> = markdown::parse(&content).collect();
         let snapshot = SurfaceSnapshot {
             id: surface_id,
@@ -14595,6 +14759,7 @@ mod tests {
         let artifact = root.join("out/slew_limiter/slew_limiter-guide.pdf");
         std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
         std::fs::write(&artifact, b"%PDF-test").unwrap();
+        std::fs::write(root.join("slew_limiter.py"), b"from skidl import *\n").unwrap();
         assert!(merge_transmog_body(
             &mut catalog,
             &mut targets,
@@ -14604,7 +14769,7 @@ mod tests {
         assert!(merge_lob_body(
             &mut catalog,
             &mut targets,
-            r#"[{"name":"slew_limiter","artifacts":[{"label":"guide-pdf","path":"out/slew_limiter/slew_limiter-guide.pdf","status":"fresh","mtime_ms":42}]},{"name":"bad/name"}]"#,
+            r#"[{"name":"slew_limiter","source":"slew_limiter.py","artifacts":[{"label":"guide-pdf","path":"out/slew_limiter/slew_limiter-guide.pdf","status":"fresh","mtime_ms":42}]},{"name":"bad/name"}]"#,
             &format!(r#"{{"root":{}}}"#, serde_json::to_string(&root).unwrap()),
         ));
         assert_eq!(targets.len(), 2);
@@ -14626,6 +14791,13 @@ mod tests {
                 .entries
                 .iter()
                 .any(|entry| entry.media_type == "application/pdf")
+        }));
+        assert!(targets.values().any(|project| {
+            project
+                .manifest
+                .entries
+                .iter()
+                .any(|entry| entry.media_type == "text/x-python")
         }));
         std::fs::remove_dir_all(&root).unwrap();
     }

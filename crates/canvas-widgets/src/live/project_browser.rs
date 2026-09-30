@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use canvas_core::VisualTheme;
 use canvas_core::project_browser::{
     BrowserAction, BrowserItem, BrowserModel, BrowserState, GalleryPlan, PreviewKind,
+    ProjectManifest,
 };
 use iced::widget::{
     button, column, container, grid, image, row, scrollable, space, text, text_input,
@@ -18,6 +19,95 @@ use iced::{ContentFit, Element, Length};
 use super::app_chrome::{
     Density, action_style, list_item_style, panel_style, rgb, work_area_style,
 };
+
+pub fn project_view<'a, Message: Clone + 'a>(
+    title: &'a str,
+    owner: &'a str,
+    manifest: &'a ProjectManifest,
+    model: &'a BrowserModel,
+    state: &'a BrowserState,
+    thumbnails: &'a BTreeMap<String, image::Handle>,
+    visual: VisualTheme,
+    on_action: impl Fn(BrowserAction) -> Message + Clone + 'a,
+    switch_project: Message,
+    close: Message,
+) -> Element<'a, Message> {
+    let metrics = visual.metrics;
+    let palette = visual.palette;
+    let insets = Density::Compact.insets(visual);
+    let header = row![
+        column![
+            text(title).size(metrics.title).color(rgb(palette.text)),
+            text(format!(
+                "{owner} PROJECT · {} FILES",
+                manifest.entries.len()
+            ))
+            .size(metrics.micro)
+            .color(rgb(palette.text_muted)),
+        ]
+        .spacing(metrics.space_1),
+        space::horizontal(),
+        button(text("PROJECTS").size(metrics.small))
+            .padding([insets.control_y, insets.control_x])
+            .on_press(switch_project)
+            .style(move |_, status| action_style(visual, false, false, status)),
+        button(text("CLOSE").size(metrics.small))
+            .padding([insets.control_y, insets.control_x])
+            .on_press(close)
+            .style(move |_, status| action_style(visual, false, false, status)),
+    ]
+    .spacing(insets.gap)
+    .align_y(iced::Alignment::Center);
+
+    let mut roots = manifest
+        .entries
+        .iter()
+        .filter_map(|entry| entry.path.split_once('/').map(|(root, _)| root))
+        .collect::<Vec<_>>();
+    roots.sort_unstable();
+    roots.dedup();
+    let mut sidebar = column![
+        text("PROJECT")
+            .size(metrics.micro)
+            .color(rgb(palette.text_muted)),
+        button(text("All files").size(metrics.body))
+            .width(Length::Fill)
+            .on_press(on_action(BrowserAction::OpenFolder(String::new())))
+            .style(move |_, status| action_style(visual, state.folder.is_empty(), false, status)),
+    ]
+    .spacing(insets.gap);
+    for root in roots {
+        let selected = state.folder == root || state.folder.starts_with(&format!("{root}/"));
+        sidebar = sidebar.push(
+            button(text(root.replace(['-', '_'], " ")).size(metrics.body))
+                .width(Length::Fill)
+                .on_press(on_action(BrowserAction::OpenFolder(root.to_owned())))
+                .style(move |_, status| action_style(visual, selected, false, status)),
+        );
+    }
+    let browser = view(model, state, thumbnails, visual, on_action);
+    container(
+        column![
+            header,
+            row![
+                container(sidebar)
+                    .padding(insets.panel)
+                    .width(Length::Fixed(180.0))
+                    .height(Length::Fill)
+                    .style(move |_| panel_style(visual)),
+                browser,
+            ]
+            .spacing(insets.gap)
+            .height(Length::Fill),
+        ]
+        .spacing(insets.gap),
+    )
+    .padding(insets.panel)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(move |_| work_area_style(visual))
+    .into()
+}
 
 pub fn view<'a, Message: Clone + 'a>(
     model: &'a BrowserModel,
