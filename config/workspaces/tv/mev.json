@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "id": "mev-research",
+  "project_id": "mev-observer",
+  "revision": 1,
+  "theme": { "source": "project" },
+  "background": { "kind": "solid", "color": [5, 8, 14, 255] },
+  "chrome": { "title": "hidden", "canvas_padding": 16, "surface_gap": 10 },
+  "surfaces": [
+    {"id":"net","title":"MEV · NET","content":{"kind":"widget","spec":{"schema_version":2,"id":"net","kind":"stat","label":"NET OPPORTUNITY · WETH","value":0,"state":"neutral","chrome":"drag_only","data":{"state":"loading","source":"unibus:mev-observer","detail":"Awaiting block-pinned evidence","provenance":"sample"}}},"inputs":[{"id":"opportunity","contract":"mev.opportunity.v1"}]},
+    {"id":"route","title":"MEV · ROUTE","content":{"kind":"widget","spec":{"schema_version":2,"id":"route","kind":"status_list","title":"ATOMIC ROUTE","nodes":[{"label":"Observer","state":"neutral","detail":"Awaiting replay"}],"chrome":"drag_only","data":{"state":"loading","source":"unibus:mev-observer","provenance":"sample"}}},"inputs":[{"id":"opportunity","contract":"mev.opportunity.v1"}]},
+    {"id":"evidence","title":"MEV · EVIDENCE","content":{"kind":"widget","spec":{"schema_version":2,"id":"evidence","kind":"table","title":"BLOCK-PINNED EVIDENCE","columns":["Measure","Value","Evidence"],"rows":[["State","—","Awaiting replay"]],"chrome":"drag_only","data":{"state":"loading","source":"unibus:mev-observer","detail":"Read-only · no signer","provenance":"sample"}}},"inputs":[{"id":"opportunity","contract":"mev.opportunity.v1"}]}
+  ],
+  "layout":{"kind":"canvas","placements":[
+    {"surface_id":"net","bounds":{"x":0.02,"y":0.03,"width":0.28,"height":0.94},"layer":0},
+    {"surface_id":"route","bounds":{"x":0.31,"y":0.03,"width":0.31,"height":0.94},"layer":0},
+    {"surface_id":"evidence","bounds":{"x":0.63,"y":0.03,"width":0.35,"height":0.94},"layer":0}
+  ]},
+  "bindings":[
+    {"id":"mev-net","source":{"owner":"mev-observer","stream":"opportunities","contract":"mev.opportunity.v1"},"target":{"surface_id":"net","input_id":"opportunity"},"adapter":"mev-opportunity-profit-v1","delivery":{"mode":"latest"}},
+    {"id":"mev-route","source":{"owner":"mev-observer","stream":"opportunities","contract":"mev.opportunity.v1"},"target":{"surface_id":"route","input_id":"opportunity"},"adapter":"mev-opportunity-route-v1","delivery":{"mode":"latest"}},
+    {"id":"mev-evidence","source":{"owner":"mev-observer","stream":"opportunities","contract":"mev.opportunity.v1"},"target":{"surface_id":"evidence","input_id":"opportunity"},"adapter":"mev-opportunity-evidence-v1","delivery":{"mode":"latest"}}
+  ],
+  "focused_surface_id":"evidence"
+}
+

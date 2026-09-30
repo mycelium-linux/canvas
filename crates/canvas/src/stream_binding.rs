@@ -424,6 +424,18 @@ pub fn apply_named_adapter_batch(
 /// added without registering it here too.
 const BUILT_IN_BINDERS: &[(&str, &str)] = &[
     (
+        "mev-opportunity-profit-v1",
+        include_str!("../../../config/binders/mev-opportunity-profit-v1.lua"),
+    ),
+    (
+        "mev-opportunity-route-v1",
+        include_str!("../../../config/binders/mev-opportunity-route-v1.lua"),
+    ),
+    (
+        "mev-opportunity-evidence-v1",
+        include_str!("../../../config/binders/mev-opportunity-evidence-v1.lua"),
+    ),
+    (
         "trader-backtest-v1",
         include_str!("../../../config/binders/trader-backtest-v1.lua"),
     ),
@@ -1088,6 +1100,39 @@ mod tests {
         };
         assert_eq!(style, canvas_widgets::HeatmapStyle::Activity);
         assert_eq!(values[1][1], 8.0);
+    }
+
+    #[test]
+    fn mev_profit_binder_reports_net_not_gross_profit() {
+        let mut target = test_spec(WidgetKind::Stat {
+            label: "Waiting".into(),
+            value: 0.0,
+            unit: None,
+            change: None,
+            state: None,
+            history: vec![],
+        });
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "mev-observer".into(),
+            stream: "opportunities".into(),
+            contract: "mev.opportunity.v1".into(),
+            project_id: Some("mev-observer".into()),
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "schema":"mev.opportunity.v1", "token":"WETH",
+                "gross_profit":2740, "gas_cost":100, "builder_payment":50,
+                "net_profit":2590, "profitable":true
+            }),
+        };
+        apply_named_adapter("mev-opportunity-profit-v1", &event, &mut target)
+            .expect("MEV net profit renders");
+        let WidgetKind::Stat { label, value, .. } = target.kind else {
+            panic!("MEV binder changed widget family")
+        };
+        assert_eq!(label, "NET OPPORTUNITY · WETH");
+        assert_eq!(value, 2590.0);
     }
 
     #[test]
