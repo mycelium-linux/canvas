@@ -11,6 +11,7 @@ use iced::widget::{Canvas, canvas, column, row, space, text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::signal_scene;
 use super::{CacheState, Key};
 
 pub(super) fn element<'a, Message: 'a>(
@@ -166,8 +167,8 @@ pub(super) fn element<'a, Message: 'a>(
             profitable,
             evaluated_candidates,
         } => {
-            let p = visual.palette;
             let m = visual.metrics;
+            let signals = signal_scene::SignalPalette::from_theme(visual);
             Canvas::new(MevOpportunityProgram {
                 chain_id: *chain_id,
                 block_number: *block_number,
@@ -183,12 +184,16 @@ pub(super) fn element<'a, Message: 'a>(
                 net_profit: *net_profit,
                 profitable: *profitable,
                 evaluated_candidates: *evaluated_candidates,
-                signal: rgb(if *profitable { p.success } else { p.danger }),
-                info: rgb(p.info),
-                warning: rgb(p.warning),
-                text: rgb(p.text),
-                muted: rgb(p.text_muted),
-                grid: alpha(rgb(p.border), visual.grid_opacity * 0.45),
+                signal: if *profitable {
+                    signals.positive
+                } else {
+                    signals.negative
+                },
+                info: signals.source,
+                warning: signals.transform,
+                text: signals.text,
+                muted: signals.muted,
+                grid: signals.grid,
                 label_size: m.micro,
                 body_size: m.body,
                 title_size: m.title,
@@ -338,40 +343,19 @@ impl<Message> canvas::Program<Message> for MevOpportunityProgram<'_> {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as f32;
-        let phase = (now_ms % 4_000.0) / 4_000.0;
+        let phase = signal_scene::phase(now_ms as u128, 4_000);
         let margin = bounds.width * 0.035;
         let top = bounds.height * 0.055;
         let bottom = bounds.height * 0.93;
 
         // A restrained operator grid gives motion and geometry a stable frame.
         let grid_step = (bounds.width / 24.0).max(48.0);
-        let mut x = margin;
-        while x < bounds.width - margin {
-            frame.stroke(
-                &canvas::Path::line(Point::new(x, top), Point::new(x, bottom)),
-                canvas::Stroke::default()
-                    .with_width(1.0)
-                    .with_color(self.grid),
-            );
-            x += grid_step;
-        }
-        let mut y = top;
-        while y < bottom {
-            frame.stroke(
-                &canvas::Path::line(Point::new(margin, y), Point::new(bounds.width - margin, y)),
-                canvas::Stroke::default()
-                    .with_width(1.0)
-                    .with_color(self.grid),
-            );
-            y += grid_step;
-        }
+        let field_origin = Point::new(margin, top);
+        let field_size = Size::new(bounds.width - margin * 2.0, bottom - top);
+        signal_scene::grid(&mut frame, field_origin, field_size, grid_step, self.grid);
 
         // A live scan line makes time first-class without obscuring evidence.
-        let scan_x = margin + phase * (bounds.width - margin * 2.0);
-        frame.fill(
-            &canvas::Path::rectangle(Point::new(scan_x, top), Size::new(2.0, bottom - top)),
-            alpha(self.info, 0.18),
-        );
+        signal_scene::scan_line(&mut frame, field_origin, field_size, phase, self.info);
 
         draw_text(
             &mut frame,
@@ -449,37 +433,24 @@ impl<Message> canvas::Program<Message> for MevOpportunityProgram<'_> {
         ];
         let node_colors = [self.info, self.warning, self.signal];
         for (index, center_x) in node_x.iter().enumerate() {
-            let pulse = ((phase + index as f32 * 0.23) % 1.0 * core::f32::consts::TAU)
-                .sin()
-                .abs();
             let center = Point::new(*center_x, route_y);
-            for ring in (1..=3).rev() {
-                frame.stroke(
-                    &canvas::Path::circle(center, 25.0 + ring as f32 * 10.0 + pulse * 5.0),
-                    canvas::Stroke::default()
-                        .with_width(1.0)
-                        .with_color(alpha(node_colors[index], 0.08 * (4 - ring) as f32)),
-                );
-            }
-            frame.fill(&canvas::Path::circle(center, 9.0), node_colors[index]);
+            signal_scene::pulse_node(
+                &mut frame,
+                center,
+                (phase + index as f32 * 0.23) % 1.0,
+                node_colors[index],
+            );
         }
         for leg in 0..2 {
             let start = node_x[leg] + 44.0;
             let end = node_x[leg + 1] - 44.0;
-            frame.stroke(
-                &canvas::Path::line(Point::new(start, route_y), Point::new(end, route_y)),
-                canvas::Stroke::default()
-                    .with_width(2.0)
-                    .with_color(alpha(node_colors[leg], 0.55)),
+            signal_scene::flow(
+                &mut frame,
+                Point::new(start, route_y),
+                Point::new(end, route_y),
+                (phase + leg as f32 * 0.13) % 1.0,
+                node_colors[leg],
             );
-            for particle in 0..5 {
-                let t = (phase * 1.7 + particle as f32 / 5.0 + leg as f32 * 0.13) % 1.0;
-                let px = start + (end - start) * t;
-                frame.fill(
-                    &canvas::Path::circle(Point::new(px, route_y), 2.5 + 2.0 * (1.0 - t)),
-                    node_colors[leg],
-                );
-            }
         }
         let node_labels = [
             ("CAPITAL", format!("{:.6} {}", self.amount_in, self.token)),

@@ -8,7 +8,8 @@
 use crate::{
     ApprovalStatus, BurnRateWindow, ChartType, ClockMode, DistributionGroup, DistributionStyle,
     EventEntry, HeatmapStyle, HierarchyNode, HierarchyStyle, MeterStyle, MetricBoardStyle,
-    ModelAnnotation, ModelView, NeuralEdge, NeuralNode, RichCardFormat, SpanTimelineStyle,
+    ModelAnnotation, ModelView, NetworkLink, NetworkLinkKind, NetworkNode, NetworkNodeKind,
+    NetworkSegment, NetworkSegmentKind, NeuralEdge, NeuralNode, RichCardFormat, SpanTimelineStyle,
     SpatialBounds, SpatialTrack, StateLane, StatusLevel, StatusState, TargetMetric, TimedSpan,
     WidgetChrome, WidgetDataState, WidgetKind, WidgetSpec,
 };
@@ -25,10 +26,32 @@ use iced::widget::{
 };
 use iced::{Color, ContentFit, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
+pub mod app_chrome;
 mod clock;
 mod quality;
 mod quant;
+mod signal_scene;
+mod wasm_cdg;
+mod wasm_hyperspace;
 use clock::AnalogClockProgram;
+
+pub fn loading_rails<Message: 'static>(visual: VisualTheme) -> Element<'static, Message> {
+    let palette = visual.palette;
+    column![
+        progress_bar(0.0..=1.0, 0.82).style(move |_| progress_bar::Style {
+            background: with_alpha(color(palette.surface_muted), 0.7).into(),
+            bar: color(palette.primary).into(),
+            border: iced::Border::default(),
+        }),
+        progress_bar(0.0..=1.0, 0.56).style(move |_| progress_bar::Style {
+            background: with_alpha(color(palette.surface_muted), 0.7).into(),
+            bar: with_alpha(color(palette.primary), 0.72).into(),
+            border: iced::Border::default(),
+        }),
+    ]
+    .spacing(visual.metrics.space_1)
+    .into()
+}
 
 /// Per-program cache state. Stores an iced `Cache` plus a data-derived key.
 ///
@@ -410,6 +433,112 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                     .collect()
             };
             panel(spec, row(tiles).spacing(metrics.space_2).into(), visual)
+        }
+        WidgetKind::LyricsDisplay {
+            title,
+            artist,
+            artwork_source: _,
+            lines: _,
+            position_ms: _,
+            duration_ms: _,
+            playing: _,
+            style: _,
+            scroll_offset: _,
+            highlight_intensity: _,
+        } => {
+            // Placeholder - full implementation in progress
+            // TODO: Implement lyrics display with hyperspace animations
+            container(
+                column![
+                    text(title)
+                        .size(visual.metrics.title)
+                        .color(color(palette.text)),
+                    text(artist)
+                        .size(visual.metrics.small)
+                        .color(color(palette.text_muted)),
+                    text("[LYRICS DISPLAY - IMPLEMENTATION IN PROGRESS]")
+                        .size(visual.metrics.small)
+                        .color(color(palette.info)),
+                ]
+                .spacing(visual.metrics.space_2)
+                .width(Length::Fill)
+                .height(Length::Fill),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center(Length::Fill)
+            .into()
+        }
+        WidgetKind::HyperspaceShader {
+            shader_id,
+            speed,
+            scale,
+        } => {
+            // Hyperspace shader visualizer drawing through the canvas program.
+            // The renderer starts at t=0; a host tick drives `update` once
+            // animation wiring lands.
+            let renderer = wasm_hyperspace::HyperspaceRenderer::new(shader_id, *speed, *scale);
+            container(
+                column![
+                    text(format!("Hyperspace: {}", shader_id))
+                        .size(visual.metrics.title)
+                        .color(color(palette.text)),
+                    text(format!("Speed: {:.2} | Scale: {:.1}x", speed, scale))
+                        .size(visual.metrics.small)
+                        .color(color(palette.text_muted)),
+                    renderer.into_element(),
+                ]
+                .spacing(visual.metrics.space_2)
+                .width(Length::Fill)
+                .height(Length::Fill),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center(Length::Fill)
+            .into()
+        }
+        WidgetKind::CdgViewer {
+            title,
+            source,
+            current_frame,
+            total_frames,
+            position_ms: _,
+            duration_ms: _,
+            playing: _,
+            scale,
+        } => {
+            // CDG viewer drawing through the canvas program. The framebuffer
+            // starts in its border state; frame packets are applied by
+            // `init_from_frame` once a CDG data source is wired up.
+            let renderer = wasm_cdg::CdgRenderer::new(title, fresh.values);
+            container(
+                column![
+                    text(title)
+                        .size(visual.metrics.title)
+                        .color(color(palette.text)),
+                    text(format!("CDG: {}", source))
+                        .size(visual.metrics.small)
+                        .color(color(palette.text_muted)),
+                    text(format!(
+                        "Frame {}/{}",
+                        current_frame,
+                        (*total_frames).max(1)
+                    ))
+                    .size(visual.metrics.small)
+                    .color(color(palette.info)),
+                    text(format!("Scale: {:.1}x", scale))
+                        .size(visual.metrics.micro)
+                        .color(color(palette.text_muted)),
+                    renderer.into_element(),
+                ]
+                .spacing(visual.metrics.space_2)
+                .width(Length::Fill)
+                .height(Length::Fill),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center(Length::Fill)
+            .into()
         }
         WidgetKind::Text { text: body } => panel(
             spec,
@@ -1548,6 +1677,49 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
             .into(),
             visual,
         ),
+        WidgetKind::NetworkTopology {
+            title,
+            segments,
+            nodes,
+            links,
+            conflicts,
+        } => panel(
+            spec,
+            column![
+                row![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    space::horizontal(),
+                    text(if *conflicts == 0 {
+                        format!("{} zones · {} nodes", segments.len(), nodes.len())
+                    } else {
+                        format!(
+                            "{} zones · {} nodes · {} conflicts",
+                            segments.len(),
+                            nodes.len(),
+                            conflicts
+                        )
+                    })
+                    .size(metrics.small)
+                    .color(color(if *conflicts == 0 {
+                        palette.text_muted
+                    } else {
+                        palette.warning
+                    })),
+                ],
+                Canvas::new(NetworkTopologyProgram {
+                    segments: segments.clone(),
+                    nodes: nodes.clone(),
+                    links: links.clone(),
+                    palette: *palette,
+                    label_size: metrics.micro,
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .spacing(metrics.space_2)
+            .into(),
+            visual,
+        ),
         WidgetKind::DagGraph {
             title,
             nodes,
@@ -1836,6 +2008,221 @@ impl<Message> canvas::Program<Message> for SpatialTracksProgram {
                     size: iced::Pixels(self.label_size),
                     ..Default::default()
                 });
+            }
+        })
+    }
+}
+
+struct NetworkTopologyProgram {
+    segments: Vec<NetworkSegment>,
+    nodes: Vec<NetworkNode>,
+    links: Vec<NetworkLink>,
+    palette: ThemePalette,
+    label_size: f32,
+}
+
+impl<Message> canvas::Program<Message> for NetworkTopologyProgram {
+    type State = CacheState;
+
+    fn draw(
+        &self,
+        state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let key = self.nodes.iter().fold(
+            Key::new()
+                .add_usize(self.segments.len())
+                .add_usize(self.links.len()),
+            |key, node| {
+                let key = key
+                    .add_str(&node.id)
+                    .add_str(&node.label)
+                    .add_u64(node.state as u64);
+                let key = node.sites.iter().fold(key, |key, site| key.add_str(site));
+                match &node.detail {
+                    Some(detail) => key.add_str(detail),
+                    None => key,
+                }
+            },
+        );
+        let key = self
+            .segments
+            .iter()
+            .fold(key, |key, segment| match &segment.site {
+                Some(site) => key.add_str(site),
+                None => key,
+            });
+        state.draw_cached(renderer, bounds.size(), key.build(), |frame| {
+            let mut ordered_segments = self.segments.iter().collect::<Vec<_>>();
+            ordered_segments.sort_by(|left, right| {
+                left.site
+                    .cmp(&right.site)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            let count = ordered_segments.len().max(1) as f32;
+            let gap = 10.0;
+            let top = 68.0;
+            let zone_w = ((bounds.width - gap * (count + 1.0)) / count).max(80.0);
+            let zone_h = (bounds.height - top - gap).max(60.0);
+            let mut zones = std::collections::BTreeMap::new();
+            let mut site_extents = std::collections::BTreeMap::<String, (f32, f32)>::new();
+            for (index, segment) in ordered_segments.iter().enumerate() {
+                let origin = Point::new(gap + index as f32 * (zone_w + gap), top);
+                let rect = Path::rounded_rectangle(origin, Size::new(zone_w, zone_h), 5.0.into());
+                let accent = match segment.kind {
+                    NetworkSegmentKind::Lan => self.palette.info,
+                    NetworkSegmentKind::Vlan => self.palette.primary,
+                    NetworkSegmentKind::Wan => self.palette.warning,
+                    NetworkSegmentKind::PointToPoint => self.palette.success,
+                };
+                frame.fill(&rect, with_alpha(color(accent), 0.08));
+                frame.stroke(
+                    &rect,
+                    canvas::Stroke::default()
+                        .with_width(1.0)
+                        .with_color(with_alpha(color(accent), 0.55)),
+                );
+                frame.fill_text(canvas::Text {
+                    content: segment.label.clone(),
+                    position: Point::new(origin.x + 8.0, origin.y + 16.0),
+                    color: color(self.palette.text),
+                    size: iced::Pixels(self.label_size),
+                    ..Default::default()
+                });
+                let meta = segment
+                    .subnet
+                    .clone()
+                    .or_else(|| segment.vlan.map(|vlan| format!("VLAN {vlan}")))
+                    .unwrap_or_else(|| format!("{:?}", segment.kind).to_lowercase());
+                frame.fill_text(canvas::Text {
+                    content: meta,
+                    position: Point::new(origin.x + 8.0, origin.y + 31.0),
+                    color: color(self.palette.text_muted),
+                    size: iced::Pixels(self.label_size),
+                    ..Default::default()
+                });
+                zones.insert(segment.id.clone(), (origin, Size::new(zone_w, zone_h)));
+                if let Some(site) = &segment.site {
+                    let extent = site_extents
+                        .entry(site.clone())
+                        .or_insert((origin.x, origin.x + zone_w));
+                    extent.0 = extent.0.min(origin.x);
+                    extent.1 = extent.1.max(origin.x + zone_w);
+                }
+            }
+            for (site, (left, right)) in site_extents {
+                frame.stroke(
+                    &Path::line(Point::new(left, 30.0), Point::new(right, 30.0)),
+                    canvas::Stroke::default()
+                        .with_width(2.0)
+                        .with_color(with_alpha(color(self.palette.primary), 0.55)),
+                );
+                frame.fill_text(canvas::Text {
+                    content: site,
+                    position: Point::new(left + 4.0, 23.0),
+                    color: color(self.palette.text),
+                    size: iced::Pixels(self.label_size),
+                    ..Default::default()
+                });
+            }
+
+            let mut positions = std::collections::BTreeMap::new();
+            let infrastructure = self
+                .nodes
+                .iter()
+                .filter(|node| node.segments.len() != 1)
+                .collect::<Vec<_>>();
+            for (index, node) in infrastructure.iter().enumerate() {
+                positions.insert(
+                    node.id.clone(),
+                    Point::new(28.0 + index as f32 * 128.0, 48.0),
+                );
+            }
+            for segment in ordered_segments {
+                let members = self
+                    .nodes
+                    .iter()
+                    .filter(|node| node.segments.len() == 1 && node.segments[0] == segment.id)
+                    .collect::<Vec<_>>();
+                if let Some((origin, size)) = zones.get(&segment.id) {
+                    for (index, node) in members.iter().enumerate() {
+                        let columns = ((size.width - 20.0) / 105.0).floor().max(1.0) as usize;
+                        let row = index / columns;
+                        let column = index % columns;
+                        positions.insert(
+                            node.id.clone(),
+                            Point::new(
+                                origin.x + 18.0 + column as f32 * 105.0,
+                                origin.y + 58.0 + row as f32 * 42.0,
+                            ),
+                        );
+                    }
+                }
+            }
+            for link in &self.links {
+                if let (Some(from), Some(to)) = (positions.get(&link.from), positions.get(&link.to))
+                {
+                    let width = match link.kind {
+                        NetworkLinkKind::Trunk => 3.0,
+                        NetworkLinkKind::Uplink => 2.5,
+                        _ => 1.5,
+                    };
+                    frame.stroke(
+                        &Path::line(*from, *to),
+                        canvas::Stroke::default()
+                            .with_width(width)
+                            .with_color(with_alpha(status_color(link.state, &self.palette), 0.72)),
+                    );
+                }
+            }
+            for node in &self.nodes {
+                let Some(position) = positions.get(&node.id) else {
+                    continue;
+                };
+                let semantic = status_color(node.state, &self.palette);
+                let shape = match node.kind {
+                    NetworkNodeKind::Host => Path::circle(*position, 6.0),
+                    NetworkNodeKind::Device => Path::rounded_rectangle(
+                        Point::new(position.x - 7.0, position.y - 6.0),
+                        Size::new(14.0, 12.0),
+                        2.0.into(),
+                    ),
+                    NetworkNodeKind::Gateway => Path::new(|path| {
+                        path.move_to(Point::new(position.x, position.y - 8.0));
+                        path.line_to(Point::new(position.x + 8.0, position.y));
+                        path.line_to(Point::new(position.x, position.y + 8.0));
+                        path.line_to(Point::new(position.x - 8.0, position.y));
+                        path.close();
+                    }),
+                };
+                frame.fill(&shape, semantic);
+                frame.fill_text(canvas::Text {
+                    content: node.label.clone(),
+                    position: Point::new(position.x + 11.0, position.y + 4.0),
+                    color: color(self.palette.text),
+                    size: iced::Pixels(self.label_size),
+                    ..Default::default()
+                });
+                let physical = if node.sites.is_empty() {
+                    node.detail.clone()
+                } else {
+                    Some(match &node.detail {
+                        Some(detail) => format!("{} · {detail}", node.sites.join(", ")),
+                        None => node.sites.join(", "),
+                    })
+                };
+                if let Some(physical) = physical {
+                    frame.fill_text(canvas::Text {
+                        content: physical,
+                        position: Point::new(position.x + 11.0, position.y + 17.0),
+                        color: color(self.palette.text_muted),
+                        size: iced::Pixels((self.label_size - 2.0).max(8.0)),
+                        ..Default::default()
+                    });
+                }
             }
         })
     }
