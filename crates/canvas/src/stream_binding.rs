@@ -1140,6 +1140,49 @@ mod tests {
     }
 
     #[test]
+    fn mev_scene_binder_builds_the_full_bleed_quant_instrument() {
+        let mut target = test_spec(WidgetKind::Stat {
+            label: "Waiting".into(),
+            value: 0.0,
+            unit: None,
+            change: None,
+            state: None,
+            history: vec![],
+        });
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "mev-observer".into(),
+            stream: "opportunities".into(),
+            contract: "mev.opportunity.v1".into(),
+            project_id: Some("home".into()),
+            sequence: 2,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "schema":"mev.opportunity.v1", "chain_id":1, "block_number":26088562,
+                "block_hash":"0x28d50943000000000000000000000000000000000000000000000000ca1c9cd5",
+                "token":"WETH", "route":["uniswap-v2","sushiswap-v2"],
+                "amount_in":10000000000000000_u64, "amount_after_first":26603579,
+                "amount_out":9936000000000000_u64, "gross_profit":-64000000000000_i64,
+                "gas_cost":374000000000000_u64, "builder_payment":0, "net_profit":-438000000000000_i64,
+                "profitable":false, "evaluated_candidates":500
+            }),
+        };
+        apply_named_adapter("mev-opportunity-scene-v1", &event, &mut target)
+            .expect("MEV scene renders");
+        let WidgetKind::Quant {
+            widget:
+                QuantWidget::MevOpportunity {
+                    route, net_profit, ..
+                },
+        } = target.kind
+        else {
+            panic!("MEV scene binder did not build its quant instrument")
+        };
+        assert_eq!(route, vec!["uniswap-v2", "sushiswap-v2"]);
+        assert!((net_profit - -0.000438).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn trader_backtest_binder_preserves_evidence_and_research_metrics() {
         let mut target = test_spec(WidgetKind::Quant {
             widget: QuantWidget::Backtest {
