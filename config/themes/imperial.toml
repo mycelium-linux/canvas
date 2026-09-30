@@ -3,6 +3,13 @@ id = "imperial"
 name = "Imperial"
 subtitle = "Severe command console"
 
+[motion]
+micro_ms = 65
+transition_ms = 190
+entrance_ms = 220
+stagger_ms = 35
+easing = "precise"
+
 [palette]
 background = "#08090b"
 background_strong = "#0e1013"

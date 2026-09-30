@@ -67,6 +67,27 @@
    }
   },
   {
+   "kind": "market.order_book.v1",
+   "target": {
+    "mode": "capability",
+    "name": "canvas.display"
+   }
+  },
+  {
+   "kind": "market.trade.v1",
+   "target": {
+    "mode": "capability",
+    "name": "canvas.display"
+   }
+  },
+  {
+   "kind": "market.ohlcv.raw.v1",
+   "target": {
+    "mode": "capability",
+    "name": "canvas.display"
+   }
+  },
+  {
    "kind": "canvas.result",
    "target": {
     "mode": "producer"
@@ -114,7 +135,9 @@
     "screen-tv"
    ],
    "publishes": [
-    "canvas.workspace_state.v1"
+    "canvas.workspace_state.v1",
+    "canvas.result",
+    "canvas_command_result"
    ],
    "publish_zones": [
     "living-room"
@@ -176,7 +199,8 @@
    ],
    "publishes": [
     "canvas.workspace_state.v1",
-    "canvas.model.camera.v1"
+    "canvas.model.camera.v1",
+    "canvas.prompt.v1"
    ],
    "publish_zones": [
     "living-room"
@@ -378,7 +402,7 @@
   },
   {
    "producer_id": "macbook-neo-agent-bridge",
-   "token_file": "/home/ajmwagar/.config/unibus/tokens/macbook-neo-agent-bridge.token",
+   "token_file": "/home/ajm/.config/unibus/tokens/macbook-neo-agent-bridge.token",
    "zones": [
     "living-room"
    ],
@@ -394,6 +418,24 @@
    ],
    "capabilities": [
     "canvas.agent"
+   ]
+  },
+  {
+   "producer_id": "trader-alpaca",
+   "token_file": "/home/ajm/.config/unibus/tokens/trader-alpaca.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "market.stream"
+   ],
+   "publishes": [
+    "market.order_book.v1",
+    "market.trade.v1",
+    "market.ohlcv.raw.v1"
+   ],
+   "publish_zones": [
+    "living-room"
    ]
   }
  ]

@@ -118,6 +118,9 @@ def plist(binary: pathlib.Path, home: pathlib.Path, port: int) -> bytes:
         "EnvironmentVariables": {
             "HOME": str(home),
             "PATH": f"{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            "DOCK_CANVAS_CENTRAL_BIN": str(home / ".local/bin/canvas-central"),
+            "DOCK_CANVAS_CENTRAL_CONFIG": str(home / "Library/Application Support/Dock/canvas-central.json"),
+            "DOCK_CANVAS_PRESENCE_SCREEN": "screen-tv",
         },
         "RunAtLoad": True,
         "KeepAlive": True,

@@ -8,10 +8,6 @@ return {
   -- coordinate-system assumption.
   model_rotation_degrees = { -90, 0, 0 },
   camera = "iso",
-  orbit = {
-    axis = { 0, 1, 0 },
-    degrees_per_second = 18,
-  },
   material = {
     color = nil,
     glow = 1.35,

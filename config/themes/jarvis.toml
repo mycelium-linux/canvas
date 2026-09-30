@@ -3,6 +3,13 @@ id = "jarvis"
 name = "JARVIS"
 subtitle = "Luminous instrumentation"
 
+[motion]
+micro_ms = 95
+transition_ms = 260
+entrance_ms = 380
+stagger_ms = 55
+easing = "fluid"
+
 [palette]
 background = "#020a11"
 background_strong = "#041420"

@@ -118,6 +118,29 @@ pub enum Command {
         visible: bool,
     },
     Focus,
+    /// Route a browser key through the same state machine as a local key.
+    /// The loopback browser host is only a transport; Canvas retains ownership
+    /// of focus, picker, prompt, terminal and model-view semantics.
+    BrowserKey {
+        key: String,
+        #[serde(default)]
+        shift: bool,
+        #[serde(default)]
+        control: bool,
+        #[serde(default)]
+        alt: bool,
+        #[serde(default)]
+        meta: bool,
+    },
+    /// Pointer gesture in normalized full-Canvas coordinates. Normalization
+    /// keeps browser device-pixel ratio and cover-cropping out of the protocol.
+    BrowserPointer {
+        phase: String,
+        x: f32,
+        y: f32,
+        #[serde(default)]
+        delta: f32,
+    },
     Navigate {
         surface_id: String,
         target: Navigation,
@@ -661,6 +684,8 @@ pub enum Receipt {
         visible: bool,
     },
     Focused,
+    BrowserKeyAccepted,
+    BrowserPointerAccepted,
     Navigated {
         surface_id: String,
         page_index: u32,
@@ -1072,6 +1097,26 @@ impl ControlRequest {
                     return Err(format!(
                         "background shader speed must be between 0 and {MAX_BACKGROUND_SHADER_SPEED}"
                     ));
+                }
+            }
+            Command::BrowserKey { key, .. } => {
+                if key.is_empty()
+                    || key.len() > 32
+                    || key.chars().any(|character| character.is_control())
+                {
+                    return Err("browser key must be visible and at most 32 bytes".into());
+                }
+            }
+            Command::BrowserPointer { phase, x, y, delta } => {
+                if !matches!(phase.as_str(), "press" | "drag" | "release" | "zoom")
+                    || !x.is_finite()
+                    || !y.is_finite()
+                    || !(0.0..=1.0).contains(x)
+                    || !(0.0..=1.0).contains(y)
+                    || !delta.is_finite()
+                    || delta.abs() > 100.0
+                {
+                    return Err("invalid normalized browser pointer gesture".into());
                 }
             }
             Command::OpenOperationalView { view_id } => {
@@ -1686,6 +1731,8 @@ pub mod text {
                         snapshot.display_frames.len(),
                         snapshot.visible
                     ),
+                    Receipt::BrowserKeyAccepted => "browser key accepted".to_string(),
+                    Receipt::BrowserPointerAccepted => "browser pointer accepted".to_string(),
                     Receipt::DocumentApplied { workspace_id } => {
                         format!("document={}", workspace_id)
                     }
@@ -1902,6 +1949,32 @@ mod tests {
             },
         };
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn browser_pointer_commands_require_bounded_normalized_coordinates() {
+        let request = |phase: &str, x: f32, y: f32, delta: f32| ControlRequest {
+            schema_version: CONTROL_VERSION,
+            request_id: "browser-pointer".into(),
+            expected_revision: None,
+            actor: None,
+            command: Command::BrowserPointer {
+                phase: phase.into(),
+                x,
+                y,
+                delta,
+            },
+        };
+
+        request("drag", 0.25, 0.75, 0.0).validate().unwrap();
+        assert!(request("hover", 0.25, 0.75, 0.0).validate().is_err());
+        assert!(request("drag", -0.01, 0.75, 0.0).validate().is_err());
+        assert!(request("drag", 0.25, 1.01, 0.0).validate().is_err());
+        assert!(
+            request("zoom", 0.25, 0.75, f32::INFINITY)
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]

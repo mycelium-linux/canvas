@@ -11,14 +11,34 @@ use canvas_core::ThemePalette;
 use iced::animation::Easing;
 use std::time::{Duration, Instant};
 
-/// Default transition duration: fast enough to feel immediate, slow enough to
-/// follow a layout shift across three displays.
-pub const TRANSITION_DURATION: Duration = Duration::from_millis(280);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Curve {
+    Fluid,
+    Terminal,
+    Precise,
+}
 
-/// The easing used for all Canvas transitions — EaseOutCubic, matching the
-/// prior hand-rolled implementation but sourced from the shared `lilt` easing
-/// table so the palette and placement transitions agree with widget animations.
-const TRANSITION_EASING: Easing = Easing::EaseOutCubic;
+impl Curve {
+    pub fn from_theme(value: &str) -> Self {
+        match value {
+            "terminal" => Self::Terminal,
+            "precise" => Self::Precise,
+            _ => Self::Fluid,
+        }
+    }
+
+    fn value(self, t: f32) -> f32 {
+        match self {
+            Self::Fluid => Easing::EaseOutCubic.value(t),
+            // A quick linear acquisition reads like a terminal repaint while
+            // remaining smooth and interruptible.
+            Self::Terminal => Easing::Linear.value(t),
+            // Imperial motion lands firmly without the luminous oversoften of
+            // the fluid curve.
+            Self::Precise => Easing::EaseOutQuad.value(t),
+        }
+    }
+}
 
 /// The bounds a brand-new surface starts from: its target shrunk about its
 /// own center. Subtle enough to read as an arrival, not a zoom.
@@ -32,10 +52,13 @@ fn arrive_from(target: [f32; 4]) -> [f32; 4] {
 }
 
 /// Eased progress of a transition that started at `started`, 1.0 once done.
-pub fn progress_at(started: Instant, duration: Duration) -> f32 {
+pub fn progress_at(started: Instant, duration: Duration, curve: Curve) -> f32 {
+    if duration.is_zero() {
+        return 1.0;
+    }
     let elapsed = started.elapsed().as_secs_f32();
     let t = (elapsed / duration.as_secs_f32()).clamp(0.0, 1.0);
-    TRANSITION_EASING.value(t)
+    curve.value(t)
 }
 
 pub fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -74,6 +97,7 @@ pub fn lerp_palette(a: ThemePalette, b: ThemePalette, t: f32) -> ThemePalette {
 pub struct Transition {
     pub started: Instant,
     pub duration: Duration,
+    pub curve: Curve,
     /// Previous normalized surface bounds, keyed by surface id.
     pub from_placements: std::collections::BTreeMap<String, [f32; 4]>,
     pub from_palette: ThemePalette,
@@ -82,12 +106,15 @@ pub struct Transition {
 impl Transition {
     pub fn new(
         started: Instant,
+        duration: Duration,
+        curve: Curve,
         from_placements: std::collections::BTreeMap<String, [f32; 4]>,
         from_palette: ThemePalette,
     ) -> Self {
         Self {
             started,
-            duration: TRANSITION_DURATION,
+            duration,
+            curve,
             from_placements,
             from_palette,
         }
@@ -95,7 +122,7 @@ impl Transition {
 
     /// Eased interpolation factor; 1.0 means the transition is finished.
     pub fn factor(&self) -> f32 {
-        progress_at(self.started, self.duration)
+        progress_at(self.started, self.duration, self.curve)
     }
 
     pub fn done(&self) -> bool {
@@ -154,10 +181,12 @@ mod tests {
     #[test]
     fn easing_starts_fast_and_lands_soft() {
         // EaseOutCubic from lilt: 0 → 0, 1 → 1, fast start, soft landing.
-        assert_eq!(TRANSITION_EASING.value(0.0), 0.0);
-        assert_eq!(TRANSITION_EASING.value(1.0), 1.0);
-        assert!(TRANSITION_EASING.value(0.25) > 0.25);
-        assert!(TRANSITION_EASING.value(0.25) < TRANSITION_EASING.value(0.75));
+        assert_eq!(Curve::Fluid.value(0.0), 0.0);
+        assert_eq!(Curve::Fluid.value(1.0), 1.0);
+        assert!(Curve::Fluid.value(0.25) > 0.25);
+        assert!(Curve::Fluid.value(0.25) < Curve::Fluid.value(0.75));
+        assert_ne!(Curve::Fluid.value(0.5), Curve::Terminal.value(0.5));
+        assert_ne!(Curve::Fluid.value(0.5), Curve::Precise.value(0.5));
     }
 
     #[test]
@@ -183,13 +212,16 @@ mod tests {
         let started = Instant::now() - Duration::from_millis(10);
         let mut from = std::collections::BTreeMap::new();
         from.insert("a".to_string(), [0.0, 0.0, 0.5, 0.5]);
-        let transition = Transition::new(started, from.clone(), palette(0));
+        let duration = Duration::from_millis(280);
+        let transition = Transition::new(started, duration, Curve::Fluid, from.clone(), palette(0));
         assert!(!transition.done());
         let mid = transition.placement("a", [0.4, 0.4, 0.6, 0.6]);
         assert!(mid[0] > 0.0 && mid[0] < 0.4);
 
         let finished = Transition::new(
-            Instant::now() - TRANSITION_DURATION - Duration::from_millis(50),
+            Instant::now() - duration - Duration::from_millis(50),
+            duration,
+            Curve::Fluid,
             from,
             palette(0),
         );
@@ -206,6 +238,8 @@ mod tests {
         let target = [0.1, 0.2, 0.3, 0.4];
         let fresh = Transition::new(
             Instant::now(),
+            Duration::from_millis(280),
+            Curve::Fluid,
             std::collections::BTreeMap::new(),
             palette(0),
         );
@@ -219,10 +253,25 @@ mod tests {
         // A finished transition puts a new surface exactly on its target, so
         // the arrival can never leave a surface resting at the shrunk bounds.
         let settled = Transition::new(
-            Instant::now() - TRANSITION_DURATION - Duration::from_millis(50),
+            Instant::now() - Duration::from_millis(330),
+            Duration::from_millis(280),
+            Curve::Fluid,
             std::collections::BTreeMap::new(),
             palette(0),
         );
         assert_eq!(settled.placement("brand-new", target), target);
+    }
+
+    #[test]
+    fn zero_duration_motion_snaps_without_nan() {
+        let transition = Transition::new(
+            Instant::now(),
+            Duration::ZERO,
+            Curve::Fluid,
+            std::collections::BTreeMap::new(),
+            palette(0),
+        );
+        assert!(transition.done());
+        assert_eq!(transition.factor(), 1.0);
     }
 }

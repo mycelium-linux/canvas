@@ -3,6 +3,13 @@ id = "pip-boy"
 name = "Pip-Boy"
 subtitle = "Field terminal phosphor"
 
+[motion]
+micro_ms = 70
+transition_ms = 180
+entrance_ms = 260
+stagger_ms = 95
+easing = "terminal"
+
 [palette]
 background = "#050d06"
 background_strong = "#081609"

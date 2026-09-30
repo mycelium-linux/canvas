@@ -146,8 +146,7 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
             // never decoded anything until Canvas happened to win the race.
             // A roster nobody can receive yet is a reason to try again later,
             // not a reason to stop decoding video.
-            if let Err(error) = publish_speedy_roster(&config.bus.producer_id, beat, &live)
-            {
+            if let Err(error) = publish_speedy_roster(&config.bus.producer_id, beat, &live) {
                 eprintln!("canvas-media-edge: roster not published yet: {error:#}");
             }
         }
@@ -167,19 +166,19 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
                 let valid_until = stream.valid_until_unix_ms;
                 decoders.upsert(
                     CameraStream {
-                    schema_version: stream.schema_version,
-                    camera_id: stream.stream_id,
-                    display_name: stream.display_name,
-                    zone: stream.zone,
-                    transport: stream.transport,
-                    transport_role: stream.transport_role,
-                    endpoint: stream.endpoint,
-                    codec: stream.codec,
-                    width: stream.width,
-                    height: stream.height,
-                    frame_rate_millihz: stream.frame_rate_millihz,
-                    announced_at_unix_ms: stream.announced_at_unix_ms,
-                    valid_until_unix_ms: stream.valid_until_unix_ms,
+                        schema_version: stream.schema_version,
+                        camera_id: stream.stream_id,
+                        display_name: stream.display_name,
+                        zone: stream.zone,
+                        transport: stream.transport,
+                        transport_role: stream.transport_role,
+                        endpoint: stream.endpoint,
+                        codec: stream.codec,
+                        width: stream.width,
+                        height: stream.height,
+                        frame_rate_millihz: stream.frame_rate_millihz,
+                        announced_at_unix_ms: stream.announced_at_unix_ms,
+                        valid_until_unix_ms: stream.valid_until_unix_ms,
                     },
                     wanted.as_ref(),
                 )?;
@@ -233,7 +232,6 @@ fn spotlight_beat(now_unix_ms: u64) -> u64 {
     now_unix_ms / SPOTLIGHT_DWELL_MS
 }
 
-
 /// The video sources Canvas says it is displaying.
 ///
 /// `None` is "no preference", which is what an absent, unreadable or empty list
@@ -251,7 +249,6 @@ fn wanted_video() -> Option<BTreeSet<String>> {
         .collect();
     (!wanted.is_empty()).then_some(wanted)
 }
-
 
 /// How stale a game's last frame may be before the board stops showing it.
 ///
@@ -321,16 +318,14 @@ fn publish_speedy_roster(owner: &str, sequence: u64, games: &BTreeSet<String>) -
 
 struct DecoderSet {
     gst_launch: PathBuf,
-    ffmpeg: PathBuf,
     policy: DecodePolicy,
     workers: HashMap<String, DecoderWorker>,
 }
 
 impl DecoderSet {
-    fn new(gst_launch: PathBuf, ffmpeg: PathBuf, policy: DecodePolicy) -> Self {
+    fn new(gst_launch: PathBuf, _ffmpeg: PathBuf, policy: DecodePolicy) -> Self {
         Self {
             gst_launch,
-            ffmpeg,
             policy,
             workers: HashMap::new(),
         }
@@ -582,7 +577,10 @@ mod wanted_video_tests {
         let wanted = parse("retro-smb\nretro-smk\n").expect("a real list");
         assert!(wanted.contains("retro-smb"));
         assert!(wanted.contains("retro-smk"));
-        assert!(!wanted.contains("cat"), "an off-screen camera is not wanted");
+        assert!(
+            !wanted.contains("cat"),
+            "an off-screen camera is not wanted"
+        );
         assert_eq!(wanted.len(), 2);
     }
 

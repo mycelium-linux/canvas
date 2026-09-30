@@ -1,4 +1,4 @@
-//! Retained WGPU video surface.
+//! Retained WGPU video surface for the native model viewer.
 //!
 //! The portable producer contract remains an atomically replaced RGBA frame.
 //! Unlike iced's immutable image handles, this widget allocates one GPU texture

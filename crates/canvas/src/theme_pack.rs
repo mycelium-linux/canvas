@@ -22,6 +22,69 @@ pub struct ThemePack {
     pub charts: ThemeCharts,
     #[serde(default)]
     pub chrome: ThemeChrome,
+    #[serde(default)]
+    pub motion: ThemeMotion,
+}
+
+/// Theme-specific movement personality. Global reduced-motion remains the
+/// authority; these values are used only while motion is enabled.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThemeMotion {
+    #[serde(default = "default_micro_ms")]
+    pub micro_ms: u64,
+    #[serde(default = "default_transition_ms")]
+    pub transition_ms: u64,
+    #[serde(default = "default_entrance_ms")]
+    pub entrance_ms: u64,
+    #[serde(default = "default_stagger_ms")]
+    pub stagger_ms: u64,
+    #[serde(default = "default_easing")]
+    pub easing: String,
+}
+
+fn default_micro_ms() -> u64 {
+    120
+}
+fn default_transition_ms() -> u64 {
+    280
+}
+fn default_entrance_ms() -> u64 {
+    360
+}
+fn default_stagger_ms() -> u64 {
+    80
+}
+fn default_easing() -> String {
+    "fluid".into()
+}
+
+impl Default for ThemeMotion {
+    fn default() -> Self {
+        Self {
+            micro_ms: default_micro_ms(),
+            transition_ms: default_transition_ms(),
+            entrance_ms: default_entrance_ms(),
+            stagger_ms: default_stagger_ms(),
+            easing: default_easing(),
+        }
+    }
+}
+
+impl ThemeMotion {
+    pub fn apply_to(
+        &self,
+        mut motion: canvas_core::appearance::Motion,
+    ) -> canvas_core::appearance::Motion {
+        if motion.is_still() {
+            return canvas_core::appearance::Motion::still();
+        }
+        motion.micro_ms = self.micro_ms;
+        motion.transition_ms = self.transition_ms;
+        motion.entrance_ms = self.entrance_ms;
+        motion.stagger_ms = self.stagger_ms;
+        motion.sanitized()
+    }
 }
 
 /// Window-manager visual language. These are presentation tokens only: hit
@@ -264,6 +327,17 @@ impl ThemePack {
         {
             return Err("theme pack chrome is outside its bounded ranges".into());
         }
+        if pack.motion.micro_ms > 2_000
+            || pack.motion.transition_ms > 2_000
+            || pack.motion.entrance_ms > 2_000
+            || pack.motion.stagger_ms > 500
+            || !matches!(
+                pack.motion.easing.as_str(),
+                "fluid" | "terminal" | "precise"
+            )
+        {
+            return Err("theme pack motion is outside its bounded ranges".into());
+        }
         Ok(pack)
     }
 }
@@ -339,8 +413,23 @@ mod tests {
         assert_ne!(packs[0].charts.categorical, packs[1].charts.categorical);
         assert_ne!(packs[0].chrome, packs[1].chrome);
         assert_ne!(packs[1].chrome, packs[2].chrome);
+        assert_ne!(packs[0].motion, packs[1].motion);
+        assert_ne!(packs[1].motion, packs[2].motion);
         assert_eq!(packs[0].chrome.control_style, "glyphs");
         assert_eq!(packs[1].chrome.control_style, "segments");
         assert_eq!(packs[2].chrome.border_radius, 0.0);
+        assert_eq!(packs[0].motion.easing, "fluid");
+        assert_eq!(packs[1].motion.easing, "terminal");
+        assert_eq!(packs[2].motion.easing, "precise");
+    }
+
+    #[test]
+    fn global_still_mode_overrides_a_theme_motion_personality() {
+        let pack = ThemePack::parse(include_bytes!("../../../config/themes/jarvis.toml")).unwrap();
+        assert!(
+            pack.motion
+                .apply_to(canvas_core::appearance::Motion::still())
+                .is_still()
+        );
     }
 }

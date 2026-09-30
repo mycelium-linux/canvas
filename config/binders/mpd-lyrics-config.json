@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "binders": [
+    {
+      "id": "mpd-lyrics",
+      "source": "lua",
+      "script": "config/binders/mpd-lyrics-v1.lua",
+      "interval_ms": 500,
+      "targets": ["mpd-lyrics"]
+    }
+  ],
+  "widgets": [
+    {
+      "id": "mpd-lyrics",
+      "schema_version": 1,
+      "kind": "lyrics_display",
+      "title": "Now Playing",
+      "artist": "MPD Client",
+      "lines": [],
+      "position_ms": 0,
+      "duration_ms": 0,
+      "playing": false,
+      "style": "hyperspace",
+      "scroll_offset": 0.0,
+      "highlight_intensity": 0.0,
+      "theme": "home",
+      "refresh_ms": 40,
+      "chrome": "frameless",
+      "data": {
+        "state": "ready",
+        "source": "mpd-client",
+        "provenance": "live"
+      }
+    }
+  ],
+  "layout": {
+    "kind": "grid",
+    "columns": 1,
+    "cells": [
+      {
+        "widget_id": "mpd-lyrics",
+        "row": 0,
+        "col": 0,
+        "row_span": 1,
+        "col_span": 1
+      }
+    ]
+  }
+}

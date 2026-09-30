@@ -130,11 +130,8 @@ mod tests {
     /// know is refused rather than parsed hopefully.
     #[test]
     fn an_unexpected_schema_version_is_refused() {
-        let error = parse_list(
-            &serde_json::json!({"schema_version": 2, "sessions": []}),
-            0,
-        )
-        .expect_err("refused");
+        let error = parse_list(&serde_json::json!({"schema_version": 2, "sessions": []}), 0)
+            .expect_err("refused");
         assert!(error.to_string().contains("schema"), "{error}");
         assert!(parse_list(&serde_json::json!({"sessions": []}), 0).is_err());
     }
@@ -143,20 +140,25 @@ mod tests {
     fn a_missing_sessions_array_is_an_error_not_an_empty_roster() {
         // An empty roster and a broken read look identical on a wall, so they
         // must not be conflated.
-        let error = parse_list(&serde_json::json!({"schema_version": 1}), 0)
-            .expect_err("refused");
+        let error = parse_list(&serde_json::json!({"schema_version": 1}), 0).expect_err("refused");
         assert!(error.to_string().contains("no sessions array"), "{error}");
     }
 
     #[test]
     fn an_empty_list_is_a_valid_empty_roster() {
-        assert!(parse_list(&reply(serde_json::json!([])), 0).unwrap().is_empty());
+        assert!(
+            parse_list(&reply(serde_json::json!([])), 0)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
     fn a_session_without_an_id_is_skipped_not_fatal() {
         let parsed = parse_list(
-            &reply(serde_json::json!([{"status": "running"}, {"id": "ses_ok", "status": "running"}])),
+            &reply(
+                serde_json::json!([{"status": "running"}, {"id": "ses_ok", "status": "running"}]),
+            ),
             0,
         )
         .expect("parses");

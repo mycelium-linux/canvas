@@ -1,0 +1,22 @@
+[Unit]
+Description=Canvas transport-neutral now-playing feed
+After=network-online.target mpd.service raspotify.service canvas-surface.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Environment=HOME=/home/ajm
+Environment=XDG_CONFIG_HOME=/home/ajm/.config
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStart=/usr/local/bin/canvas-now-playing
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ajm/.config/dock/canvas/frames /run/raspotify
+
+[Install]
+WantedBy=multi-user.target

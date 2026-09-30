@@ -140,6 +140,37 @@
     "placeholder": "Type to the newest running session"
    },
    "inputs": []
+  },
+  {
+   "id": "notifications",
+   "title": "Notifications",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "notifications",
+     "kind": "event_log",
+     "title": "Notifications",
+     "query": null,
+     "paused": false,
+     "follow": true,
+     "entries": [],
+     "theme": null,
+     "refresh_ms": null,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "jarvis:notifications",
+      "observed_at": null,
+      "window": "recent",
+      "detail": "Awaiting JARVIS",
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    { "id": "events", "contract": "canvas.widget.snapshot.v1" }
+   ]
   }
  ],
  "layout": {
@@ -170,7 +201,17 @@
     "bounds": {
      "x": 0.39,
      "y": 0.63,
-     "width": 0.58,
+     "width": 0.34,
+     "height": 0.31
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "notifications",
+    "bounds": {
+     "x": 0.75,
+     "y": 0.63,
+     "width": 0.22,
      "height": 0.31
     },
     "layer": 0
@@ -206,6 +247,22 @@
     "input_id": "sessions"
    },
    "adapter": "widget-snapshot-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "jarvis-notifications-live",
+   "source": {
+    "owner": "jarvis",
+    "stream": "notifications",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "notifications",
+    "input_id": "events"
+   },
+   "adapter": "jarvis-notifications-v1",
    "delivery": {
     "mode": "latest"
    }

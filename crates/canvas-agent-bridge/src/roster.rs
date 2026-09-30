@@ -191,7 +191,6 @@ mod tests {
         );
     }
 
-
     /// Canvas owns the surface; a producer replaces the kind body only. Sending
     /// a whole WidgetSpec was rejected on every tick with "unknown field
     /// `schema_version`" and the tile sat on "loading" forever.
@@ -208,7 +207,14 @@ mod tests {
         assert!(widget["title"].is_string());
         assert!(widget["nodes"].is_array());
 
-        for forbidden in ["schema_version", "id", "chrome", "theme", "refresh_ms", "data"] {
+        for forbidden in [
+            "schema_version",
+            "id",
+            "chrome",
+            "theme",
+            "refresh_ms",
+            "data",
+        ] {
             assert!(
                 widget.get(forbidden).is_none(),
                 "{forbidden} belongs to the surface, not the snapshot: {widget}"
@@ -258,7 +264,13 @@ mod tests {
     #[test]
     fn live_sessions_outrank_recently_finished_ones() {
         let mut sessions: Vec<Session> = (0..ROSTER_CAPACITY)
-            .map(|index| session(&format!("done{index}"), SessionState::Ended, 9_000 + index as u64))
+            .map(|index| {
+                session(
+                    &format!("done{index}"),
+                    SessionState::Ended,
+                    9_000 + index as u64,
+                )
+            })
             .collect();
         sessions.push(session("sess_running", SessionState::Working, 10));
 

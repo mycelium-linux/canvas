@@ -34,6 +34,7 @@ pub fn load_briefing(name: &str) -> Result<Vec<u8>, String> {
     let built_in = match name {
         "intro-v1" => include_str!("../../../config/briefings/intro-v1.lua"),
         "speedy-layout" => include_str!("../../../config/briefings/speedy-layout.lua"),
+        "speedy-demo" => include_str!("../../../config/briefings/speedy-demo.lua"),
         _ => {
             return Err(format!("unknown briefing: {name}"));
         }

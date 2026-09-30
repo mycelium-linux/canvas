@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "eval-workspace",
+  "project_id": "eval",
+  "revision": 6,
+  "theme": { "source": "project" },
+  "background": { "kind": "shader", "shader_id": "star-nest", "speed": 0.28 },
+  "chrome": { "title": "hidden", "canvas_padding": 0, "surface_gap": 1 },
+  "surfaces": [
+    { "id": "eval-model", "title": "Run model", "content": { "kind": "live_video", "source_id": "transmog-step", "width": 1280, "height": 720, "orbitable": true, "timeline": false }, "inputs": [] },
+    { "id": "eval-summary", "title": "Run", "content": { "kind": "widget", "spec": { "schema_version": 2, "id": "eval-summary", "kind": "status_list", "title": "Connecting to eval", "nodes": [], "chrome": "integrated", "refresh_ms": 250, "data": { "state": "loading", "source": "eval.watch.v1", "window": "live", "detail": "Live run HUD", "provenance": "live" } } }, "inputs": [{ "id": "run", "contract": "canvas.run.watch.v1" }] },
+    { "id": "eval-decisions", "title": "Execution tree", "content": { "kind": "widget", "spec": { "schema_version": 2, "id": "eval-decisions", "kind": "execution_tree", "title": "Awaiting execution trace", "nodes": [], "edges": [], "active": null, "chrome": "integrated", "refresh_ms": 40, "data": { "state": "loading", "source": "eval.watch.v1", "window": "live", "detail": "Animated execution tree", "provenance": "live" } } }, "inputs": [{ "id": "run", "contract": "canvas.run.watch.v1" }] },
+    { "id": "eval-events", "title": "Event rail", "content": { "kind": "widget", "spec": { "schema_version": 2, "id": "eval-events", "kind": "event_log", "title": "Live event rail", "entries": [], "follow": true, "chrome": "integrated", "refresh_ms": 250, "data": { "state": "loading", "source": "eval.watch.v1", "window": "live", "detail": "Following the active run", "provenance": "live" } } }, "inputs": [{ "id": "run", "contract": "canvas.run.watch.v1" }] },
+    { "id": "eval-verification", "title": "Checks", "content": { "kind": "widget", "spec": { "schema_version": 2, "id": "eval-verification", "kind": "status_list", "title": "Awaiting verifier", "nodes": [], "chrome": "integrated", "refresh_ms": 250, "data": { "state": "loading", "source": "eval.watch.v1", "window": "live", "detail": "Run verdicts", "provenance": "live" } } }, "inputs": [{ "id": "run", "contract": "canvas.run.watch.v1" }] }
+  ],
+  "layout": { "kind": "canvas", "placements": [
+    { "surface_id": "eval-summary", "bounds": { "x": 0.0, "y": 0.0, "width": 0.72, "height": 0.14 }, "layer": 0 },
+    { "surface_id": "eval-model", "bounds": { "x": 0.0, "y": 0.141, "width": 0.72, "height": 0.579 }, "layer": 0 },
+    { "surface_id": "eval-decisions", "bounds": { "x": 0.0, "y": 0.721, "width": 0.72, "height": 0.279 }, "layer": 0 },
+    { "surface_id": "eval-events", "bounds": { "x": 0.721, "y": 0.0, "width": 0.279, "height": 0.64 }, "layer": 0 },
+    { "surface_id": "eval-verification", "bounds": { "x": 0.721, "y": 0.641, "width": 0.279, "height": 0.359 }, "layer": 0 }
+  ] },
+  "pages": [],
+  "active_page": 0,
+  "bindings": [
+    { "id": "eval-summary-live", "source": { "owner": "eval-studio", "stream": "eval-summary", "contract": "canvas.run.watch.v1" }, "target": { "surface_id": "eval-summary", "input_id": "run" }, "adapter": "eval-watch-v1", "delivery": { "mode": "latest" } },
+    { "id": "eval-decisions-live", "source": { "owner": "eval-studio", "stream": "eval-tree", "contract": "canvas.run.watch.v1" }, "target": { "surface_id": "eval-decisions", "input_id": "run" }, "adapter": "run-tree-v1", "delivery": { "mode": "latest" } },
+    { "id": "eval-events-live", "source": { "owner": "eval-studio", "stream": "eval-events", "contract": "canvas.run.watch.v1" }, "target": { "surface_id": "eval-events", "input_id": "run" }, "adapter": "eval-watch-v1", "delivery": { "mode": "latest" } },
+    { "id": "eval-verification-live", "source": { "owner": "eval-studio", "stream": "eval-verification", "contract": "canvas.run.watch.v1" }, "target": { "surface_id": "eval-verification", "input_id": "run" }, "adapter": "eval-watch-v1", "delivery": { "mode": "latest" } }
+  ],
+  "focused_surface_id": "eval-model"
+}

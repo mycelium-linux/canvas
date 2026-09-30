@@ -11,7 +11,7 @@ use super::{
     },
     visible,
 };
-use canvas_core::{Accent, ProjectTheme, ThemeMode};
+use canvas_core::{Accent, ProjectTheme, ThemeMode, VisualTheme};
 use mlua::{Lua, Table};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -99,6 +99,14 @@ pub struct HostResourceRef {
 #[serde(deny_unknown_fields)]
 pub struct ModuleInputSnapshot {
     pub revision: u64,
+    /// The instant the host stamped this invocation, in epoch milliseconds.
+    ///
+    /// Supplied rather than readable: a module still cannot ask for a clock
+    /// (`os` is removed from its VM), so a scene stays reproducible from its
+    /// inputs alone, while the civil date an authored widget needs — today, for
+    /// a calendar — has exactly one source, [`crate::hud::local_parts`], the same
+    /// one the HUD renders. A test pins it by putting a number here.
+    pub now_ms: u64,
     pub values: BTreeMap<String, ModuleInputValue>,
 }
 
@@ -208,6 +216,56 @@ pub struct ModuleThemeTokens {
     pub danger: [u8; 3],
     pub space_2: f32,
     pub radius: f32,
+    /// The whole type scale, not a subset of it.
+    ///
+    /// A module that can only see `space_2` has to invent text sizes, which is
+    /// exactly how the widget library ended up with eight unreadable literals.
+    /// Handing over every role means an authored grid sizes itself with the same
+    /// names a native widget uses, and moves when the theme moves.
+    pub micro: f32,
+    pub small: f32,
+    pub body: f32,
+    pub large: f32,
+    pub title: f32,
+    pub display: f32,
+    pub hero: f32,
+}
+
+impl ModuleThemeTokens {
+    /// The values a renderer has already resolved, for a host drawing on a wall
+    /// rather than naming a project.
+    ///
+    /// [`Self::from`] is the project-identity path. The Canvas host holds a
+    /// *presented* [`VisualTheme`] — after theme packs, corner scaling and the
+    /// chosen accent — and an authored widget must be coloured and sized from
+    /// what is actually on screen, not from a second opinion about what the
+    /// project theme ought to be. Two derivations of one palette is how an
+    /// authored widget ends up a near-miss of the native ones beside it.
+    pub fn from_visual(visual: &VisualTheme, accent: Accent) -> Self {
+        let palette = visual.palette;
+        let metrics = visual.metrics;
+        Self {
+            mode: visual.mode,
+            accent,
+            background: palette.background,
+            surface: palette.surface,
+            text: palette.text,
+            muted: palette.text_muted,
+            primary: palette.primary,
+            success: palette.success,
+            warning: palette.warning,
+            danger: palette.danger,
+            space_2: metrics.space_2,
+            radius: metrics.radius,
+            micro: metrics.micro,
+            small: metrics.small,
+            body: metrics.body,
+            large: metrics.large,
+            title: metrics.title,
+            display: metrics.display,
+            hero: metrics.hero,
+        }
+    }
 }
 
 impl From<ProjectTheme> for ModuleThemeTokens {
@@ -227,6 +285,13 @@ impl From<ProjectTheme> for ModuleThemeTokens {
             danger: palette.danger,
             space_2: metrics.space_2,
             radius: metrics.radius,
+            micro: metrics.micro,
+            small: metrics.small,
+            body: metrics.body,
+            large: metrics.large,
+            title: metrics.title,
+            display: metrics.display,
+            hero: metrics.hero,
         }
     }
 }
@@ -506,6 +571,9 @@ fn install_module_context(
     }
     module.set("inputs", inputs).map_err(lua_error)?;
     module
+        .set("now", now_to_lua(lua, snapshot.now_ms)?)
+        .map_err(lua_error)?;
+    module
         .set("event", event_to_lua(lua, event)?)
         .map_err(lua_error)?;
     if manifest.capabilities.read_theme {
@@ -778,6 +846,46 @@ fn theme_to_lua(lua: &Lua, theme: ModuleThemeTokens) -> Result<Table> {
     }
     table.set("space_2", theme.space_2).map_err(lua_error)?;
     table.set("radius", theme.radius).map_err(lua_error)?;
+    for (name, size) in [
+        ("micro", theme.micro),
+        ("small", theme.small),
+        ("body", theme.body),
+        ("large", theme.large),
+        ("title", theme.title),
+        ("display", theme.display),
+        ("hero", theme.hero),
+    ] {
+        table.set(name, size).map_err(lua_error)?;
+    }
+    Ok(table)
+}
+
+/// The host-stamped civil time, as `module.now`.
+///
+/// A module cannot read a clock and must not need one to be reproducible, so the
+/// instant arrives with the invocation rather than being asked for. Every field
+/// is derived from [`crate::hud::local_parts`], the same conversion the HUD clock
+/// uses, so a calendar and the wall cannot disagree about today.
+fn now_to_lua(lua: &Lua, now_ms: u64) -> Result<Table> {
+    let parts = crate::hud::local_parts(now_ms);
+    let table = lua.create_table().map_err(lua_error)?;
+    table.set("epoch_ms", now_ms).map_err(lua_error)?;
+    table.set("year", parts.year).map_err(lua_error)?;
+    table.set("month", parts.month).map_err(lua_error)?;
+    table.set("day", parts.day).map_err(lua_error)?;
+    table.set("weekday", parts.weekday).map_err(lua_error)?;
+    table.set("hour", parts.hour).map_err(lua_error)?;
+    table.set("minute", parts.minute).map_err(lua_error)?;
+    table.set("second", parts.second).map_err(lua_error)?;
+    table
+        .set("utc_offset_seconds", parts.utc_offset_seconds)
+        .map_err(lua_error)?;
+    table
+        .set(
+            "iso_date",
+            format!("{:04}-{:02}-{:02}", parts.year, parts.month, parts.day),
+        )
+        .map_err(lua_error)?;
     Ok(table)
 }
 
@@ -785,6 +893,10 @@ fn validate_snapshot(manifest: &ModuleManifest, snapshot: &ModuleInputSnapshot) 
     ensure(
         snapshot.revision > 0,
         "Canvas Lua input revision must be positive",
+    )?;
+    ensure(
+        snapshot.now_ms > 0,
+        "Canvas Lua invocation must carry a host-stamped time",
     )?;
     ensure(
         snapshot.values.len() <= MAX_DECLARATIONS,
@@ -1013,9 +1125,14 @@ mod tests {
         ModuleManifest::parse(include_str!("../examples/lua/graph.json")).unwrap()
     }
 
+    /// A pinned instant for the host-stamped clock, so a module test asserts on
+    /// the date it authored rather than the date a runner happened to execute on.
+    const TEST_NOW_MS: u64 = 1_768_000_000_000;
+
     fn graph_snapshot(revision: u64) -> ModuleInputSnapshot {
         ModuleInputSnapshot {
             revision,
+            now_ms: TEST_NOW_MS,
             values: BTreeMap::from([(
                 "samples".into(),
                 ModuleInputValue::Series(vec![
@@ -1045,7 +1162,7 @@ mod tests {
         assert_eq!(module.retained().scene.nodes.len(), 4);
         assert!(matches!(
             &module.retained().scene.nodes[1].content,
-            super::super::NodeContent::Text { text } if text == "███"
+            super::super::NodeContent::Text { text, .. } if text == "███"
         ));
     }
 
@@ -1084,6 +1201,7 @@ mod tests {
             include_str!("../examples/lua/activity-graph.lua"),
             ModuleInputSnapshot {
                 revision: 7,
+                now_ms: TEST_NOW_MS,
                 values: BTreeMap::from([(
                     "graph".into(),
                     ModuleInputValue::Graph(activity_graph()),
@@ -1103,6 +1221,7 @@ mod tests {
     fn cross_owner_snapshot() -> ModuleInputSnapshot {
         ModuleInputSnapshot {
             revision: 1,
+            now_ms: TEST_NOW_MS,
             values: BTreeMap::from([
                 (
                     "bifrost".into(),
@@ -1239,6 +1358,7 @@ mod tests {
             ModuleManifest::parse(include_str!("../examples/lua/pnl-status.json")).unwrap();
         let snapshot = ModuleInputSnapshot {
             revision: 1,
+            now_ms: TEST_NOW_MS,
             values: BTreeMap::from([
                 ("pnl".into(), ModuleInputValue::Number(1842.50)),
                 (
@@ -1267,7 +1387,7 @@ mod tests {
             .nodes
             .iter()
             .filter_map(|node| match &node.content {
-                super::super::NodeContent::Text { text } => Some(text.as_str()),
+                super::super::NodeContent::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect();
@@ -1318,7 +1438,7 @@ mod tests {
         assert_eq!(module.retained().module_generation, 2);
         assert!(matches!(
             &module.retained().scene.nodes[0].content,
-            super::super::NodeContent::Text { text } if text == "reload"
+            super::super::NodeContent::Text { text, .. } if text == "reload"
         ));
     }
 
@@ -1364,7 +1484,11 @@ mod tests {
               canvas.host_resource { id = "camera", parent = "wall", resource = "north-camera" }
               canvas.host_resource { id = "map", parent = "wall", resource = "fleet-map", translation = {1, 0, 0} }
             "#,
-            ModuleInputSnapshot { revision: 1, values: BTreeMap::new() },
+            ModuleInputSnapshot {
+                revision: 1,
+                now_ms: TEST_NOW_MS,
+                values: BTreeMap::new(),
+            },
             theme(),
             resources,
             LuaSceneCapabilities::default(),
@@ -1397,5 +1521,244 @@ mod tests {
         )
         .unwrap_err();
         assert!(rejected.0.contains("unknown field"));
+    }
+}
+
+#[cfg(test)]
+mod calendar_module_tests {
+    use super::super::{NodeContent, Scene, SemanticInk};
+    use super::*;
+
+    /// Midday UTC on 2026-09-28. Assertions about *today* still derive it from
+    /// `crate::hud::local_parts` rather than assume it, because the whole point of
+    /// stamping the instant is that the host and the widget agree in whatever zone
+    /// the machine is actually in.
+    const SEPT_2026: u64 = 1_790_600_000_000;
+
+    fn theme() -> ModuleThemeTokens {
+        ProjectTheme {
+            mode: ThemeMode::Dark,
+            accent: Accent::Info,
+        }
+        .into()
+    }
+
+    fn calendar_scene(values: Vec<(&str, ModuleInputValue)>, now_ms: u64) -> Scene {
+        let manifest =
+            ModuleManifest::parse(include_str!("../../../config/modules/calendar-v1.json"))
+                .expect("calendar manifest");
+        let module = LuaModule::load(
+            manifest,
+            include_str!("../../../config/modules/calendar-v1.lua"),
+            ModuleInputSnapshot {
+                revision: 1,
+                now_ms,
+                values: values
+                    .into_iter()
+                    .map(|(id, value)| (id.to_string(), value))
+                    .collect(),
+            },
+            theme(),
+            BTreeMap::new(),
+            LuaSceneCapabilities::default(),
+            LuaSceneLimits::default(),
+        )
+        .expect("the authored calendar must render");
+        module.retained().scene.clone()
+    }
+
+    fn text_node<'a>(scene: &'a Scene, id: &str) -> Option<(&'a str, Option<SemanticInk>)> {
+        scene
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .map(|node| match &node.content {
+                NodeContent::Text { text, ink } => (text.as_str(), *ink),
+                other => panic!("node {id} is not text: {other:?}"),
+            })
+    }
+
+    fn day_cells(scene: &Scene) -> Vec<(String, String)> {
+        scene
+            .nodes
+            .iter()
+            .filter_map(|node| {
+                node.id.strip_prefix("d").map(|key| {
+                    (
+                        key.to_string(),
+                        match &node.content {
+                            NodeContent::Text { text, .. } => text.clone(),
+                            _ => String::new(),
+                        },
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn text(values: &str) -> ModuleInputValue {
+        ModuleInputValue::Text(values.into())
+    }
+
+    #[test]
+    fn the_host_date_arrives_in_the_module_and_inks_the_day_it_names() {
+        let today = crate::hud::local_parts(SEPT_2026);
+        let scene = calendar_scene(Vec::new(), SEPT_2026);
+        let key = format!("{:04}-{:02}-{:02}", today.year, today.month, today.day);
+        let (drawn, ink) =
+            text_node(&scene, &format!("d{key}")).expect("today must be on the grid");
+        assert_eq!(drawn, today.day.to_string());
+        assert_eq!(
+            ink,
+            Some(SemanticInk::Primary),
+            "today is the one cell the reader is looking for"
+        );
+    }
+
+    #[test]
+    fn a_pinned_month_draws_six_contiguous_weeks_beginning_on_monday() {
+        let scene = calendar_scene(vec![("anchor", text("2026-09-01"))], SEPT_2026);
+        assert_eq!(
+            text_node(&scene, "title").expect("title").0,
+            "September 2026"
+        );
+        // 2026-09-01 is a Tuesday, so the grid opens on Monday the 31st. Asserted
+        // from the calendar, not the clock: the anchor is what a person pins.
+        let cells = day_cells(&scene);
+        assert_eq!(cells.len(), 42, "six rows of seven");
+        assert_eq!(cells[0], ("2026-08-31".into(), "31".into()));
+        assert_eq!(cells[1], ("2026-09-01".into(), "1".into()));
+        assert_eq!(cells[41], ("2026-10-11".into(), "11".into()));
+        assert_eq!(
+            text_node(&scene, "d2026-08-31").expect("trailing day").1,
+            Some(SemanticInk::Muted),
+            "a day from the month either side must not compete with this one"
+        );
+        assert_eq!(
+            text_node(&scene, "d2026-09-01").expect("first").1,
+            Some(SemanticInk::Text)
+        );
+    }
+
+    #[test]
+    fn a_leap_february_reaches_the_29th_and_stops_there() {
+        let scene = calendar_scene(vec![("anchor", text("2028-02-01"))], SEPT_2026);
+        let keys: Vec<String> = day_cells(&scene).into_iter().map(|(key, _)| key).collect();
+        assert!(keys.contains(&"2028-02-29".into()), "{keys:?}");
+        assert!(!keys.contains(&"2028-02-30".into()), "{keys:?}");
+    }
+
+    #[test]
+    fn an_agenda_marks_its_day_without_moving_the_grid() {
+        let scene = calendar_scene(
+            vec![
+                ("anchor", text("2026-09-01")),
+                (
+                    "agenda",
+                    text(
+                        "2026-09-14 09:30 standup|2026-09-14 14:00 review|2026-09-30 08:00 shipit",
+                    ),
+                ),
+            ],
+            SEPT_2026,
+        );
+        assert_eq!(day_cells(&scene).len(), 42);
+        // Two events share the day, so the mark is two dots rather than a count:
+        // a number at this size is unreadable across a room.
+        assert_eq!(text_node(&scene, "m2026-09-14").expect("mark").0, "••");
+        assert_eq!(text_node(&scene, "m2026-09-30").expect("mark").0, "•");
+        assert!(
+            text_node(&scene, "m2026-09-15").is_none(),
+            "a day with nothing on it draws no mark"
+        );
+    }
+
+    #[test]
+    fn week_view_opens_on_monday_and_carries_the_plans_of_that_week() {
+        let scene = calendar_scene(
+            vec![
+                ("view", text("week")),
+                ("anchor", text("2026-09-01")),
+                ("agenda", text("2026-09-01 10:00 fpl call")),
+            ],
+            SEPT_2026,
+        );
+        assert_eq!(
+            text_node(&scene, "title").expect("title").0,
+            "August 31 – September 6",
+            "the week is named by its own endpoints, not by seven days from Tuesday"
+        );
+        assert_eq!(text_node(&scene, "c1").expect("monday").0, "Mon 31");
+        assert_eq!(text_node(&scene, "c7").expect("sunday").0, "Sun 6");
+        assert_eq!(
+            text_node(&scene, "e2026-09-01-1").expect("event").0,
+            "10:00  fpl call"
+        );
+        assert_eq!(
+            text_node(&scene, "n2026-08-31").expect("quiet day").0,
+            "open"
+        );
+    }
+
+    #[test]
+    fn day_view_titles_the_weekday_it_names() {
+        let scene = calendar_scene(
+            vec![("view", text("day")), ("anchor", text("2026-09-01"))],
+            SEPT_2026,
+        );
+        assert_eq!(
+            text_node(&scene, "title").expect("title").0,
+            "Tue 1 September 2026"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_view_or_anchor_falls_back_without_inventing_a_date() {
+        for values in [
+            vec![("view", text("hourly"))],
+            vec![("anchor", text("tomorrow-ish"))],
+            vec![("agenda", text("not an agenda at all"))],
+        ] {
+            let scene = calendar_scene(values.clone(), SEPT_2026);
+            assert_eq!(
+                day_cells(&scene).len(),
+                42,
+                "{values:?} must still draw a month"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_agenda_is_a_calendar_and_not_a_claim_about_plans() {
+        let scene = calendar_scene(
+            vec![("view", text("day")), ("anchor", text("2026-09-01"))],
+            SEPT_2026,
+        );
+        assert_eq!(text_node(&scene, "n2026-09-01").expect("quiet").0, "open");
+        assert!(
+            scene.nodes.iter().all(|node| !node.id.starts_with("e")),
+            "no event line may be drawn that the payload did not send"
+        );
+    }
+
+    #[test]
+    fn a_month_view_fits_the_hosts_node_budget() {
+        // The default budget is 256 nodes. A month with an event on every day is
+        // the worst case, and it must fit rather than fail at the host boundary.
+        let agenda: Vec<String> = (1..=31)
+            .map(|day| format!("2026-09-{:02} 09:00 standup", day))
+            .collect();
+        let scene = calendar_scene(
+            vec![
+                ("anchor", text("2026-09-01")),
+                ("agenda", text(&agenda.join("|"))),
+            ],
+            SEPT_2026,
+        );
+        assert!(
+            scene.nodes.len() < LuaSceneLimits::default().max_nodes,
+            "{} nodes",
+            scene.nodes.len()
+        );
     }
 }

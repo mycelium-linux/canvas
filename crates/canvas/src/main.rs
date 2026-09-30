@@ -27,24 +27,20 @@ use ::canvas::workspace_store::{self, WorkspaceStore};
 use ::canvas::{
     AssetRef, Axis, Background, BackgroundFit, DataBinding, DataSource, GradientStop, InputPort,
     InputTarget, Layout, NodeContent, NormalizedRect, PatchOperation, Placement, SCHEMA_VERSION,
-    Scene, SceneNode, Surface, SurfaceChrome, SurfaceContent, SurfaceTitleMode, ThemeRef,
-    WorkspaceDocument, WorkspacePatch,
+    Scene, SceneNode, SemanticInk, Surface, SurfaceChrome, SurfaceContent, SurfaceTitleMode,
+    ThemeRef, WorkspaceDocument, WorkspacePatch,
 };
 use base64::Engine as _;
 use canvas_core::display_watch::{DisplayWatch, WatchStatus};
 use canvas_core::global_hotkey::{GlobalHotkey, HotkeySpec};
-use canvas_core::{
-    Catalog, ThemeMetrics, ThemePalette, VisualTheme, desktop::WallpaperRequest, layout::Rect,
-};
+use canvas_core::{Catalog, ThemePalette, VisualTheme, desktop::WallpaperRequest, layout::Rect};
 use iced::mouse;
-use iced::widget::canvas::{Canvas, Geometry};
+use iced::widget::canvas::Canvas;
 use iced::widget::{
-    button, canvas, column, container, image as image_widget, markdown, mouse_area, row,
-    scrollable, space, stack, text, tooltip,
+    button, column, container, image as image_widget, markdown, mouse_area, row, scrollable, space,
+    stack, text, tooltip,
 };
-use iced::{
-    Color, ContentFit, Element, Length, Point, Rectangle, Renderer, Size, Subscription, Task, Theme,
-};
+use iced::{Color, ContentFit, Element, Length, Point, Rectangle, Size, Subscription, Task, Theme};
 use image::{ImageReader, Limits};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -62,14 +58,17 @@ use std::sync::{
     mpsc::{self, Receiver, SyncSender, TryRecvError},
 };
 use std::time::{Duration, Instant};
-use unibus_media::{CameraDetections, Detection};
+use unibus_media::CameraDetections;
 
 mod indicator;
+mod keyboard_input;
 mod presence;
-mod retained_video;
 use ::canvas::screensaver;
+use keyboard_input::*;
 mod terminal;
 mod transition;
+mod visual_overlays;
+use visual_overlays::*;
 
 const INITIAL_FRAME: Rect = Rect {
     x: 120,
@@ -101,7 +100,6 @@ const JUMP_BACK_KEYS: &str = "Ctrl-O";
 const JUMP_FORWARD_KEYS: &str = "Ctrl-Shift-O";
 const SHORTCUT_HELP_KEYS: &str = "Ctrl-Option-?";
 const FOCUSED_HELP_KEYS: &str = "?";
-const FOCUS_EMPHASIS_DURATION: Duration = Duration::from_millis(1_400);
 
 /// A position in the jump list: a project workspace and optionally an
 /// operational view within it.
@@ -201,6 +199,37 @@ struct LoadedContent {
 }
 
 #[derive(Debug, Clone)]
+/// What a Lua-authored widget currently draws on this wall.
+///
+/// Resolved off the frame path and retained, because a scene is only
+/// reproducible from its inputs and the author never re-runs because a frame
+/// passed: the same key must produce the same scene without touching a VM.
+#[cfg(feature = "lua-scenes")]
+enum ModuleSurface {
+    Rendered {
+        key: u64,
+        scene: Scene,
+    },
+    /// Why nothing is drawn, said on the surface.
+    ///
+    /// A module that failed to load and a widget with nothing in it are the same
+    /// shape from across a room, and only one of them is a bug worth chasing.
+    Failed {
+        key: u64,
+        reason: String,
+    },
+}
+
+#[cfg(feature = "lua-scenes")]
+impl ModuleSurface {
+    fn key(&self) -> u64 {
+        match self {
+            Self::Rendered { key, .. } | Self::Failed { key, .. } => *key,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 enum ContentSource {
     Image {
         _path: PathBuf,
@@ -268,7 +297,22 @@ enum ContentSource {
         session: Option<String>,
         draft: String,
         sent: Vec<String>,
+        task_kinds: Vec<String>,
+        task_targets: BTreeMap<String, String>,
+        selected_kind: Option<String>,
+        tasks: Vec<LocalTask>,
+        active_task: Option<u64>,
     },
+}
+
+#[derive(Debug, Clone)]
+struct LocalTask {
+    id: u64,
+    kind: String,
+    prompt: String,
+    state: String,
+    detail: Option<String>,
+    activity: Vec<String>,
 }
 
 /// Longest prompt a surface will accept.
@@ -331,7 +375,7 @@ struct LoadedBackground {
 ///
 /// Modified presses are left alone: Ctrl-arrow already pages the workspace,
 /// and a model surface must not steal it just because it has focus.
-fn orbit_action(event: &iced::keyboard::Event) -> Option<::canvas::model_orbit::OrbitAction> {
+fn orbit_action(event: &iced::keyboard::Event) -> Option<canvas_model_viewer::OrbitAction> {
     use iced::keyboard::Event;
     let Event::KeyPressed {
         key,
@@ -352,7 +396,7 @@ fn orbit_action(event: &iced::keyboard::Event) -> Option<::canvas::model_orbit::
         iced::keyboard::Key::Named(iced::keyboard::key::Named::ArrowDown) => "ArrowDown",
         _ => text.as_ref().map(|text| text.as_str())?,
     };
-    ::canvas::model_orbit::action_for_key(name)
+    canvas_model_viewer::action_for_key(name)
 }
 
 /// Whether a press belongs to interactive content rather than surface layout.
@@ -364,16 +408,22 @@ fn content_claims_surface_drag(region: HitRegion, orbitable: bool) -> bool {
     orbitable && matches!(region, HitRegion::Body | HitRegion::TopBar)
 }
 
-/// How often a camera pose is written while a drag is in flight. 30 a second
-/// is finer than the 24fps the model renders at, so the renderer never waits
-/// on the pointer.
-const ORBIT_PUBLISH_INTERVAL: Duration = Duration::from_millis(33);
-
 fn unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_millis() as u64)
         .unwrap_or_default()
+}
+
+fn prompt_target_for_kind<'a>(
+    default_target: &'a str,
+    task_targets: &'a BTreeMap<String, String>,
+    kind: &str,
+) -> &'a str {
+    task_targets
+        .get(kind)
+        .map(String::as_str)
+        .unwrap_or(default_target)
 }
 
 /// Write a pose where the renderer, or an edge forwarding to it, will find it.
@@ -390,27 +440,26 @@ fn publish_model_camera(pose: &canvas_core::model_camera::ViewerCamera) -> anyho
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
-enum TimelineAction {
-    Older,
-    Newer,
-    Latest,
-}
+type TimelineAction = canvas_model_viewer::view::TimelineAction;
 
 #[derive(Debug, Clone)]
 enum Message {
     Tick,
+    ShellBack,
+    ShellForward,
+    ShellProjects,
+    ShellNewTask,
     /// A gesture on a model surface. Carries the stream rather than the
     /// surface: the camera belongs to the thing being rendered, so two
     /// surfaces showing the same model turn together.
     ModelOrbit {
         stream_id: String,
-        event: retained_video::OrbitEvent,
+        event: canvas_model_viewer::video::OrbitEvent,
     },
     /// A discrete face/corner chosen from the model's view cube.
     ModelOrbitAction {
         stream_id: String,
-        action: ::canvas::model_orbit::OrbitAction,
+        action: canvas_model_viewer::OrbitAction,
     },
     ModelOrbitToggle {
         stream_id: String,
@@ -418,6 +467,19 @@ enum Message {
     ModelTimeline {
         stream_id: String,
         action: TimelineAction,
+    },
+    PromptNew(String),
+    PromptKindSelected {
+        surface_id: String,
+        kind: String,
+    },
+    PromptTaskSelected {
+        surface_id: String,
+        task_id: u64,
+    },
+    PdfNavigate {
+        surface_id: String,
+        target: Navigation,
     },
     WindowReady(iced::window::Id),
     WindowEvent(iced::window::Id, iced::window::Event),
@@ -435,7 +497,7 @@ enum Message {
         result: Box<ContentLoadResult>,
     },
     PageLoaded {
-        pending: Box<Pending>,
+        pending: Option<Box<Pending>>,
         surface_id: String,
         page_index: u32,
         result: Box<PageLoadResult>,
@@ -573,11 +635,9 @@ struct App {
     /// Last list written, so an unchanged set costs nothing.
     last_wanted_video: Option<String>,
     /// Camera pose per model stream, keyed by stream rather than surface so
-    /// two surfaces showing one model agree.
-    orbits: BTreeMap<String, ::canvas::model_orbit::OrbitController>,
-    /// When each stream's pose was last written, to keep a drag from writing
-    /// a file per pointer sample.
-    orbit_published: BTreeMap<String, Instant>,
+    /// Viewer-side state for every streamed model. The dedicated crate owns
+    /// camera, orbit, timeline, throttling and view-cube semantics.
+    model_viewer: canvas_model_viewer::state::Viewer,
     frame: Rect,
     display_frames: Vec<Rect>,
     displays: Vec<DisplayInfo>,
@@ -646,6 +706,20 @@ struct App {
     stream_position: u64,
     windows: BTreeMap<iced::window::Id, Rect>,
     decoded: BTreeMap<String, RuntimeSurface>,
+    /// Lua-authored widgets, resolved off the frame path.
+    ///
+    /// Keyed by surface so an authored widget behaves like every other surface:
+    /// it is placed, transitioned and themed by the document, and it is only the
+    /// drawing that came from a script instead of from a Rust kind.
+    #[cfg(feature = "lua-scenes")]
+    modules: BTreeMap<String, ModuleSurface>,
+    /// The civil day the authored modules were resolved for.
+    ///
+    /// Held rather than recomputed because the point is to notice the change: a
+    /// wall with a calendar on it must roll over at midnight without waiting for
+    /// someone to touch the document.
+    #[cfg(feature = "lua-scenes")]
+    module_day: u32,
     shared_views: BTreeMap<String, SharedViewDocument>,
     indicators: BTreeMap<String, StatusIndicator>,
     mesh: Option<MeshSnapshot>,
@@ -968,8 +1042,7 @@ impl App {
             catalog,
             document,
             last_wanted_video: None,
-            orbits: BTreeMap::new(),
-            orbit_published: BTreeMap::new(),
+            model_viewer: canvas_model_viewer::state::Viewer::default(),
             runtime_revision: 1,
             frame: desktop_frame,
             display_frames,
@@ -1021,6 +1094,10 @@ impl App {
             stream_position: 0,
             windows: BTreeMap::new(),
             decoded: BTreeMap::new(),
+            #[cfg(feature = "lua-scenes")]
+            modules: BTreeMap::new(),
+            #[cfg(feature = "lua-scenes")]
+            module_day: ::canvas::hud::local_parts(now_unix_ms()).day,
             shared_views: BTreeMap::new(),
             indicators: BTreeMap::new(),
             mesh: None,
@@ -1100,6 +1177,18 @@ impl App {
     /// Capture the presentation just before a workspace change so the view can
     /// interpolate from it. Call before mutating `document` or the theme.
     fn start_transition(&mut self) {
+        let global_motion = canvas_core::appearance::current().motion;
+        let pack_motion = self
+            .selected_theme_pack(&self.document.project_id)
+            .map(|pack| pack.motion);
+        let motion = pack_motion
+            .as_ref()
+            .map_or(global_motion, |theme| theme.apply_to(global_motion));
+        let curve = transition::Curve::from_theme(
+            pack_motion
+                .as_ref()
+                .map_or("fluid", |theme| theme.easing.as_str()),
+        );
         let from_placements = match self.document.active_layout() {
             Layout::Canvas { placements } => placements
                 .iter()
@@ -1124,6 +1213,8 @@ impl App {
         };
         self.transition = Some(transition::Transition::new(
             Instant::now(),
+            Duration::from_millis(motion.transition_ms),
+            curve,
             from_placements,
             self.project_palette(),
         ));
@@ -1442,6 +1533,44 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::ShellBack => {
+                self.jump_back();
+                Task::none()
+            }
+            Message::ShellForward => {
+                self.jump_forward();
+                Task::none()
+            }
+            Message::ShellProjects => self.toggle_project_picker(),
+            Message::ShellNewTask => {
+                let prompt = self.decoded.iter().find_map(|(id, surface)| {
+                    matches!(
+                        &surface.source,
+                        ContentSource::Prompt { task_kinds, .. } if !task_kinds.is_empty()
+                    )
+                    .then(|| id.clone())
+                });
+                match prompt {
+                    Some(surface_id) => {
+                        let destination_page = {
+                            self.document.layouts().position(|layout| {
+                                flatten_layout(layout)
+                                    .iter()
+                                    .any(|placement| placement.surface_id == surface_id)
+                            })
+                        };
+                        if let Some(page) = destination_page {
+                            self.document.active_page = page;
+                        }
+                        self.update(Message::PromptNew(surface_id))
+                    }
+                    None => {
+                        self.status = "This workspace has no task creator.".into();
+                        self.bump();
+                        Task::none()
+                    }
+                }
+            }
             Message::ModelOrbit { stream_id, event } => {
                 self.handle_model_orbit(&stream_id, event);
                 Task::none()
@@ -1455,6 +1584,9 @@ impl App {
             }
             Message::ModelTimeline { stream_id, action } => {
                 self.apply_model_timeline(&stream_id, action)
+            }
+            Message::PdfNavigate { surface_id, target } => {
+                self.navigate_pdf(surface_id, target, None)
             }
             Message::Tick => {
                 if self
@@ -1496,6 +1628,13 @@ impl App {
                     self.last_clock_second = clock_second;
                 }
                 let clock_millis = now_unix_ms();
+                #[cfg(feature = "lua-scenes")]
+                if ::canvas::hud::local_parts(clock_millis).day != self.module_day {
+                    // Midnight is a document change nobody made. Without this the
+                    // wall would show yesterday's calendar until someone touched it.
+                    self.module_day = ::canvas::hud::local_parts(clock_millis).day;
+                    self.refresh_modules();
+                }
                 if self.widget_animation_interval().is_some_and(|interval| {
                     clock_millis.saturating_sub(self.last_clock_millis)
                         >= interval.as_millis() as u64
@@ -1700,6 +1839,46 @@ impl App {
                 self.replan_rasters();
                 Task::none()
             }
+            Message::PromptNew(surface_id) => {
+                if let Some(surface) = self.decoded.get_mut(&surface_id)
+                    && let ContentSource::Prompt {
+                        selected_kind,
+                        active_task,
+                        draft,
+                        ..
+                    } = &mut surface.source
+                {
+                    *selected_kind = None;
+                    *active_task = None;
+                    draft.clear();
+                    self.document.focused_surface_id = Some(surface_id);
+                    self.bump();
+                }
+                Task::none()
+            }
+            Message::PromptKindSelected { surface_id, kind } => {
+                if let Some(surface) = self.decoded.get_mut(&surface_id)
+                    && let ContentSource::Prompt {
+                        task_kinds,
+                        selected_kind,
+                        active_task,
+                        draft,
+                        ..
+                    } = &mut surface.source
+                    && task_kinds.iter().any(|candidate| candidate == &kind)
+                {
+                    *selected_kind = Some(kind);
+                    *active_task = None;
+                    draft.clear();
+                    self.document.focused_surface_id = Some(surface_id);
+                    self.bump();
+                }
+                Task::none()
+            }
+            Message::PromptTaskSelected {
+                surface_id,
+                task_id,
+            } => self.select_prompt_task(&surface_id, task_id),
             Message::LinkOpened(url) => {
                 self.status = match platform::open_url(&url) {
                     Ok(()) => format!("Opened link {url}."),
@@ -1843,6 +2022,22 @@ impl App {
                 }
                 if switcher_requested(&kbd_event) {
                     return self.toggle_project_switcher();
+                }
+                if new_task_requested(&kbd_event) {
+                    let prompt = self.decoded.iter().find_map(|(id, surface)| {
+                        matches!(
+                            &surface.source,
+                            ContentSource::Prompt { task_kinds, .. } if !task_kinds.is_empty()
+                        )
+                        .then(|| id.clone())
+                    });
+                    if let Some(surface_id) = prompt {
+                        self.document.active_page = 0;
+                        return self.update(Message::PromptNew(surface_id));
+                    }
+                    self.status = "This workspace has no task creator.".into();
+                    self.bump();
+                    return Task::none();
                 }
                 if diagnostics_toggle_requested(&kbd_event) {
                     self.hud_visible = !self.hud_visible;
@@ -2021,17 +2216,15 @@ impl App {
                 page_index,
                 result,
             } => {
-                let pending = *pending;
+                let pending = pending.map(|pending| *pending);
                 match *result {
                     Ok((handle, source_pixels, media_plan)) => {
                         let Some(surface) = self.decoded.get_mut(&surface_id) else {
-                            self.fail(
-                                pending,
-                                Failure {
-                                    code: ErrorCode::NotFound,
-                                    message: format!("Canvas surface disappeared: {surface_id}"),
-                                },
-                            );
+                            let failure = Failure {
+                                code: ErrorCode::NotFound,
+                                message: format!("Canvas surface disappeared: {surface_id}"),
+                            };
+                            self.finish_pdf_failure(pending, failure);
                             return Task::none();
                         };
                         let ContentSource::Pdf {
@@ -2040,7 +2233,10 @@ impl App {
                             ..
                         } = &mut surface.source
                         else {
-                            self.fail(pending, Failure::unsupported("surface is not a PDF"));
+                            self.finish_pdf_failure(
+                                pending,
+                                Failure::unsupported("surface is not a PDF"),
+                            );
                             return Task::none();
                         };
                         *current = page_index;
@@ -2061,18 +2257,20 @@ impl App {
                         self.document.focused_surface_id = Some(surface_id.clone());
                         self.bump();
                         self.status = format!("Page {} of {}.", page_index + 1, page_count);
-                        self.answer(
-                            pending,
-                            Outcome::Ok {
-                                receipt: Receipt::Navigated {
-                                    surface_id,
-                                    page_index,
-                                    page_count,
+                        if let Some(pending) = pending {
+                            self.answer(
+                                pending,
+                                Outcome::Ok {
+                                    receipt: Receipt::Navigated {
+                                        surface_id,
+                                        page_index,
+                                        page_count,
+                                    },
                                 },
-                            },
-                        );
+                            );
+                        }
                     }
-                    Err(failure) => self.fail(pending, failure),
+                    Err(failure) => self.finish_pdf_failure(pending, failure),
                 }
                 Task::none()
             }
@@ -2201,6 +2399,21 @@ impl App {
         if events.is_empty() {
             return;
         }
+        // Task lifecycle is Canvas chrome rather than a widget presentation.
+        // Consume the generic status contract before Lua-bound widget events;
+        // tool-specific build facts still flow through their Lua binders.
+        let task_events = events
+            .extract_if(.., |event| event.contract == canvas_core::task::CONTRACT)
+            .collect::<Vec<_>>();
+        for event in task_events {
+            match serde_json::from_value::<canvas_core::task::TaskStatus>(event.payload) {
+                Ok(status) => self.apply_task_status(status),
+                Err(error) => {
+                    eprintln!("Canvas rejected task status: {error}");
+                    self.emit_event(format!("task_status_rejected error={error}"));
+                }
+            }
+        }
         // Briefings are whole-canvas programs, not widget bindings. Render
         // their Lua beats through the same sandbox, then apply the resulting
         // visual patch atomically before ordinary stream bindings run.
@@ -2294,11 +2507,27 @@ impl App {
                 rejected = rejected.saturating_add(matching.len() as u64);
                 continue;
             };
-            let ContentSource::Widget { spec } = &mut surface.source else {
-                rejected = rejected.saturating_add(matching.len() as u64);
-                continue;
+            let result = match &mut surface.source {
+                ContentSource::Widget { spec } => {
+                    ::canvas::stream_binding::apply_named_adapter_batch(adapter, &matching, spec)
+                }
+                ContentSource::LiveVideo { source_id, .. } => {
+                    let last = matching.last().expect("non-empty stream batch");
+                    ::canvas::stream_binding::apply_named_timeline_adapter(adapter, last).map(
+                        |mut timeline| {
+                            // The surface remains authoritative for routing; a
+                            // binder cannot redirect controls to another model.
+                            timeline.stream_id.clone_from(source_id);
+                            self.model_viewer.set_timeline(timeline);
+                        },
+                    )
+                }
+                _ => Err(::canvas::Error(format!(
+                    "binding {} targets unsupported non-widget surface",
+                    binding.id
+                ))),
             };
-            match ::canvas::stream_binding::apply_named_adapter_batch(adapter, &matching, spec) {
+            match result {
                 Ok(()) => {
                     let last = matching.last().expect("non-empty stream batch");
                     self.stream_sequences
@@ -2317,8 +2546,10 @@ impl App {
                 Err(error) => {
                     rejected = rejected.saturating_add(matching.len() as u64);
                     eprintln!("Canvas rejected {} batch: {error}", binding.id);
-                    spec.data.state = canvas_widgets::WidgetDataState::Error;
-                    spec.data.detail = Some(format!("Binder rejected payload: {error}"));
+                    if let ContentSource::Widget { spec } = &mut surface.source {
+                        spec.data.state = canvas_widgets::WidgetDataState::Error;
+                        spec.data.detail = Some(format!("Binder rejected payload: {error}"));
+                    }
                 }
             }
         }
@@ -2330,6 +2561,42 @@ impl App {
                 "stream_tick applied={applied} rejected={rejected} age_ms={oldest_age} \
                  position={} retained={} evicted={}",
                 self.stream_position, stats.retained, stats.evicted
+            ));
+        }
+    }
+
+    #[cfg(feature = "lua-scenes")]
+    fn apply_task_status(&mut self, status: canvas_core::task::TaskStatus) {
+        let Some(id) = status
+            .task_id
+            .strip_prefix("local-")
+            .and_then(|id| id.parse::<u64>().ok())
+        else {
+            self.emit_event(format!("task_status_unknown id={}", status.task_id));
+            return;
+        };
+        let mut applied = false;
+        for surface in self.decoded.values_mut() {
+            let ContentSource::Prompt { tasks, .. } = &mut surface.source else {
+                continue;
+            };
+            if let Some(task) = tasks.iter_mut().find(|task| task.id == id) {
+                task.state = status.state.clone();
+                task.detail = status.detail.clone().or_else(|| {
+                    status
+                        .session
+                        .as_deref()
+                        .map(|session| format!("Delivered to {} · {session}", status.target))
+                });
+                task.activity = status.activity.clone();
+                applied = true;
+            }
+        }
+        if applied {
+            self.bump();
+            self.emit_event(format!(
+                "task_status id={} state={}",
+                status.task_id, status.state
             ));
         }
     }
@@ -2756,11 +3023,20 @@ impl App {
             session,
             draft,
             sent,
+            task_kinds,
+            task_targets,
+            selected_kind,
+            tasks,
+            active_task,
             ..
         } = &mut surface.source
         else {
             return Task::none();
         };
+
+        if !task_kinds.is_empty() && selected_kind.is_none() {
+            return Task::none();
+        }
 
         match key {
             Key::Named(Named::Backspace) => {
@@ -2772,16 +3048,27 @@ impl App {
                 if line.is_empty() {
                     return Task::none();
                 }
-                let target = target.clone();
                 let session = session.clone();
                 draft.clear();
                 sent.push(line.clone());
+                let kind = selected_kind.take().unwrap_or_else(|| "Prompt".to_string());
+                let target = prompt_target_for_kind(target, task_targets, &kind).to_string();
+                let task_id = unix_ms();
+                tasks.push(LocalTask {
+                    id: task_id,
+                    kind: kind.clone(),
+                    prompt: line.clone(),
+                    state: "queued".into(),
+                    detail: Some("Waiting for the local delivery bridge".into()),
+                    activity: Vec::new(),
+                });
+                *active_task = Some(task_id);
                 // Only the tail is kept: this is a receipt that something was
                 // sent, not a transcript. Answers arrive as their own surfaces.
                 while sent.len() > PROMPT_SENT_TAIL {
                     sent.remove(0);
                 }
-                return self.submit_prompt(&target, session.as_deref(), &line);
+                return self.submit_prompt(&target, session.as_deref(), &line, &kind, task_id);
             }
             Key::Named(Named::Space) => draft.push(' '),
             _ => {
@@ -2805,7 +3092,14 @@ impl App {
     /// and `canvas-edge`, which already owns the canvas/bus boundary, publishes
     /// and removes it. Keeping the wall off the bus is what stops a display
     /// from becoming a client of every tool that might answer.
-    fn submit_prompt(&mut self, target: &str, session: Option<&str>, line: &str) -> Task<Message> {
+    fn submit_prompt(
+        &mut self,
+        target: &str,
+        session: Option<&str>,
+        line: &str,
+        task_kind: &str,
+        task_id: u64,
+    ) -> Task<Message> {
         let Some(root) = ::canvas::runtime_config::root() else {
             self.status = "No runtime directory: the prompt was not sent.".into();
             return Task::none();
@@ -2830,6 +3124,11 @@ impl App {
             "text": line,
             "at_unix_ms": at_ms,
             "project_id": self.document.project_id,
+            "task": {
+                "id": format!("local-{task_id}"),
+                "kind": task_kind,
+                "state": "submitted"
+            },
         });
         // Absent rather than null when unpinned: the tool then applies its own
         // notion of "current", which is the whole point of not pinning.
@@ -2879,6 +3178,62 @@ impl App {
         self.publish_wanted_video();
         self.bump();
         self.emit_event(format!("page_switched {index}"));
+        Task::none()
+    }
+
+    /// Open a task receipt wherever its owning prompt surface currently lives.
+    ///
+    /// The global task strip is visible across every workspace page, while a
+    /// prompt surface may be parked on another page or minimized. Selecting a
+    /// receipt therefore navigates first and selects second; merely changing
+    /// `active_task` would leave the user looking at an unchanged page.
+    fn select_prompt_task(&mut self, surface_id: &str, task_id: u64) -> Task<Message> {
+        let owns_task = self.decoded.get(surface_id).is_some_and(|surface| {
+            matches!(
+                &surface.source,
+                ContentSource::Prompt { tasks, .. }
+                    if tasks.iter().any(|task| task.id == task_id)
+            )
+        });
+        if !owns_task {
+            return Task::none();
+        }
+
+        let destination_page = self.document.layouts().position(|layout| {
+            flatten_layout(layout)
+                .iter()
+                .any(|placement| placement.surface_id == surface_id)
+        });
+        let page_changed =
+            destination_page.is_some_and(|page| page != self.document.active_page_index());
+        if page_changed {
+            self.start_transition();
+            self.document.active_page = destination_page.expect("page was present");
+        }
+
+        let Some(surface) = self.decoded.get_mut(surface_id) else {
+            return Task::none();
+        };
+        let ContentSource::Prompt {
+            active_task,
+            selected_kind,
+            ..
+        } = &mut surface.source
+        else {
+            return Task::none();
+        };
+        *active_task = Some(task_id);
+        *selected_kind = None;
+        self.minimized_surfaces.remove(surface_id);
+        self.document.focused_surface_id = Some(surface_id.to_string());
+
+        if page_changed {
+            self.ensure_scene_decoded();
+            self.publish_wanted_video();
+        }
+        self.status = format!("Opened task on {}.", self.document.active_page_name());
+        self.bump();
+        self.emit_event(format!("task_opened {surface_id} {task_id}"));
         Task::none()
     }
 
@@ -3406,6 +3761,38 @@ impl App {
                 );
                 Task::none()
             }
+            Command::BrowserKey {
+                key,
+                shift,
+                control,
+                alt,
+                meta,
+            } => {
+                let Some(event) = browser_key_event(&key, shift, control, alt, meta) else {
+                    self.fail(
+                        pending,
+                        Failure::invalid(format!("unsupported browser key {key}")),
+                    );
+                    return Task::none();
+                };
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::BrowserKeyAccepted,
+                    },
+                );
+                Task::done(Message::TerminalInput(event))
+            }
+            Command::BrowserPointer { phase, x, y, delta } => {
+                self.handle_browser_pointer(&phase, x, y, delta);
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::BrowserPointerAccepted,
+                    },
+                );
+                Task::none()
+            }
             Command::ApplyDocument { document } => {
                 if let Err(error) = document.validate(&self.catalog) {
                     self.fail(pending, Failure::invalid(error.to_string()));
@@ -3415,12 +3802,28 @@ impl App {
                     self.fail(pending, failure);
                     return Task::none();
                 }
+                // Applying a project workspace is a durable edit, not a
+                // temporary preview. If we only replace `self.document`, the
+                // next project switch resurrects the old stored copy and the
+                // user's controls/layout appear to vanish. Persist before
+                // presenting so an I/O failure cannot leave screen and store
+                // disagreeing about which revision is current.
+                let mut next = self.workspaces.clone();
+                next.upsert(document.clone());
+                next.active_project_id = Some(document.project_id.clone());
+                if let Err(error) =
+                    workspace_store::save(&self.workspace_store_path, &next, &self.catalog)
+                {
+                    self.fail(pending, Failure::resource(error.to_string()));
+                    return Task::none();
+                }
                 let previous_focus = self.document.focused_surface_id.clone();
                 let presentation_changed = self.document.id != document.id
                     || self.document.background != document.background;
                 let workspace_id = document.id.clone();
                 self.start_transition();
                 self.document = document;
+                self.workspaces = next;
                 if self.document.focused_surface_id.is_some()
                     && (self.document.focused_surface_id != previous_focus || presentation_changed)
                 {
@@ -3428,7 +3831,7 @@ impl App {
                 }
                 self.refresh_interaction_geometry();
                 self.prune_decoded();
-                self.active_project_workspace = None;
+                self.active_project_workspace = Some(self.document.project_id.clone());
                 self.ensure_scene_decoded();
                 if presentation_changed {
                     self.reset_background_animation();
@@ -3761,72 +4164,7 @@ impl App {
                 Task::batch(self.windows.keys().copied().map(iced::window::gain_focus))
             }
             Command::Navigate { surface_id, target } => {
-                let Some(surface) = self.decoded.get(&surface_id) else {
-                    self.fail(
-                        pending,
-                        Failure {
-                            code: ErrorCode::NotFound,
-                            message: format!("unknown decoded Canvas surface: {surface_id}"),
-                        },
-                    );
-                    return Task::none();
-                };
-                let ContentSource::Pdf {
-                    path,
-                    page_index,
-                    page_count,
-                } = &surface.source
-                else {
-                    self.fail(pending, Failure::unsupported("surface is not navigable"));
-                    return Task::none();
-                };
-                let next = match target {
-                    Navigation::Next => page_index.saturating_add(1),
-                    Navigation::Previous => page_index.saturating_sub(1),
-                    Navigation::Page { index } => index,
-                };
-                if next >= *page_count {
-                    self.fail(
-                        pending,
-                        Failure::invalid(format!(
-                            "PDF page index {next} is outside 0..{}",
-                            page_count
-                        )),
-                    );
-                    return Task::none();
-                }
-                let path = path.clone();
-                let source_id = surface
-                    .snapshot
-                    .asset_sha256
-                    .clone()
-                    .unwrap_or_else(|| surface_id.clone());
-                let viewport = self.media_viewport();
-                let scale_factor = self.scale_factor;
-                Task::perform(
-                    async move {
-                        let (handle, pixels) = render_pdf_page(&path, next)?;
-                        let plan = plan_pdf_page(
-                            source_id,
-                            next,
-                            LogicalSize {
-                                width: f64::from(pixels[0]),
-                                height: f64::from(pixels[1]),
-                            },
-                            viewport,
-                            scale_factor,
-                            MediaLimits::default(),
-                        )
-                        .map_err(|error| Failure::resource(error.to_string()))?;
-                        Ok((handle, pixels, plan))
-                    },
-                    move |result| Message::PageLoaded {
-                        pending: Box::new(pending),
-                        surface_id,
-                        page_index: next,
-                        result: Box::new(result),
-                    },
-                )
+                self.navigate_pdf(surface_id, target, Some(pending))
             }
             Command::SetTheme { project_id } => {
                 let mut document = self.document.clone();
@@ -5200,6 +5538,18 @@ impl App {
             y: f64::from(viewport.y - self.frame.y),
         };
 
+        match event {
+            Event::ButtonPressed(Button::Back) => {
+                self.jump_back();
+                return;
+            }
+            Event::ButtonPressed(Button::Forward) => {
+                self.jump_forward();
+                return;
+            }
+            _ => {}
+        }
+
         if let Event::ButtonPressed(Button::Left) = &event
             && let Some((surface_id, action)) = self.hit_test_surface_control()
         {
@@ -5303,18 +5653,14 @@ impl App {
                 f64::from(self.window_chrome().titlebar_height),
             )
             && self.decoded.get(&target.surface_id).is_some_and(|surface| {
-                let orbit_enabled = match &surface.source {
+                let orbitable = matches!(
+                    &surface.source,
                     ContentSource::LiveVideo {
-                        source_id,
                         orbitable: true,
                         ..
-                    } => self
-                        .orbits
-                        .get(source_id)
-                        .is_some_and(|controller| controller.enabled()),
-                    _ => false,
-                };
-                content_claims_surface_drag(target.region, orbit_enabled)
+                    }
+                );
+                content_claims_surface_drag(target.region, orbitable)
             })
         {
             // Focus and z-order are still ordinary surface concerns, but no
@@ -5421,6 +5767,7 @@ impl App {
                 Some(
                     canvas_widgets::WidgetChrome::DragOnly
                         | canvas_widgets::WidgetChrome::Frameless
+                        | canvas_widgets::WidgetChrome::Integrated
                 )
             ) {
                 continue;
@@ -5793,13 +6140,25 @@ impl App {
                         // flashed "loading" and then the new state instead of
                         // updating in place. Identity is the widget's id and
                         // family, as it already is for live video below.
-                        SurfaceContent::Widget { spec } => matches!(
-                            &decoded.source,
-                            ContentSource::Widget { spec: decoded_spec }
-                                if decoded_spec.id == spec.id
-                                    && std::mem::discriminant(&decoded_spec.kind)
-                                        == std::mem::discriminant(&spec.kind)
-                        ),
+                        SurfaceContent::Widget { spec } => {
+                            let ContentSource::Widget { spec: decoded_spec } =
+                                &mut decoded.source
+                            else {
+                                return false;
+                            };
+                            let same_widget = decoded_spec.id == spec.id
+                                && std::mem::discriminant(&decoded_spec.kind)
+                                    == std::mem::discriminant(&spec.kind);
+                            if same_widget {
+                                // The retained value/data belongs to the live
+                                // stream, while chrome belongs to the applied
+                                // workspace. Keeping the former must not make
+                                // presentation edits appear to do nothing.
+                                decoded_spec.chrome = spec.chrome;
+                                decoded_spec.refresh_ms = spec.refresh_ms;
+                            }
+                            same_widget
+                        }
                         SurfaceContent::Chart { chart } => matches!(
                             &decoded.source,
                             ContentSource::DataViz { chart: decoded_chart } if decoded_chart == chart
@@ -5910,62 +6269,205 @@ impl App {
     /// project is published. An empty or missing file means "no preference",
     /// never "nothing" — a reader that cannot find this must keep decoding
     /// rather than blank the wall.
-    /// Apply a gesture to a model's camera and publish the result.
-    ///
-    /// The pose is written at most `ORBIT_PUBLISH_INTERVAL` apart, because a
-    /// drag produces a pointer sample per frame and the renderer only ever
-    /// wants the newest. The release is always written regardless of the
-    /// throttle: it is the one that clears `grabbed`, and dropping it would
-    /// leave the renderer believing a pointer is still down and holding the
-    /// camera against the scene forever.
-    fn handle_model_orbit(&mut self, stream_id: &str, event: retained_video::OrbitEvent) {
-        use ::canvas::model_orbit::OrbitController;
-        use retained_video::OrbitEvent;
+    fn navigate_pdf(
+        &mut self,
+        surface_id: String,
+        target: Navigation,
+        pending: Option<Pending>,
+    ) -> Task<Message> {
+        let Some(surface) = self.decoded.get(&surface_id) else {
+            self.finish_pdf_failure(
+                pending,
+                Failure {
+                    code: ErrorCode::NotFound,
+                    message: format!("unknown decoded Canvas surface: {surface_id}"),
+                },
+            );
+            return Task::none();
+        };
+        let ContentSource::Pdf {
+            path,
+            page_index,
+            page_count,
+        } = &surface.source
+        else {
+            self.finish_pdf_failure(pending, Failure::unsupported("surface is not navigable"));
+            return Task::none();
+        };
+        let next = match target {
+            Navigation::Next => page_index.saturating_add(1),
+            Navigation::Previous => page_index.saturating_sub(1),
+            Navigation::Page { index } => index,
+        };
+        if next >= *page_count {
+            self.finish_pdf_failure(
+                pending,
+                Failure::invalid(format!(
+                    "PDF page index {next} is outside 0..{}",
+                    page_count
+                )),
+            );
+            return Task::none();
+        }
+        let path = path.clone();
+        let source_id = surface
+            .snapshot
+            .asset_sha256
+            .clone()
+            .unwrap_or_else(|| surface_id.clone());
+        let viewport = self.media_viewport();
+        let scale_factor = self.scale_factor;
+        Task::perform(
+            async move {
+                let (handle, pixels) = render_pdf_page(&path, next)?;
+                let plan = plan_pdf_page(
+                    source_id,
+                    next,
+                    LogicalSize {
+                        width: f64::from(pixels[0]),
+                        height: f64::from(pixels[1]),
+                    },
+                    viewport,
+                    scale_factor,
+                    MediaLimits::default(),
+                )
+                .map_err(|error| Failure::resource(error.to_string()))?;
+                Ok((handle, pixels, plan))
+            },
+            move |result| Message::PageLoaded {
+                pending: pending.map(Box::new),
+                surface_id,
+                page_index: next,
+                result: Box::new(result),
+            },
+        )
+    }
 
-        let controller = self
-            .orbits
-            .entry(stream_id.to_string())
-            .or_insert_with(OrbitController::default);
-        let (moved, force) = match event {
-            OrbitEvent::Press(at) => {
-                controller.press(at);
-                // Publishes immediately so the renderer stops its idle orbit
-                // the moment the pointer goes down, rather than fighting the
-                // first part of the drag.
-                (true, true)
-            }
-            OrbitEvent::Drag(to, surface) => (controller.drag(to, surface), false),
-            OrbitEvent::Release => {
-                controller.release();
-                (true, true)
-            }
-            OrbitEvent::Zoom(steps) => (controller.zoom(steps), false),
+    fn finish_pdf_failure(&mut self, pending: Option<Pending>, failure: Failure) {
+        if let Some(pending) = pending {
+            self.fail(pending, failure);
+        } else {
+            self.status = failure.message.clone();
+            eprintln!("Canvas: PDF navigation failed: {}", failure.message);
+        }
+    }
+
+    fn handle_model_orbit(
+        &mut self,
+        stream_id: &str,
+        event: canvas_model_viewer::video::OrbitEvent,
+    ) {
+        use canvas_model_viewer::state::{Gesture, Input};
+        use canvas_model_viewer::video::OrbitEvent;
+        let gesture = match event {
+            OrbitEvent::Press(at) => Gesture::Press(at),
+            OrbitEvent::Drag(to, size) => Gesture::Drag(to, size),
+            OrbitEvent::Release => Gesture::Release,
+            OrbitEvent::Zoom(steps) => Gesture::Zoom(steps),
         };
-        if !moved {
-            return;
+        self.apply_model_viewer_input(stream_id, Input::Gesture(gesture));
+    }
+
+    fn apply_model_viewer_input(
+        &mut self,
+        stream_id: &str,
+        input: canvas_model_viewer::state::Input,
+    ) {
+        let update = self
+            .model_viewer
+            .apply(stream_id, input, Instant::now(), unix_ms());
+        if let Some(output) = update.output {
+            if let Err(error) = publish_model_camera(&output.pose) {
+                eprintln!(
+                    "Canvas: could not publish model viewer state for {stream_id}: {error:#}"
+                );
+            }
+            self.status = output.status;
         }
-        let now = Instant::now();
-        if !force
-            && self
-                .orbit_published
-                .get(stream_id)
-                .is_some_and(|last| now.duration_since(*last) < ORBIT_PUBLISH_INTERVAL)
-        {
-            return;
+        if update.changed {
+            // The Neo owns the interaction chrome. Repaint its cube for every
+            // accepted gesture even when Studio publication is rate-limited.
+            self.bump();
         }
-        self.orbit_published.insert(stream_id.to_string(), now);
-        let pose = controller.pose(stream_id, unix_ms());
-        if let Err(error) = publish_model_camera(&pose) {
-            eprintln!("Canvas: could not publish camera for {stream_id}: {error:#}");
-        }
-        self.status = match controller.named_view() {
-            Some(view) => format!("{stream_id}: {view} view"),
-            None => format!(
-                "{stream_id}: {:.0} deg, {:.0} deg up",
-                controller.yaw(),
-                controller.pitch()
-            ),
+    }
+
+    fn handle_browser_pointer(&mut self, phase: &str, x: f32, y: f32, delta: f32) {
+        use canvas_model_viewer::video::OrbitEvent;
+
+        let snapshot = self.snapshot();
+        let global = iced::Point::new(
+            self.frame.x as f32 + x * self.frame.width as f32,
+            self.frame.y as f32 + y * self.frame.height as f32,
+        );
+        // A stream can remain grabbed if its surface disappears before the
+        // browser delivers pointer-up (workspace switches are the common
+        // case). Never let that stale controller capture gestures intended
+        // for a model that is visible in the current document.
+        let grabbed = snapshot
+            .surface_bounds
+            .iter()
+            .find_map(|(surface_id, bounds)| {
+                let surface = self
+                    .document
+                    .surfaces
+                    .iter()
+                    .find(|surface| &surface.id == surface_id)?;
+                let SurfaceContent::LiveVideo {
+                    source_id,
+                    orbitable: true,
+                    ..
+                } = &surface.content
+                else {
+                    return None;
+                };
+                self.model_viewer
+                    .is_grabbed(source_id)
+                    .then(|| (source_id.clone(), *bounds))
+            });
+        let hit = snapshot
+            .surface_bounds
+            .iter()
+            .find_map(|(surface_id, bounds)| {
+                let inside = global.x >= bounds.x as f32
+                    && global.y >= bounds.y as f32
+                    && global.x <= (bounds.x + bounds.width as i32) as f32
+                    && global.y <= (bounds.y + bounds.height as i32) as f32;
+                if !inside {
+                    return None;
+                }
+                let surface = self
+                    .document
+                    .surfaces
+                    .iter()
+                    .find(|surface| &surface.id == surface_id)?;
+                let SurfaceContent::LiveVideo {
+                    source_id,
+                    orbitable: true,
+                    ..
+                } = &surface.content
+                else {
+                    return None;
+                };
+                Some((source_id.clone(), *bounds))
+            });
+        let target = if let Some(grabbed) = grabbed {
+            Some(grabbed)
+        } else {
+            hit
         };
+        let Some((stream, bounds)) = target else {
+            return;
+        };
+        let local = iced::Point::new(global.x - bounds.x as f32, global.y - bounds.y as f32);
+        let size = iced::Size::new(bounds.width as f32, bounds.height as f32);
+        let event = match phase {
+            "press" => OrbitEvent::Press(local),
+            "drag" => OrbitEvent::Drag(local, size),
+            "release" => OrbitEvent::Release,
+            "zoom" => OrbitEvent::Zoom(delta),
+            _ => return,
+        };
+        self.handle_model_orbit(&stream, event);
     }
 
     /// The model stream the focused surface is showing, if it is showing one.
@@ -5989,62 +6491,22 @@ impl App {
     fn apply_orbit_action(
         &mut self,
         stream_id: &str,
-        action: ::canvas::model_orbit::OrbitAction,
+        action: canvas_model_viewer::OrbitAction,
     ) -> Task<Message> {
-        use ::canvas::model_orbit::OrbitController;
-        let controller = self
-            .orbits
-            .entry(stream_id.to_string())
-            .or_insert_with(OrbitController::default);
-        if !action.apply(controller) {
-            return Task::none();
-        }
-        let pose = controller.pose(stream_id, unix_ms()).with_instant();
-        let described = controller
-            .named_view()
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("{:.0} deg", controller.yaw()));
-        if let Err(error) = publish_model_camera(&pose) {
-            eprintln!("Canvas: could not publish camera for {stream_id}: {error:#}");
-        }
-        self.orbit_published
-            .insert(stream_id.to_string(), Instant::now());
-        self.status = format!("{stream_id}: {described}");
-        self.bump();
+        self.apply_model_viewer_input(stream_id, canvas_model_viewer::state::Input::Camera(action));
         Task::none()
     }
 
     fn apply_model_timeline(&mut self, stream_id: &str, action: TimelineAction) -> Task<Message> {
-        use ::canvas::model_orbit::OrbitController;
-        let controller = self
-            .orbits
-            .entry(stream_id.to_string())
-            .or_insert_with(OrbitController::default);
-        let changed = match action {
-            TimelineAction::Older => controller.step_older(),
-            TimelineAction::Newer => controller.step_newer(),
-            TimelineAction::Latest => controller.follow_latest(),
-        };
-        if !changed {
-            return Task::none();
-        }
-        let pose = controller.pose(stream_id, unix_ms()).with_instant();
-        if let Err(error) = publish_model_camera(&pose) {
-            eprintln!("Canvas: could not publish timeline cursor for {stream_id}: {error:#}");
-        }
-        self.orbit_published
-            .insert(stream_id.to_string(), Instant::now());
-        self.bump();
+        self.apply_model_viewer_input(
+            stream_id,
+            canvas_model_viewer::state::Input::Timeline(action),
+        );
         Task::none()
     }
 
     fn toggle_model_orbit(&mut self, stream_id: &str) {
-        use ::canvas::model_orbit::OrbitController;
-        self.orbits
-            .entry(stream_id.to_string())
-            .or_insert_with(OrbitController::default)
-            .toggle_enabled();
-        self.bump();
+        self.apply_model_viewer_input(stream_id, canvas_model_viewer::state::Input::ToggleOrbit);
     }
 
     fn publish_wanted_video(&mut self) {
@@ -6195,6 +6657,8 @@ impl App {
                     target,
                     placeholder,
                     session,
+                    task_kinds,
+                    task_targets,
                 } => (
                     ContentKind::Widget,
                     ContentSource::Prompt {
@@ -6203,6 +6667,11 @@ impl App {
                         session: session.clone(),
                         draft: String::new(),
                         sent: Vec::new(),
+                        task_kinds: task_kinds.clone(),
+                        task_targets: task_targets.clone(),
+                        selected_kind: None,
+                        tasks: Vec::new(),
+                        active_task: None,
                     },
                 ),
                 SurfaceContent::LiveImage { source_id } => {
@@ -6346,6 +6815,12 @@ impl App {
             }
             self.decoded.insert(surface.id.clone(), runtime);
         }
+        // Authored widgets are part of the document, so they are reconciled with
+        // it. Every caller of this function gets them, which is the point: a
+        // module that only resolved on one of twenty-four paths would be a wall
+        // that shows an authored widget until someone switches workspace.
+        #[cfg(feature = "lua-scenes")]
+        self.refresh_modules();
     }
 
     fn project_palette(&self) -> ThemePalette {
@@ -6404,6 +6879,106 @@ impl App {
         }
     }
 
+    /// Resolve every authored module into a scene, and forget surfaces that have
+    /// left the document.
+    ///
+    /// Runs when the document changes and when the civil day turns over — an
+    /// authored calendar that does not roll at midnight is a wall that lies once a
+    /// day. Never per frame: the retained key means a steady wall starts no VM.
+    #[cfg(feature = "lua-scenes")]
+    fn refresh_modules(&mut self) {
+        let now_ms = now_unix_ms();
+        let visual = self.presented_visual_theme();
+        let accent = self.effective_theme(&self.document).accent();
+        let theme = ::canvas::lua_module::ModuleThemeTokens::from_visual(&visual, accent);
+        let today = ::canvas::hud::local_parts(now_ms);
+        let mut targets = Vec::new();
+        for (id, surface) in &self.decoded {
+            if let ContentSource::Widget { spec } = &surface.source
+                && let canvas_widgets::WidgetKind::Module { module, inputs } = &spec.kind
+            {
+                let key = module_key(module, inputs, &visual, today.year, today.month, today.day);
+                targets.push((id.clone(), module.clone(), inputs.clone(), key));
+            }
+        }
+        let live: BTreeSet<String> = targets.iter().map(|(id, _, _, _)| id.clone()).collect();
+        for (id, name, inputs, key) in targets {
+            if self.modules.get(&id).is_some_and(|done| done.key() == key) {
+                continue;
+            }
+            let resolved = match resolve_module(&name, &inputs, theme, now_ms) {
+                Ok(scene) => ModuleSurface::Rendered { key, scene },
+                Err(reason) => {
+                    // Loud on the console as well as on the wall: this is the one
+                    // failure mode where a silent fallback would look like a
+                    // working widget.
+                    eprintln!("Canvas module {name} on surface {id}: {reason}");
+                    ModuleSurface::Failed { key, reason }
+                }
+            };
+            self.modules.insert(id, resolved);
+        }
+        self.modules.retain(|id, _| live.contains(id));
+    }
+
+    /// Draw a scene's text nodes in 2D, sized and coloured from the presented theme.
+    ///
+    /// Shared by document-authored scenes and resolved Lua modules, so an
+    /// authored widget can never look like a different toolkit than a placed one.
+    fn scene_layer(&self, scene: &Scene, viewport: LogicalSize) -> Element<'static, Message> {
+        let visual = self.presented_visual_theme();
+        let palette = visual.palette;
+        let metrics = visual.metrics;
+        // Only text nodes are renderable in 2D. Group/Mesh/Camera/Light nodes
+        // contribute transforms and still influence child text through the graph.
+        let mut sorted: Vec<usize> = scene
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| matches!(node.content, NodeContent::Text { .. }))
+            .map(|(index, _)| index)
+            .collect();
+        // Farther nodes draw first so closer ones appear on top.
+        sorted.sort_by(|a, b| {
+            scene.nodes[*a].transform.translation[2]
+                .total_cmp(&scene.nodes[*b].transform.translation[2])
+        });
+        let children: Vec<Element<'static, Message>> = sorted
+            .iter()
+            .map(|&index| {
+                let node = &scene.nodes[index];
+                let NodeContent::Text { text: label, ink } = &node.content else {
+                    return container(text("")).into();
+                };
+                let parents = scene_parent_chain(index, &scene.nodes);
+                let (translation, _rotation, scale) =
+                    scene_node_effective(index, &scene.nodes, &parents);
+                let [pos_x, pos_y] = scene_node_position(translation, viewport);
+                let z_scale = scene_node_scale(translation[2]);
+                // `scale` is the font-size dial, and it multiplies `body` rather
+                // than a literal: an authored grid at scale 1 must be exactly as
+                // large as every other body text on the wall, and it must move
+                // when the theme's type scale does. This replaced `* 24.0`.
+                let font_size = (scale[0] * scale[1] * metrics.body * z_scale).max(metrics.micro);
+                container(
+                    text(label.clone())
+                        .size(font_size)
+                        .color(color(scene_ink(*ink, &palette))),
+                )
+                .width(Length::Shrink)
+                .height(Length::Shrink)
+                .padding(iced::Padding {
+                    top: pos_y,
+                    right: 0.0,
+                    bottom: 0.0,
+                    left: pos_x,
+                })
+                .into()
+            })
+            .collect();
+        container(stack(children)).into()
+    }
+
     fn surface_widget<'a>(
         &self,
         surface: &'a RuntimeSurface,
@@ -6412,6 +6987,36 @@ impl App {
         viewport: LogicalSize,
     ) -> Element<'a, Message> {
         match &surface.source {
+            ContentSource::LiveVideo {
+                source_id,
+                path,
+                orbitable,
+                timeline,
+                ..
+            } if !path.is_file() => {
+                let loading = self.unloaded_media(
+                    &surface.snapshot.title,
+                    source_id,
+                    Length::Fill,
+                    Length::Fill,
+                );
+                if *orbitable || *timeline {
+                    column![
+                        container(loading).width(Length::Fill).height(Length::Fill),
+                        self.model_toolbar(source_id, *orbitable, *timeline),
+                    ]
+                    .width(width)
+                    .height(height)
+                    .into()
+                } else {
+                    container(loading).width(width).height(height).into()
+                }
+            }
+            ContentSource::LiveImage {
+                source_id,
+                seen: None,
+                ..
+            } => self.unloaded_media(&surface.snapshot.title, source_id, width, height),
             ContentSource::Markdown { items, .. } => container(
                 markdown::view(items, markdown::Settings::from(&iced::Theme::Dark))
                     .map(Message::LinkOpened),
@@ -6426,60 +7031,10 @@ impl App {
                     .height(height)
                     .into()
             }
-            ContentSource::Scene { scene } => {
-                let palette = self.project_palette();
-                // Only text nodes are renderable in 2D; Mesh/Camera/Light/I Group
-                // nodes contribute transforms and are skipped for drawing but
-                // influence child text nodes through the scene graph.
-                let text_nodes: Vec<usize> = scene
-                    .nodes
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, n)| matches!(n.content, NodeContent::Text { .. }))
-                    .map(|(index, _)| index)
-                    .collect();
-                // Sort text nodes by Z (depth) so farther nodes are drawn first,
-                // letting closer nodes appear on top.
-                let mut sorted = text_nodes;
-                sorted.sort_by(|a, b| {
-                    let za = scene.nodes[*a].transform.translation[2];
-                    let zb = scene.nodes[*b].transform.translation[2];
-                    za.total_cmp(&zb)
-                });
-                let children: Vec<Element<'_, Message>> = sorted
-                    .iter()
-                    .map(|&index| {
-                        let node = &scene.nodes[index];
-                        let NodeContent::Text { text: label } = &node.content else {
-                            return container(text("")).into();
-                        };
-                        let parents = scene_parent_chain(index, &scene.nodes);
-                        let (translation, _rotation, scale) =
-                            scene_node_effective(index, &scene.nodes, &parents);
-                        let [pos_x, pos_y] = scene_node_position(translation, viewport);
-                        let z_scale = scene_node_scale(translation[2]);
-                        let font_size = (scale[0] * scale[1] * 24.0 * z_scale).max(10.0);
-                        // Rotation is noted but not applied in 2D text rendering;
-                        // full 3D mesh rendering with vertex shaders is a future
-                        // backend task (dock-cov.44). Z-based scale and depth
-                        // ordering provide the visible 3D structure.
-                        container(text(label).size(font_size).color(color(palette.text)))
-                            .width(Length::Shrink)
-                            .height(Length::Shrink)
-                            .padding(iced::Padding {
-                                top: pos_y,
-                                right: 0.0,
-                                bottom: 0.0,
-                                left: pos_x,
-                            })
-                            .into()
-                    })
-                    .collect();
-                container(stack(children))
-                    .width(width)
-                    .height(height)
-                    .into()
-            }
+            ContentSource::Scene { scene } => container(self.scene_layer(scene, viewport))
+                .width(width)
+                .height(height)
+                .into(),
             ContentSource::DataViz { chart } => {
                 let visual = self.presented_visual_theme();
                 let palette = visual.palette;
@@ -6504,6 +7059,11 @@ impl App {
                 session,
                 draft,
                 sent,
+                task_kinds,
+                task_targets,
+                selected_kind,
+                tasks,
+                active_task,
             } => {
                 let palette = self.project_palette();
                 let focused =
@@ -6511,44 +7071,170 @@ impl App {
                 // Which session is named outright: on a wall showing several
                 // agents, "→ operator" alone cannot tell you which of them is
                 // about to receive what you type.
+                let addressed_target = selected_kind.as_ref().map_or(target.as_str(), |kind| {
+                    prompt_target_for_kind(target, task_targets, kind)
+                });
                 let addressed = match session {
-                    Some(session) => format!("→ {target} · {session}"),
-                    None => format!("→ {target} · current session"),
+                    Some(session) => format!("→ {addressed_target} · {session}"),
+                    None => format!("→ {addressed_target} · current session"),
                 };
+                let surface_id = surface.snapshot.id.clone();
+                let mut header = row![
+                    text(if task_kinds.is_empty() {
+                        addressed.clone()
+                    } else {
+                        "PROJECT TASKS".into()
+                    })
+                    .size(13)
+                    .color(color(palette.text_muted)),
+                    space::horizontal(),
+                ]
+                .align_y(iced::Alignment::Center);
+                if !task_kinds.is_empty() {
+                    header = header.push(
+                        button(text("＋ CREATE NEW").size(12))
+                            .padding([6, 10])
+                            .on_press(Message::PromptNew(surface_id.clone())),
+                    );
+                } else if active_task.is_some() {
+                    header = header.push(
+                        button(text("＋ FOLLOW UP").size(12))
+                            .padding([6, 10])
+                            .on_press(Message::PromptNew(surface_id.clone())),
+                    );
+                }
                 let mut column = iced::widget::Column::<Message>::new()
                     .spacing(10)
-                    .push(text(addressed).size(13).color(color(palette.text_muted)));
+                    .push(header);
 
-                // An empty draft shows the placeholder muted. The caret appears
-                // only while focused, so an unfocused prompt does not look like
-                // it is waiting on a keystroke it will never receive.
-                let (line, line_color) = if draft.is_empty() {
-                    (
-                        placeholder
-                            .clone()
-                            .unwrap_or_else(|| "Type, then press Enter".into()),
-                        palette.text_muted,
-                    )
-                } else {
-                    (draft.clone(), palette.text)
-                };
-                column = column.push(
-                    text(format!("{line}{}", if focused { "▌" } else { "" }))
-                        .size(22)
-                        .color(color(line_color)),
-                );
+                if !tasks.is_empty() {
+                    let mut tabs = row![].spacing(6);
+                    for task in tasks.iter().rev().take(5) {
+                        let selected = *active_task == Some(task.id);
+                        tabs = tabs.push(
+                            button(
+                                text(format!(
+                                    "{} {}",
+                                    if selected { "●" } else { "○" },
+                                    task.kind.to_ascii_uppercase()
+                                ))
+                                .size(11),
+                            )
+                            .padding([5, 8])
+                            .on_press(Message::PromptTaskSelected {
+                                surface_id: surface_id.clone(),
+                                task_id: task.id,
+                            }),
+                        );
+                    }
+                    column = column.push(tabs);
+                }
 
-                // Newest first: the confirmation you just earned is the one
-                // worth reading.
-                for line in sent.iter().rev() {
-                    column = column.push(
-                        text(format!("sent · {line}"))
+                if !task_kinds.is_empty() && selected_kind.is_none() && active_task.is_none() {
+                    column = column.push(text("Create New…").size(24).color(color(palette.text)));
+                    let mut kinds = row![].spacing(8);
+                    for kind in task_kinds {
+                        kinds = kinds.push(
+                            button(text(kind.to_ascii_uppercase()).size(13))
+                                .padding([9, 14])
+                                .on_press(Message::PromptKindSelected {
+                                    surface_id: surface_id.clone(),
+                                    kind: kind.clone(),
+                                }),
+                        );
+                    }
+                    column = column.push(kinds).push(
+                        text("Start a task here; the workspace becomes its live studio.")
                             .size(12)
                             .color(color(palette.text_muted)),
                     );
+                } else if let Some(task) =
+                    active_task.and_then(|task_id| tasks.iter().find(|task| task.id == task_id))
+                {
+                    let state = task.state.to_ascii_uppercase();
+                    column = column
+                        .push(
+                            text(format!("{} · {state}", task.kind.to_ascii_uppercase()))
+                                .size(13)
+                                .color(color(palette.primary)),
+                        )
+                        .push(
+                            text("FINAL PROMPT")
+                                .size(10)
+                                .color(color(palette.text_muted)),
+                        )
+                        .push(text(&task.prompt).size(19).color(color(palette.text)))
+                        .push(
+                            text(
+                                task.detail
+                                    .as_deref()
+                                    .unwrap_or("Watching live task activity"),
+                            )
+                            .size(11)
+                            .color(color(palette.text_muted)),
+                        );
+                    column = column.push(
+                        text("LIVE ACTIVITY")
+                            .size(10)
+                            .color(color(palette.text_muted)),
+                    );
+                    if task.activity.is_empty() {
+                        column = column.push(
+                            text("Waiting for the tool to report progress…")
+                                .size(11)
+                                .color(color(palette.text_muted)),
+                        );
+                    } else {
+                        for entry in task.activity.iter().rev().take(6).rev() {
+                            column = column.push(
+                                text(format!("› {entry}"))
+                                    .size(11)
+                                    .color(color(palette.text)),
+                            );
+                        }
+                    }
+                    if !matches!(task.state.as_str(), "complete" | "failed") {
+                        column = column.push(canvas_widgets::live::loading_rails(
+                            self.effective_visual_theme(&self.document),
+                        ));
+                    }
+                } else {
+                    if let Some(kind) = selected_kind {
+                        column = column.push(
+                            text(format!("NEW {}  ·  {addressed}", kind.to_ascii_uppercase()))
+                                .size(13)
+                                .color(color(palette.primary)),
+                        );
+                    }
+
+                    let (line, line_color) = if draft.is_empty() {
+                        (
+                            placeholder
+                                .clone()
+                                .unwrap_or_else(|| "Describe the outcome…".into()),
+                            palette.text_muted,
+                        )
+                    } else {
+                        (draft.clone(), palette.text)
+                    };
+                    column = column.push(
+                        text(format!("{line}{}", if focused { "▌" } else { "" }))
+                            .size(22)
+                            .color(color(line_color)),
+                    );
                 }
 
-                container(column)
+                if task_kinds.is_empty() {
+                    for line in sent.iter().rev() {
+                        column = column.push(
+                            text(format!("sent · {line}"))
+                                .size(12)
+                                .color(color(palette.text_muted)),
+                        );
+                    }
+                }
+
+                container(scrollable(column).height(Length::Fill))
                     .padding(16)
                     .width(width)
                     .height(height)
@@ -6592,10 +7278,49 @@ impl App {
                 .into()
             }
             ContentSource::Widget { spec } => {
-                // Module widgets are resolved by the Lua host (lua_module.rs)
-                // before reaching the static renderer. If a raw Module spec
-                // arrives here, it means the host hasn't bound it yet — show
-                // a labeled panel rather than an empty blank.
+                // An authored widget draws its retained scene. The static library
+                // still answers for a module that has not resolved at all, so the
+                // two failure shapes stay distinguishable on the wall: an
+                // unresolved module says "unresolved", a resolved one that failed
+                // says why.
+                #[cfg(feature = "lua-scenes")]
+                if let canvas_widgets::WidgetKind::Module { .. } = &spec.kind {
+                    return match self.modules.get(&surface.snapshot.id) {
+                        Some(ModuleSurface::Rendered { scene, .. }) => {
+                            container(self.scene_layer(scene, viewport))
+                                .width(width)
+                                .height(height)
+                                .into()
+                        }
+                        Some(ModuleSurface::Failed { reason, .. }) => {
+                            let metrics = self.presented_visual_theme().metrics;
+                            let palette = self.project_palette();
+                            container(
+                                column![
+                                    text(surface.snapshot.title.clone())
+                                        .size(metrics.title)
+                                        .color(color(palette.text)),
+                                    text(reason.clone())
+                                        .size(metrics.small)
+                                        .color(color(palette.danger)),
+                                ]
+                                .spacing(metrics.space_2),
+                            )
+                            .width(width)
+                            .height(height)
+                            .padding(metrics.space_4)
+                            .into()
+                        }
+                        None => canvas_widgets::live::element_at_with_artwork(
+                            spec,
+                            &self.presented_visual_theme(),
+                            canvas_widgets::live::chrono_now_at_millis(
+                                self.last_clock_millis as i64,
+                            ),
+                            None,
+                        ),
+                    };
+                }
                 let visual = self.presented_visual_theme();
                 let artwork = match &spec.kind {
                     canvas_widgets::WidgetKind::MediaCard {
@@ -6629,16 +7354,11 @@ impl App {
                         ..
                     } => {
                         let stream = source_id.clone();
-                        let orbit_enabled = *orbitable
-                            && self
-                                .orbits
-                                .get(source_id)
-                                .is_some_and(|controller| controller.enabled());
-                        retained_video::view(
+                        canvas_model_viewer::video::view(
                             path.clone(),
                             *frame_width,
                             *frame_height,
-                            orbit_enabled.then(|| {
+                            orbitable.then(|| {
                                 std::sync::Arc::new(move |event| Message::ModelOrbit {
                                     stream_id: stream.clone(),
                                     event,
@@ -6675,6 +7395,14 @@ impl App {
                         .into(),
                     );
                 }
+                if let ContentSource::LiveVideo {
+                    source_id,
+                    orbitable: true,
+                    ..
+                } = &surface.source
+                {
+                    layers.push(self.model_view_cube(source_id));
+                }
                 if let Some(view) = view
                     && let Some(attention) = &view.attention
                 {
@@ -6693,26 +7421,81 @@ impl App {
                     );
                 }
                 let visual: Element<'_, Message> = stack(layers).into();
-                if let ContentSource::LiveVideo {
-                    source_id,
-                    orbitable,
-                    timeline,
-                    ..
-                } = &surface.source
-                    && (*orbitable || *timeline)
-                {
-                    column![
+                match &surface.source {
+                    ContentSource::Pdf {
+                        page_index,
+                        page_count,
+                        ..
+                    } => column![
+                        container(visual).width(Length::Fill).height(Length::Fill),
+                        self.pdf_toolbar(&surface.snapshot.id, *page_index, *page_count),
+                    ]
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into(),
+                    ContentSource::LiveVideo {
+                        source_id,
+                        orbitable,
+                        timeline,
+                        ..
+                    } if *orbitable || *timeline => column![
                         container(visual).width(Length::Fill).height(Length::Fill),
                         self.model_toolbar(source_id, *orbitable, *timeline),
                     ]
                     .width(Length::Fill)
                     .height(Length::Fill)
-                    .into()
-                } else {
-                    visual
+                    .into(),
+                    _ => visual,
                 }
             }
         }
+    }
+
+    fn unloaded_media<'a>(
+        &self,
+        title: &'a str,
+        source_id: &'a str,
+        width: Length,
+        height: Length,
+    ) -> Element<'a, Message> {
+        let visual = self.presented_visual_theme();
+        let palette = visual.palette;
+        let metrics = visual.metrics;
+        let content = column![
+            text("AWAITING LIVE ARTIFACT")
+                .size(metrics.small)
+                .color(color(palette.primary)),
+            text(title).size(metrics.title).color(color(palette.text)),
+            text(source_id)
+                .size(metrics.small)
+                .color(color(palette.text_muted)),
+            space::vertical().height(Length::Fixed(metrics.space_3)),
+            canvas_widgets::live::loading_rails(visual),
+        ]
+        .spacing(metrics.space_2);
+        container(content)
+            .padding(metrics.space_4)
+            .width(width)
+            .height(height)
+            .style(move |_| container::Style {
+                background: Some(
+                    Color {
+                        a: 0.96,
+                        ..color(visual.surface_raised)
+                    }
+                    .into(),
+                ),
+                border: iced::Border {
+                    color: Color {
+                        a: 0.72,
+                        ..color(palette.border_strong)
+                    },
+                    width: 1.0,
+                    radius: metrics.radius_sm.into(),
+                },
+                ..Default::default()
+            })
+            .into()
     }
 
     /// Native controls adjacent to the video rather than burned into or laid
@@ -6724,72 +7507,81 @@ impl App {
         orbitable: bool,
         timeline: bool,
     ) -> Element<'a, Message> {
-        use ::canvas::model_orbit::OrbitAction;
-        let controller = self.orbits.get(stream_id);
-        let orbit_enabled = controller.is_some_and(|controller| controller.enabled());
-        let selected = controller.and_then(|controller| controller.named_view());
-        let mut controls = iced::widget::Row::new()
-            .spacing(3)
-            .align_y(iced::Alignment::Center);
-        if orbitable {
-            controls = controls.push(
-                button(text(if orbit_enabled { "ORBIT ON" } else { "ORBIT" }).size(11))
-                    .padding([5, 9])
-                    .on_press(Message::ModelOrbitToggle {
-                        stream_id: stream_id.to_string(),
-                    })
-                    .style(if orbit_enabled {
-                        button::primary
-                    } else {
-                        button::secondary
-                    }),
-            );
-            for (label, view) in [("ISO", "iso"), ("F", "front"), ("R", "right"), ("T", "top")] {
-                controls = controls.push(
-                    button(text(label).size(11))
-                        .padding([5, 8])
-                        .on_press(Message::ModelOrbitAction {
-                            stream_id: stream_id.to_string(),
-                            action: OrbitAction::Snap(view),
-                        })
-                        .style(if selected == Some(view) {
-                            button::primary
-                        } else {
-                            button::secondary
-                        }),
-                );
-            }
-        }
-        if timeline {
-            let steps_back = controller
-                .and_then(|controller| controller.steps_back())
-                .unwrap_or(0);
-            let position = if steps_back == 0 {
-                "LIVE".to_string()
-            } else {
-                format!("−{steps_back}")
-            };
-            for (label, action) in [
-                ("◀", TimelineAction::Older),
-                (position.as_str(), TimelineAction::Latest),
-                ("▶", TimelineAction::Newer),
-            ] {
-                controls = controls.push(
-                    button(text(label.to_string()).size(11))
-                        .padding([5, 9])
-                        .on_press(Message::ModelTimeline {
-                            stream_id: stream_id.to_string(),
-                            action,
-                        })
-                        .style(button::secondary),
-                );
-            }
-        }
-        container(controls)
-            .width(Length::Fill)
-            .padding([5, 7])
-            .align_x(iced::alignment::Horizontal::Center)
-            .into()
+        canvas_model_viewer::view::toolbar(
+            self.presented_visual_theme(),
+            stream_id,
+            self.model_viewer.controller(stream_id),
+            self.model_viewer.timeline(stream_id),
+            orbitable,
+            timeline,
+            |stream_id, action| match action {
+                canvas_model_viewer::view::Action::ToggleOrbit => {
+                    Message::ModelOrbitToggle { stream_id }
+                }
+                canvas_model_viewer::view::Action::Camera(action) => {
+                    Message::ModelOrbitAction { stream_id, action }
+                }
+                canvas_model_viewer::view::Action::Timeline(action) => {
+                    Message::ModelTimeline { stream_id, action }
+                }
+            },
+        )
+    }
+
+    /// Compact CAD view cube overlaid in the model's lower-right corner.
+    /// Faces and chamfer-like corner buttons all resolve through the same
+    /// named-view controller used by keys and drag gestures.
+    fn model_view_cube<'a>(&self, stream_id: &'a str) -> Element<'a, Message> {
+        canvas_model_viewer::view::view_cube(
+            self.presented_visual_theme(),
+            stream_id,
+            self.model_viewer.controller(stream_id),
+            |stream_id, action| match action {
+                canvas_model_viewer::view::Action::Camera(action) => {
+                    Message::ModelOrbitAction { stream_id, action }
+                }
+                _ => unreachable!("view cube only emits camera actions"),
+            },
+        )
+    }
+
+    fn pdf_toolbar<'a>(
+        &self,
+        surface_id: &'a str,
+        page_index: u32,
+        page_count: u32,
+    ) -> Element<'a, Message> {
+        use canvas_widgets::live::app_chrome::Item;
+        let previous = if page_index == 0 {
+            Item::disabled("◀")
+        } else {
+            Item::action(
+                "◀",
+                Message::PdfNavigate {
+                    surface_id: surface_id.to_string(),
+                    target: Navigation::Previous,
+                },
+            )
+        };
+        let next = if page_index + 1 >= page_count {
+            Item::disabled("▶")
+        } else {
+            Item::action(
+                "▶",
+                Message::PdfNavigate {
+                    surface_id: surface_id.to_string(),
+                    target: Navigation::Next,
+                },
+            )
+        };
+        canvas_widgets::live::app_chrome::bar(
+            self.presented_visual_theme(),
+            [
+                previous,
+                Item::Status(format!("PAGE {} / {}", page_index + 1, page_count)),
+                next,
+            ],
+        )
     }
 
     fn surface_controls<'a>(
@@ -6800,7 +7592,13 @@ impl App {
         widget_chrome: Option<canvas_widgets::WidgetChrome>,
     ) -> Element<'a, Message> {
         if self.document.chrome.title == SurfaceTitleMode::Hidden
-            || widget_chrome == Some(canvas_widgets::WidgetChrome::Frameless)
+            || matches!(
+                widget_chrome,
+                Some(
+                    canvas_widgets::WidgetChrome::Frameless
+                        | canvas_widgets::WidgetChrome::Integrated
+                )
+            )
         {
             return container(space::horizontal())
                 .width(Length::Fill)
@@ -7182,7 +7980,7 @@ impl App {
                     path,
                     seen,
                 } => (source_id, path, seen, None),
-                // Raw video is uploaded by `retained_video` directly into a
+                // Raw video is uploaded by `canvas-model-viewer` directly into a
                 // stable WGPU texture. It must never enter iced's immutable
                 // image-handle cache, which allocates a new texture per frame.
                 ContentSource::LiveVideo { .. } => continue,
@@ -7493,8 +8291,13 @@ impl App {
                             return None;
                         }
                         let widget_chrome = self.widget_chrome(&placement.surface_id);
-                        let frameless =
-                            widget_chrome == Some(canvas_widgets::WidgetChrome::Frameless);
+                        let frameless = matches!(
+                            widget_chrome,
+                            Some(
+                                canvas_widgets::WidgetChrome::Frameless
+                                    | canvas_widgets::WidgetChrome::Integrated
+                            )
+                        );
                         let control_height = if self.document.chrome.title
                             == SurfaceTitleMode::Hidden
                             || frameless
@@ -7710,7 +8513,13 @@ impl App {
                         let mut viewport = self.media_viewport();
                         let widget_chrome = self.widget_chrome(&surface.snapshot.id);
                         if self.document.chrome.title != SurfaceTitleMode::Hidden
-                            && widget_chrome != Some(canvas_widgets::WidgetChrome::Frameless)
+                            && !matches!(
+                                widget_chrome,
+                                Some(
+                                    canvas_widgets::WidgetChrome::Frameless
+                                        | canvas_widgets::WidgetChrome::Integrated
+                                )
+                            )
                         {
                             viewport.height = (viewport.height
                                 - f64::from(window_chrome.titlebar_height))
@@ -7883,15 +8692,56 @@ impl App {
                 .count();
             let now = canvas_widgets::live::chrono_now();
             let clock = format!("{:02}:{:02}:{:02}", now.hour, now.minute, now.second);
+            let back = button(text("‹").size(18).center())
+                .padding([2, 9])
+                .on_press_maybe(
+                    self.jump_history
+                        .can_go_back()
+                        .then_some(Message::ShellBack),
+                )
+                .style(move |_, status| {
+                    canvas_widgets::live::app_chrome::cube_button_style(visual_theme, false, status)
+                });
+            let forward = button(text("›").size(18).center())
+                .padding([2, 9])
+                .on_press_maybe(
+                    self.jump_history
+                        .can_go_forward()
+                        .then_some(Message::ShellForward),
+                )
+                .style(move |_, status| {
+                    canvas_widgets::live::app_chrome::cube_button_style(visual_theme, false, status)
+                });
+            let project = button(text(project_label).size(12))
+                .padding([5, 10])
+                .on_press(Message::ShellProjects)
+                .style(move |_, status| {
+                    canvas_widgets::live::app_chrome::cube_button_style(visual_theme, true, status)
+                });
+            let has_creator = self.decoded.values().any(|surface| {
+                matches!(
+                    &surface.source,
+                    ContentSource::Prompt { task_kinds, .. } if !task_kinds.is_empty()
+                )
+            });
+            let create = button(text("＋ NEW").size(10))
+                .padding([5, 10])
+                .on_press_maybe(has_creator.then_some(Message::ShellNewTask))
+                .style(move |_, status| {
+                    canvas_widgets::live::app_chrome::cube_button_style(visual_theme, false, status)
+                });
             let identity = row![
                 text("FPL").size(12).color(Color { a: 0.90, ..primary }),
-                text(project_label).size(12).color(Color {
-                    a: 0.94,
-                    ..text_color
-                }),
-                text("CANVAS").size(10).color(Color { a: 0.52, ..muted }),
+                back,
+                forward,
+                project,
+                text("/").size(11).color(Color { a: 0.40, ..muted }),
+                text(self.document.active_page_name().to_uppercase())
+                    .size(10)
+                    .color(Color { a: 0.72, ..muted }),
+                create,
             ]
-            .spacing(14)
+            .spacing(7)
             .align_y(iced::Alignment::Center);
             let health = row![
                 text(format!("{live_sources} LIVE"))
@@ -7944,6 +8794,85 @@ impl App {
                     .align_x(iced::alignment::Horizontal::Center)
                     .align_y(iced::alignment::Vertical::Top)
                     .into(),
+            );
+        }
+
+        let global_tasks = self
+            .decoded
+            .iter()
+            .flat_map(|(surface_id, surface)| match &surface.source {
+                ContentSource::Prompt {
+                    tasks, active_task, ..
+                } => tasks
+                    .iter()
+                    .map(|task| (surface_id.clone(), task, *active_task == Some(task.id)))
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        if !global_tasks.is_empty() {
+            let mut task_switcher = row![
+                text("ACTIVE TASKS")
+                    .size(10)
+                    .color(color(palette.text_muted))
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center);
+            for (surface_id, task, selected) in global_tasks.iter().rev().take(6) {
+                let selected = *selected;
+                let state_glyph = match task.state.as_str() {
+                    "complete" => "✓",
+                    "failed" => "!",
+                    "working" | "delivered" => "●",
+                    _ => "○",
+                };
+                let summary: String = task.prompt.chars().take(28).collect();
+                task_switcher = task_switcher.push(
+                    button(
+                        text(format!(
+                            "{state_glyph} {} · {summary}",
+                            task.kind.to_uppercase()
+                        ))
+                        .size(11),
+                    )
+                    .padding([6, 10])
+                    .on_press(Message::PromptTaskSelected {
+                        surface_id: surface_id.clone(),
+                        task_id: task.id,
+                    })
+                    .style(move |_, status| {
+                        canvas_widgets::live::app_chrome::cube_button_style(
+                            visual_theme,
+                            selected,
+                            status,
+                        )
+                    }),
+                );
+            }
+            layers.push(
+                container(container(task_switcher).padding([6, 8]).style(move |_| {
+                    container::Style {
+                        background: Some(
+                            Color {
+                                a: 0.94,
+                                ..surface_color
+                            }
+                            .into(),
+                        ),
+                        border: iced::Border {
+                            color: border_color,
+                            width: 1.0,
+                            radius: 6.0.into(),
+                        },
+                        ..Default::default()
+                    }
+                }))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Center)
+                .align_y(iced::alignment::Vertical::Bottom)
+                .padding(14)
+                .into(),
             );
         }
 
@@ -8316,236 +9245,6 @@ fn render_mermaid(source: &Path, surface_id: &str) -> Result<PathBuf, Failure> {
     Ok(temp)
 }
 
-fn key_to_bytes(event: &iced::keyboard::Event) -> Vec<u8> {
-    use iced::keyboard::Event;
-    match event {
-        Event::KeyPressed { text, key, .. } => {
-            if let Some(text) = text {
-                return text.to_string().into_bytes();
-            }
-            use iced::keyboard::key::Named;
-            match key {
-                iced::keyboard::Key::Named(Named::Enter) => b"\r".to_vec(),
-                iced::keyboard::Key::Named(Named::Backspace) => b"\x7f".to_vec(),
-                iced::keyboard::Key::Named(Named::Tab) => b"\t".to_vec(),
-                iced::keyboard::Key::Named(Named::ArrowUp) => b"\x1b[A".to_vec(),
-                iced::keyboard::Key::Named(Named::ArrowDown) => b"\x1b[B".to_vec(),
-                iced::keyboard::Key::Named(Named::ArrowRight) => b"\x1b[C".to_vec(),
-                iced::keyboard::Key::Named(Named::ArrowLeft) => b"\x1b[D".to_vec(),
-                iced::keyboard::Key::Named(Named::Escape) => b"\x1b".to_vec(),
-                iced::keyboard::Key::Named(Named::Delete) => b"\x1b[3~".to_vec(),
-                _ => Vec::new(),
-            }
-        }
-        _ => Vec::new(),
-    }
-}
-
-fn focus_emphasis_curve(elapsed: Duration) -> f32 {
-    let progress = (elapsed.as_secs_f32() / FOCUS_EMPHASIS_DURATION.as_secs_f32()).clamp(0.0, 1.0);
-    if progress >= 1.0 {
-        return 0.0;
-    }
-    let pulse = (progress * core::f32::consts::TAU * 2.0).sin() * 0.5 + 0.5;
-    (1.0 - progress) * (0.45 + pulse * 0.55)
-}
-
-/// Ctrl+Left / Ctrl+Right steps pages within the current workspace.
-///
-/// Horizontal to the workspace cycle's vertical (Ctrl+Shift+Up/Down): moving
-/// sideways stays inside the board, moving up and down leaves it. Shift is
-/// excluded so the two cannot be pressed as the same gesture.
-fn page_cycle_direction(event: &iced::keyboard::Event) -> Option<i32> {
-    use iced::keyboard::{Event, Key, key::Named};
-    let Event::KeyPressed {
-        key,
-        modifiers,
-        repeat: false,
-        ..
-    } = event
-    else {
-        return None;
-    };
-    if !modifiers.control() || modifiers.shift() || modifiers.alt() || modifiers.logo() {
-        return None;
-    }
-    match key {
-        Key::Named(Named::ArrowLeft) => Some(-1),
-        Key::Named(Named::ArrowRight) => Some(1),
-        _ => None,
-    }
-}
-
-fn workspace_cycle_direction(event: &iced::keyboard::Event) -> Option<i32> {
-    use iced::keyboard::{Event, Key, key::Named};
-    let Event::KeyPressed { key, modifiers, .. } = event else {
-        return None;
-    };
-    if !modifiers.control() || !modifiers.shift() || modifiers.alt() || modifiers.logo() {
-        return None;
-    }
-    match key {
-        Key::Named(Named::ArrowUp) => Some(-1),
-        Key::Named(Named::ArrowDown) => Some(1),
-        _ => None,
-    }
-}
-
-fn display_shortcut(event: &iced::keyboard::Event) -> Option<usize> {
-    use iced::keyboard::{Event, Key};
-    let Event::KeyPressed {
-        key,
-        modifiers,
-        repeat: false,
-        ..
-    } = event
-    else {
-        return None;
-    };
-    if !modifiers.control() || modifiers.alt() || modifiers.logo() {
-        return None;
-    }
-    match key.as_ref() {
-        Key::Character("0") => Some(0),
-        Key::Character("1") => Some(1),
-        Key::Character("2") => Some(2),
-        Key::Character("3") => Some(3),
-        _ => None,
-    }
-}
-
-fn snap_layout_requested(event: &iced::keyboard::Event) -> bool {
-    use iced::keyboard::Event;
-    matches!(
-        event,
-        Event::KeyPressed {
-            key,
-            modified_key,
-            modifiers,
-            repeat: false,
-            ..
-        } if (matches_character(key, "l") || matches_character(modified_key, "l"))
-            && modifiers.control()
-            && modifiers.alt()
-            && !modifiers.logo()
-    )
-}
-
-fn matches_character(key: &iced::keyboard::Key, expected: &str) -> bool {
-    matches!(key, iced::keyboard::Key::Character(value) if value.eq_ignore_ascii_case(expected))
-}
-
-fn widget_catalog_page_direction(event: &iced::keyboard::Event) -> Option<i32> {
-    use iced::keyboard::Event;
-    let Event::KeyPressed {
-        key,
-        modified_key,
-        modifiers,
-        repeat: false,
-        ..
-    } = event
-    else {
-        return None;
-    };
-    if modifiers.control() || modifiers.alt() || modifiers.logo() {
-        return None;
-    }
-    if matches_character(key, "[") || matches_character(modified_key, "[") {
-        Some(-1)
-    } else if matches_character(key, "]") || matches_character(modified_key, "]") {
-        Some(1)
-    } else {
-        None
-    }
-}
-
-fn shortcut_help_requested(event: &iced::keyboard::Event) -> bool {
-    use iced::keyboard::Event;
-    matches!(
-        event,
-        Event::KeyPressed {
-            text: Some(text),
-            modifiers,
-            repeat: false,
-            ..
-        } if text.as_str() == "?"
-            && !modifiers.control()
-            && !modifiers.alt()
-            && !modifiers.logo()
-    )
-}
-
-fn background_picker_requested(event: &iced::keyboard::Event) -> bool {
-    use iced::keyboard::{Event, Key, key::Named};
-    matches!(
-        event,
-        Event::KeyPressed {
-            key: Key::Named(Named::F2),
-            modifiers,
-            repeat: false,
-            ..
-        } if modifiers.is_empty()
-    )
-}
-
-fn diagnostics_toggle_requested(event: &iced::keyboard::Event) -> bool {
-    use iced::keyboard::{Event, Key, key::Named};
-    matches!(
-        event,
-        Event::KeyPressed {
-            key: Key::Named(Named::F3),
-            modifiers,
-            repeat: false,
-            ..
-        } if modifiers.is_empty()
-    )
-}
-
-fn theme_picker_requested(event: &iced::keyboard::Event) -> bool {
-    use iced::keyboard::{Event, Key, key::Named};
-    matches!(
-        event,
-        Event::KeyPressed {
-            key: Key::Named(Named::F4),
-            modifiers,
-            repeat: false,
-            ..
-        } if modifiers.is_empty()
-    )
-}
-
-fn project_picker_requested(event: &iced::keyboard::Event) -> bool {
-    use iced::keyboard::{Event, Key};
-    // Key::Character carries a SmolStr, so the literal is compared rather than
-    // pattern-matched.
-    matches!(
-        event,
-        Event::KeyPressed {
-            key: Key::Character(character),
-            modifiers,
-            repeat: false,
-            ..
-        } if character == "p" && modifiers.control() && !modifiers.alt() && !modifiers.logo()
-    )
-}
-
-fn switcher_requested(event: &iced::keyboard::Event) -> bool {
-    use iced::keyboard::{Event, Key};
-    matches!(
-        event,
-        Event::KeyPressed {
-            key: Key::Character(character),
-            modifiers,
-            repeat: false,
-            ..
-        } if character == "p"
-            && modifiers.control()
-            && modifiers.shift()
-            && !modifiers.alt()
-            && !modifiers.logo()
-    )
-}
-
 fn load_terminal(
     surface_id: String,
     shell: &str,
@@ -8797,661 +9496,6 @@ fn parse_dataviz_file(file: &Path, chart_type: &str) -> Result<ChartDocument, St
     .map_err(|error| error.to_string())
 }
 
-fn view_crop_pixels(viewport: ViewRect, source: [u32; 2]) -> iced::Rectangle<u32> {
-    let width = source[0].max(1);
-    let height = source[1].max(1);
-    let x = (viewport.x * width as f32).floor().max(0.0) as u32;
-    let y = (viewport.y * height as f32).floor().max(0.0) as u32;
-    let right = ((viewport.x + viewport.width) * width as f32)
-        .ceil()
-        .max((x + 1) as f32) as u32;
-    let bottom = ((viewport.y + viewport.height) * height as f32)
-        .ceil()
-        .max((y + 1) as f32) as u32;
-    iced::Rectangle {
-        x: x.min(width - 1),
-        y: y.min(height - 1),
-        width: right.min(width).saturating_sub(x).max(1),
-        height: bottom.min(height).saturating_sub(y).max(1),
-    }
-}
-
-fn attention_geometry(
-    canvas: Size,
-    source: [u32; 2],
-    viewport: ViewRect,
-    attention: ViewRect,
-) -> Option<Rectangle> {
-    let left = attention.x.max(viewport.x);
-    let top = attention.y.max(viewport.y);
-    let right = (attention.x + attention.width).min(viewport.x + viewport.width);
-    let bottom = (attention.y + attention.height).min(viewport.y + viewport.height);
-    if right <= left || bottom <= top {
-        return None;
-    }
-
-    let crop_width = source[0].max(1) as f32 * viewport.width;
-    let crop_height = source[1].max(1) as f32 * viewport.height;
-    let scale = (canvas.width / crop_width).min(canvas.height / crop_height);
-    let drawn_width = crop_width * scale;
-    let drawn_height = crop_height * scale;
-    let offset_x = (canvas.width - drawn_width) / 2.0;
-    let offset_y = (canvas.height - drawn_height) / 2.0;
-    Some(Rectangle {
-        x: offset_x + ((left - viewport.x) / viewport.width) * drawn_width,
-        y: offset_y + ((top - viewport.y) / viewport.height) * drawn_height,
-        width: ((right - left) / viewport.width) * drawn_width,
-        height: ((bottom - top) / viewport.height) * drawn_height,
-    })
-}
-
-struct DetectionOverlayProgram {
-    detections: Vec<Detection>,
-    source_pixels: [u32; 2],
-    color: Color,
-}
-
-impl<Message> canvas::Program<Message> for DetectionOverlayProgram {
-    type State = canvas_widgets::live::CacheState;
-
-    fn draw(
-        &self,
-        state: &Self::State,
-        renderer: &Renderer,
-        _theme: &Theme,
-        bounds: Rectangle,
-        _cursor: mouse::Cursor,
-    ) -> Vec<Geometry> {
-        let mut key = canvas_widgets::live::Key::new()
-            .add_u64(self.source_pixels[0] as u64)
-            .add_u64(self.source_pixels[1] as u64)
-            .add_color(self.color);
-        for detection in &self.detections {
-            key = key
-                .add_str(&detection.tracking_id)
-                .add_str(&detection.label)
-                .add_f32(detection.confidence)
-                .add_f32(detection.bounds.x)
-                .add_f32(detection.bounds.y)
-                .add_f32(detection.bounds.width)
-                .add_f32(detection.bounds.height);
-        }
-        let key = key.build();
-        state.draw_cached(renderer, bounds.size(), key, |frame| {
-            let source_width = self.source_pixels[0].max(1) as f32;
-            let source_height = self.source_pixels[1].max(1) as f32;
-            let scale = (bounds.width / source_width).min(bounds.height / source_height);
-            let drawn_width = source_width * scale;
-            let drawn_height = source_height * scale;
-            let offset_x = (bounds.width - drawn_width) * 0.5;
-            let offset_y = (bounds.height - drawn_height) * 0.5;
-            for detection in &self.detections {
-                let region = Rectangle {
-                    x: offset_x + detection.bounds.x * drawn_width,
-                    y: offset_y + detection.bounds.y * drawn_height,
-                    width: detection.bounds.width * drawn_width,
-                    height: detection.bounds.height * drawn_height,
-                };
-                let path = canvas::Path::rectangle(region.position(), region.size());
-                frame.stroke(
-                    &path,
-                    canvas::Stroke::default()
-                        .with_width(2.0)
-                        .with_color(self.color),
-                );
-                chart_text(
-                    frame,
-                    &format!("{} {:.0}%", detection.label, detection.confidence * 100.0),
-                    Point::new(region.x + 4.0, (region.y - 17.0).max(3.0)),
-                    12.0,
-                    self.color,
-                    iced::alignment::Horizontal::Left,
-                );
-            }
-        })
-    }
-}
-
-struct AttentionProgram {
-    viewport: ViewRect,
-    attention: ViewRect,
-    source_pixels: [u32; 2],
-    color: Color,
-    label: Option<String>,
-}
-
-impl<Message> canvas::Program<Message> for AttentionProgram {
-    type State = canvas_widgets::live::CacheState;
-
-    fn draw(
-        &self,
-        state: &Self::State,
-        renderer: &Renderer,
-        _theme: &Theme,
-        bounds: Rectangle,
-        _cursor: mouse::Cursor,
-    ) -> Vec<Geometry> {
-        let key = canvas_widgets::live::Key::new()
-            .add_f32(self.viewport.x)
-            .add_f32(self.viewport.y)
-            .add_f32(self.viewport.width)
-            .add_f32(self.viewport.height)
-            .add_f32(self.attention.x)
-            .add_f32(self.attention.y)
-            .add_f32(self.attention.width)
-            .add_f32(self.attention.height)
-            .add_u64(self.source_pixels[0] as u64)
-            .add_u64(self.source_pixels[1] as u64)
-            .add_color(self.color)
-            .add_str(self.label.as_deref().unwrap_or(""))
-            .build();
-        state.draw_cached(renderer, bounds.size(), key, |frame| {
-            let Some(region) = attention_geometry(
-                bounds.size(),
-                self.source_pixels,
-                self.viewport,
-                self.attention,
-            ) else {
-                return;
-            };
-            let path = canvas::Path::rectangle(region.position(), region.size());
-            frame.fill(
-                &path,
-                Color {
-                    a: 0.08,
-                    ..self.color
-                },
-            );
-            frame.stroke(
-                &path,
-                canvas::Stroke::default().with_width(2.0).with_color(Color {
-                    a: 0.95,
-                    ..self.color
-                }),
-            );
-            if let Some(label) = &self.label {
-                chart_text(
-                    frame,
-                    label,
-                    Point::new(region.x + 5.0, (region.y - 18.0).max(4.0)),
-                    12.0,
-                    self.color,
-                    iced::alignment::Horizontal::Left,
-                );
-            }
-        })
-    }
-}
-
-struct ChartProgram {
-    chart: ChartDocument,
-    axis_color: Color,
-    muted_color: Color,
-    surface_color: Color,
-    series_colors: Vec<Color>,
-    /// The chart draws its own labels, so it has to be handed the type scale
-    /// rather than inheriting one from a widget it does not use.
-    metrics: ThemeMetrics,
-}
-
-impl<Message> canvas::Program<Message> for ChartProgram {
-    type State = canvas_widgets::live::CacheState;
-
-    fn draw(
-        &self,
-        state: &Self::State,
-        renderer: &Renderer,
-        _theme: &Theme,
-        bounds: Rectangle,
-        cursor: mouse::Cursor,
-    ) -> Vec<Geometry> {
-        let total_points: usize = self.chart.series.iter().map(|s| s.points.len()).sum();
-        let val_sum: f32 = self
-            .chart
-            .series
-            .iter()
-            .flat_map(|s| &s.points)
-            .map(|p| p.y)
-            .sum();
-        let key = canvas_widgets::live::Key::new()
-            .add_usize(total_points)
-            .add_f32(val_sum)
-            .add_usize(self.chart.kind as usize)
-            .add_str(&self.chart.title)
-            .add_f32(bounds.width)
-            .add_f32(bounds.height)
-            .build();
-        state.draw_cached(renderer, bounds.size(), key, |frame| {
-            let Some((min_x, max_x, min_y, max_y)) = chart_extents(&self.chart) else {
-                chart_text(
-                    frame,
-                    "No chart data",
-                    Point::new(20.0, 24.0),
-                    self.metrics.body,
-                    self.muted_color,
-                    iced::alignment::Horizontal::Left,
-                );
-                return;
-            };
-
-            chart_text(
-                frame,
-                &self.chart.title,
-                Point::new(18.0, 12.0),
-                self.metrics.body,
-                self.axis_color,
-                iced::alignment::Horizontal::Left,
-            );
-            let legend = legend_layout(
-                self.chart.series.iter().map(|series| series.name.as_str()),
-                bounds.width.max(1.0),
-            );
-            for (index, item) in legend.items.iter().enumerate() {
-                let color = self.series_colors[index % self.series_colors.len()];
-                frame.fill(
-                    &canvas::Path::circle(Point::new(item.x + 4.0, item.y + 6.0), 3.5),
-                    color,
-                );
-                chart_text(
-                    frame,
-                    &item.label,
-                    Point::new(item.x + 13.0, item.y),
-                    self.metrics.micro,
-                    self.muted_color,
-                    iced::alignment::Horizontal::Left,
-                );
-            }
-
-            let left = if bounds.width < 360.0 { 44.0 } else { 58.0 };
-            let right = (bounds.width - 18.0).max(left + 1.0);
-            let top = (48.0 + legend.rows as f32 * 18.0).min(bounds.height * 0.45);
-            let bottom = (bounds.height - 36.0).max(top + 1.0);
-            let plot_width = right - left;
-            let plot_height = bottom - top;
-            if plot_width <= 1.0 || plot_height <= 1.0 {
-                return;
-            }
-
-            let x_ticks = chart_ticks(min_x, max_x, if bounds.width < 420.0 { 3 } else { 5 });
-            let y_ticks = chart_ticks(min_y, max_y, if bounds.height < 300.0 { 3 } else { 5 });
-            let sx = |x: f32| left + (x - min_x) / (max_x - min_x) * plot_width;
-            let sy = |y: f32| bottom - (y - min_y) / (max_y - min_y) * plot_height;
-            let grid_stroke = canvas::Stroke::default().with_width(1.0).with_color(Color {
-                a: 0.14,
-                ..self.axis_color
-            });
-
-            for tick in &y_ticks {
-                let y = sy(*tick);
-                frame.stroke(
-                    &canvas::Path::line(Point::new(left, y), Point::new(right, y)),
-                    grid_stroke,
-                );
-                chart_text(
-                    frame,
-                    &format_chart_value(*tick),
-                    Point::new(left - 7.0, y),
-                    self.metrics.micro,
-                    self.muted_color,
-                    iced::alignment::Horizontal::Right,
-                );
-            }
-            for tick in &x_ticks {
-                let x = sx(*tick);
-                frame.stroke(
-                    &canvas::Path::line(Point::new(x, top), Point::new(x, bottom)),
-                    grid_stroke,
-                );
-                chart_text(
-                    frame,
-                    &format_chart_value(*tick),
-                    Point::new(x, bottom + 7.0),
-                    self.metrics.micro,
-                    self.muted_color,
-                    iced::alignment::Horizontal::Center,
-                );
-            }
-
-            let y_label = axis_title(&self.chart.y_axis);
-            chart_text(
-                frame,
-                &y_label,
-                Point::new(12.0, top - 20.0),
-                self.metrics.micro,
-                self.muted_color,
-                iced::alignment::Horizontal::Left,
-            );
-            let x_label = axis_title(&self.chart.x_axis);
-            chart_text(
-                frame,
-                &x_label,
-                Point::new((left + right) / 2.0, bounds.height - 15.0),
-                self.metrics.micro,
-                self.muted_color,
-                iced::alignment::Horizontal::Center,
-            );
-
-            let total_points = self
-                .chart
-                .series
-                .iter()
-                .map(|series| series.points.len())
-                .sum::<usize>()
-                .max(1);
-            let bar_width = (plot_width / total_points as f32 * 0.72).clamp(2.0, 28.0);
-            for (series_index, series) in self.chart.series.iter().enumerate() {
-                let series_color = self.series_colors[series_index % self.series_colors.len()];
-                match self.chart.kind {
-                    ChartKind::Line => {
-                        let points: Vec<Point> = series
-                            .points
-                            .iter()
-                            .map(|point| Point::new(sx(point.x), sy(point.y)))
-                            .collect();
-                        draw_chart_series_line(
-                            frame,
-                            &points,
-                            bottom,
-                            series_color,
-                            CHART_AREA_ALPHA / self.chart.series.len().max(1) as f32,
-                        );
-                    }
-                    ChartKind::Scatter => {
-                        for point in &series.points {
-                            frame.fill(
-                                &canvas::Path::circle(Point::new(sx(point.x), sy(point.y)), 3.4),
-                                series_color,
-                            );
-                        }
-                    }
-                    ChartKind::Bar => {
-                        let group_offset = (series_index as f32
-                            - (self.chart.series.len() - 1) as f32 / 2.0)
-                            * bar_width;
-                        for point in &series.points {
-                            let x = sx(point.x) + group_offset;
-                            let y = sy(point.y);
-                            let base = sy(min_y.max(0.0));
-                            frame.fill(
-                                &canvas::Path::rectangle(
-                                    Point::new(x - bar_width * 0.42, y.min(base)),
-                                    Size::new(bar_width * 0.84, (base - y).abs().max(1.0)),
-                                ),
-                                series_color,
-                            );
-                        }
-                    }
-                }
-            }
-
-            if let Some(cursor) = cursor.position_in(bounds)
-                && cursor.x >= left
-                && cursor.x <= right
-                && cursor.y >= top
-                && cursor.y <= bottom
-                && let Some((series_index, point, position)) =
-                    nearest_chart_point(&self.chart, cursor, sx, sy, 20.0)
-            {
-                let series = &self.chart.series[series_index];
-                let series_color = self.series_colors[series_index % self.series_colors.len()];
-                frame.fill(&canvas::Path::circle(position, 5.0), self.surface_color);
-                frame.stroke(
-                    &canvas::Path::circle(position, 5.0),
-                    canvas::Stroke::default()
-                        .with_width(2.0)
-                        .with_color(series_color),
-                );
-                let value = format!(
-                    "{}  {} · {}",
-                    series.name,
-                    format_axis_value(point.x, self.chart.x_axis.unit.as_deref()),
-                    format_axis_value(point.y, self.chart.y_axis.unit.as_deref())
-                );
-                let tooltip_width = (value.chars().count() as f32 * 6.5 + 18.0).min(plot_width);
-                let tooltip_x = (position.x + 12.0).min(right - tooltip_width);
-                let tooltip_y = (position.y - 32.0).max(top + 4.0);
-                frame.fill(
-                    &canvas::Path::rounded_rectangle(
-                        Point::new(tooltip_x, tooltip_y),
-                        Size::new(tooltip_width, 24.0),
-                        6.0.into(),
-                    ),
-                    Color {
-                        a: 0.94,
-                        ..self.surface_color
-                    },
-                );
-                chart_text(
-                    frame,
-                    &value,
-                    Point::new(tooltip_x + 9.0, tooltip_y + 5.0),
-                    self.metrics.micro,
-                    self.axis_color,
-                    iced::alignment::Horizontal::Left,
-                );
-            }
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct LegendItem {
-    label: String,
-    x: f32,
-    y: f32,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct LegendLayout {
-    items: Vec<LegendItem>,
-    rows: usize,
-}
-
-fn legend_layout<'a>(labels: impl Iterator<Item = &'a str>, width: f32) -> LegendLayout {
-    let available = (width - 36.0).max(80.0);
-    let mut x = 18.0;
-    let mut row = 0usize;
-    let mut items = Vec::new();
-    for label in labels {
-        let item_width = label.chars().count() as f32 * 6.5 + 30.0;
-        if x > 18.0 && x + item_width > available + 18.0 {
-            row += 1;
-            x = 18.0;
-        }
-        items.push(LegendItem {
-            label: label.to_owned(),
-            x,
-            y: 34.0 + row as f32 * 18.0,
-        });
-        x += item_width;
-    }
-    LegendLayout {
-        rows: row + usize::from(!items.is_empty()),
-        items,
-    }
-}
-
-fn chart_extents(chart: &ChartDocument) -> Option<(f32, f32, f32, f32)> {
-    let mut min_x = f32::INFINITY;
-    let mut max_x = f32::NEG_INFINITY;
-    let mut min_y = f32::INFINITY;
-    let mut max_y = f32::NEG_INFINITY;
-    for point in chart.series.iter().flat_map(|series| &series.points) {
-        min_x = min_x.min(point.x);
-        max_x = max_x.max(point.x);
-        min_y = min_y.min(point.y);
-        max_y = max_y.max(point.y);
-    }
-    if !min_x.is_finite() {
-        return None;
-    }
-    if min_x == max_x {
-        min_x -= 0.5;
-        max_x += 0.5;
-    }
-    if min_y == max_y {
-        let padding = min_y.abs().max(1.0) * 0.1;
-        min_y -= padding;
-        max_y += padding;
-    }
-    Some((min_x, max_x, min_y, max_y))
-}
-
-fn chart_ticks(min: f32, max: f32, count: usize) -> Vec<f32> {
-    let count = count.max(2);
-    let step = (max - min) / (count - 1) as f32;
-    (0..count).map(|index| min + step * index as f32).collect()
-}
-
-fn nearest_chart_point<F, G>(
-    chart: &ChartDocument,
-    cursor: Point,
-    sx: F,
-    sy: G,
-    maximum_distance: f32,
-) -> Option<(usize, ::canvas::chart::ChartPoint, Point)>
-where
-    F: Fn(f32) -> f32,
-    G: Fn(f32) -> f32,
-{
-    chart
-        .series
-        .iter()
-        .enumerate()
-        .flat_map(|(series_index, series)| {
-            let sx = &sx;
-            let sy = &sy;
-            series.points.iter().map(move |point| {
-                let position = Point::new(sx(point.x), sy(point.y));
-                let distance = (position.x - cursor.x).hypot(position.y - cursor.y);
-                (distance, series_index, point.clone(), position)
-            })
-        })
-        .filter(|(distance, _, _, _)| *distance <= maximum_distance)
-        .min_by(|left, right| left.0.total_cmp(&right.0))
-        .map(|(_, series_index, point, position)| (series_index, point, position))
-}
-
-fn axis_title(axis: &::canvas::chart::ChartAxis) -> String {
-    axis.unit.as_ref().map_or_else(
-        || axis.label.clone(),
-        |unit| format!("{} ({unit})", axis.label),
-    )
-}
-
-fn format_chart_value(value: f32) -> String {
-    if value.abs() >= 1_000_000.0 {
-        format!("{:.1}m", value / 1_000_000.0)
-    } else if value.abs() >= 1_000.0 {
-        format!("{:.1}k", value / 1_000.0)
-    } else if value.abs() >= 10.0 {
-        format!("{value:.0}")
-    } else {
-        format!("{value:.1}")
-    }
-}
-
-fn format_axis_value(value: f32, unit: Option<&str>) -> String {
-    let value = format_chart_value(value);
-    unit.map_or(value.clone(), |unit| {
-        if unit == "$" || unit == "£" || unit == "€" {
-            format!("{unit}{value}")
-        } else {
-            format!("{value} {unit}")
-        }
-    })
-}
-
-const CHART_LINE_WIDTH: f32 = 2.0;
-/// Opacity of the area under a line at the line itself, falling to nothing at
-/// the axis. Divided among overlaid series so a four-series chart does not silt
-/// up.
-const CHART_AREA_ALPHA: f32 = 0.22;
-const CHART_HEAD_RADIUS: f32 = CHART_LINE_WIDTH * 1.6;
-
-/// Draw one series: the area beneath it, the line as a single path, and a
-/// filled head on the newest point.
-///
-/// Every vertex used to be the meeting of two separately stroked `Path::line`
-/// segments, which on a 2px butt-capped stroke leaves a visible notch at each
-/// one. One path with round joins removes them, and hands the tessellator one
-/// shape instead of n.
-///
-/// This mirrors `canvas_widgets::live`'s private `draw_series_line`; the two
-/// should become one call once that crate exports it.
-fn draw_chart_series_line(
-    frame: &mut canvas::Frame,
-    points: &[Point],
-    baseline: f32,
-    stroke: Color,
-    area_alpha: f32,
-) {
-    let (Some(first), Some(last)) = (points.first(), points.last()) else {
-        return;
-    };
-    if points.len() < 2 {
-        return;
-    }
-    let crest = points.iter().map(|point| point.y).fold(baseline, f32::min);
-    let area = canvas::Path::new(|path| {
-        path.move_to(Point::new(first.x, baseline));
-        for point in points {
-            path.line_to(*point);
-        }
-        path.line_to(Point::new(last.x, baseline));
-        path.close();
-    });
-    frame.fill(
-        &area,
-        canvas::gradient::Linear::new(Point::new(first.x, crest), Point::new(first.x, baseline))
-            .add_stop(
-                0.0,
-                Color {
-                    a: area_alpha,
-                    ..stroke
-                },
-            )
-            .add_stop(1.0, Color { a: 0.0, ..stroke }),
-    );
-    let line = canvas::Path::new(|path| {
-        path.move_to(*first);
-        for point in &points[1..] {
-            path.line_to(*point);
-        }
-    });
-    frame.stroke(
-        &line,
-        canvas::Stroke {
-            style: canvas::Style::Solid(stroke),
-            width: CHART_LINE_WIDTH,
-            line_cap: canvas::LineCap::Round,
-            line_join: canvas::LineJoin::Round,
-            ..Default::default()
-        },
-    );
-    // The newest point is what a live series is read for; without it the eye
-    // has to work out which end of the line is now.
-    frame.fill(&canvas::Path::circle(*last, CHART_HEAD_RADIUS), stroke);
-}
-
-fn chart_text(
-    frame: &mut canvas::Frame,
-    content: &str,
-    position: Point,
-    size: f32,
-    color: Color,
-    align_x: iced::alignment::Horizontal,
-) {
-    frame.fill_text(canvas::Text {
-        content: content.to_owned(),
-        position,
-        color,
-        size: iced::Pixels(size),
-        align_x: align_x.into(),
-        ..Default::default()
-    });
-}
-
 fn surface_layout_metrics(frame: Rect, chrome: SurfaceChrome) -> (f64, f64, f64, f64) {
     let frame_width = f64::from(frame.width.max(1));
     let frame_height = f64::from(frame.height.max(1));
@@ -9648,6 +9692,165 @@ fn normalize_visible_surface_bounds(
         y: y as f32,
         width: width as f32,
         height: height as f32,
+    }
+}
+
+/// Resolve a scene label's ink role against the presented palette.
+///
+/// A scene cannot ask for a colour, only for a meaning, so the same authored
+/// grid stays readable on a light theme and a dark one. Absent means `Text`,
+/// which is what every pre-`ink` scene drew.
+/// The identity of everything an authored scene depends on.
+///
+/// The civil date is in the key and no finer time is: an authored calendar has
+/// to change at midnight, and nothing an author legitimately draws changes
+/// because a minute passed. Keying on minutes would start a VM for every module
+/// on the wall, sixty times an hour, to redraw the same glyphs.
+#[cfg(feature = "lua-scenes")]
+fn module_key(
+    module: &str,
+    inputs: &BTreeMap<String, canvas_widgets::WidgetInput>,
+    visual: &VisualTheme,
+    year: i32,
+    month: u32,
+    day: u32,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    module.hash(&mut hasher);
+    // Serialized rather than structurally hashed: a spec is the artifact an agent
+    // authors and a person inspects, so byte equality is the honest key.
+    serde_json::to_string(inputs)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    for size in [
+        visual.metrics.micro,
+        visual.metrics.small,
+        visual.metrics.body,
+        visual.metrics.large,
+        visual.metrics.title,
+        visual.metrics.display,
+        visual.metrics.hero,
+        visual.metrics.space_2,
+        visual.metrics.radius,
+    ] {
+        f64::from(size).to_bits().hash(&mut hasher);
+    }
+    for role in [
+        visual.palette.text,
+        visual.palette.text_muted,
+        visual.palette.primary,
+        visual.palette.success,
+        visual.palette.warning,
+        visual.palette.danger,
+        visual.palette.info,
+        visual.palette.background,
+    ] {
+        role.hash(&mut hasher);
+    }
+    (year, month, day).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Run an authored module against its declared inputs and return its scene.
+///
+/// Source and manifest are read from the Canvas runtime directory, disk-first,
+/// the same rule stream binders already follow: adding a wall widget is writing
+/// two files, not rebuilding Canvas. A missing file is an error naming the path,
+/// never an empty scene — an uninstalled module and a widget with nothing in it
+/// are otherwise indistinguishable from across the room.
+#[cfg(feature = "lua-scenes")]
+fn resolve_module(
+    name: &str,
+    inputs: &BTreeMap<String, canvas_widgets::WidgetInput>,
+    theme: ::canvas::lua_module::ModuleThemeTokens,
+    now_ms: u64,
+) -> std::result::Result<Scene, String> {
+    use ::canvas::lua_module::{LuaModule, ModuleInputSnapshot, ModuleInputValue, ModuleManifest};
+    use ::canvas::lua_scene::{LuaSceneCapabilities, LuaSceneLimits};
+
+    let limit = ::canvas::stream_binding::MAX_ADAPTER_BYTES as u64;
+    let read = |file: &str| -> std::result::Result<Option<String>, String> {
+        let relative = PathBuf::from("modules").join(file);
+        ::canvas::runtime_config::read(&relative, limit)
+            .map(|bytes| bytes.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+            .map_err(|error| error.to_string())
+    };
+    let manifest_name = format!("{name}.json");
+    let Some(manifest_text) = read(&manifest_name)? else {
+        return Err(format!(
+            "no manifest at modules/{name}.json in the Canvas runtime directory"
+        ));
+    };
+    let manifest = ModuleManifest::parse(&manifest_text).map_err(|error| error.to_string())?;
+    let Some(source) = read(&format!("{name}.lua"))? else {
+        return Err(format!(
+            "no source at modules/{name}.lua in the Canvas runtime directory"
+        ));
+    };
+    let snapshot = ModuleInputSnapshot {
+        revision: 1,
+        now_ms,
+        values: inputs
+            .iter()
+            .map(|(id, value)| (id.clone(), module_input(value)))
+            .collect(),
+    };
+    // Assets and host resources are not granted to document-authored modules yet:
+    // a surface reference has to come from a trusted caller, and a spec written
+    // by an agent is not one. A module that asks for one fails loudly here
+    // rather than drawing a blank where a video should be.
+    LuaModule::load(
+        manifest,
+        source,
+        snapshot,
+        theme,
+        BTreeMap::new(),
+        LuaSceneCapabilities::default(),
+        LuaSceneLimits::default(),
+    )
+    .map(|module| module.retained().scene.clone())
+    .map_err(|error| error.to_string())
+}
+
+/// One declared input, in the vocabulary the module host accepts.
+#[cfg(feature = "lua-scenes")]
+fn module_input(value: &canvas_widgets::WidgetInput) -> ::canvas::lua_module::ModuleInputValue {
+    use ::canvas::lua_module::{ModuleInputValue, SeriesPoint, StatusLevel};
+    match value {
+        canvas_widgets::WidgetInput::Number { value } => ModuleInputValue::Number(*value),
+        canvas_widgets::WidgetInput::Text { value } => ModuleInputValue::Text(value.clone()),
+        canvas_widgets::WidgetInput::Boolean { value } => ModuleInputValue::Boolean(*value),
+        canvas_widgets::WidgetInput::Series { points } => ModuleInputValue::Series(
+            points
+                .iter()
+                .map(|point| SeriesPoint {
+                    x: point.x,
+                    y: point.y,
+                })
+                .collect(),
+        ),
+        canvas_widgets::WidgetInput::Status { level, label } => ModuleInputValue::Status {
+            level: match level {
+                canvas_widgets::StatusLevel::Neutral => StatusLevel::Neutral,
+                canvas_widgets::StatusLevel::Good => StatusLevel::Good,
+                canvas_widgets::StatusLevel::Warning => StatusLevel::Warning,
+                canvas_widgets::StatusLevel::Critical => StatusLevel::Critical,
+            },
+            label: label.clone(),
+        },
+    }
+}
+
+fn scene_ink(ink: Option<SemanticInk>, palette: &ThemePalette) -> [u8; 3] {
+    match ink.unwrap_or(SemanticInk::Text) {
+        SemanticInk::Text => palette.text,
+        SemanticInk::Muted => palette.text_muted,
+        SemanticInk::Primary => palette.primary,
+        SemanticInk::Success => palette.success,
+        SemanticInk::Warning => palette.warning,
+        SemanticInk::Danger => palette.danger,
+        SemanticInk::Info => palette.info,
     }
 }
 
@@ -10850,13 +11053,39 @@ fn assemble_presence(
 mod tests {
     use super::*;
 
+    #[test]
+    fn browser_keys_preserve_named_keys_text_and_modifiers() {
+        use iced::keyboard::{Event, Key, Modifiers, key};
+
+        let Event::KeyPressed { key, text, .. } =
+            browser_key_event("ArrowDown", false, false, false, false).unwrap()
+        else {
+            panic!("browser key must produce a key-pressed event");
+        };
+        assert_eq!(key, Key::Named(key::Named::ArrowDown));
+        assert!(text.is_none());
+
+        let Event::KeyPressed {
+            key,
+            text,
+            modifiers,
+            ..
+        } = browser_key_event("k", true, true, false, false).unwrap()
+        else {
+            panic!("browser character must produce a key-pressed event");
+        };
+        assert_eq!(key, Key::Character("k".into()));
+        assert_eq!(text.as_deref(), Some("k"));
+        assert!(modifiers.contains(Modifiers::SHIFT));
+        assert!(modifiers.contains(Modifiers::CTRL));
+    }
+
     #[cfg(feature = "lua-scenes")]
     #[test]
     /// The Speedy failure: an agent restarts, its decision counter returns to
     /// 1, and the binding's mark is far above that. Filtering on the stale mark
     /// discards every later decision, so the widget keeps its placeholder until
     /// Canvas restarts.
-    #[test]
     fn a_restarted_producer_rebaselines_instead_of_being_ignored() {
         assert_eq!(effective_stream_watermark(5000, 1), 0);
     }
@@ -11139,7 +11368,10 @@ mod tests {
                 id: "c".into(),
                 parent_id: Some("b".into()),
                 transform: ::canvas::Transform3::default(),
-                content: NodeContent::Text { text: "hi".into() },
+                content: NodeContent::Text {
+                    text: "hi".into(),
+                    ink: None,
+                },
             },
         ];
         let chain = scene_parent_chain(2, &nodes);
@@ -12738,6 +12970,8 @@ mod tests {
                 target: "transmog".into(),
                 placeholder: None,
                 session: None,
+                task_kinds: Vec::new(),
+                task_targets: BTreeMap::new(),
             },
             inputs: Vec::new(),
         }];
@@ -12769,6 +13003,138 @@ mod tests {
 
         let _ = app.handle_prompt_key("ask", key(iced::keyboard::key::Named::Escape));
         assert_eq!(draft_of(&app), "", "escape abandons the line");
+    }
+
+    #[test]
+    fn task_launcher_requires_a_kind_and_retains_the_submitted_prompt() {
+        let mut app = app_with_prompt();
+        let ContentSource::Prompt { task_kinds, .. } =
+            &mut app.decoded.get_mut("ask").unwrap().source
+        else {
+            panic!("expected prompt")
+        };
+        *task_kinds = vec!["PCB".into(), "Part".into(), "Code".into()];
+
+        let _ = app.handle_prompt_key("ask", typed("x"));
+        assert_eq!(draft_of(&app), "", "idle launcher does not steal typing");
+
+        drop(app.update(Message::PromptKindSelected {
+            surface_id: "ask".into(),
+            kind: "PCB".into(),
+        }));
+        for character in ["f", "i", "l", "t", "e", "r"] {
+            let _ = app.handle_prompt_key("ask", typed(character));
+        }
+        let _ = app.handle_prompt_key("ask", key(iced::keyboard::key::Named::Enter));
+
+        let ContentSource::Prompt {
+            selected_kind,
+            tasks,
+            active_task,
+            ..
+        } = &app.decoded.get("ask").unwrap().source
+        else {
+            panic!("expected prompt")
+        };
+        assert!(selected_kind.is_none());
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].kind, "PCB");
+        assert_eq!(tasks[0].prompt, "filter");
+        assert_eq!(tasks[0].state, "queued");
+        assert_eq!(*active_task, Some(tasks[0].id));
+    }
+
+    #[test]
+    fn creation_kind_routes_to_its_declared_tool_target() {
+        let targets = BTreeMap::from([
+            ("PCB".into(), "lob".into()),
+            ("Model".into(), "transmog".into()),
+        ]);
+        assert_eq!(prompt_target_for_kind("transmog", &targets, "PCB"), "lob");
+        assert_eq!(
+            prompt_target_for_kind("transmog", &targets, "Model"),
+            "transmog"
+        );
+        assert_eq!(
+            prompt_target_for_kind("transmog", &targets, "Code"),
+            "transmog",
+            "undeclared kinds retain the prompt's default target"
+        );
+    }
+
+    #[test]
+    fn selecting_a_global_task_jumps_to_its_page_and_restores_its_surface() {
+        let mut app = app_with_prompt();
+        let ContentSource::Prompt { tasks, .. } = &mut app.decoded.get_mut("ask").unwrap().source
+        else {
+            panic!("expected prompt")
+        };
+        tasks.push(LocalTask {
+            id: 42,
+            kind: "Model".into(),
+            prompt: "a bracket".into(),
+            state: "queued".into(),
+            detail: None,
+            activity: Vec::new(),
+        });
+        app.document.layout = Layout::Empty;
+        app.document.pages = vec![::canvas::Page {
+            name: "Model task".into(),
+            layout: Layout::Surface {
+                surface_id: "ask".into(),
+            },
+        }];
+        app.document.active_page = 0;
+        app.document.focused_surface_id = None;
+        app.minimized_surfaces.insert("ask".into());
+
+        drop(app.update(Message::PromptTaskSelected {
+            surface_id: "ask".into(),
+            task_id: 42,
+        }));
+
+        assert_eq!(app.document.active_page_index(), 1);
+        assert_eq!(app.document.focused_surface_id.as_deref(), Some("ask"));
+        assert!(!app.minimized_surfaces.contains("ask"));
+        let ContentSource::Prompt { active_task, .. } = &app.decoded["ask"].source else {
+            panic!("expected prompt")
+        };
+        assert_eq!(*active_task, Some(42));
+    }
+
+    #[cfg(feature = "lua-scenes")]
+    #[test]
+    fn bridge_status_updates_the_exact_creation_task() {
+        let mut app = app_with_prompt();
+        let ContentSource::Prompt { tasks, .. } = &mut app.decoded.get_mut("ask").unwrap().source
+        else {
+            panic!("expected prompt")
+        };
+        tasks.push(LocalTask {
+            id: 42,
+            kind: "Model".into(),
+            prompt: "a bracket".into(),
+            state: "queued".into(),
+            detail: None,
+            activity: Vec::new(),
+        });
+        app.apply_task_status(canvas_core::task::TaskStatus {
+            task_id: "local-42".into(),
+            kind: "Model".into(),
+            state: "delivered".into(),
+            target: "transmog".into(),
+            session: Some("build-session".into()),
+            detail: None,
+            activity: vec!["agent started".into()],
+        });
+        let ContentSource::Prompt { tasks, .. } = &app.decoded["ask"].source else {
+            panic!("expected prompt")
+        };
+        assert_eq!(tasks[0].state, "delivered");
+        assert_eq!(
+            tasks[0].detail.as_deref(),
+            Some("Delivered to transmog · build-session")
+        );
     }
 
     /// Enter spools the line and clears the draft. The draft must not survive:
@@ -12829,6 +13195,42 @@ mod tests {
         app.prune_decoded();
         app.ensure_scene_decoded();
         assert_eq!(draft_of(&app), "half");
+    }
+
+    #[test]
+    fn widget_reapplication_retains_live_data_but_adopts_document_chrome() {
+        let mut app = test_app();
+        let mut spec = canvas_widgets::WidgetSpec::from_json(
+            br#"{"id":"run","kind":"status_list","title":"Live","nodes":[],"chrome":"frameless"}"#,
+        )
+        .unwrap();
+        app.document.surfaces = vec![Surface {
+            id: "run".into(),
+            title: "Run".into(),
+            content: SurfaceContent::Widget { spec: spec.clone() },
+            inputs: Vec::new(),
+        }];
+        app.ensure_scene_decoded();
+
+        let canvas_widgets::WidgetKind::StatusList { title, .. } = &mut spec.kind else {
+            unreachable!()
+        };
+        *title = "Template title must not replace live data".into();
+        spec.chrome = canvas_widgets::WidgetChrome::Integrated;
+        app.document.surfaces[0].content = SurfaceContent::Widget { spec };
+        app.prune_decoded();
+
+        let ContentSource::Widget { spec } = &app.decoded["run"].source else {
+            panic!("widget remains decoded")
+        };
+        assert_eq!(
+            spec.effective_chrome(),
+            canvas_widgets::WidgetChrome::Integrated
+        );
+        let canvas_widgets::WidgetKind::StatusList { title, .. } = &spec.kind else {
+            unreachable!()
+        };
+        assert_eq!(title, "Live");
     }
 
     #[test]
@@ -12908,6 +13310,15 @@ mod tests {
         assert_eq!(display_shortcut(&pressed("2")), Some(2));
         assert_eq!(display_shortcut(&pressed("3")), Some(3));
         assert_eq!(display_shortcut(&pressed("4")), None);
+    }
+
+    #[test]
+    fn control_n_is_reserved_for_project_task_creation() {
+        let event = browser_key_event("n", false, true, false, false).expect("key event");
+        assert!(new_task_requested(&event));
+        assert!(!new_task_requested(&typed("n")));
+        let shifted = browser_key_event("n", true, true, false, false).expect("key event");
+        assert!(!new_task_requested(&shifted));
     }
 
     #[test]
@@ -13886,6 +14297,33 @@ mod tests {
             panic!("live dashboard")
         };
         assert_eq!(source_id, "other-dashboard-html");
+        if let Some(parent) = app.workspace_store_path.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+    }
+
+    #[test]
+    fn applying_a_document_persists_it_for_the_next_project_round_trip() {
+        let mut app = test_app();
+        let project = app.document.project_id.clone();
+        let mut edited = app.document.clone();
+        edited.chrome.canvas_padding = 17;
+
+        let reply = execute(
+            &mut app,
+            "apply-durable-workspace",
+            Command::ApplyDocument { document: edited },
+        );
+        assert!(matches!(reply.outcome, Outcome::Ok { .. }));
+        assert_eq!(
+            app.active_project_workspace.as_deref(),
+            Some(project.as_str())
+        );
+        let stored = workspace_store::load(&app.workspace_store_path, &app.catalog)
+            .expect("saved workspace store")
+            .0;
+        assert_eq!(stored.get(&project).unwrap().chrome.canvas_padding, 17);
+
         if let Some(parent) = app.workspace_store_path.parent() {
             let _ = std::fs::remove_dir_all(parent);
         }

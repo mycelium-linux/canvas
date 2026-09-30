@@ -4,7 +4,44 @@
 //! transport is in `main`, so the decisions worth arguing about are testable
 //! without a control plane to talk to.
 
+use crate::{EdgerunnerCreate, Prompt};
 use crate::{Session, SessionState};
+
+pub const CREATE_PATH: &str = "/v1/sessions";
+
+pub fn create_body(prompt: &Prompt, template: &EdgerunnerCreate) -> serde_json::Value {
+    let title = prompt
+        .task
+        .as_ref()
+        .map(|task| {
+            format!(
+                "Canvas {} · {}",
+                task.kind,
+                prompt.project_id.as_deref().unwrap_or("task")
+            )
+        })
+        .unwrap_or_else(|| "Canvas task".into());
+    let mut body = serde_json::json!({
+        "title": title,
+        "repo_url": template.repo_url,
+        "prompt": prompt.delivery_text(),
+        "auto_start": true,
+        "labels": {
+            "project": prompt.project_id.as_deref().unwrap_or("unspecified"),
+            "canvas.task_id": prompt.task.as_ref().map(|task| task.id.as_str()).unwrap_or("")
+        }
+    });
+    if let Some(value) = &template.ref_name {
+        body["ref"] = value.clone().into();
+    }
+    if let Some(value) = &template.runner {
+        body["runner"] = value.clone().into();
+    }
+    if let Some(value) = &template.model {
+        body["model"] = value.clone().into();
+    }
+    body
+}
 
 /// Where a prompt is delivered for a given session.
 pub fn message_path(session: &str) -> String {
@@ -153,6 +190,38 @@ mod tests {
         assert_eq!(message_body("hi")["role"], "user");
     }
 
+    #[test]
+    fn canvas_creation_task_becomes_a_labeled_edgerunner_session() {
+        let prompt = Prompt {
+            target: "transmog".into(),
+            text: "make a fan duct".into(),
+            session: None,
+            project_id: Some("transmog".into()),
+            task: Some(canvas_core::task::TaskRef {
+                id: "42".into(),
+                kind: "Model".into(),
+                state: Some("queued".into()),
+            }),
+        };
+        let body = create_body(
+            &prompt,
+            &EdgerunnerCreate {
+                repo_url: "https://github.com/FuturePresentLabs/transmog.git".into(),
+                ref_name: None,
+                runner: None,
+                model: None,
+            },
+        );
+        assert_eq!(
+            body["repo_url"],
+            "https://github.com/FuturePresentLabs/transmog.git"
+        );
+        assert_eq!(body["labels"]["project"], "transmog");
+        assert_eq!(body["labels"]["canvas.task_id"], "42");
+        assert_eq!(body["auto_start"], true);
+        assert!(body["prompt"].as_str().unwrap().contains("Kind: Model"));
+    }
+
     /// Waiting on a person is the state worth crossing the room for, so an
     /// approval flag outranks whatever the session calls itself.
     #[test]
@@ -230,7 +299,6 @@ mod tests {
         assert_eq!(parsed.updated_at_ms, 77, "falls back to now, not zero");
     }
 
-
     /// Shaped from a real `/v1/sessions` reply rather than invented, because the
     /// field this build first guessed at (`updated_at_unix_ms`) is not the one
     /// edgerunner sends, and the guess failed silently: everything stamped
@@ -278,7 +346,13 @@ mod tests {
     #[test]
     fn the_newest_running_session_wins_against_a_mostly_dead_listing() {
         let mut listed: Vec<Session> = (0..38)
-            .map(|index| session(&format!("dead{index:02}"), SessionState::Ended, 9_000 + index))
+            .map(|index| {
+                session(
+                    &format!("dead{index:02}"),
+                    SessionState::Ended,
+                    9_000 + index,
+                )
+            })
             .collect();
         listed.push(session("sess_old_running", SessionState::Working, 100));
         listed.push(session("sess_new_running", SessionState::Working, 200));

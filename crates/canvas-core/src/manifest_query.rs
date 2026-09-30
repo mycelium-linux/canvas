@@ -28,6 +28,10 @@ pub struct Entry {
     /// Content hash. Identity and fetch key.
     pub id: String,
     pub name: String,
+    /// Optional logical project path. Search treats it like the name while UI
+    /// continues to present the friendly name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// Full media type, e.g. `image/png`. Both halves are matchable: `fmt:img`
     /// matches the type, `fmt:png` the subtype.
     pub content_type: String,
@@ -200,7 +204,11 @@ fn matches(query: &Query, entry: &Entry) -> bool {
         return false;
     }
     let name = entry.name.to_lowercase();
-    query.terms.iter().all(|term| name.contains(term.as_str()))
+    let path = entry.path.as_deref().unwrap_or("").to_lowercase();
+    query
+        .terms
+        .iter()
+        .all(|term| name.contains(term.as_str()) || path.contains(term.as_str()))
 }
 
 /// `img` matches the type half, `png` the subtype half, and `image/png` matches
@@ -264,6 +272,7 @@ mod tests {
         Entry {
             id: format!("{:064x}", at),
             name: name.into(),
+            path: None,
             content_type: content_type.into(),
             bytes: 1024,
             store,

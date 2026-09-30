@@ -1,0 +1,24 @@
+{
+  "schema_version": 2,
+  "id": "mycelium-network-topology",
+  "kind": "network_topology",
+  "title": "Home network",
+  "segments": [
+    {"id":"lan:core","label":"Core LAN","kind":"lan","subnet":"192.168.20.0/24","gateway":"192.168.20.1"},
+    {"id":"vlan:35","label":"Audio","kind":"vlan","vlan":35,"subnet":"10.35.0.0/24"},
+    {"id":"vlan:50","label":"IoT","kind":"vlan","vlan":50,"subnet":"10.50.0.0/24"}
+  ],
+  "nodes": [
+    {"id":"router","label":"EdgeRouter","kind":"gateway","segments":["lan:core","vlan:35","vlan:50"],"detail":"gateway","state":"good"},
+    {"id":"studio","label":"Mac Studio","kind":"host","segments":["vlan:35"],"detail":"10.35.0.12","state":"good"},
+    {"id":"pi","label":"Home Pi","kind":"host","segments":["vlan:35"],"detail":"10.35.0.13","state":"good"},
+    {"id":"camera","label":"Frigate camera","kind":"host","segments":["vlan:50"],"detail":"10.50.0.22","state":"warning"}
+  ],
+  "links": [
+    {"from":"router","to":"studio","label":"eth1.35","kind":"trunk","state":"good"},
+    {"from":"router","to":"pi","label":"eth1.35","kind":"trunk","state":"good"},
+    {"from":"router","to":"camera","label":"eth1.50","kind":"access","state":"warning"}
+  ],
+  "conflicts": 0,
+  "data": {"state":"ready","source":"demo:mycelium","provenance":"demo","window":"live"}
+}

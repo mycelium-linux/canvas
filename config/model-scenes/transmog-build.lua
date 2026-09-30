@@ -25,13 +25,10 @@ return {
   -- Canvas coordinate-system claim.
   model_rotation_degrees = { -90, 0, 0 },
   camera = "iso",
-  orbit = {
-    axis = { 0, 1, 0 },
-    -- Slow enough to read the geometry while it changes underneath.
-    degrees_per_second = 12,
-  },
   material = {
-    color = nil,
+    -- The current DesignDocument names PETG and no finish. Present that as a
+    -- neutral blue-grey polymer instead of inheriting a decorative theme hue.
+    color = { 72, 154, 184 },
     -- Lift the glow as the part gains steps, so a long build reads as
     -- progress rather than as a static object that happens to differ.
     glow = 1.1 + depth * 0.02,

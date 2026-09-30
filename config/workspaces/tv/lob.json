@@ -63,7 +63,7 @@
    "inputs": [
     {
      "id": "fan",
-     "contract": "canvas.widget.snapshot.v1"
+          "contract": "lob.pipeline.status.v1"
     }
    ]
   },
@@ -94,7 +94,7 @@
    "inputs": [
     {
      "id": "brief",
-     "contract": "canvas.widget.snapshot.v1"
+          "contract": "lob.pipeline.status.v1"
     }
    ]
   },
@@ -125,7 +125,7 @@
    "inputs": [
     {
      "id": "pipeline",
-     "contract": "canvas.widget.snapshot.v1"
+          "contract": "lob.pipeline.status.v1"
     }
    ]
   },
@@ -162,18 +162,19 @@
    "inputs": [
     {
      "id": "confidence",
-     "contract": "canvas.widget.snapshot.v1"
+          "contract": "lob.pipeline.status.v1"
     }
    ]
   },
   {
    "id": "lob-ask",
    "title": "Ask lob",
-   "content": {
-    "kind": "prompt",
-    "target": "lob",
-    "placeholder": "Describe a board, then press Enter"
-   },
+      "content": {
+        "kind": "prompt",
+        "target": "lob",
+        "placeholder": "Describe the board or circuit you want…",
+        "task_kinds": ["PCB", "Part", "Code"]
+      },
    "inputs": []
   }
  ],
@@ -258,13 +259,13 @@
    "source": {
     "owner": "legion-of-bom",
     "stream": "lob-fan",
-    "contract": "canvas.widget.snapshot.v1"
+        "contract": "lob.pipeline.status.v1"
    },
    "target": {
     "surface_id": "lob-fan",
     "input_id": "fan"
    },
-   "adapter": "widget-snapshot-v1",
+      "adapter": "lob-pipeline-v1",
    "delivery": {
     "mode": "latest"
    }
@@ -274,13 +275,13 @@
    "source": {
     "owner": "legion-of-bom",
     "stream": "lob-brief",
-    "contract": "canvas.widget.snapshot.v1"
+        "contract": "lob.pipeline.status.v1"
    },
    "target": {
     "surface_id": "lob-brief",
     "input_id": "brief"
    },
-   "adapter": "widget-snapshot-v1",
+      "adapter": "lob-pipeline-v1",
    "delivery": {
     "mode": "latest"
    }
@@ -290,13 +291,13 @@
    "source": {
     "owner": "legion-of-bom",
     "stream": "lob-pipeline",
-    "contract": "canvas.widget.snapshot.v1"
+        "contract": "lob.pipeline.status.v1"
    },
    "target": {
     "surface_id": "lob-pipeline",
     "input_id": "pipeline"
    },
-   "adapter": "widget-snapshot-v1",
+      "adapter": "lob-pipeline-v1",
    "delivery": {
     "mode": "latest"
    }
@@ -306,13 +307,13 @@
    "source": {
     "owner": "legion-of-bom",
     "stream": "lob-confidence",
-    "contract": "canvas.widget.snapshot.v1"
+        "contract": "lob.pipeline.status.v1"
    },
    "target": {
     "surface_id": "lob-confidence",
     "input_id": "confidence"
    },
-   "adapter": "widget-snapshot-v1",
+      "adapter": "lob-pipeline-v1",
    "delivery": {
     "mode": "latest"
    }

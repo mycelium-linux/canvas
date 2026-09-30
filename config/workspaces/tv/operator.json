@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "operator-workspace",
+  "project_id": "operator",
+  "revision": 1,
+  "theme": { "source": "project" },
+  "background": { "kind": "theme" },
+  "chrome": { "title": "hidden", "canvas_padding": 20, "surface_gap": 0 },
+  "surfaces": [
+    {
+      "id": "operator-session",
+      "title": "Operator session",
+      "content": {
+        "kind": "prompt",
+        "target": "operator",
+        "placeholder": "Describe what you want to create…",
+        "task_kinds": ["Code", "PCB", "CAD"],
+        "task_targets": {
+          "Code": "operator",
+          "PCB": "lob",
+          "CAD": "transmog"
+        }
+      },
+      "inputs": []
+    }
+  ],
+  "layout": {
+    "kind": "canvas",
+    "placements": [
+      {
+        "surface_id": "operator-session",
+        "bounds": { "x": 0.08, "y": 0.08, "width": 0.84, "height": 0.84 },
+        "layer": 0
+      }
+    ]
+  },
+  "pages": [],
+  "active_page": 0,
+  "bindings": [],
+  "focused_surface_id": "operator-session"
+}

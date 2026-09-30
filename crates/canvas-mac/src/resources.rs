@@ -467,7 +467,9 @@ mod tests {
         let entries = entries("business", &context).unwrap();
         assert_eq!(entries[0].company_id, None);
         assert_eq!(entries[0].workspace_id.as_deref(), Some("fpl"));
-        assert!(entries.iter().all(|entry| entry.workspace_id.as_deref() == Some("fpl")));
+        assert!(entries
+            .iter()
+            .all(|entry| entry.workspace_id.as_deref() == Some("fpl")));
     }
     #[test]
     fn company_ids_group_equal_names_without_guessing_unassigned_ownership() {

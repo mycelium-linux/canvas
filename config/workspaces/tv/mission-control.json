@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "id": "mission-control-workspace",
+  "project_id": "mission-control",
+  "revision": 1,
+  "theme": { "source": "project" },
+  "background": { "kind": "theme" },
+  "chrome": { "title": "hidden", "canvas_padding": 0, "surface_gap": 1 },
+  "surfaces": [
+    {
+      "id": "mission-topology",
+      "title": "System map",
+      "content": { "kind": "widget", "spec": {
+        "schema_version": 2, "id": "mission-topology", "kind": "neural_graph",
+        "title": "System map · live architecture",
+        "nodes": [
+          {"id":"edge","label":"EDGE","group":"ingress","heat":0.72,"state":"good"},
+          {"id":"router","label":"UNIBUS","group":"control","heat":0.54,"state":"good"},
+          {"id":"jarvis","label":"JARVIS","group":"control","heat":0.86,"state":"good"},
+          {"id":"transmog","label":"TRANSMOG","group":"fabrication","heat":0.64,"state":"warning"},
+          {"id":"lob","label":"LEGION OF BOM","group":"fabrication","heat":0.42,"state":"good"},
+          {"id":"canvas","label":"CANVAS","group":"display","heat":0.91,"state":"good"}
+        ],
+        "edges": [
+          {"from":"edge","to":"router","heat":0.72},
+          {"from":"router","to":"jarvis","heat":0.82},
+          {"from":"jarvis","to":"transmog","heat":0.66},
+          {"from":"jarvis","to":"lob","heat":0.54},
+          {"from":"transmog","to":"canvas","heat":0.88},
+          {"from":"lob","to":"canvas","heat":0.62}
+        ],
+        "chrome": "integrated",
+        "data": {"state":"ready","source":"demo:mission-control","window":"live","detail":"Architecture demonstration","provenance":"demo"}
+      } },
+      "inputs": []
+    },
+    {
+      "id": "mission-timeline",
+      "title": "Activity",
+      "content": { "kind": "widget", "spec": {
+        "schema_version": 2, "id": "mission-timeline", "kind": "state_timeline",
+        "title": "Fleet activity · last hour",
+        "lanes": [
+          {"label":"Neo","segments":[{"label":"online","state":"good","start":0.0,"end":1.0}]},
+          {"label":"Studio","segments":[{"label":"build","state":"warning","start":0.0,"end":0.22},{"label":"online","state":"good","start":0.22,"end":1.0}]},
+          {"label":"Agora","segments":[{"label":"online","state":"good","start":0.0,"end":0.76},{"label":"handoff","state":"neutral","start":0.76,"end":1.0}]}
+        ],
+        "chrome": "integrated",
+        "data": {"state":"ready","source":"demo:mission-control","window":"1h","provenance":"demo"}
+      } },
+      "inputs": []
+    },
+    {
+      "id": "mission-events",
+      "title": "Event rail",
+      "content": { "kind": "widget", "spec": {
+        "schema_version": 2, "id": "mission-events", "kind": "event_log",
+        "title": "Live activity", "follow": true,
+        "entries": [
+          {"timestamp":"NOW","message":"Canvas app surface deployed to Neo","level":"good"},
+          {"timestamp":"-02m","message":"Eval execution tree retained","level":"neutral"},
+          {"timestamp":"-07m","message":"Studio renderer heartbeat delayed","level":"warning"},
+          {"timestamp":"-12m","message":"Alfalfa manifest index refreshed","level":"good"}
+        ],
+        "chrome": "integrated",
+        "data": {"state":"ready","source":"demo:mission-control","window":"recent","provenance":"demo"}
+      } },
+      "inputs": []
+    },
+    {
+      "id": "mission-status",
+      "title": "Readiness",
+      "content": { "kind": "widget", "spec": {
+        "schema_version": 2, "id": "mission-status", "kind": "status_list",
+        "title": "System readiness",
+        "nodes": [
+          {"label":"Canvas","state":"good","detail":"Neo · local GPU"},
+          {"label":"JARVIS","state":"good","detail":"audio ready"},
+          {"label":"Transmog","state":"warning","detail":"Studio reconnecting"},
+          {"label":"Legion of BOM","state":"good","detail":"idle"},
+          {"label":"Artifact cache","state":"good","detail":"warm"}
+        ],
+        "chrome": "integrated",
+        "data": {"state":"ready","source":"demo:mission-control","window":"live","provenance":"demo"}
+      } },
+      "inputs": []
+    }
+  ],
+  "layout": { "kind": "canvas", "placements": [
+    {"surface_id":"mission-topology","bounds":{"x":0.0,"y":0.0,"width":0.72,"height":0.72},"layer":0},
+    {"surface_id":"mission-timeline","bounds":{"x":0.0,"y":0.721,"width":0.72,"height":0.279},"layer":0},
+    {"surface_id":"mission-events","bounds":{"x":0.721,"y":0.0,"width":0.279,"height":0.62},"layer":0},
+    {"surface_id":"mission-status","bounds":{"x":0.721,"y":0.621,"width":0.279,"height":0.379},"layer":0}
+  ] },
+  "pages": [],
+  "active_page": 0,
+  "bindings": [],
+  "focused_surface_id": "mission-topology"
+}

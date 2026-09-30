@@ -5,7 +5,10 @@
 
 use canvas_core::{Catalog, ResourceKind, ThemeSelection, is_declared_contract};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 pub mod backend;
 pub mod background_picker;
@@ -28,7 +31,6 @@ pub mod map;
 #[cfg(all(feature = "mcp", unix))]
 pub mod mcp;
 pub mod media;
-pub mod model_orbit;
 pub mod operational_views;
 pub mod project_picker;
 pub mod project_switcher;
@@ -541,6 +543,14 @@ pub enum SurfaceContent {
         /// board watching *that* session.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
+        /// Optional creation modes presented before composition. Empty keeps
+        /// the original direct-prompt behavior.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        task_kinds: Vec<String>,
+        /// Optional delivery target per creation mode. Kinds absent from this
+        /// map use the prompt's default `target` for backward compatibility.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        task_targets: BTreeMap<String, String>,
     },
     /// Content from a newer Canvas, kept exactly as written.
     #[serde(untagged)]
@@ -679,6 +689,10 @@ enum Known {
         placeholder: Option<String>,
         #[serde(default)]
         session: Option<String>,
+        #[serde(default)]
+        task_kinds: Vec<String>,
+        #[serde(default)]
+        task_targets: BTreeMap<String, String>,
     },
 }
 
@@ -712,10 +726,14 @@ impl Known {
                 target,
                 placeholder,
                 session,
+                task_kinds,
+                task_targets,
             } => SurfaceContent::Prompt {
                 target,
                 placeholder,
                 session,
+                task_kinds,
+                task_targets,
             },
         }
     }
@@ -886,16 +904,51 @@ impl Default for Transform3 {
     }
 }
 
+/// Which Coherence role a scene label is drawn in.
+///
+/// A role, never RGB. A generated scene is an untrusted proposal the host still
+/// has to render legibly on whatever theme it lands on, and raw colour would
+/// make Lua a second style owner beside Coherence. `Primary` is the accent: the
+/// library already uses it as one (see the clock's second hand in
+/// `canvas-widgets/src/live.rs`), and a second name for the same fact is a
+/// drift hazard waiting for someone to disagree with the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
+pub enum SemanticInk {
+    /// Body text. The default, and the only thing a pre-`ink` scene meant.
+    Text,
+    Muted,
+    Primary,
+    Success,
+    Warning,
+    Danger,
+    Info,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum NodeContent {
     Group,
-    Text { text: String },
-    Image { asset: AssetRef },
-    Mesh { asset: AssetRef },
-    Camera { projection: Projection },
-    Light { light: Light },
+    Text {
+        text: String,
+        /// Absent in scenes written before ink existed, which draw as `Text`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ink: Option<SemanticInk>,
+    },
+    Image {
+        asset: AssetRef,
+    },
+    Mesh {
+        asset: AssetRef,
+    },
+    Camera {
+        projection: Projection,
+    },
+    Light {
+        light: Light,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -1051,7 +1104,7 @@ impl Scene {
             node.transform.validate()?;
             match &node.content {
                 NodeContent::Group => {}
-                NodeContent::Text { text } => {
+                NodeContent::Text { text, .. } => {
                     check(visible(text), "Scene text must be printable")?;
                 }
                 NodeContent::Image { asset } | NodeContent::Mesh { asset } => {
@@ -1260,6 +1313,8 @@ impl WorkspaceDocument {
                     target,
                     placeholder,
                     session,
+                    task_kinds,
+                    task_targets,
                 } => {
                     // An identifier, not an address: the bridge resolves where
                     // a target lives, so a document cannot name a destination
@@ -1276,6 +1331,21 @@ impl WorkspaceDocument {
                         // from whichever tool minted them and their shape is
                         // not Canvas's to dictate.
                         check(visible(session), "Prompt session must be printable")?;
+                    }
+                    check(task_kinds.len() <= 8, "Prompt has too many task kinds")?;
+                    for kind in task_kinds {
+                        check(visible(kind), "Prompt task kind must be printable")?;
+                    }
+                    for (kind, target) in task_targets {
+                        check(visible(kind), "Prompt task target kind must be printable")?;
+                        check(
+                            task_kinds.contains(kind),
+                            format!("Prompt task target names undeclared kind: {kind}"),
+                        )?;
+                        check(
+                            identifier(target),
+                            format!("Invalid prompt task target: {target}"),
+                        )?;
                     }
                 }
                 SurfaceContent::LiveVideo {
@@ -1716,6 +1786,45 @@ mod tests {
                 .all(|s| matches!(s.content, SurfaceContent::LiveImage { .. })),
             "both surfaces must be live images"
         );
+    }
+
+    #[test]
+    fn operator_workspace_is_one_session_backed_application() {
+        let json = include_str!("../../../config/workspaces/tv/operator.json");
+        let doc: WorkspaceDocument = serde_json::from_str(json)
+            .expect("operator.json must deserialize as a WorkspaceDocument");
+        doc.validate(&Catalog::bundled().expect("bundled catalog"))
+            .expect("operator.json must pass validation");
+        assert_eq!(doc.surfaces.len(), 1, "a session loads as one application");
+        assert!(
+            doc.bindings.is_empty(),
+            "no independently loading fragments"
+        );
+        assert!(matches!(
+            &doc.surfaces[0].content,
+            SurfaceContent::Prompt { target, task_kinds, task_targets, .. }
+                if target == "operator"
+                    && task_kinds == &["Code", "PCB", "CAD"]
+                    && task_targets.get("Code").is_some_and(|target| target == "operator")
+                    && task_targets.get("PCB").is_some_and(|target| target == "lob")
+                    && task_targets.get("CAD").is_some_and(|target| target == "transmog")
+        ));
+    }
+
+    #[test]
+    fn mission_control_is_a_flush_integrated_demo_application() {
+        let json = include_str!("../../../config/workspaces/tv/mission-control.json");
+        let doc: WorkspaceDocument = serde_json::from_str(json)
+            .expect("mission-control.json must deserialize as a WorkspaceDocument");
+        doc.validate(&Catalog::bundled().expect("bundled catalog"))
+            .expect("mission-control.json must pass validation");
+        assert_eq!(doc.chrome.canvas_padding, 0);
+        assert_eq!(doc.chrome.surface_gap, 1);
+        assert!(doc.surfaces.iter().all(|surface| matches!(
+            &surface.content,
+            SurfaceContent::Widget { spec }
+                if spec.effective_chrome() == canvas_widgets::WidgetChrome::Integrated
+        )));
     }
 
     #[test]
@@ -2374,6 +2483,8 @@ mod surface_kind_parity_tests {
             target: "transmog".into(),
             placeholder: Some("Describe a part".into()),
             session: None,
+            task_kinds: vec!["Part".into()],
+            task_targets: BTreeMap::new(),
         };
         let json = serde_json::to_value(&content).expect("serializes");
         assert_eq!(json["kind"], "prompt");
@@ -2393,7 +2504,9 @@ mod surface_kind_parity_tests {
             SurfaceContent::Prompt {
                 target: "lob".into(),
                 placeholder: None,
-                session: None
+                session: None,
+                task_kinds: Vec::new(),
+                task_targets: BTreeMap::new(),
             }
         );
     }
@@ -2407,6 +2520,8 @@ mod surface_kind_parity_tests {
             target: "operator".into(),
             placeholder: None,
             session: Some("ses_9f2".into()),
+            task_kinds: Vec::new(),
+            task_targets: BTreeMap::new(),
         };
         let json = serde_json::to_value(&pinned).expect("serializes");
         assert_eq!(json["session"], "ses_9f2");
@@ -2419,6 +2534,8 @@ mod surface_kind_parity_tests {
             target: "operator".into(),
             placeholder: None,
             session: None,
+            task_kinds: Vec::new(),
+            task_targets: BTreeMap::new(),
         };
         let json = serde_json::to_value(&unpinned).expect("serializes");
         assert!(

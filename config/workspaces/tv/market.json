@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "id": "market-workspace",
+  "project_id": "market",
+  "revision": 1,
+  "theme": { "source": "project" },
+  "background": { "kind": "shader", "shader_id": "smoke-rings", "speed": 0.35 },
+  "chrome": { "title": "hidden", "canvas_padding": 20, "surface_gap": 12 },
+  "surfaces": [{
+    "id": "btc-candles",
+    "title": "BTC/USD · LIVE",
+    "content": { "kind": "widget", "spec": {
+      "schema_version": 2,
+      "id": "btc-candles",
+      "kind": "quant",
+      "widget": {
+        "visualization": "candlestick",
+        "symbol": "BTC/USD",
+        "interval": "1m",
+        "show_volume": true,
+        "candles": [{ "time": 1, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 0.0 }]
+      },
+      "chrome": "drag_only",
+      "data": { "state": "loading", "source": "unibus:trader-alpaca", "observed_at": null, "window": "live", "detail": "Awaiting BTC/USD bars", "provenance": "live" }
+    }},
+    "inputs": [{ "id": "ohlcv", "contract": "market.ohlcv.raw.v1" }]
+  }],
+  "layout": { "kind": "canvas", "placements": [
+    { "surface_id": "btc-candles", "bounds": { "x": 0.02, "y": 0.03, "width": 0.96, "height": 0.94 }, "layer": 0 }
+  ]},
+  "bindings": [{
+    "id": "btc-bars",
+    "source": { "owner": "market", "stream": "btc-usd", "contract": "market.ohlcv.raw.v1" },
+    "target": { "surface_id": "btc-candles", "input_id": "ohlcv" },
+    "adapter": "market-ohlcv-v1",
+    "delivery": { "mode": "latest" }
+  }],
+  "focused_surface_id": "btc-candles"
+}

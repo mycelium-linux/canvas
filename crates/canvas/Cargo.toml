@@ -16,8 +16,10 @@ canvas-control = { path = "../canvas-control" }
 canvas-alfalfa = { path = "../canvas-alfalfa" }
 canvas-bifrost = { path = "../canvas-bifrost" }
 canvas-fab = { path = "../canvas-fab" }
+canvas-feeds = { path = "../canvas-feeds" }
 canvas-shroud = { path = "../canvas-shroud" }
 canvas-widgets = { path = "../canvas-widgets", features = ["live"] }
+canvas-model-viewer = { path = "../canvas-model-viewer" }
 anyhow.workspace = true
 canvas-core.workspace = true
 iced = { version = "0.14", default-features = false, features = ["wgpu", "tokio", "canvas", "image-without-codecs", "x11", "wayland", "markdown", "highlighter"] }
@@ -65,6 +67,11 @@ path = "src/bin/canvasctl.rs"
 [[bin]]
 name = "canvas-workspace-capture"
 path = "src/bin/canvas-workspace-capture.rs"
+
+[[bin]]
+name = "canvas-briefing-record"
+path = "src/bin/canvas-briefing-record.rs"
+required-features = ["lua-scenes"]
 
 [[bin]]
 name = "canvas-mcp"

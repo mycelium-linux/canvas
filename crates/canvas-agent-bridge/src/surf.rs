@@ -91,8 +91,8 @@ mod tests {
 
     #[test]
     fn an_unknown_surf_state_stays_promptable() {
-        let parsed =
-            parse_session(&serde_json::json!({"id": "s1", "state": "hydrating"}), 5).expect("parses");
+        let parsed = parse_session(&serde_json::json!({"id": "s1", "state": "hydrating"}), 5)
+            .expect("parses");
         assert_eq!(parsed.state, SessionState::Idle);
         assert!(parsed.state.accepts_prompts());
         assert_eq!(parsed.updated_at_ms, 5);
@@ -100,8 +100,8 @@ mod tests {
 
     #[test]
     fn a_closed_session_is_ended() {
-        let parsed = parse_session(&serde_json::json!({"id": "s1", "status": "closed"}), 0)
-            .expect("parses");
+        let parsed =
+            parse_session(&serde_json::json!({"id": "s1", "status": "closed"}), 0).expect("parses");
         assert!(!parsed.state.accepts_prompts());
     }
 

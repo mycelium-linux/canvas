@@ -879,6 +879,7 @@ impl App {
                             Host::Mac => "Mac",
                             Host::AgoraOne => "Agora One",
                             Host::EdgeRunner => "Edge Runner",
+                            Host::HomePi => "Home Pi",
                         })
                         .size(metrics.small)
                     ]

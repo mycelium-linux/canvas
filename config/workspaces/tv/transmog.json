@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "transmog-workspace",
   "project_id": "transmog",
-  "revision": 3,
+  "revision": 6,
   "theme": {
     "source": "project"
   },
@@ -28,7 +28,12 @@
         "orbitable": true,
         "timeline": true
       },
-      "inputs": []
+      "inputs": [
+        {
+          "id": "timeline",
+          "contract": "transmog.build.status.v1"
+        }
+      ]
     },
     {
       "id": "transmog-fan",
@@ -58,7 +63,7 @@
       "inputs": [
         {
           "id": "fan",
-          "contract": "canvas.widget.snapshot.v1"
+          "contract": "transmog.build.status.v1"
         }
       ]
     },
@@ -89,7 +94,7 @@
       "inputs": [
         {
           "id": "brief",
-          "contract": "canvas.widget.snapshot.v1"
+          "contract": "transmog.build.status.v1"
         }
       ]
     },
@@ -120,7 +125,7 @@
       "inputs": [
         {
           "id": "steps",
-          "contract": "canvas.widget.snapshot.v1"
+          "contract": "transmog.build.status.v1"
         }
       ]
     },
@@ -157,7 +162,7 @@
       "inputs": [
         {
           "id": "confidence",
-          "contract": "canvas.widget.snapshot.v1"
+          "contract": "transmog.build.status.v1"
         }
       ]
     },
@@ -167,9 +172,41 @@
       "content": {
         "kind": "prompt",
         "target": "transmog",
-        "placeholder": "Describe a part, then press Enter"
+        "placeholder": "Describe the part or model you want…",
+        "task_kinds": ["PCB", "Model"],
+        "task_targets": {
+          "PCB": "lob",
+          "Model": "transmog"
+        }
       },
       "inputs": []
+    },
+    {
+      "id": "transmog-files",
+      "title": "Project files",
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "transmog-files",
+          "kind": "table",
+          "title": "All files",
+          "columns": ["Name", "Kind", "Folder", "Size"],
+          "rows": [],
+          "theme": null,
+          "refresh_ms": null,
+          "chrome": "frameless",
+          "data": {
+            "state": "loading",
+            "source": "alfalfa:transmog",
+            "observed_at": null,
+            "window": "current revision",
+            "detail": "Awaiting manifest index",
+            "provenance": "live"
+          }
+        }
+      },
+      "inputs": [{ "id": "results", "contract": "canvas.widget.snapshot.v1" }]
     }
   ],
   "layout": {
@@ -237,19 +274,45 @@
       }
     ]
   },
+  "pages": [
+    {
+      "name": "Files",
+      "layout": {
+        "kind": "surface",
+        "surface_id": "transmog-files"
+      }
+    }
+  ],
+  "active_page": 0,
   "bindings": [
+    {
+      "id": "transmog-model-timeline-live",
+      "source": {
+        "owner": "mac-studio-transmog",
+        "stream": "transmog-timeline",
+        "contract": "transmog.build.status.v1"
+      },
+      "target": {
+        "surface_id": "transmog-part",
+        "input_id": "timeline"
+      },
+      "adapter": "transmog-build-v1",
+      "delivery": {
+        "mode": "latest"
+      }
+    },
     {
       "id": "transmog-fan-live",
       "source": {
         "owner": "mac-studio-transmog",
         "stream": "transmog-fan",
-        "contract": "canvas.widget.snapshot.v1"
+        "contract": "transmog.build.status.v1"
       },
       "target": {
         "surface_id": "transmog-fan",
         "input_id": "fan"
       },
-      "adapter": "widget-snapshot-v1",
+      "adapter": "transmog-build-v1",
       "delivery": {
         "mode": "latest"
       }
@@ -259,13 +322,13 @@
       "source": {
         "owner": "mac-studio-transmog",
         "stream": "transmog-brief",
-        "contract": "canvas.widget.snapshot.v1"
+        "contract": "transmog.build.status.v1"
       },
       "target": {
         "surface_id": "transmog-brief",
         "input_id": "brief"
       },
-      "adapter": "widget-snapshot-v1",
+      "adapter": "transmog-build-v1",
       "delivery": {
         "mode": "latest"
       }
@@ -275,13 +338,13 @@
       "source": {
         "owner": "mac-studio-transmog",
         "stream": "transmog-steps",
-        "contract": "canvas.widget.snapshot.v1"
+        "contract": "transmog.build.status.v1"
       },
       "target": {
         "surface_id": "transmog-steps",
         "input_id": "steps"
       },
-      "adapter": "widget-snapshot-v1",
+      "adapter": "transmog-build-v1",
       "delivery": {
         "mode": "latest"
       }
@@ -291,13 +354,29 @@
       "source": {
         "owner": "mac-studio-transmog",
         "stream": "transmog-confidence",
-        "contract": "canvas.widget.snapshot.v1"
+        "contract": "transmog.build.status.v1"
       },
       "target": {
         "surface_id": "transmog-confidence",
         "input_id": "confidence"
       },
-      "adapter": "widget-snapshot-v1",
+      "adapter": "transmog-build-v1",
+      "delivery": {
+        "mode": "latest"
+      }
+    },
+    {
+      "id": "transmog-files-live",
+      "source": {
+        "owner": "canvas-artifact-index",
+        "stream": "transmog-artifacts",
+        "contract": "canvas.artifact.search.v1"
+      },
+      "target": {
+        "surface_id": "transmog-files",
+        "input_id": "results"
+      },
+      "adapter": "alfalfa-manifest-search-v1",
       "delivery": {
         "mode": "latest"
       }

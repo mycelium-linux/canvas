@@ -59,7 +59,15 @@
         "mode": "dark",
         "accent": "info"
       },
-      "resources": []
+      "resources": [
+        {
+          "id": "home-mpd",
+          "title": "MPD Audio Server",
+          "host": "home_pi",
+          "kind": "remote_desktop",
+          "target": "192.168.10.74"
+        }
+      ]
     },
     {
       "id": "trader",
@@ -112,8 +120,38 @@
       "resources": []
     },
     {
+      "id": "operator",
+      "name": "Operator",
+      "theme": {
+        "source": "coherence",
+        "mode": "dark",
+        "accent": "brand"
+      },
+      "resources": []
+    },
+    {
+      "id": "eval",
+      "name": "Evaluation",
+      "theme": {
+        "source": "coherence",
+        "mode": "dark",
+        "accent": "info"
+      },
+      "resources": []
+    },
+    {
       "id": "surf",
       "name": "Surf",
+      "theme": {
+        "source": "coherence",
+        "mode": "dark",
+        "accent": "info"
+      },
+      "resources": []
+    },
+    {
+      "id": "mission-control",
+      "name": "Mission Control",
       "theme": {
         "source": "coherence",
         "mode": "dark",

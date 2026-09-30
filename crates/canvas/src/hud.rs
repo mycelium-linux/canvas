@@ -8,7 +8,7 @@ use crate::control::{MeshNode, MeshNodeState};
 use iced::mouse;
 use iced::widget::{Column, canvas, column, container, row, text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Theme, Vector, alignment};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 pub const MAX_HUD_CORES: usize = 32;
 pub const MAX_HUD_PROCESSES: usize = 3;
@@ -221,24 +221,74 @@ pub(crate) fn format_rate(bytes_per_second: u64) -> String {
     format!("{} /s", format_bytes(bytes_per_second))
 }
 
-pub fn now_local() -> (String, String) {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs() as i64);
+/// The civil date and time a human would read off this machine's wall clock.
+///
+/// One conversion, shared by the HUD and by every Lua module invocation, because
+/// the date a calendar draws and the date the clock shows are the same fact. Two
+/// implementations of `localtime_r` is how a wall starts disagreeing with itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalParts {
+    pub year: i32,
+    /// 1-12.
+    pub month: u32,
+    pub day: u32,
+    /// 1 = Monday through 7 = Sunday. ISO rather than C's `tm_wday`, because a
+    /// grid author chooses whether the week starts Monday or Sunday, and a
+    /// zero-based Sunday invites the off-by-one that choice is meant to avoid.
+    pub weekday: u32,
+    pub hour: u32,
+    pub minute: u32,
+    pub second: u32,
+    pub utc_offset_seconds: i32,
+}
+
+/// Convert epoch milliseconds to local civil time.
+///
+/// Takes the instant rather than reading it, so a test can pin a date and a
+/// module invocation stays reproducible from its inputs alone.
+pub fn local_parts(epoch_ms: u64) -> LocalParts {
+    let seconds = (epoch_ms / 1_000) as i64;
     let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
     unsafe {
         libc::localtime_r(&seconds, &mut tm);
     }
+    let weekday = if tm.tm_wday == 0 {
+        7
+    } else {
+        tm.tm_wday as u32
+    };
+    LocalParts {
+        year: tm.tm_year + 1900,
+        month: tm.tm_mon as u32 + 1,
+        day: tm.tm_mday as u32,
+        weekday,
+        hour: tm.tm_hour as u32,
+        minute: tm.tm_min as u32,
+        second: tm.tm_sec as u32,
+        utc_offset_seconds: tm.tm_gmtoff as i32,
+    }
+}
+
+/// The HUD's two clock strings, from a civil time someone already resolved.
+///
+/// Split from [`now_local`] so the formatting a wall reads and the date an
+/// authored widget draws can be tested against one another without either of them
+/// reaching for the clock.
+pub fn format_local(parts: &LocalParts) -> (String, String) {
     const DOW: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
-    let dow = DOW[(tm.tm_wday as usize).min(6)];
-    let month = MONTHS[(tm.tm_mon as usize).min(11)];
+    let dow = DOW[((parts.weekday % 7) as usize).min(6)];
+    let month = MONTHS[(parts.month as usize - 1).min(11)];
     (
-        format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec),
-        format!("{dow} {month} {:02}, {}", tm.tm_mday, tm.tm_year + 1900),
+        format!("{:02}:{:02}:{:02}", parts.hour, parts.minute, parts.second),
+        format!("{dow} {month} {:02}, {}", parts.day, parts.year),
     )
+}
+
+pub fn now_local() -> (String, String) {
+    format_local(&local_parts(crate::stream_binding::now_ms()))
 }
 
 fn node_row<'a, Message: 'a>(
@@ -392,6 +442,48 @@ fn with_alpha(color: Color, alpha: f32) -> Color {
 mod tests {
     use super::*;
     use iced::Color;
+
+    #[test]
+    fn civil_time_formats_the_weekday_the_host_numbered_it() {
+        // The mapping this replaced is `tm_wday` 0 = Sunday; the module contract is
+        // ISO 1 = Monday .. 7 = Sunday. Getting that conversion wrong by one is the
+        // kind of bug that puts every event a day early and reads as fine.
+        let monday = LocalParts {
+            year: 2026,
+            month: 9,
+            day: 28,
+            weekday: 1,
+            hour: 7,
+            minute: 5,
+            second: 2,
+            utc_offset_seconds: -25200,
+        };
+        assert_eq!(
+            format_local(&monday),
+            ("07:05:02".into(), "Mon Sep 28, 2026".into())
+        );
+        let mut sunday = monday;
+        sunday.weekday = 7;
+        sunday.day = 27;
+        sunday.month = 12;
+        assert_eq!(format_local(&sunday).1, "Sun Dec 27, 2026");
+    }
+
+    #[test]
+    fn every_day_of_the_year_advances_the_weekday_by_exactly_one() {
+        // Zone-independent: a day later is a day later, across DST and across
+        // month and year ends, or the calendar grid walks off its own dates.
+        let start = 1_735_689_600_000; // 2025-01-01T00:00:00Z
+        let first = local_parts(start).weekday;
+        for days in 1..400u64 {
+            let parts = local_parts(start + days * 86_400_000);
+            assert_eq!(
+                parts.weekday,
+                (first - 1 + days as u32) % 7 + 1,
+                "day {days} landed on the wrong weekday"
+            );
+        }
+    }
 
     fn palette() -> HudPalette {
         HudPalette {

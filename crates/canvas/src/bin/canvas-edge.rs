@@ -299,6 +299,9 @@ fn ingest(
         }
         CAMERA_KIND => apply_camera_pose(camera_seen, envelope),
         "audio_level" | "audio.level" => publish_audio_level(envelope),
+        "market.order_book.v1" | "market.trade.v1" | "market.ohlcv.raw.v1" => {
+            publish_market_data(envelope)
+        }
         "rlcd.decision.v1" => publish_rlcd_decision(liveness, envelope),
         "spatial_tracks" | "spatial.tracks" => publish_spatial_tracks(envelope),
         MIRROR_KIND => apply_workspace_mirror(config, liveness, mirror_runtime, envelope),
@@ -341,6 +344,65 @@ fn ingest(
             Ok(())
         }
     }
+}
+
+/// Bridge normalized market data onto Canvas's local stream contract.
+///
+/// FIX parsing and book state deliberately remain at the market edge. This
+/// process only translates the Unibus envelope, so a WebSocket crypto source
+/// can publish the exact same contracts without another Canvas integration.
+fn publish_market_data(envelope: &Envelope) -> Result<()> {
+    let symbol = envelope
+        .message
+        .body
+        .get("symbol")
+        .and_then(serde_json::Value::as_str)
+        .context("market event missing symbol")?;
+    let stream = symbol
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    ensure!(!stream.is_empty(), "market event has empty symbol");
+    let event = StreamEnvelope {
+        schema_version: STREAM_SCHEMA_VERSION,
+        owner: "market".into(),
+        stream,
+        contract: envelope.message.kind.clone(),
+        sequence: envelope
+            .message
+            .body
+            .get("sequence")
+            .and_then(serde_json::Value::as_u64)
+            .context("market event missing sequence")?,
+        emitted_at_ms: envelope
+            .message
+            .body
+            .get("emitted_at_ms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(envelope.issued_at_unix_ms),
+        project_id: None,
+        payload: serde_json::Value::Object(envelope.message.body.clone()),
+    };
+    event.validate().map_err(anyhow::Error::msg)?;
+    let bytes = serde_json::to_vec(&event).context("encode Canvas market event")?;
+    ensure!(
+        bytes.len() <= MAX_LOCAL_STREAM_DATAGRAM,
+        "market snapshot is {} bytes; local Canvas limit is {}",
+        bytes.len(),
+        MAX_LOCAL_STREAM_DATAGRAM
+    );
+    let path = canvas_core::stream_socket_path().context("Canvas stream socket is unavailable")?;
+    UnixDatagram::unbound()
+        .context("open Canvas market stream datagram")?
+        .send_to(&bytes, path)
+        .context("send Canvas market event")?;
+    Ok(())
 }
 
 struct MirrorSocketGuard(std::path::PathBuf);
@@ -415,6 +477,10 @@ fn start_camera_bridge(config: &EdgeConfig, bus: Arc<Bus>, seen: CameraSeen) -> 
         return Ok(());
     };
     fs::create_dir_all(&directory).context("create video frame directory")?;
+    eprintln!(
+        "canvas-edge: forwarding model camera poses from {}",
+        directory.display()
+    );
     let zone = config
         .bus
         .zones

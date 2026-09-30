@@ -25,7 +25,12 @@ use rmcp::{
     RoleServer, ServerHandler, ServiceExt,
 };
 use serde_json::{json, Value};
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    io::Write,
+    process::{Command, Stdio},
+    sync::Arc,
+};
 
 #[derive(Clone, Default)]
 struct Orchestration;
@@ -364,10 +369,110 @@ fn workspace_window_count(value: &Value, project: &str) -> Result<usize, String>
         .ok_or_else(|| format!("Recalled project workspace {project} is missing"))
 }
 
-fn target_area(target: Target) -> Result<(Option<super::Rect>, Option<Value>), String> {
+fn remote_presence_screen() -> Option<(String, String, String)> {
+    let program = std::env::var("DOCK_CANVAS_CENTRAL_BIN").ok()?;
+    let config = std::env::var("DOCK_CANVAS_CENTRAL_CONFIG").ok()?;
+    let screen = std::env::var("DOCK_CANVAS_PRESENCE_SCREEN").ok()?;
+    (!program.trim().is_empty() && !config.trim().is_empty() && !screen.trim().is_empty())
+        .then_some((program, config, screen))
+}
+
+fn remote_canvas_request(
+    program: &str,
+    config: &str,
+    screen: &str,
+    request: &Value,
+) -> Result<Value, String> {
+    let mut child = Command::new(program)
+        .args([
+            "--config",
+            config,
+            "--screen",
+            screen,
+            "--timeout",
+            "8",
+            "-",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Cannot start remote Canvas transport: {error}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or("Remote Canvas transport has no stdin")?
+        .write_all(request.to_string().as_bytes())
+        .map_err(|error| format!("Cannot send remote Canvas request: {error}"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("Cannot read remote Canvas receipt: {error}"))?;
+    if !output.status.success() {
+        let reason = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "Remote Canvas rejected the request: {}",
+            reason.trim()
+        ));
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|_| "Remote Canvas returned an invalid receipt".into())
+}
+
+fn present_remote_project(
+    program: &str,
+    config: &str,
+    screen: &str,
+    project: &str,
+    name: &str,
+) -> Result<Value, String> {
+    let request_id = format!("dock-remote-{project}-{}", std::process::id());
+    remote_canvas_request(
+        program,
+        config,
+        screen,
+        &json!({
+            "schema_version": CANVAS_CONTROL_VERSION,
+            "request_id": format!("{request_id}-sync"),
+            "command": {"command":"workspace_sync","projects":[{
+                "project_id":project,"name":name,"status":"active",
+                "theme":{"source":"coherence","mode":"dark","accent":"brand"}
+            }]}
+        }),
+    )?;
+    remote_canvas_request(
+        program,
+        config,
+        screen,
+        &json!({
+            "schema_version": CANVAS_CONTROL_VERSION,
+            "request_id": format!("{request_id}-switch"),
+            "command": {"command":"workspace_switch","name":project}
+        }),
+    )
+}
+
+fn target_area(
+    target: Target,
+) -> Result<
+    (
+        Option<super::Rect>,
+        Option<Value>,
+        Option<(String, String, String)>,
+    ),
+    String,
+> {
     match target {
-        Target::Primary => Ok((None, None)),
+        Target::Primary => Ok((None, None, None)),
         Target::Presence => {
+            if let Some(remote) = remote_presence_screen() {
+                return Ok((
+                    None,
+                    Some(json!({
+                        "target":"presence","transport":"unibus","display_id":remote.2
+                    })),
+                    Some(remote),
+                ));
+            }
             let route = super::presence::resolve()?;
             let (display_name, area) = super::display_work_area(&route.display_id)?;
             Ok((
@@ -380,6 +485,7 @@ fn target_area(target: Target) -> Result<(Option<super::Rect>, Option<Value>), S
                     "display_name":display_name,
                     "age_ms":route.age_ms
                 })),
+                None,
             ))
         }
     }
@@ -583,7 +689,7 @@ fn workspace_summaries() -> Result<Vec<Value>, String> {
 
 fn presence_status() -> Value {
     match target_area(Target::Presence) {
-        Ok((_, Some(route))) => json!({"available":true,"route":route}),
+        Ok((_, Some(route), _)) => json!({"available":true,"route":route}),
         Ok(_) => json!({"available":false,"reason":"Presence route did not resolve"}),
         Err(error) => json!({"available":false,"reason":error}),
     }
@@ -592,16 +698,22 @@ fn presence_status() -> Value {
 fn activate_workspace(project: &str, target: Target) -> Result<Value, String> {
     // Project/resource lookup is the owner-authorized exact-ID check.
     super::resources::project_entries(project)?;
-    let (area, route) = target_area(target)?;
+    let (area, route, remote) = target_area(target)?;
     let mut bindings = super::workspace::load()?;
     let activation = super::workspace::activate(&mut bindings, project, area)?;
     super::workspace::save(&bindings)?;
+    let remote_canvas = remote
+        .map(|(program, config, screen)| {
+            present_remote_project(&program, &config, &screen, project, project)
+        })
+        .transpose()?;
     Ok(json!({
         "project_id":project,
         "presented":true,
         "local_window_count":activation.windows.len(),
         "target":if target == Target::Presence {"presence"} else {"primary"},
-        "presence_route":route
+        "presence_route":route,
+        "remote_canvas":remote_canvas
     }))
 }
 
@@ -612,11 +724,17 @@ fn recall(project: &str, target: Target) -> Result<Value, String> {
         .filter(|entry| entry.id == "@home")
         .ok_or("Alfalfa project home is missing")?;
     let project_name = project_home.project_name.clone();
+    let (area, route, remote) = target_area(target)?;
     let workspace_id = project_home
         .workspace_id
         .as_deref()
         .ok_or("Alfalfa project is not assigned to a portfolio workspace")?;
     let canvas = switch_canvas_workspace(&super::alfalfa::workspaces()?, workspace_id)?;
+    let remote_canvas = remote
+        .map(|(program, config, screen)| {
+            present_remote_project(&program, &config, &screen, project, &project_name)
+        })
+        .transpose()?;
     let recalled = super::remote::rpc(project, "desktop-recall", &[], None)?;
     let status = super::remote::rpc(project, "desktop-status", &[], None)?;
     let window_count = workspace_window_count(&status, project)?;
@@ -624,7 +742,6 @@ fn recall(project: &str, target: Target) -> Result<Value, String> {
     // optional observer. A TV/remote Canvas must not be reported as failed
     // merely because this Mac has no TigerVNC application installed.
     let viewer = viewer_receipt(super::remote::open_desktop(project));
-    let (area, route) = target_area(target)?;
     let local = super::workspace::activate_saved_if_bound_at(project, area)?;
     Ok(json!({
         "project_id":project,
@@ -637,6 +754,7 @@ fn recall(project: &str, target: Target) -> Result<Value, String> {
         "presentation_only":true,
         "target":if target == Target::Presence {"presence"} else {"primary"},
         "presence_route":route,
+        "remote_canvas":remote_canvas,
         "local_workspace_presented":local.is_some(),
         "local_window_count":local.as_ref().map(|activation| activation.windows.len()).unwrap_or(0),
         "canvas":canvas,
@@ -886,38 +1004,30 @@ mod tests {
 
     #[test]
     fn an_ad_hoc_workspace_needs_an_id_and_a_presentable_name() {
-        assert!(
-            arguments(
-                "canvas_workspace_create",
-                &json!({"workspace_id":"desktop","name":"Desktop"})
-            )
-            .is_ok()
-        );
+        assert!(arguments(
+            "canvas_workspace_create",
+            &json!({"workspace_id":"desktop","name":"Desktop"})
+        )
+        .is_ok());
         // A missing half is not a usable desktop.
-        assert!(
-            arguments(
-                "canvas_workspace_create",
-                &json!({"workspace_id":"desktop"})
-            )
-            .is_err()
-        );
+        assert!(arguments(
+            "canvas_workspace_create",
+            &json!({"workspace_id":"desktop"})
+        )
+        .is_err());
         assert!(arguments("canvas_workspace_create", &json!({"name":"Desktop"})).is_err());
         // Control characters would carry into a presented label.
-        assert!(
-            arguments(
-                "canvas_workspace_create",
-                &json!({"workspace_id":"desktop","name":"Desk\ntop"})
-            )
-            .is_err()
-        );
+        assert!(arguments(
+            "canvas_workspace_create",
+            &json!({"workspace_id":"desktop","name":"Desk\ntop"})
+        )
+        .is_err());
         // Unknown arguments are refused rather than ignored.
-        assert!(
-            arguments(
-                "canvas_workspace_create",
-                &json!({"workspace_id":"d","name":"D","extra":1})
-            )
-            .is_err()
-        );
+        assert!(arguments(
+            "canvas_workspace_create",
+            &json!({"workspace_id":"d","name":"D","extra":1})
+        )
+        .is_err());
     }
 
     #[test]
@@ -1038,13 +1148,11 @@ mod tests {
         assert!(arguments("displays_list", &json!({"host":"other"})).is_err());
         assert!(arguments("workspaces_list", &json!({})).is_ok());
         assert!(arguments("canvas_workspaces_sync", &json!({})).is_ok());
-        assert!(
-            arguments(
-                "canvas_workspace_switch",
-                &json!({"project_id":"gh-1288853134"})
-            )
-            .is_ok()
-        );
+        assert!(arguments(
+            "canvas_workspace_switch",
+            &json!({"project_id":"gh-1288853134"})
+        )
+        .is_ok());
         assert!(arguments("canvas_workspace_reset", &json!({"project_id":"ohm"})).is_ok());
         assert!(arguments("presence_route", &json!({})).is_ok());
         assert!(arguments("projects_list", &json!({})).is_ok());
@@ -1058,20 +1166,16 @@ mod tests {
             .target,
             Target::Presence
         );
-        assert!(
-            arguments(
-                "workspace_activate",
-                &json!({"project_id":"dock","target":"nearby"})
-            )
-            .is_err()
-        );
-        assert!(
-            arguments(
-                "project_recall",
-                &json!({"project_id":"dock","query":"other"})
-            )
-            .is_err()
-        );
+        assert!(arguments(
+            "workspace_activate",
+            &json!({"project_id":"dock","target":"nearby"})
+        )
+        .is_err());
+        assert!(arguments(
+            "project_recall",
+            &json!({"project_id":"dock","query":"other"})
+        )
+        .is_err());
         assert!(arguments("resource_open", &json!({"project_id":"dock"})).is_err());
         assert!(arguments("unknown", &json!({})).is_err());
     }
@@ -1096,11 +1200,9 @@ mod tests {
                 json!({"workspace_id":"scratch","name":"Scratch"}),
             ),
         ] {
-            assert!(
-                execute(name, &args)
-                    .unwrap_err()
-                    .contains("presentation is busy")
-            );
+            assert!(execute(name, &args)
+                .unwrap_err()
+                .contains("presentation is busy"));
         }
         // Pinned so a new tool is a decision, not an accident: anything added
         // here has to be considered against the presentation lock above.

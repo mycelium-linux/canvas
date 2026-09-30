@@ -14,7 +14,10 @@
          the studio LAN. Kept here and not only on the installed copy, because
          installing this file has silently dropped destinations before. Studio
          Canvas reads the host's raw local frame instead. -->
-    <string>udp://100.120.101.5:55207,udp://192.168.20.13:55207</string>
+    <!-- One route per receiving host. Sending the same MPEG-TS packets to
+         Neo's Tailscale and LAN addresses interleaves duplicate continuity
+         counters at its wildcard UDP socket and corrupts hardware decode. -->
+    <string>udp://100.120.101.5:55207</string>
     <!-- 1280x720 at 24fps. Measured on this Mac: the render and the
          VideoToolbox encode hold 20fps at 720p exactly as they did at 320x180,
          so the small frame was buying nothing. Bitrate is derived from the

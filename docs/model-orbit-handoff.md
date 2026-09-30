@@ -1,9 +1,9 @@
 # Handoff: click-drag orbit for streamed models
 
-Updated after the local implementation was completed and verified. Nothing is
-deployed yet. The remaining end-to-end blocker changes shared infrastructure —
-the Unibus router on home-pi — and still requires explicit review before anyone
-runs it.
+Updated 2026-09-24 after the viewer split and Neo/Studio deployment. The
+release Canvas binary is running on Neo and the matching `canvas-model-host`
+binary is running for both Transmog and Benchy on the Studio. Pointer-level
+end-to-end acceptance still needs a human drag on the visible model.
 
 ## The problem this solves
 
@@ -15,10 +15,10 @@ from the camera it wants to move. This adds the return path.
 
 ```
 neo: pointer/key on the surface
-  -> OrbitController decides a pose            crates/canvas/src/model_orbit.rs
+  -> Viewer state machine decides a pose       crates/canvas-model-viewer/src/state.rs
   -> Canvas writes <frames>/<stream>.camera    crates/canvas/src/main.rs
   -> canvas-edge forwards it                   crates/canvas/src/bin/canvas-edge.rs
-  -> unibus  canvas.model.camera.v1            [ROUTE NOT YET ADDED]
+  -> unibus  canvas.model.camera.v1
   -> canvas-edge on the Studio writes the same file
   -> canvas-model-host reads it each frame     crates/canvas-model-host/src/main.rs
   -> the video everyone is already watching turns
@@ -41,17 +41,19 @@ All of this is uncommitted working-tree state in `~/src/fpl/dock`.
 | File | What it gained |
 | --- | --- |
 | `crates/canvas-core/src/lib.rs` | `model_camera` module: `ViewerCamera`, `NAMED_VIEWS`, `named_view`, `view_at`, `camera_file`, `CAMERA_CONTRACT`, `HOLD_MS`. Shared so Canvas, the edge and the renderer cannot disagree. |
-| `crates/canvas/src/model_orbit.rs` | **new.** `OrbitController` — the pure input→pose state machine, plus `KEYBINDS` and `action_for_key`. No GPU, no filesystem, no clock; 14 tests. |
-| `crates/canvas/src/retained_video.rs` | The video widget reports gestures (`OrbitEvent`) through an optional hook. It interprets nothing. |
-| `crates/canvas/src/main.rs` | `Message::ModelOrbit`, `handle_model_orbit` (throttled publish), `apply_orbit_action`, `focused_model_stream`, `orbit_action` key mapping, `publish_model_camera`. |
+| `crates/canvas-model-viewer/src/orbit.rs` | `OrbitController` — the pure input→pose state machine, plus key actions. No GPU, filesystem, or clock. |
+| `crates/canvas-model-viewer/src/video.rs` | Retained WGPU video surface and gesture reporting. It interprets no camera policy. |
+| `crates/canvas-model-viewer/src/state.rs` | One viewer state machine owns controllers, throttling, gestures, camera/timeline actions, and camera publication. |
+| `crates/canvas-model-viewer/src/view.rs` | Compact toolbar, direct-access operation timeline, and the rotating clickable view cube. |
+| `crates/canvas/src/main.rs` | Integrates the viewer through its narrow state/view API; it no longer owns orbit or retained-video internals. |
 | `crates/canvas/src/bin/canvas-edge.rs` | `start_camera_bridge` / `changed_cameras` / `forward_cameras` / `apply_camera_pose`, and a `CAMERA_KIND` arm in `ingest`. 7 tests. |
 | `crates/canvas-model-host/src/renderer.rs` | `render` now takes a settled `eye_direction` + `distance_scale` instead of sampling the flight and orbit itself. |
 | `crates/canvas-model-host/src/main.rs` | The host settles the camera each frame: viewer pose outranks scene fly-in and idle orbit, eased not assigned. `ease_toward`, `read_viewer_camera`, `unix_ms`. 4 tests. |
 
-Current focused test counts: `canvas-core` 108, `canvas --lib` 282,
-`canvas-edge` 30, `canvas-model-host` 30. All passing. Strict Clippy could not
-run because the installed stable Apple ARM toolchain has no applicable
-`cargo-clippy` component.
+The 2026-09-24 gate passed: `canvas-model-viewer` 23 tests,
+`canvas-core::part_inspector` 9 tests, and `canvas-widgets` 49 tests, followed
+by checks of Canvas (with Lua scenes) and the model host and release builds of
+both deployed binaries.
 
 ## Controls
 
@@ -75,11 +77,12 @@ The flag defaults false and is omitted when false on the wire, so ordinary
 cameras, games, and browser streams neither steal pointer gestures nor show a
 view cube they cannot use.
 
-## Blocked: the router change
+## Router contract
 
-This is the step that was rejected, and it is the only thing between the code
-and a working orbit. It edits **shared installation state on home-pi**, so it
-deserves a look before it runs.
+Camera poses use `canvas.model.camera.v1`. The checked-in home-pi deployment
+configuration now documents the route and Studio capability. Treat changes to
+the installed router as shared installation changes and review them separately
+from rebuilding Canvas.
 
 It would have done two things to `/home/ajm/.config/unibus/router.json`:
 
@@ -103,16 +106,38 @@ Things to weigh before doing it:
   introduced, but it means the change is invisible to review.
 - The script took a `.bak` first. It did not run, so no backup exists yet.
 
-## Remaining work after the route
+## Current deployment and remaining acceptance
 
-1. **Deploy**: `canvas` + `canvas-edge` to neo; `canvas-model-host` +
-   `canvas-edge` to the Studio (`ajmwagar@100.108.9.93`).
-2. **Verify end to end**: drag on neo → `<frames>/transmog-step.camera` appears
+1. **Deployed**: release `canvas` on Neo; release `canvas-model-host` on Studio
+   (`ajmwagar@100.108.9.93`). Both Studio launch agents are running.
+2. **Accept end to end**: drag on Neo → `<frames>/transmog-step.camera` changes
    → the same file appears on the Studio → the streamed model turns.
 
-The model-host plists now pass their required eighth stream-id argument and
-were parsed with Python `plistlib`. The clickable eight-view overlay is also
-built and highlights the active named pose.
+The model-host plists pass their required eighth stream-id argument. The view
+overlay now exposes eleven named poses, including extra chamfer/corner views,
+and rotates its visible face labels with the model.
+
+Neo renders the view cube itself from the viewer controller's current pose.
+Local cube repainting is intentionally independent of the 30 Hz camera-file
+publication limit: every accepted drag sample updates the cube immediately,
+while only the latest useful pose crosses to Studio. Before the first gesture,
+the cube uses the same default isometric pose as the model host instead of an
+unrelated front-facing fallback. This behavior is covered by the viewer's
+`throttled_drag_still_reports_a_local_change` regression test and is deployed
+in the Neo Canvas binary built on 2026-09-24.
+
+## Part/project direction
+
+The viewer is no longer assumed to be a Transmog-only workspace. Canvas core
+can project an Alfalfa revisioned manifest into explicit `parts/<name>` and
+`assemblies/<name>` inspectors. An inspector groups model artifacts, drawing
+PDFs, metadata, supporting files, and named revisions without inventing IDs or
+copying Alfalfa's schema. Canvas already has paged PDF rendering; the remaining
+work is runtime composition: selecting an Alfalfa part should open its model
+and drawing side by side, and an iteration action should send the bounded
+`IterationRequest` (project, manifest revision, part, prompt, artifact IDs and
+CIDs) to Transmog. No live Alfalfa Transmog manifest is currently registered on
+Neo, so discovery and that combined inspector page are not yet operational.
 
 ## Context that is easy to lose
 

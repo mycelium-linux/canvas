@@ -12,7 +12,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use canvas::bus::Bus;
 use canvas::stream_contract::{STREAM_SCHEMA_VERSION, StreamEnvelope};
-use canvas_agent_bridge::{AdapterKind, BridgeConfig, Prompt, Session, Target, edgerunner, roster, surf};
+use canvas_agent_bridge::{
+    AdapterKind, BridgeConfig, Prompt, Session, Target, edgerunner, roster, surf,
+};
 
 const PROMPT_KIND: &str = "canvas.prompt.v1";
 const WIDGET_CONTRACT: &str = "canvas.widget.snapshot.v1";
@@ -83,6 +85,7 @@ fn run(config: Arc<BridgeConfig>, clients: Arc<Clients>) -> Result<()> {
                 let body = serde_json::Value::Object(envelope.message.body.clone());
                 if let Err(error) = deliver(&config, &clients, &body) {
                     eprintln!("canvas-agent-bridge: prompt rejected: {error:#}");
+                    publish_task_result(&body, "failed", None, Some(error.to_string()));
                 }
             }
             Ok(None) => {}
@@ -105,9 +108,8 @@ impl Clients {
                 // mTLS: edge listeners require a client certificate, so a
                 // missing or unreadable identity is fatal at startup rather
                 // than a puzzling 403 on the first prompt.
-                let pem = std::fs::read(path).with_context(|| {
-                    format!("read client identity for {}: {path}", target.name)
-                })?;
+                let pem = std::fs::read(path)
+                    .with_context(|| format!("read client identity for {}: {path}", target.name))?;
                 let identity = reqwest::Identity::from_pem(&pem)
                     .with_context(|| format!("parse client identity for {}", target.name))?;
                 builder = builder.identity(identity);
@@ -191,16 +193,21 @@ fn list_sessions(clients: &Clients, target: &Target) -> Result<Vec<Session>> {
         .cloned()
         .unwrap_or_default();
     let stamp = now_ms();
-    Ok(items
+    let mut sessions = items
         .iter()
         .filter_map(|item| match target.kind {
             AdapterKind::Edgerunner => edgerunner::parse_session(item, stamp),
             AdapterKind::Surf => surf::parse_session(item, stamp),
             AdapterKind::DesktopBridge => None,
         })
-        .collect())
+        .collect::<Vec<_>>();
+    // A server may accept the project query while ignoring it. Never let an
+    // unpinned project prompt fall through to the newest unrelated session.
+    if let Some(project) = target.project.as_deref() {
+        sessions.retain(|session| session.project.as_deref() == Some(project));
+    }
+    Ok(sessions)
 }
-
 
 /// List sessions by asking the desktop bridge, which attaches the owner's OIDC
 /// identity itself.
@@ -246,6 +253,44 @@ fn deliver(config: &BridgeConfig, clients: &Clients, body: &serde_json::Value) -
          receive a prompt",
         target.name
     );
+    if prompt.task.is_some()
+        && target.kind == AdapterKind::Edgerunner
+        && let Some(template) = &target.create
+    {
+        let response = authorized(
+            clients.get(&target.name)?.post(format!(
+                "{}{}",
+                target.http_base()?,
+                edgerunner::CREATE_PATH
+            )),
+            target,
+        )
+        .json(&edgerunner::create_body(&prompt, template))
+        .send()
+        .with_context(|| format!("create session for {}", target.name))?;
+        let status = response.status();
+        let reply: serde_json::Value = response
+            .json()
+            .with_context(|| format!("unreadable creation response from {}", target.name))?;
+        anyhow::ensure!(
+            status.is_success(),
+            "{} refused session creation with {status}: {reply}",
+            target.name
+        );
+        let session = reply["id"]
+            .as_str()
+            .context("Edgerunner creation response has no session id")?;
+        eprintln!("canvas-agent-bridge: created {}/{session}", target.name);
+        publish_task_result(body, "delivered", Some(session), None);
+        start_task_monitor(
+            clients.get(&target.name)?.clone(),
+            target.clone(),
+            body.clone(),
+            session.to_string(),
+            0,
+        );
+        return Ok(());
+    }
     let session = match prompt.session.as_deref() {
         Some(pinned) => pinned.to_string(),
         None => {
@@ -257,12 +302,20 @@ fn deliver(config: &BridgeConfig, clients: &Clients, body: &serde_json::Value) -
     let (path, payload) = match target.kind {
         AdapterKind::Edgerunner => (
             edgerunner::message_path(&session),
-            edgerunner::message_body(&prompt.text),
+            edgerunner::message_body(&prompt.delivery_text()),
         ),
-        AdapterKind::Surf => (surf::execute_path(&session), surf::execute_body(&prompt.text)),
+        AdapterKind::Surf => (
+            surf::execute_path(&session),
+            surf::execute_body(&prompt.delivery_text()),
+        ),
         AdapterKind::DesktopBridge => anyhow::bail!("refused above"),
     };
 
+    let monitor_cursor = if target.kind == AdapterKind::Edgerunner {
+        latest_event_cursor(clients.get(&target.name)?, target, &session).unwrap_or(0)
+    } else {
+        0
+    };
     let response = authorized(
         clients
             .get(&target.name)?
@@ -282,7 +335,164 @@ fn deliver(config: &BridgeConfig, clients: &Clients, body: &serde_json::Value) -
         "canvas-agent-bridge: delivered to {}/{session}",
         target.name
     );
+    publish_task_result(body, "delivered", Some(&session), None);
+    if target.kind == AdapterKind::Edgerunner {
+        start_task_monitor(
+            clients.get(&target.name)?.clone(),
+            target.clone(),
+            body.clone(),
+            session,
+            monitor_cursor,
+        );
+    }
     Ok(())
+}
+
+fn publish_task_result(
+    body: &serde_json::Value,
+    state: &str,
+    session: Option<&str>,
+    detail: Option<String>,
+) {
+    publish_task_status(body, state, session, detail, Vec::new());
+}
+
+fn publish_task_status(
+    body: &serde_json::Value,
+    state: &str,
+    session: Option<&str>,
+    detail: Option<String>,
+    activity: Vec<String>,
+) {
+    let Ok(prompt) = Prompt::parse(body) else {
+        return;
+    };
+    let Some(task) = prompt.task else { return };
+    let stamp = now_ms();
+    let payload = canvas_core::task::TaskStatus {
+        task_id: task.id,
+        kind: task.kind,
+        state: state.to_string(),
+        target: prompt.target,
+        session: session.map(str::to_owned),
+        detail,
+        activity,
+    };
+    let envelope = StreamEnvelope {
+        schema_version: STREAM_SCHEMA_VERSION,
+        owner: LOCAL_OWNER.into(),
+        stream: "task-status".into(),
+        contract: canvas_core::task::CONTRACT.into(),
+        sequence: stamp.max(1),
+        emitted_at_ms: stamp,
+        project_id: prompt.project_id,
+        payload: serde_json::to_value(payload).expect("task status serializes"),
+    };
+    if let Err(error) = publish_local(&envelope) {
+        eprintln!("canvas-agent-bridge: task status publish failed: {error:#}");
+    }
+}
+
+/// Follow the durable Edgerunner event log for one explicit creation task.
+/// Canvas receives bounded semantic activity; it never scrapes raw logs or
+/// manufactures an explanation for the agent.
+fn start_task_monitor(
+    client: reqwest::blocking::Client,
+    target: Target,
+    body: serde_json::Value,
+    session: String,
+    initial_cursor: u64,
+) {
+    let _ = thread::Builder::new()
+        .name(format!("task-monitor-{session}"))
+        .spawn(move || {
+            let mut cursor = initial_cursor;
+            let mut activity = Vec::<String>::new();
+            loop {
+                let Ok(base) = target.http_base() else { return };
+                let request = client.get(format!(
+                    "{base}/v1/sessions/{session}/events?after={cursor}"
+                ));
+                let response = match authorized(request, &target).send() {
+                    Ok(response) => response,
+                    Err(error) => {
+                        eprintln!("canvas-agent-bridge: task monitor {session}: {error}");
+                        thread::sleep(Duration::from_secs(2));
+                        continue;
+                    }
+                };
+                let payload: serde_json::Value =
+                    match response.error_for_status().and_then(|r| r.json()) {
+                        Ok(payload) => payload,
+                        Err(error) => {
+                            eprintln!("canvas-agent-bridge: task monitor {session}: {error}");
+                            thread::sleep(Duration::from_secs(2));
+                            continue;
+                        }
+                    };
+                let mut terminal = None;
+                if let Some(events) = payload["events"].as_array() {
+                    for event in events {
+                        cursor = cursor.max(event["id"].as_u64().unwrap_or(cursor));
+                        let kind = event["kind"].as_str().unwrap_or("progress");
+                        let message = event["message"].as_str().unwrap_or(kind).trim();
+                        if !message.is_empty()
+                            && !matches!(kind, "agent_heartbeat" | "assistant_delta")
+                            && activity.last().is_none_or(|last| last != message)
+                        {
+                            activity.push(message.chars().take(180).collect());
+                            if activity.len() > 12 {
+                                activity.remove(0);
+                            }
+                        }
+                        terminal = match kind {
+                            "run_completed" => Some("complete"),
+                            "run_failed" | "canceled" => Some("failed"),
+                            _ => terminal,
+                        };
+                    }
+                }
+                if !activity.is_empty() || terminal.is_some() {
+                    let state = terminal.unwrap_or("working");
+                    publish_task_status(
+                        &body,
+                        state,
+                        Some(&session),
+                        Some(activity.last().cloned().unwrap_or_else(|| state.into())),
+                        activity.clone(),
+                    );
+                }
+                if terminal.is_some() {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(750));
+            }
+        });
+}
+
+fn latest_event_cursor(
+    client: &reqwest::blocking::Client,
+    target: &Target,
+    session: &str,
+) -> Result<u64> {
+    let response = authorized(
+        client.get(format!(
+            "{}/v1/sessions/{session}/events",
+            target.http_base()?
+        )),
+        target,
+    )
+    .send()
+    .with_context(|| format!("read event cursor for {}/{session}", target.name))?
+    .error_for_status()
+    .with_context(|| format!("event cursor rejected for {}/{session}", target.name))?;
+    let payload: serde_json::Value = response
+        .json()
+        .with_context(|| format!("unreadable event cursor for {}/{session}", target.name))?;
+    Ok(payload["next_cursor"]
+        .as_u64()
+        .or_else(|| payload["events"].as_array()?.last()?.get("id")?.as_u64())
+        .unwrap_or(0))
 }
 
 /// Publish each target's session roster on its own cadence.

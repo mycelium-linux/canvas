@@ -19,7 +19,7 @@
     <string>-L</string><string>127.0.0.1:55008:127.0.0.1:5008</string>
     <string>-L</string><string>127.0.0.1:18791:127.0.0.1:18790</string>
     <string>-o</string><string>HostKeyAlias=home-pi.local</string>
-    <string>ajm@192.168.20.13</string>
+    <string>ajm@192.168.10.74</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

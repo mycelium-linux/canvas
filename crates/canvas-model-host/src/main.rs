@@ -337,6 +337,9 @@ fn main() -> Result<()> {
             }
         }
         let (target_direction, target_distance) = match &viewer {
+            // A viewer pose is absolute. Never add renderer-local motion to it:
+            // the remote view cube cannot observe that hidden transform and
+            // would immediately become detached from the model it controls.
             Some(camera) => (Vec3::from_array(camera.direction()), camera.distance),
             None => {
                 let (direction, distance_scale) = flight.sample(elapsed_seconds);
@@ -545,6 +548,12 @@ fn spawn_encoder(
             "0",
             "-flush_packets",
             "1",
+            // A UDP viewer can begin at any point in the process lifetime.
+            // MPEG-TS resend_headers repeats PAT/PMT, not H.264 SPS/PPS;
+            // repeat the codec extradata at every keyframe so late joiners can
+            // decode the next GOP instead of remaining grey forever.
+            "-bsf:v",
+            "dump_extra=freq=keyframe",
         ])
         .args(mpegts_output_args(&destinations))
         .stdin(Stdio::piped())

@@ -91,10 +91,19 @@ impl Panels {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Motion {
+    /// Hover, focus and selection feedback. Kept shorter than a layout change
+    /// so controls acknowledge input before the next deliberate gesture.
+    pub micro_ms: u64,
     /// Surface and palette transitions. Zero disables them outright, which is
     /// the honest way to express "still" — not a very small non-zero number
     /// that still animates and still costs frames.
     pub transition_ms: u64,
+    /// Panel entrances and loading-to-content reveals. This can breathe a
+    /// little more than a workspace transition without delaying interaction.
+    pub entrance_ms: u64,
+    /// Delay between siblings in a staged reveal. The total sequence is
+    /// bounded by [`Motion::reveal_delay_ms`] regardless of item count.
+    pub stagger_ms: u64,
     /// Frame ceiling for animated backgrounds.
     pub background_max_fps: u16,
     /// Idle tick interval in milliseconds. When nothing is animating, Canvas
@@ -108,7 +117,10 @@ pub struct Motion {
 impl Default for Motion {
     fn default() -> Self {
         Self {
+            micro_ms: 120,
             transition_ms: 280,
+            entrance_ms: 360,
+            stagger_ms: 80,
             background_max_fps: 60,
             idle_tick_ms: 33,
         }
@@ -119,20 +131,39 @@ impl Motion {
     /// Nothing animates and nothing repaints for animation's sake.
     pub fn still() -> Self {
         Self {
+            micro_ms: 0,
             transition_ms: 0,
+            entrance_ms: 0,
+            stagger_ms: 0,
             background_max_fps: 0,
             idle_tick_ms: 33,
         }
     }
 
     pub fn is_still(self) -> bool {
+        // These were the original public switches. Treating both as the
+        // master reduced-motion signal preserves existing appearance files
+        // written before the semantic timing fields existed.
         self.transition_ms == 0 && self.background_max_fps == 0
+    }
+
+    /// Deterministic sibling delay for cinematic entrances. Even a very large
+    /// result set completes its sequence within two seconds.
+    pub fn reveal_delay_ms(self, index: usize, count: usize) -> u64 {
+        if count <= 1 || self.stagger_ms == 0 || self.is_still() {
+            return 0;
+        }
+        let step = self.stagger_ms.min(2_000 / (count as u64 - 1));
+        index as u64 * step
     }
 
     pub fn sanitized(self) -> Self {
         Self {
+            micro_ms: self.micro_ms.min(2_000),
             // A transition longer than a couple of seconds reads as a fault.
             transition_ms: self.transition_ms.min(2_000),
+            entrance_ms: self.entrance_ms.min(2_000),
+            stagger_ms: self.stagger_ms.min(500),
             background_max_fps: self.background_max_fps.min(240),
             idle_tick_ms: self.idle_tick_ms.clamp(16, 5_000),
         }
@@ -405,7 +436,10 @@ impl Appearance {
             muted_factor: 0.3,
         },
         motion: Motion {
+            micro_ms: 120,
             transition_ms: 280,
+            entrance_ms: 360,
+            stagger_ms: 80,
             background_max_fps: 60,
             idle_tick_ms: 33,
         },
@@ -479,6 +513,9 @@ mod tests {
             a.motion.transition_ms, 280,
             "transition.rs TRANSITION_DURATION"
         );
+        assert_eq!(a.motion.micro_ms, 120);
+        assert_eq!(a.motion.entrance_ms, 360);
+        assert_eq!(a.motion.stagger_ms, 80);
         assert_eq!(a.limits.table_rows, 8, "live.rs:518 take(8)");
         assert_eq!(a.limits.event_lines, 7, "live.rs:554 take(7)");
         assert_eq!(a.limits.summary_nodes, 8, "live.rs:595 take(8)");
@@ -594,6 +631,9 @@ mod tests {
         let a = Appearance::default().still();
         assert!(a.motion.is_still());
         assert_eq!(a.motion.transition_ms, 0);
+        assert_eq!(a.motion.micro_ms, 0);
+        assert_eq!(a.motion.entrance_ms, 0);
+        assert_eq!(a.motion.stagger_ms, 0);
         assert_eq!(a.motion.background_max_fps, 0);
         assert_eq!(a.density, Density::default(), "still changes only motion");
     }
@@ -612,5 +652,13 @@ mod tests {
         assert_eq!(wanted.limits.table_rows, 12);
         let json = serde_json::to_string(&wanted).unwrap();
         assert_eq!(Appearance::parse(&json).unwrap(), wanted);
+    }
+
+    #[test]
+    fn stagger_is_cinematic_but_never_delays_a_set_past_two_seconds() {
+        let motion = Motion::default();
+        assert_eq!(motion.reveal_delay_ms(0, 100), 0);
+        assert!(motion.reveal_delay_ms(99, 100) <= 2_000);
+        assert_eq!(Motion::still().reveal_delay_ms(99, 100), 0);
     }
 }

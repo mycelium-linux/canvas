@@ -74,6 +74,22 @@ pub struct Target {
     /// supports it.
     #[serde(default)]
     pub project: Option<String>,
+    /// Template used only for explicit Canvas creation tasks. Ordinary prompts
+    /// continue an existing session and never allocate work implicitly.
+    #[serde(default)]
+    pub create: Option<EdgerunnerCreate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EdgerunnerCreate {
+    pub repo_url: String,
+    #[serde(default, rename = "ref")]
+    pub ref_name: Option<String>,
+    #[serde(default)]
+    pub runner: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 impl Target {
@@ -82,9 +98,9 @@ impl Target {
     /// An error rather than an empty string: a request built against "" would
     /// go somewhere surprising instead of failing.
     pub fn http_base(&self) -> anyhow::Result<&str> {
-        self.base_url.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("target {:?} has no base_url to call", self.name)
-        })
+        self.base_url
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("target {:?} has no base_url to call", self.name))
     }
 
     /// The command for adapters that broker through a local binary.
@@ -126,10 +142,7 @@ impl BridgeConfig {
         anyhow::ensure!(!self.targets.is_empty(), "bridge has no targets");
         let mut seen = std::collections::BTreeSet::new();
         for target in &self.targets {
-            anyhow::ensure!(
-                !target.name.trim().is_empty(),
-                "a target has an empty name"
-            );
+            anyhow::ensure!(!target.name.trim().is_empty(), "a target has an empty name");
             anyhow::ensure!(
                 seen.insert(target.name.as_str()),
                 "two targets are both named {:?}; a prompt could not say which it meant",
@@ -137,7 +150,7 @@ impl BridgeConfig {
             );
             match target.kind {
                 AdapterKind::DesktopBridge => anyhow::ensure!(
-                    target.base_url.is_none(),
+                    target.base_url.is_none() && target.create.is_none(),
                     "target {:?} is brokered through a command, so a base_url would be ignored \
                      rather than honoured",
                     target.name
@@ -150,6 +163,21 @@ impl BridgeConfig {
                         target.name,
                         target.base_url
                     );
+                    if let Some(create) = &target.create {
+                        anyhow::ensure!(
+                            target.kind == AdapterKind::Edgerunner,
+                            "target {:?} has an Edgerunner creation template but uses {:?}",
+                            target.name,
+                            target.kind
+                        );
+                        anyhow::ensure!(
+                            create.repo_url.starts_with("https://")
+                                || create.repo_url.starts_with("ssh://")
+                                || create.repo_url.starts_with("git@"),
+                            "target {:?} has an invalid creation repo_url",
+                            target.name
+                        );
+                    }
                 }
             }
         }
@@ -176,6 +204,8 @@ pub struct Prompt {
     pub session: Option<String>,
     #[serde(default)]
     pub project_id: Option<String>,
+    #[serde(default)]
+    pub task: Option<canvas_core::task::TaskRef>,
 }
 
 impl Prompt {
@@ -185,7 +215,27 @@ impl Prompt {
             .map_err(|error| anyhow::anyhow!("unusable prompt: {error}"))?;
         anyhow::ensure!(!prompt.target.trim().is_empty(), "prompt has no target");
         anyhow::ensure!(!prompt.text.trim().is_empty(), "prompt has no text");
+        if let Some(task) = &prompt.task {
+            anyhow::ensure!(!task.id.trim().is_empty(), "task has no id");
+            anyhow::ensure!(!task.kind.trim().is_empty(), "task has no kind");
+        }
         Ok(prompt)
+    }
+
+    /// Preserve the selected creation mode across control planes that only
+    /// accept a user-message string. This is bounded context, not workflow
+    /// logic: the receiving tool still owns how PCB and Model work is done.
+    pub fn delivery_text(&self) -> String {
+        match &self.task {
+            Some(task) => format!(
+                "Canvas creation task\nKind: {}\nTask: {}\nProject: {}\n\n{}",
+                task.kind,
+                task.id,
+                self.project_id.as_deref().unwrap_or("unspecified"),
+                self.text
+            ),
+            None => self.text.clone(),
+        }
     }
 }
 
@@ -307,7 +357,6 @@ mod tests {
         assert!(!rendered.contains("token\":"), "{rendered}");
     }
 
-
     #[test]
     fn a_brokered_target_needs_no_url_and_refuses_one() {
         let brokered = parse(config(serde_json::json!([
@@ -338,6 +387,21 @@ mod tests {
         assert!(Prompt::parse(&serde_json::json!({"target": "operator", "text": "  "})).is_err());
         assert!(Prompt::parse(&serde_json::json!({"text": "orphan"})).is_err());
         assert!(Prompt::parse(&serde_json::json!({"target": "", "text": "x"})).is_err());
+    }
+
+    #[test]
+    fn a_creation_task_keeps_its_kind_at_the_text_only_control_plane() {
+        let prompt = Prompt::parse(&serde_json::json!({
+            "target": "transmog",
+            "text": "a compact motor controller",
+            "project_id": "demo",
+            "task": {"id": "local-42", "kind": "PCB", "state": "submitted"}
+        }))
+        .expect("creation task");
+        let delivered = prompt.delivery_text();
+        assert!(delivered.contains("Kind: PCB"), "{delivered}");
+        assert!(delivered.contains("Task: local-42"), "{delivered}");
+        assert!(delivered.ends_with("a compact motor controller"));
     }
 
     #[test]

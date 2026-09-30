@@ -17,7 +17,6 @@ pub const STREAM_SCHEMA_VERSION: u32 = 1;
 /// Contract a briefing beat is published under.
 pub const BRIEFING_CONTRACT: &str = "canvas.briefing.beat.v1";
 
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StreamEnvelope {

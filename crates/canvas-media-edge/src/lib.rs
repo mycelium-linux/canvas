@@ -153,11 +153,12 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
             // roughly four times as much.
             "v4l2convert".into(),
         ]),
+        // GStreamer 1.28's vtdec_hw stalls on this live MPEG-TS stream, while
+        // avdec_h264 successfully joins mid-stream. This is the compatibility
+        // path until Neo consumes the mesh directly instead of remote pixels.
         HardwareDecoder::VideoToolbox => argv.extend([
             "!".into(),
-            "video/x-h264,stream-format=avc,alignment=au".into(),
-            "!".into(),
-            "vtdec_hw".into(),
+            "avdec_h264".into(),
             "!".into(),
             "videoconvert".into(),
         ]),
@@ -182,9 +183,14 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
     })
 }
 
-/// Build a shell-free FFmpeg raw-frame pipeline for macOS VideoToolbox.
+/// Build a shell-free FFmpeg raw-frame pipeline for macOS.
 /// The output is tightly packed RGBA, so unlike the Pi V4L2 allocation there
 /// is no coded-width tail to strip before publishing the frame.
+///
+/// Do not force FFmpeg's VideoToolbox decoder here. Recent VideoToolbox rejects
+/// valid H.264 produced by `h264_videotoolbox` after a UDP discontinuity rather
+/// than falling back, leaving the model permanently grey. Decoding at the edge
+/// is a compatibility fallback; the direct model path avoids this copy.
 pub fn ffmpeg_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result<RawVideoPlan> {
     stream.validate().map_err(anyhow::Error::msg)?;
     policy.validate()?;
@@ -212,8 +218,6 @@ pub fn ffmpeg_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result<Ra
         "+nobuffer+discardcorrupt".into(),
         "-flags".into(),
         "low_delay".into(),
-        "-hwaccel".into(),
-        "videotoolbox".into(),
     ];
     if stream.transport == VideoTransport::Rtsp {
         argv.extend(["-rtsp_transport".into(), "tcp".into()]);
@@ -436,7 +440,6 @@ pub fn write_frame(runtime_root: &Path, camera_id: &str, bytes: &[u8]) -> Result
     Ok(path)
 }
 
-
 /// Create a directory tree owner-only, including any parents this is the first
 /// to make.
 ///
@@ -583,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn videotoolbox_raw_plan_is_packed_and_shell_free() {
+    fn macos_raw_plan_is_packed_and_shell_free() {
         let value = stream(VideoTransport::UdpMpegTs, "udp://127.0.0.1:5600");
         let plan = ffmpeg_raw_plan(
             &value,
@@ -595,11 +598,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.allocation_bytes, plan.frame_bytes().unwrap());
-        assert!(
-            plan.argv
-                .windows(2)
-                .any(|args| args == ["-hwaccel", "videotoolbox"])
-        );
+        assert!(!plan.argv.iter().any(|arg| arg == "-hwaccel"));
         assert!(plan.argv.iter().any(|arg| arg == "rawvideo"));
         assert!(!plan.argv.iter().any(|arg| arg == "sh" || arg == "-c"));
     }

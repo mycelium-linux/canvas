@@ -241,12 +241,16 @@ fn appetite(kind: &WidgetKind) -> f32 {
         | WidgetKind::EventLog { .. }
         | WidgetKind::StatusList { .. }
         | WidgetKind::NeuralGraph { .. }
+        | WidgetKind::NetworkTopology { .. }
         | WidgetKind::DagGraph { .. }
         | WidgetKind::SpatialTracks { .. }
         | WidgetKind::Chart { .. }
         | WidgetKind::Quant { .. }
         | WidgetKind::Module { .. }
-        | WidgetKind::Launcher { .. } => 1.0,
+        | WidgetKind::Launcher { .. }
+        | WidgetKind::HyperspaceShader { .. }
+        | WidgetKind::CdgViewer { .. }
+        | WidgetKind::LyricsDisplay { .. } => 1.0,
         WidgetKind::Stat { .. }
         | WidgetKind::MediaCard { .. }
         | WidgetKind::Gauge { .. }
@@ -586,6 +590,7 @@ fn widget_title(spec: &canvas_widgets::WidgetSpec) -> String {
         | WidgetKind::EventLog { title, .. }
         | WidgetKind::StatusList { title, .. }
         | WidgetKind::NeuralGraph { title, .. }
+        | WidgetKind::NetworkTopology { title, .. }
         | WidgetKind::DagGraph { title, .. } => title.clone(),
         _ => spec.id.clone(),
     }

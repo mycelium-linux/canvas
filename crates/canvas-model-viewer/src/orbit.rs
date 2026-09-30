@@ -49,7 +49,7 @@ impl Default for OrbitController {
         // Opens where a CAD tool opens: the corner that shows three faces.
         let (yaw, pitch) = named_view("iso").unwrap_or((45.0, 35.264));
         Self {
-            enabled: false,
+            enabled: true,
             yaw,
             pitch,
             distance: 1.0,
@@ -114,6 +114,16 @@ impl OrbitController {
             return false;
         }
         self.steps_back = Some(0);
+        true
+    }
+
+    /// Select an exact build artifact relative to the newest one. This is the
+    /// idempotent operation used by a clickable timeline rail.
+    pub fn select_steps_back(&mut self, steps_back: u32) -> bool {
+        if self.steps_back == Some(steps_back) {
+            return false;
+        }
+        self.steps_back = Some(steps_back);
         true
     }
 
@@ -206,7 +216,12 @@ impl OrbitController {
             at_unix_ms,
         );
         pose.steps_back = self.steps_back;
+        pose.auto_orbit = self.enabled;
         pose
+    }
+
+    pub fn stop_auto_orbit(&mut self) {
+        self.enabled = false;
     }
 }
 
@@ -487,14 +502,26 @@ mod tests {
     }
 
     #[test]
-    fn orbit_capture_is_an_explicit_toggle_and_disabling_releases_it() {
+    fn timeline_can_jump_directly_to_any_visible_step() {
         let mut controller = OrbitController::default();
-        assert!(!controller.enabled());
-        assert!(controller.toggle_enabled());
+        assert!(controller.select_steps_back(9));
+        assert_eq!(controller.pose("m", 1).steps_back, Some(9));
+        assert!(!controller.select_steps_back(9));
+        assert!(controller.select_steps_back(2));
+        assert_eq!(controller.pose("m", 2).steps_back, Some(2));
+    }
+
+    #[test]
+    fn auto_orbit_starts_on_and_disabling_releases_pointer_capture() {
+        let mut controller = OrbitController::default();
+        assert!(controller.enabled());
         controller.press(Point::new(10.0, 10.0));
         assert!(controller.is_grabbed());
         assert!(!controller.toggle_enabled());
         assert!(!controller.is_grabbed());
+        assert!(!controller.pose("m", 1).auto_orbit);
+        assert!(controller.toggle_enabled());
+        assert!(controller.pose("m", 2).auto_orbit);
     }
 
     /// Whatever the input, the pose handed to the renderer is in range.

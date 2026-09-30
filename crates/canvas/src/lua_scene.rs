@@ -4,7 +4,9 @@
 //! but cannot read files, load packages, open sockets, launch processes, or
 //! mutate workspace state.
 
-use super::{AssetRef, Error, NodeContent, Result, Scene, SceneNode, Transform3, identifier};
+use super::{
+    AssetRef, Error, NodeContent, Result, Scene, SceneNode, SemanticInk, Transform3, identifier,
+};
 use mlua::{Lua, LuaOptions, StdLib, Table, Value, VmState};
 use std::{
     cell::RefCell,
@@ -197,10 +199,19 @@ fn install_canvas_api(
             "text",
             lua.create_function(move |_, spec: Table| {
                 let text = required_string(&spec, "text")?;
+                let ink = optional_ink(&spec)?;
                 let node = parse_node(
                     &spec,
-                    &["id", "parent", "text", "translation", "rotation", "scale"],
-                    NodeContent::Text { text },
+                    &[
+                        "id",
+                        "parent",
+                        "text",
+                        "ink",
+                        "translation",
+                        "rotation",
+                        "scale",
+                    ],
+                    NodeContent::Text { text, ink },
                 )?;
                 append_node(&text_nodes, max_nodes, node)
             })
@@ -300,6 +311,32 @@ pub(crate) fn required_string(table: &Table, key: &str) -> mlua::Result<String> 
     })
 }
 
+/// The semantic ink role of a label, or `None` for the default body ink.
+///
+/// An unknown role is an error rather than a silent fall back to `text`: a scene
+/// that meant to shout "today" and quietly drew body-grey is the kind of wrong
+/// that is only noticed by someone who already distrusts the wall.
+fn optional_ink(table: &Table) -> mlua::Result<Option<SemanticInk>> {
+    let Some(name) = table.get::<Option<String>>("ink")? else {
+        return Ok(None);
+    };
+    let ink = match name.as_str() {
+        "text" => SemanticInk::Text,
+        "muted" => SemanticInk::Muted,
+        "primary" => SemanticInk::Primary,
+        "success" => SemanticInk::Success,
+        "warning" => SemanticInk::Warning,
+        "danger" => SemanticInk::Danger,
+        "info" => SemanticInk::Info,
+        other => {
+            return Err(mlua::Error::RuntimeError(format!(
+                "Canvas Lua ink must be text, muted, primary, success, warning, danger or info; got {other}"
+            )));
+        }
+    };
+    Ok(Some(ink))
+}
+
 fn optional_vector<const N: usize>(
     table: &Table,
     key: &str,
@@ -358,6 +395,60 @@ mod tests {
             media_type: "image/png".into(),
             byte_length: 42,
         }
+    }
+
+    /// The ink a scene asks for is the ink it gets, and the absence of one is the
+    /// body default rather than a grey invented by whoever wrote the renderer.
+    fn ink_of(source: &str) -> Option<SemanticInk> {
+        let scene = generate_scene(
+            source,
+            &LuaSceneCapabilities::default(),
+            LuaSceneLimits::default(),
+        )
+        .expect("scene");
+        match &scene.nodes[0].content {
+            NodeContent::Text { ink, .. } => *ink,
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ink_is_accepted_per_role_and_absent_means_body_text() {
+        assert_eq!(
+            ink_of(r#"canvas.text { id = "a", text = "hi", ink = "primary" }"#),
+            Some(SemanticInk::Primary)
+        );
+        assert_eq!(
+            ink_of(r#"canvas.text { id = "a", text = "hi", ink = "muted" }"#),
+            Some(SemanticInk::Muted)
+        );
+        assert_eq!(ink_of(r#"canvas.text { id = "a", text = "hi" }"#), None);
+    }
+
+    #[test]
+    fn an_unknown_ink_role_fails_loudly_rather_than_drawing_grey() {
+        // A scene that meant to mark today and silently drew body text would be
+        // unreadable in exactly the way a wall widget must not be.
+        let error = generate_scene(
+            r#"canvas.text { id = "a", text = "hi", ink = "chartreuse" }"#,
+            &LuaSceneCapabilities::default(),
+            LuaSceneLimits::default(),
+        )
+        .expect_err("unknown role");
+        let message = error.0;
+        assert!(message.contains("ink"), "{message}");
+        assert!(message.contains("chartreuse"), "{message}");
+    }
+
+    #[test]
+    fn a_scene_without_ink_still_parses_because_authored_docs_predate_it() {
+        let scene: Scene =
+            serde_json::from_str(r#"{"nodes":[{"id":"a","content":{"kind":"text","text":"hi"}}]}"#)
+                .expect("pre-ink scene");
+        assert!(matches!(
+            scene.nodes[0].content,
+            NodeContent::Text { ink: None, .. }
+        ));
     }
 
     #[test]

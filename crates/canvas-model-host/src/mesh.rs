@@ -39,10 +39,7 @@ pub fn bake_stl(path: &Path) -> Result<PreparedMesh> {
     bake_stl_with_field(path, None)
 }
 
-pub fn bake_stl_with_field(
-    path: &Path,
-    field: Option<&crate::Field>,
-) -> Result<PreparedMesh> {
+pub fn bake_stl_with_field(path: &Path, field: Option<&crate::Field>) -> Result<PreparedMesh> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mesh = stl_io::read_stl(&mut BufReader::new(file))
         .with_context(|| format!("parse {}", path.display()))?;
@@ -167,8 +164,7 @@ impl BakePool {
                             Ok(request) => request,
                             Err(_) => break,
                         };
-                        let result =
-                            bake_stl_with_field(&request.asset, request.field.as_ref());
+                        let result = bake_stl_with_field(&request.asset, request.field.as_ref());
                         if results
                             .send(BakeResult {
                                 generation: request.generation,

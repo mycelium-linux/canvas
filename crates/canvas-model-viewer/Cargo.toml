@@ -1,0 +1,12 @@
+[package]
+name = "canvas-model-viewer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+canvas-core.workspace = true
+canvas-widgets = { path = "../canvas-widgets", features = ["live"] }
+iced = { version = "0.14", default-features = false, features = ["wgpu", "canvas"] }
+wgpu = "27"
+serde.workspace = true

@@ -24,6 +24,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("       echo 'nav scene-view next' | canvasctl");
         eprintln!("       echo 'titles focused' | canvasctl");
         eprintln!("       echo 'spacing 12 8' | canvasctl");
+        eprintln!("       echo 'manifest PROJECT FILE.json' | canvasctl");
+        eprintln!("       echo 'manifest-search PROJECT [QUERY]' | canvasctl");
         eprintln!("       echo 'patch /tmp/patch.json' | canvasctl");
         eprintln!("       echo '{{\"schema_version\":1,...}}' | canvasctl  (JSON mode)");
         std::process::exit(1);
@@ -80,6 +82,12 @@ fn handle_line(line: &str) -> Result<(), String> {
     }
     if tokens[0] == "spacing" {
         return handle_spacing(&tokens);
+    }
+    if tokens[0] == "manifest" {
+        return handle_manifest(&tokens);
+    }
+    if tokens[0] == "manifest-search" {
+        return handle_manifest_search(&tokens);
     }
     if tokens[0] == "minimize" || tokens[0] == "maximize" || tokens[0] == "restore" {
         return handle_window_control(&tokens);
@@ -156,6 +164,71 @@ fn handle_line(line: &str) -> Result<(), String> {
         Ok(reply) => println!("{}", text::format_reply(&reply)),
         Err(e) => println!("ERR {e}"),
     }
+    Ok(())
+}
+
+fn handle_manifest(tokens: &[String]) -> Result<(), String> {
+    if tokens.len() != 3 {
+        return Err("usage: manifest PROJECT FILE.json".into());
+    }
+    let project_id = &tokens[1];
+    if !canvas_core::is_safe_frame_id(project_id) {
+        return Err("manifest project id is invalid".into());
+    }
+    let bytes = fs::read(&tokens[2]).map_err(|error| format!("read manifest: {error}"))?;
+    if bytes.len() > 8 * 1024 * 1024 {
+        return Err("manifest exceeds 8 MiB".into());
+    }
+    let manifest: canvas_core::project_browser::ProjectManifest =
+        serde_json::from_slice(&bytes).map_err(|error| format!("parse manifest: {error}"))?;
+    manifest.validate().map_err(|error| error.to_string())?;
+    if &manifest.project_id != project_id {
+        return Err("manifest belongs to another project".into());
+    }
+    let root = canvas_core::runtime_root().ok_or("Canvas runtime root unavailable")?;
+    let target = root.join("manifests").join(format!("{project_id}.json"));
+    canvas_core::write_atomic(&target, &bytes)
+        .map_err(|error| format!("install manifest: {error}"))?;
+    println!("OK manifest {project_id} revision {}", manifest.revision);
+    Ok(())
+}
+
+fn handle_manifest_search(tokens: &[String]) -> Result<(), String> {
+    if tokens.len() < 2 {
+        return Err("usage: manifest-search PROJECT [QUERY]".into());
+    }
+    let project_id = &tokens[1];
+    if !canvas_core::is_safe_frame_id(project_id) {
+        return Err("manifest project id is invalid".into());
+    }
+    let root = canvas_core::runtime_root().ok_or("Canvas runtime root unavailable")?;
+    let path = root.join("manifests").join(format!("{project_id}.json"));
+    let bytes = fs::read(&path).map_err(|error| format!("read manifest: {error}"))?;
+    if bytes.len() > 8 * 1024 * 1024 {
+        return Err("manifest exceeds 8 MiB".into());
+    }
+    let manifest: canvas_core::project_browser::ProjectManifest =
+        serde_json::from_slice(&bytes).map_err(|error| format!("parse manifest: {error}"))?;
+    if &manifest.project_id != project_id {
+        return Err("manifest belongs to another project".into());
+    }
+    let query = tokens[2..].join(" ");
+    let results = manifest
+        .search(&query, 50)
+        .map_err(|error| error.to_string())?;
+    let now = canvas_feeds::now_ms();
+    let event = serde_json::json!({
+        "schema_version": canvas_feeds::SCHEMA_VERSION,
+        "owner": "canvas-artifact-index",
+        "stream": format!("{project_id}-artifacts"),
+        "contract": canvas_core::project_browser::SEARCH_CONTRACT,
+        "sequence": now,
+        "emitted_at_ms": now,
+        "project_id": project_id,
+        "payload": results,
+    });
+    canvas_feeds::send_raw(&event).map_err(|error| error.to_string())?;
+    println!("OK manifest-search {project_id} {}", query);
     Ok(())
 }
 

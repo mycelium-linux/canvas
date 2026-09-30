@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.fpl.canvas-eval</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/ajmwagar/.local/bin/canvas-eval</string>
+    <string>--endpoint</string><string>http://100.108.9.93:8125/api/watch/rocket-jev-transmog/rocket/0/events</string>
+    <string>--project</string><string>eval</string>
+    <string>--owner</string><string>eval-studio</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>StandardOutPath</key><string>/Users/ajmwagar/Library/Logs/canvas-eval.log</string>
+  <key>StandardErrorPath</key><string>/Users/ajmwagar/Library/Logs/canvas-eval.log</string>
+</dict></plist>

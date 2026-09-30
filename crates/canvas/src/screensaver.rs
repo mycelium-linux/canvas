@@ -253,7 +253,10 @@ fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let envelope = smoothstep(0.16, 0.25, radius) * (1.0 - smoothstep(0.48, 0.62, radius));
     let breath = 0.78 + 0.22 * sin(angle * 2.0 - tt * 6.0);
     let smoke = rings * envelope * breath;
-    let col = vec3<f32>(0.035, 0.055, 0.070) + vec3<f32>(0.33, 0.42, 0.48) * smoke;
+    // Instrument backdrop, not hero artwork: deep JARVIS blue with restrained
+    // cyan energy. The old near-white rings won every contrast contest on the
+    // page and made the actual applications look disabled on top of them.
+    let col = vec3<f32>(0.008, 0.026, 0.040) + vec3<f32>(0.025, 0.16, 0.20) * smoke;
     return vec4<f32>(col, 1.0);
 }
 "#;
