@@ -9,5 +9,4 @@ rows[#rows+1] = {"Gas", tostring(p.gas_cost), tostring(p.token)}
 rows[#rows+1] = {"Builder", tostring(p.builder_payment), tostring(p.token)}
 rows[#rows+1] = {"Net", tostring(p.net_profit), p.profitable and "VIABLE" or "REJECT"}
 rows[#rows+1] = {"Search", tostring(p.evaluated_candidates), "bounded deterministic"}
-return {kind="snapshot",widget={kind="table",title="BLOCK-PINNED EVIDENCE · CHAIN " .. tostring(p.chain_id),columns={"Measure","Value","Evidence"},rows=rows},data={state="ready",source="unibus:mev-observer",detail="read-only reconstruction · no signer",provenance="replay"}}
-
+return {kind="snapshot",widget={kind="table",title="BLOCK-PINNED EVIDENCE · CHAIN " .. tostring(p.chain_id),columns={"Measure","Value","Evidence"},rows=rows},data={state="ready",source="unibus:mev-observer",detail="read-only reconstruction · no signer",provenance="live"}}
