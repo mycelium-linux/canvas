@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "mev-research",
-  "project_id": "mev-observer",
+  "project_id": "home",
   "revision": 1,
   "theme": { "source": "project" },
   "background": { "kind": "solid", "color": [5, 8, 14, 255] },
@@ -23,4 +23,3 @@
   ],
   "focused_surface_id":"evidence"
 }
-
