@@ -1131,8 +1131,8 @@ mod tests {
         let WidgetKind::Stat { label, value, .. } = target.kind else {
             panic!("MEV binder changed widget family")
         };
-        assert_eq!(label, "NET · WETH BASE UNITS");
-        assert_eq!(value, 2590.0);
+        assert_eq!(label, "NET OPPORTUNITY");
+        assert_eq!(value, 0.000_000_000_000_002_59);
     }
 
     #[test]
