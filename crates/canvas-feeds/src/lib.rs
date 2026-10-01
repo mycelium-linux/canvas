@@ -91,6 +91,8 @@ fn parse_prometheus_sample(line: &str) -> Option<PrometheusSample> {
 }
 
 pub mod comics;
+pub mod bsky_trends;
+pub mod x_trends;
 
 pub const CONTRACT: &str = "canvas.widget.snapshot.v1";
 pub const SCHEMA_VERSION: u32 = 1;

@@ -31,3 +31,11 @@ path = "src/bin/canvas-now-playing.rs"
 [[bin]]
 name = "canvas-host-observer"
 path = "src/bin/canvas-host-observer.rs"
+
+[[bin]]
+name = "canvas-x-trends"
+path = "src/bin/canvas-x-trends.rs"
+
+[[bin]]
+name = "canvas-bsky-trends"
+path = "src/bin/canvas-bsky-trends.rs"

@@ -49,6 +49,7 @@ pub const DECLARED_CONTRACTS: &[&str] = &[
     "fpl.trader.backtest-visualization/v1",
     "fpl.trader.backtest-visualization/v2",
     "canvas.run.watch.v1",
+    "canvas.social.trends.v1",
     "jarvis.presence.v1",
     "lob.pipeline.status.v1",
     "map.v1",

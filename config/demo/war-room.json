@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "war-room",
+  "project_id": "dock",
+  "revision": 1,
+  "theme": { "source": "project" },
+  "surfaces": [{
+    "id": "x-trends",
+    "title": "Bluesky / War Room",
+    "content": { "kind": "widget", "spec": {
+      "schema_version": 2, "id": "social-war-room-feed", "kind": "table", "title": "CONNECTING | Bluesky / War Room",
+      "columns": ["#", "account", "post", "eng", "age"], "rows": [],
+      "data": { "state": "loading", "source": "bsky:appview", "detail": "waiting for canvas-bsky-trends", "provenance": "live" }
+    }},
+    "inputs": [{ "id": "feed", "contract": "canvas.social.trends.v1" }]
+  }],
+  "layout": { "kind": "canvas", "placements": [{ "surface_id": "x-trends", "bounds": { "x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0 }, "layer": 0 }] },
+  "bindings": [{
+    "id": "x-trends-bind",
+    "source": { "owner": "feeds", "stream": "bsky-war-room", "contract": "canvas.social.trends.v1" },
+    "target": { "surface_id": "x-trends", "input_id": "feed" },
+    "adapter": "x-trends-v1", "delivery": { "mode": "latest" }
+  }]
+}
