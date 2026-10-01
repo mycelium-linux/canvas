@@ -12,9 +12,9 @@ use canvas_core::project_browser::{
     ProjectManifest,
 };
 use iced::widget::{
-    button, column, container, grid, image, row, scrollable, space, text, text_input,
+    button, column, container, grid, image, progress_bar, row, scrollable, space, text, text_input,
 };
-use iced::{ContentFit, Element, Length};
+use iced::{Color, ContentFit, Element, Length};
 
 use super::app_chrome::{
     Density, action_style, list_item_style, panel_style, rgb, work_area_style,
@@ -76,6 +76,20 @@ pub fn project_view<'a, Message: Clone + 'a>(
     .spacing(insets.gap)
     .align_y(iced::Alignment::Center);
 
+    let ready_bar = progress_bar(
+        0.0..=manifest.entries.len().max(1) as f32,
+        manifest.entries.len() as f32,
+    )
+    .girth(3.0)
+    .style(move |_| progress_bar::Style {
+        background: rgb(palette.surface_muted).into(),
+        bar: rgb(palette.primary).into(),
+        border: iced::Border {
+            radius: 2.0.into(),
+            ..Default::default()
+        },
+    });
+
     let mut roots = manifest
         .entries
         .iter()
@@ -96,20 +110,28 @@ pub fn project_view<'a, Message: Clone + 'a>(
     for root in roots {
         let selected = state.folder == root || state.folder.starts_with(&format!("{root}/"));
         sidebar = sidebar.push(
-            button(text(root.replace(['-', '_'], " ")).size(metrics.body))
-                .width(Length::Fill)
-                .on_press(on_action(BrowserAction::OpenFolder(root.to_owned())))
-                .style(move |_, status| action_style(visual, selected, false, status)),
+            button(
+                row![
+                    folder_icon::<Message>(visual, false),
+                    text(root.replace(['-', '_'], " ")).size(metrics.body),
+                ]
+                .spacing(metrics.space_1)
+                .align_y(iced::Alignment::Center),
+            )
+            .width(Length::Fill)
+            .on_press(on_action(BrowserAction::OpenFolder(root.to_owned())))
+            .style(move |_, status| action_style(visual, selected, false, status)),
         );
     }
     let browser = view(model, state, thumbnails, visual, on_action);
     container(
         column![
             header,
+            ready_bar,
             row![
                 container(sidebar)
                     .padding(insets.panel)
-                    .width(Length::Fixed(180.0))
+                    .width(Length::Fixed(260.0))
                     .height(Length::Fill)
                     .style(move |_| panel_style(visual)),
                 browser,
@@ -177,7 +199,7 @@ pub fn view_with_density<'a, Message: Clone + 'a>(
         .padding(insets.control_x)
         .size(metrics.body);
 
-    let mut list = column![].spacing(insets.gap);
+    let mut tiles: Vec<Element<'a, Message>> = Vec::new();
     for item in &model.items {
         let (id, detail, preview, action, selected) = match item {
             BrowserItem::Folder {
@@ -199,49 +221,49 @@ pub fn view_with_density<'a, Message: Clone + 'a>(
                     format_bytes(entry.bytes)
                 ),
                 *preview,
-                BrowserAction::Select(entry.id.clone()),
+                BrowserAction::Open(entry.id.clone()),
                 state.selected_id.as_deref() == Some(entry.id.as_str()),
             ),
         };
-        let thumbnail = thumbnail(
-            id.and_then(|id| thumbnails.get(id)),
-            preview,
-            visual,
-            Length::Fixed(if density == Density::Compact {
-                60.0
-            } else {
-                72.0
-            }),
-            Length::Fixed(if density == Density::Compact {
-                45.0
-            } else {
-                54.0
-            }),
-        );
-        let content = row![
-            thumbnail,
-            column![
-                text(item.label())
-                    .size(metrics.body)
-                    .color(rgb(palette.text)),
-                text(detail)
-                    .size(metrics.small)
-                    .color(rgb(palette.text_muted)),
-            ]
-            .spacing(insets.gap)
+        let icon: Element<'a, Message> = if id.is_none() {
+            container(folder_icon::<Message>(visual, true))
+                .center_x(Length::Fill)
+                .height(Length::Fixed(72.0))
+                .into()
+        } else {
+            thumbnail(
+                id.and_then(|id| thumbnails.get(id)),
+                preview,
+                visual,
+                Length::Fill,
+                Length::Fixed(72.0),
+            )
+        };
+        let content = column![
+            icon,
+            text(item.label().replace(['-', '_'], " "))
+                .size(metrics.body)
+                .color(rgb(palette.text))
+                .center(),
+            text(detail)
+                .size(metrics.micro)
+                .color(rgb(palette.text_muted))
+                .center(),
         ]
-        .spacing(insets.control_x)
-        .align_y(iced::Alignment::Center);
-        list = list.push(
+        .spacing(metrics.space_1)
+        .align_x(iced::Alignment::Center);
+        tiles.push(
             button(content)
-                .width(Length::Fill)
-                .padding(insets.control_y)
+                .width(Length::Fixed(190.0))
+                .height(Length::Fixed(132.0))
+                .padding(metrics.space_2)
                 .on_press(on_action(action))
-                .style(move |_, status| list_item_style(visual, selected, status)),
+                .style(move |_, status| list_item_style(visual, selected, status))
+                .into(),
         );
     }
-    if model.items.is_empty() {
-        list = list.push(
+    let files: Element<'a, Message> = if model.items.is_empty() {
+        container(
             container(
                 text(if state.query.trim().is_empty() {
                     "This folder is empty"
@@ -252,45 +274,13 @@ pub fn view_with_density<'a, Message: Clone + 'a>(
                 .color(rgb(palette.text_muted)),
             )
             .padding(insets.panel),
-        );
-    }
-
-    let preview: Element<'a, Message> = if let Some(entry) = &model.selected {
-        let kind = canvas_core::project_browser::preview_kind(entry);
-        let picture = thumbnail(
-            thumbnails.get(&entry.id),
-            kind,
-            visual,
-            Length::Fill,
-            Length::FillPortion(3),
-        );
-        column![
-            picture,
-            text(entry.display_name.clone())
-                .size(metrics.title)
-                .color(rgb(palette.text)),
-            text(format!(
-                "{} · {}",
-                entry.media_type,
-                format_bytes(entry.bytes)
-            ))
-            .size(metrics.small)
-            .color(rgb(palette.text_muted)),
-            button(text("OPEN").size(metrics.small))
-                .padding([metrics.space_1, metrics.space_3])
-                .on_press(on_action(BrowserAction::OpenSelected))
-                .style(move |_, status| action_style(visual, true, false, status)),
-        ]
-        .spacing(insets.control_x)
-        .into()
-    } else {
-        container(
-            text("Select a file for a larger preview")
-                .size(metrics.body)
-                .color(rgb(palette.text_muted)),
         )
         .center(Length::Fill)
         .into()
+    } else {
+        scrollable(grid(tiles).fluid(190.0).spacing(metrics.space_3))
+            .height(Length::Fill)
+            .into()
     };
 
     let count = if model.more == 0 {
@@ -302,18 +292,7 @@ pub fn view_with_density<'a, Message: Clone + 'a>(
         column![
             crumbs,
             search,
-            row![
-                scrollable(list)
-                    .height(Length::Fill)
-                    .width(Length::FillPortion(2)),
-                container(preview)
-                    .padding(insets.panel)
-                    .width(Length::FillPortion(3))
-                    .height(Length::Fill)
-                    .style(move |_| panel_style(visual)),
-            ]
-            .spacing(insets.gap)
-            .height(Length::Fill),
+            files,
             text(count)
                 .size(metrics.micro)
                 .color(rgb(palette.text_muted)),
@@ -450,6 +429,46 @@ fn thumbnail<'a, Message: 'a>(
     .height(height)
     .style(move |_| panel_style(visual))
     .into()
+}
+
+/// Draw a stable Finder-style folder from layout primitives rather than a
+/// platform emoji. Emoji fallback differed across the macOS and Linux edges
+/// (blue on one, gray document on another), which made the same project look
+/// like different content on different screens.
+fn folder_icon<'a, Message: 'a>(visual: VisualTheme, large: bool) -> Element<'a, Message> {
+    let (width, tab_width, tab_height, body_height, radius) = if large {
+        (68.0, 30.0, 10.0, 45.0, 7.0)
+    } else {
+        (21.0, 10.0, 4.0, 14.0, 3.0)
+    };
+    let blue = Color::from_rgb8(78, 162, 232);
+    let tab = container(space::horizontal())
+        .width(Length::Fixed(tab_width))
+        .height(Length::Fixed(tab_height))
+        .style(move |_| container::Style {
+            background: Some(blue.into()),
+            border: iced::Border {
+                radius: radius.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+    let body = container(space::horizontal())
+        .width(Length::Fixed(width))
+        .height(Length::Fixed(body_height))
+        .style(move |_| container::Style {
+            background: Some(blue.into()),
+            border: iced::Border {
+                color: Color {
+                    a: 0.55,
+                    ..rgb(visual.focus)
+                },
+                width: 1.0,
+                radius: radius.into(),
+            },
+            ..Default::default()
+        });
+    column![tab, body].spacing(0).into()
 }
 
 fn short_media(media: &str) -> &str {

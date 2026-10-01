@@ -455,6 +455,7 @@ enum Message {
     EngineeringBrowser(BrowserAction),
     EngineeringBrowserClose,
     EngineeringArtifactLoaded(Box<Result<LoadedContent, Failure>>),
+    EngineeringModelPrepared(Box<Result<(String, String), Failure>>),
     /// A gesture on a model surface. Carries the stream rather than the
     /// surface: the camera belongs to the thing being rendered, so two
     /// surfaces showing the same model turn together.
@@ -637,6 +638,8 @@ fn surface_title_visible(mode: SurfaceTitleMode, focused: bool) -> bool {
 #[derive(Debug, Clone)]
 enum EngineeringArtifact {
     Local(PathBuf),
+    RemoteText { base: String, path: String },
+    RemoteModel { base: String, path: String },
     Unavailable(String),
 }
 
@@ -1669,6 +1672,37 @@ impl App {
                                 |result| Message::EngineeringArtifactLoaded(Box::new(result)),
                             );
                         }
+                        Some(EngineeringArtifact::RemoteText { base, path }) => {
+                            let viewport = self.media_viewport();
+                            let scale_factor = self.scale_factor;
+                            let surface_id = format!("artifact-{}", entry.id);
+                            let title = Some(entry.display_name);
+                            self.engineering_browser = None;
+                            return Task::perform(
+                                async move {
+                                    load_remote_text_content(
+                                        surface_id,
+                                        base,
+                                        path,
+                                        title,
+                                        viewport,
+                                        scale_factor,
+                                    )
+                                },
+                                |result| Message::EngineeringArtifactLoaded(Box::new(result)),
+                            );
+                        }
+                        Some(EngineeringArtifact::RemoteModel { base, path }) => {
+                            let surface_id = format!("artifact-{}", entry.id);
+                            let title = entry.display_name;
+                            self.engineering_browser = None;
+                            self.status = format!("Loading {title}…");
+                            self.bump();
+                            return Task::perform(
+                                async move { prepare_remote_model(surface_id, title, base, path) },
+                                |result| Message::EngineeringModelPrepared(Box::new(result)),
+                            );
+                        }
                         Some(EngineeringArtifact::Unavailable(reason)) => {
                             self.status = reason;
                         }
@@ -1696,6 +1730,41 @@ impl App {
             Message::EngineeringArtifactLoaded(result) => {
                 match *result {
                     Ok(loaded) => self.install_loaded_content(loaded),
+                    Err(failure) => self.status = failure.message,
+                }
+                self.bump();
+                Task::none()
+            }
+            Message::EngineeringModelPrepared(result) => {
+                match *result {
+                    Ok((surface_id, title)) => {
+                        let surface = Surface {
+                            id: surface_id.clone(),
+                            title: title.clone(),
+                            content: SurfaceContent::LiveVideo {
+                                source_id: "transmog-step".into(),
+                                width: 1280,
+                                height: 720,
+                                orbitable: true,
+                                timeline: true,
+                            },
+                            inputs: Vec::new(),
+                        };
+                        if let Some(existing) = self
+                            .document
+                            .surfaces
+                            .iter_mut()
+                            .find(|candidate| candidate.id == surface_id)
+                        {
+                            *existing = surface;
+                        } else {
+                            self.document.surfaces.push(surface);
+                        }
+                        self.document.focused_surface_id = Some(surface_id);
+                        self.rebuild_stack();
+                        self.ensure_scene_decoded();
+                        self.status = format!("Opened {title} in the Canvas model viewer.");
+                    }
                     Err(failure) => self.status = failure.message,
                 }
                 self.bump();
@@ -9675,6 +9744,56 @@ fn owner_get(base: &str, path: &str, timeout: Duration) -> Option<String> {
     alfalfa_get(&socket, path, timeout)
 }
 
+fn owner_get_bytes(base: &str, path: &str, timeout: Duration) -> Option<Vec<u8>> {
+    let authority = base.strip_prefix("http://")?.trim_end_matches('/');
+    if authority.contains('/') || authority.contains('@') {
+        return None;
+    }
+    let socket = if let Some(port) = authority.strip_prefix("localhost:") {
+        format!("127.0.0.1:{port}")
+    } else {
+        authority.to_owned()
+    };
+    let mut stream = std::net::TcpStream::connect_timeout(&socket.parse().ok()?, timeout).ok()?;
+    stream.set_read_timeout(Some(timeout)).ok()?;
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).ok()?;
+    let split = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")?;
+    let headers = std::str::from_utf8(&response[..split]).ok()?;
+    if !headers.lines().next()?.contains(" 200 ") {
+        return None;
+    }
+    Some(response[split + 4..].to_vec())
+}
+
+fn owner_content_length(base: &str, path: &str, timeout: Duration) -> Option<u64> {
+    let authority = base.strip_prefix("http://")?.trim_end_matches('/');
+    if authority.contains('/') || authority.contains('@') {
+        return None;
+    }
+    let socket = if let Some(port) = authority.strip_prefix("localhost:") {
+        format!("127.0.0.1:{port}")
+    } else {
+        authority.to_owned()
+    };
+    let mut stream = std::net::TcpStream::connect_timeout(&socket.parse().ok()?, timeout).ok()?;
+    stream.set_read_timeout(Some(timeout)).ok()?;
+    let request = format!("HEAD {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok()?;
+    response.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse().ok())
+            .flatten()
+    })
+}
+
 fn engineering_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -9695,7 +9814,7 @@ fn engineering_project_id(owner: &str, identity: &str) -> String {
 fn merge_transmog_body(
     catalog: &mut Catalog,
     targets: &mut BTreeMap<String, EngineeringProject>,
-    _base: &str,
+    base: &str,
     body: &str,
 ) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
@@ -9730,21 +9849,47 @@ fn merge_transmog_body(
                 continue;
             }
             let entry_id = format!("{identity}-{part_id}-report");
+            let report_path = format!("/{bundle}/report.json");
+            let bytes =
+                owner_content_length(base, &report_path, Duration::from_millis(250)).unwrap_or(0);
             entries.push(ManifestEntry {
                 id: entry_id.clone(),
                 path: format!("{part_id}/report.json"),
                 display_name: format!("{} report", part_id.replace(['-', '_'], " ")),
                 cid: format!("transmog:{bundle}/report.json"),
                 media_type: "application/json".into(),
-                bytes: 0,
+                bytes,
                 modified_at_ms: None,
             });
             artifacts.insert(
                 entry_id,
-                EngineeringArtifact::Unavailable(
-                    "This Transmog bundle is GLB/JSON. Canvas has kept it in the project view, but a native GLB surface is not available yet.".into(),
-                ),
+                EngineeringArtifact::RemoteText {
+                    base: base.to_owned(),
+                    path: report_path,
+                },
             );
+            let model_path = format!("/{bundle}/parts/0.glb");
+            if let Some(bytes) = owner_content_length(base, &model_path, Duration::from_millis(250))
+                .filter(|bytes| *bytes > 0)
+            {
+                let model_id = format!("{identity}-{part_id}-model");
+                entries.push(ManifestEntry {
+                    id: model_id.clone(),
+                    path: format!("{part_id}/model.glb"),
+                    display_name: format!("{} model", part_id.replace(['-', '_'], " ")),
+                    cid: format!("transmog:{bundle}/parts/0.glb"),
+                    media_type: "model/gltf-binary".into(),
+                    bytes,
+                    modified_at_ms: None,
+                });
+                artifacts.insert(
+                    model_id,
+                    EngineeringArtifact::RemoteModel {
+                        base: base.to_owned(),
+                        path: model_path,
+                    },
+                );
+            }
         }
         for entry in &entries {
             let mut hub_entry = entry.clone();
@@ -10618,6 +10763,160 @@ fn apply_plan_diagnostics(
     snapshot.rendered_pixels = Some(rendered_pixels);
     snapshot.display_logical = Some([plan.display_logical.width, plan.display_logical.height]);
     snapshot.scale_factor = Some(plan.scale_factor);
+}
+
+fn load_remote_text_content(
+    surface_id: String,
+    base: String,
+    path: String,
+    title: Option<String>,
+    viewport: LogicalSize,
+    scale_factor: f64,
+) -> Result<LoadedContent, Failure> {
+    let body = owner_get(&base, &path, Duration::from_secs(5))
+        .ok_or_else(|| Failure::invalid(format!("Could not load {path} from its owner")))?;
+    if body.is_empty() || body.len() as u64 > MAX_FILE_BYTES {
+        return Err(Failure::resource(format!(
+            "Owner artifact must contain 1–{MAX_FILE_BYTES} bytes"
+        )));
+    }
+    let cache = std::env::temp_dir().join("canvas-owner-artifacts");
+    fs::create_dir_all(&cache).map_err(|error| Failure::invalid(error.to_string()))?;
+    #[cfg(unix)]
+    fs::set_permissions(&cache, fs::Permissions::from_mode(0o700))
+        .map_err(|error| Failure::invalid(error.to_string()))?;
+    let digest = format!("{:x}", Sha256::digest(format!("{base}{path}").as_bytes()));
+    let extension = Path::new(&path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("txt");
+    let cached = cache.join(format!("{digest}.{extension}"));
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    let mut file = options
+        .open(&cached)
+        .map_err(|error| Failure::invalid(error.to_string()))?;
+    file.write_all(body.as_bytes())
+        .and_then(|_| file.sync_all())
+        .map_err(|error| Failure::invalid(error.to_string()))?;
+    load_content(surface_id, cached, title, viewport, scale_factor)
+}
+
+fn prepare_remote_model(
+    surface_id: String,
+    title: String,
+    base: String,
+    path: String,
+) -> Result<(String, String), Failure> {
+    let bytes = owner_get_bytes(&base, &path, Duration::from_secs(15))
+        .ok_or_else(|| Failure::invalid(format!("Could not load {path} from Transmog")))?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(Failure::resource(format!(
+            "Model must contain 1–{MAX_FILE_BYTES} bytes"
+        )));
+    }
+    let scratch = std::env::temp_dir().join(format!("canvas-transmog-{}", unix_ms()));
+    fs::create_dir_all(&scratch).map_err(|error| Failure::invalid(error.to_string()))?;
+    let input = scratch.join("model.glb");
+    fs::write(&input, bytes).map_err(|error| Failure::invalid(error.to_string()))?;
+    let split = scratch.join("split");
+    let binary = transmog_binary().ok_or_else(|| {
+        Failure::invalid(
+            "Transmog is serving models, but its CLI is unavailable. Set CANVAS_TRANSMOG_BIN.",
+        )
+    })?;
+    let output = Process::new(binary)
+        .arg("split-mesh")
+        .arg(&input)
+        .arg("--out")
+        .arg(&split)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| Failure::invalid(format!("Could not start Transmog: {error}")))?;
+    if !output.status.success() {
+        return Err(Failure::invalid(format!(
+            "Transmog could not prepare the model: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let mut components = fs::read_dir(&split)
+        .map_err(|error| Failure::invalid(error.to_string()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("stl"))
+        .collect::<Vec<_>>();
+    components.sort();
+    let stl = merge_binary_stls(&components)?;
+    let steps = transmog_steps_dir()?;
+    fs::create_dir_all(&steps).map_err(|error| Failure::invalid(error.to_string()))?;
+    let destination = steps.join(format!("step-{}.stl", unix_ms()));
+    canvas_core::write_atomic(&destination, &stl)
+        .map_err(|error| Failure::invalid(format!("Could not publish model: {error}")))?;
+    let _ = fs::remove_dir_all(&scratch);
+    Ok((surface_id, title))
+}
+
+fn transmog_binary() -> Option<PathBuf> {
+    std::env::var_os("CANVAS_TRANSMOG_BIN")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join("src/fpl/transmog/target/debug/transmog"))
+                .filter(|path| path.is_file())
+        })
+        .or_else(|| {
+            Process::new("/usr/bin/which")
+                .arg("transmog")
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .map(|path| PathBuf::from(path.trim()))
+                .filter(|path| path.is_file())
+        })
+}
+
+fn transmog_steps_dir() -> Result<PathBuf, Failure> {
+    if let Some(path) = std::env::var_os("CANVAS_TRANSMOG_STEPS_DIR") {
+        return Ok(PathBuf::from(path));
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".cache/dock/canvas/transmog-steps"))
+        .ok_or_else(|| Failure::invalid("No home directory for the Canvas model cache"))
+}
+
+fn merge_binary_stls(paths: &[PathBuf]) -> Result<Vec<u8>, Failure> {
+    let mut triangles = 0u32;
+    let mut bodies = Vec::new();
+    for path in paths {
+        let bytes = fs::read(path).map_err(|error| Failure::invalid(error.to_string()))?;
+        if bytes.len() < 84 {
+            return Err(Failure::invalid("Transmog emitted an invalid STL"));
+        }
+        let count = u32::from_le_bytes(bytes[80..84].try_into().expect("four-byte STL count"));
+        let expected = 84usize.saturating_add(count as usize * 50);
+        if bytes.len() < expected {
+            return Err(Failure::invalid("Transmog emitted a truncated STL"));
+        }
+        triangles = triangles
+            .checked_add(count)
+            .ok_or_else(|| Failure::resource("Model has too many triangles"))?;
+        bodies.extend_from_slice(&bytes[84..expected]);
+    }
+    if triangles == 0 {
+        return Err(Failure::invalid("Transmog emitted no model geometry"));
+    }
+    let mut merged = vec![0u8; 80];
+    merged[0..28].copy_from_slice(b"Canvas via Transmog binary STL");
+    merged.extend_from_slice(&triangles.to_le_bytes());
+    merged.extend_from_slice(&bodies);
+    Ok(merged)
 }
 
 fn load_content(

@@ -56,6 +56,9 @@ pub enum BrowserAction {
     Query(String),
     OpenFolder(String),
     Select(String),
+    /// Open this exact file from an icon/list activation. Unlike
+    /// `OpenSelected`, callers do not need a separate selection round-trip.
+    Open(String),
     SelectNext,
     SelectPrevious,
     OpenParent,
@@ -295,6 +298,15 @@ impl ProjectManifest {
                     return Err(Error(format!("unknown project entry: {id}")));
                 }
                 state.selected_id = Some(id);
+            }
+            BrowserAction::Open(id) => {
+                let entry = self
+                    .entries
+                    .iter()
+                    .find(|entry| entry.id == id)
+                    .ok_or_else(|| Error(format!("unknown project entry: {id}")))?;
+                state.selected_id = Some(id);
+                return Ok(Some(entry.clone()));
             }
             BrowserAction::SelectNext | BrowserAction::SelectPrevious => {
                 let model = self.browse(state, MAX_ENTRIES)?;
@@ -837,6 +849,13 @@ mod tests {
             .unwrap();
         assert_eq!(opened.cid, "bafyb");
         assert_eq!(opened.path, "docs/report.pdf");
+
+        let direct = manifest
+            .apply(&mut state, BrowserAction::Open("a".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(direct.path, "models/enclosure.stl");
+        assert_eq!(state.selected_id.as_deref(), Some("a"));
     }
 
     #[test]
