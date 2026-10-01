@@ -2450,6 +2450,51 @@ mod tests {
     }
 
     #[test]
+    fn social_feed_binder_renders_post_cards_with_metadata() {
+        let mut target = WidgetSpec {
+            schema_version: WIDGET_SCHEMA_VERSION,
+            id: "social-war-room-feed".into(),
+            kind: WidgetKind::SocialFeed {
+                title: "Bluesky / War Room".into(),
+                status: "degraded".into(),
+                detail: None,
+                posts: Vec::new(),
+                rotate_seconds: 8,
+            },
+            theme: None,
+            refresh_ms: None,
+            chrome: WidgetChrome::DragOnly,
+            data: canvas_widgets::WidgetData::default(),
+        };
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "feeds".into(),
+            stream: "bsky-war-room".into(),
+            contract: "canvas.social.trends.v1".into(),
+            project_id: None,
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "title": "Bluesky / War Room",
+                "status": {"health":"healthy","mode":"polling","detail":"2 saved feeds live"},
+                "items": [{
+                    "id":"at://did:plc:a/app.bsky.feed.post/one", "author":"alice.test",
+                    "text":"A full social post", "age_secs":120, "engagement_score":17,
+                    "matches":["audio-tech"], "url":"https://bsky.app/profile/did:plc:a/post/one"
+                }]
+            }),
+        };
+        apply_named_adapter("x-trends-v1", &event, &mut target).expect("social feed renders");
+        let WidgetKind::SocialFeed { status, posts, .. } = &target.kind else {
+            panic!("social feed")
+        };
+        assert_eq!(status, "healthy");
+        assert_eq!(posts[0].author, "alice.test");
+        assert_eq!(posts[0].engagement, 17);
+        assert_eq!(posts[0].matches, vec!["audio-tech"]);
+    }
+
+    #[test]
     fn feed_headlines_keeps_a_multibyte_dash_ending_exactly_at_the_clip_edge() {
         // The live HN shape that poisoned a whole batch: a 51-char ASCII
         // title, an em dash (3 bytes) at 53..55, and clip's limit of 55 —

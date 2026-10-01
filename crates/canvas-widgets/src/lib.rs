@@ -207,6 +207,7 @@ pub const KNOWN_WIDGET_KINDS: &[&str] = &[
     "rate_bars",
     "table",
     "event_log",
+    "social_feed",
     "status_list",
     "neural_graph",
     "network_topology",
@@ -482,6 +483,16 @@ pub enum WidgetKind {
         paused: bool,
         #[serde(default = "default_true")]
         follow: bool,
+    },
+    /// Rotating social posts rendered as readable cards rather than tabular rows.
+    SocialFeed {
+        title: String,
+        status: String,
+        #[serde(default)]
+        detail: Option<String>,
+        posts: Vec<SocialFeedPost>,
+        #[serde(default = "default_social_feed_rotate_seconds")]
+        rotate_seconds: u64,
     },
     /// Compact health summary for nodes, agents, or DAG stages.
     ///
@@ -1446,6 +1457,25 @@ pub struct EventEntry {
     pub timestamp: String,
     pub message: String,
     pub level: StatusLevel,
+}
+
+fn default_social_feed_rotate_seconds() -> u64 {
+    8
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SocialFeedPost {
+    pub id: String,
+    pub author: String,
+    pub text: String,
+    pub age: String,
+    pub engagement: u64,
+    #[serde(default)]
+    pub matches: Vec<String>,
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2473,6 +2503,35 @@ impl WidgetSpec {
                     "event log entry is too large",
                 )?;
             }
+            WidgetKind::SocialFeed {
+                title,
+                status,
+                detail,
+                posts,
+                rotate_seconds,
+            } => {
+                bounded_label(title, "social feed title")?;
+                bounded_label(status, "social feed status")?;
+                optional_label(detail, "social feed detail")?;
+                check(
+                    (3..=300).contains(rotate_seconds),
+                    "social feed rotation must be 3-300 seconds",
+                )?;
+                check(posts.len() <= 64, "social feed exceeds 64 posts")?;
+                for post in posts {
+                    check(
+                        !post.id.is_empty() && post.id.len() <= 512,
+                        "social post id is invalid",
+                    )?;
+                    bounded_label(&post.author, "social post author")?;
+                    check(
+                        post.text.len() <= MAX_INPUT_TEXT_BYTES,
+                        "social post text is too large",
+                    )?;
+                    bounded_label(&post.age, "social post age")?;
+                    check(post.matches.len() <= 16, "social post has too many matches")?;
+                }
+            }
             WidgetKind::StatusList { title, nodes } => {
                 bounded_label(title, "node summary title")?;
                 check(nodes.len() <= 256, "node summary exceeds 256 nodes")?;
@@ -3019,6 +3078,9 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
             let row = metrics.small * 1.6;
             SizeHint::new(240.0, row * 4.0 + chrome, 420.0, row * 8.0 + chrome, 1.8)
         }
+        WidgetKind::SocialFeed { .. } => {
+            SizeHint::new(320.0, 260.0 + chrome, 720.0, 620.0 + chrome, 1.4)
+        }
         WidgetKind::NeuralGraph { .. }
         | WidgetKind::NetworkTopology { .. }
         | WidgetKind::DagGraph { .. }
@@ -3267,6 +3329,21 @@ mod tests {
                 query: None,
                 paused: false,
                 follow: true,
+            },
+            WidgetKind::SocialFeed {
+                title: "Social".into(),
+                status: "healthy".into(),
+                detail: None,
+                posts: vec![SocialFeedPost {
+                    id: "at://did:plc:test/app.bsky.feed.post/one".into(),
+                    author: "test.example".into(),
+                    text: "A real post".into(),
+                    age: "now".into(),
+                    engagement: 3,
+                    matches: vec!["topic".into()],
+                    url: None,
+                }],
+                rotate_seconds: 8,
             },
             WidgetKind::NeuralGraph {
                 title: "Neural activity".into(),

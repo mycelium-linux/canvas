@@ -1442,6 +1442,86 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                 visual,
             )
         }
+        WidgetKind::SocialFeed {
+            title,
+            status,
+            detail,
+            posts,
+            rotate_seconds,
+        } => {
+            let status_color = if status == "healthy" {
+                color(palette.success)
+            } else {
+                color(palette.danger)
+            };
+            let page_size = 3usize;
+            let start = if posts.is_empty() {
+                0
+            } else {
+                (((now.minute * 60 + now.second) / (*rotate_seconds).max(1)) as usize * page_size)
+                    % posts.len()
+            };
+            let mut cards = column![].spacing(metrics.space_3);
+            for offset in 0..posts.len().min(page_size) {
+                let post = &posts[(start + offset) % posts.len()];
+                let accent = color(palette.primary);
+                let surface = color(palette.surface_muted);
+                let matches = if post.matches.is_empty() {
+                    String::new()
+                } else {
+                    format!("#{}", post.matches.join("  #"))
+                };
+                cards = cards.push(
+                    container(
+                        column![
+                            row![
+                                text(format!("@{}", post.author)).size(metrics.body).color(accent),
+                                space::horizontal(),
+                                text(&post.age).size(metrics.small).color(color(palette.text_muted)),
+                            ],
+                            text(&post.text).size(metrics.body).color(color(palette.text)).width(Length::Fill),
+                            row![
+                                text(format!("{} interactions", post.engagement)).size(metrics.small).color(color(palette.text_muted)),
+                                space::horizontal(),
+                                text(matches).size(metrics.small).color(accent),
+                            ],
+                        ].spacing(metrics.space_2),
+                    )
+                    .padding(metrics.space_3)
+                    .width(Length::Fill)
+                    .style(move |_| container::Style {
+                        background: Some(surface.into()),
+                        border: iced::Border { color: accent, width: 1.0, radius: metrics.radius_md.into() },
+                        ..Default::default()
+                    }),
+                );
+            }
+            if posts.is_empty() {
+                cards = cards.push(
+                    text(detail.as_deref().unwrap_or("Waiting for posts"))
+                        .size(metrics.body)
+                        .color(color(palette.text_muted)),
+                );
+            }
+            panel(
+                spec,
+                column![
+                    row![
+                        status_dot(status_color, 9.0),
+                        text(title).size(metrics.large).color(color(palette.text)),
+                        space::horizontal(),
+                        text(format!(
+                            "{} / {} · auto {}s",
+                            if posts.is_empty() { 0 } else { start + 1 },
+                            posts.len(),
+                            rotate_seconds
+                        )).size(metrics.small).color(color(palette.text_muted)),
+                    ].spacing(metrics.space_2),
+                    cards,
+                ].spacing(metrics.space_3).into(),
+                visual,
+            )
+        }
         WidgetKind::MediaTransport {
             title,
             source,

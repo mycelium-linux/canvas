@@ -239,6 +239,7 @@ fn appetite(kind: &WidgetKind) -> f32 {
         | WidgetKind::RateBars { .. }
         | WidgetKind::Table { .. }
         | WidgetKind::EventLog { .. }
+        | WidgetKind::SocialFeed { .. }
         | WidgetKind::StatusList { .. }
         | WidgetKind::NeuralGraph { .. }
         | WidgetKind::NetworkTopology { .. }

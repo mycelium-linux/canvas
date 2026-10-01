@@ -25,15 +25,29 @@ local function age(seconds)
   return string.format("%dh", math.floor(seconds / 3600))
 end
 
-local rows = {}
+local posts = {}
 for i = 1, math.min(#event.payload.items, 12) do
   local item = event.payload.items[i]
-  rows[#rows + 1] = { tostring(i), "@" .. clip(item.author, 16), clip(item.text, 72), tostring(item.engagement_score or 0), age(item.age_secs) }
+  posts[#posts + 1] = {
+    id = tostring(item.id or i),
+    author = clip(item.author, 48),
+    text = clip(item.text, 280),
+    age = age(item.age_secs),
+    engagement = item.engagement_score or 0,
+    matches = item.matches or {},
+    url = item.url,
+  }
 end
-if #rows == 0 then rows[1] = { "-", "X", clip(event.payload.status.detail, 72), "-", "-" } end
 local degraded = event.payload.status.health == "degraded"
 return {
   kind = "snapshot",
-  widget = { kind = "table", title = (degraded and "DEGRADED | " or "LIVE | ") .. (event.payload.title or "Social / War Room"), columns = { "#", "account", "post", "eng", "age" }, rows = rows },
+  widget = {
+    kind = "social_feed",
+    title = event.payload.title or "Social / War Room",
+    status = event.payload.status.health,
+    detail = event.payload.status.detail,
+    posts = posts,
+    rotate_seconds = 8,
+  },
   data = { state = degraded and "error" or "ready", source = "social:trend-feed", detail = event.payload.status.mode .. " | " .. event.payload.status.detail, provenance = "live" },
 }

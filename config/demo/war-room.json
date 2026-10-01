@@ -8,8 +8,8 @@
     "id": "x-trends",
     "title": "Bluesky / War Room",
     "content": { "kind": "widget", "spec": {
-      "schema_version": 2, "id": "social-war-room-feed", "kind": "table", "title": "CONNECTING | Bluesky / War Room",
-      "columns": ["#", "account", "post", "eng", "age"], "rows": [],
+      "schema_version": 2, "id": "social-war-room-feed", "kind": "social_feed", "title": "Bluesky / War Room",
+      "status": "degraded", "detail": "waiting for canvas-bsky-trends", "posts": [], "rotate_seconds": 8,
       "data": { "state": "loading", "source": "bsky:appview", "detail": "waiting for canvas-bsky-trends", "provenance": "live" }
     }},
     "inputs": [{ "id": "feed", "contract": "canvas.social.trends.v1" }]
