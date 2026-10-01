@@ -23,6 +23,8 @@ use super::app_chrome::{
 pub fn project_view<'a, Message: Clone + 'a>(
     title: &'a str,
     owner: &'a str,
+    node: &'a str,
+    mirror_connected: bool,
     manifest: &'a ProjectManifest,
     model: &'a BrowserModel,
     state: &'a BrowserState,
@@ -35,23 +37,38 @@ pub fn project_view<'a, Message: Clone + 'a>(
     let metrics = visual.metrics;
     let palette = visual.palette;
     let insets = Density::Compact.insets(visual);
+    let sync_color = if mirror_connected {
+        palette.success
+    } else {
+        palette.warning
+    };
+    let sync_label = if mirror_connected {
+        "Shared workspace connected"
+    } else {
+        "Local workspace only"
+    };
     let header = row![
         column![
             text(title).size(metrics.title).color(rgb(palette.text)),
-            text(format!(
-                "{owner} PROJECT · {} FILES",
-                manifest.entries.len()
-            ))
-            .size(metrics.micro)
-            .color(rgb(palette.text_muted)),
+            row![
+                text(format!("{owner} · {} files", manifest.entries.len()))
+                    .size(metrics.small)
+                    .color(rgb(palette.text_muted)),
+                text("●").size(metrics.small).color(rgb(sync_color)),
+                text(format!("{sync_label} on {node}"))
+                    .size(metrics.small)
+                    .color(rgb(palette.text_muted)),
+            ]
+            .spacing(metrics.space_2)
+            .align_y(iced::Alignment::Center),
         ]
         .spacing(metrics.space_1),
         space::horizontal(),
-        button(text("PROJECTS").size(metrics.small))
+        button(text("Projects").size(metrics.small))
             .padding([insets.control_y, insets.control_x])
             .on_press(switch_project)
             .style(move |_, status| action_style(visual, false, false, status)),
-        button(text("CLOSE").size(metrics.small))
+        button(text("Close").size(metrics.small))
             .padding([insets.control_y, insets.control_x])
             .on_press(close)
             .style(move |_, status| action_style(visual, false, false, status)),
@@ -67,7 +84,7 @@ pub fn project_view<'a, Message: Clone + 'a>(
     roots.sort_unstable();
     roots.dedup();
     let mut sidebar = column![
-        text("PROJECT")
+        text("Project")
             .size(metrics.micro)
             .color(rgb(palette.text_muted)),
         button(text("All files").size(metrics.body))

@@ -8851,6 +8851,8 @@ impl App {
             layers.push(canvas_widgets::live::project_browser::project_view(
                 &browser.project.name,
                 &browser.project.owner,
+                &self.metrics.name,
+                self.workspace_mirror.edge_connected(),
                 &browser.project.manifest,
                 &browser.model,
                 &browser.state,
