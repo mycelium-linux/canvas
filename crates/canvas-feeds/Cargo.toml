@@ -38,6 +38,10 @@ name = "canvas-mycelium-observer"
 path = "src/bin/canvas-mycelium-observer.rs"
 
 [[bin]]
+name = "canvas-synesthesia-observer"
+path = "src/bin/canvas-synesthesia-observer.rs"
+
+[[bin]]
 name = "canvas-x-trends"
 path = "src/bin/canvas-x-trends.rs"
 

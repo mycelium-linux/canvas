@@ -30,6 +30,17 @@
       }}, "inputs": [{ "id": "media", "contract": "canvas.widget.snapshot.v1" }]
     },
     {
+      "id": "daw", "title": "Synesthesia studio",
+      "content": { "kind": "widget", "spec": {
+        "schema_version": 2, "id": "daw", "kind": "daw_deck", "title": "Synesthesia studio",
+        "playing": false, "paused": false, "recording": false, "bpm": null,
+        "position_ticks": 0, "cycle_ticks": 1,
+        "tracks": [{"label":"API","level":0.0,"clipping":false}], "notes": [],
+        "theme": null, "refresh_ms": 250, "chrome": "integrated",
+        "data": { "state": "loading", "source": "synesthesia/daw", "observed_at": null, "window": "live", "detail": "Awaiting studio telemetry", "provenance": "live" }
+      }}, "inputs": [{ "id": "daw", "contract": "canvas.widget.snapshot.v1" }]
+    },
+    {
       "id": "mesh", "title": "Mycelium mesh",
       "content": { "kind": "widget", "spec": {
         "schema_version": 2, "id": "mesh", "kind": "neural_graph", "title": "Mycelium web",
@@ -50,8 +61,8 @@
   "layout": { "kind": "canvas", "placements": [
     { "surface_id": "clock", "bounds": { "x": 0.0, "y": 0.0, "width": 0.38, "height": 0.48 }, "layer": 0 },
     { "surface_id": "now-playing", "bounds": { "x": 0.0, "y": 0.48, "width": 0.38, "height": 0.52 }, "layer": 0 },
-    { "surface_id": "mesh", "bounds": { "x": 0.38, "y": 0.0, "width": 0.62, "height": 0.60 }, "layer": 0 },
-    { "surface_id": "systems", "bounds": { "x": 0.38, "y": 0.60, "width": 0.62, "height": 0.40 }, "layer": 0 }
+    { "surface_id": "daw", "bounds": { "x": 0.38, "y": 0.0, "width": 0.62, "height": 0.70 }, "layer": 0 },
+    { "surface_id": "mesh", "bounds": { "x": 0.38, "y": 0.70, "width": 0.62, "height": 0.30 }, "layer": 0 }
   ]},
   "bindings": [
     {
@@ -59,6 +70,12 @@
       "source": { "owner": "home-pi-media", "stream": "now-playing", "contract": "canvas.music.nowplaying.v1" },
       "target": { "surface_id": "now-playing", "input_id": "media" },
       "adapter": "music-nowplaying-v1", "delivery": { "mode": "latest" }
+    },
+    {
+      "id": "synesthesia-daw-live",
+      "source": { "owner": "synesthesia", "stream": "daw", "contract": "canvas.widget.snapshot.v1" },
+      "target": { "surface_id": "daw", "input_id": "daw" },
+      "adapter": "synesthesia-daw-v1", "delivery": { "mode": "latest" }
     },
     {
       "id": "mycelium-mesh-live",

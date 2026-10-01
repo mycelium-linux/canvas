@@ -233,6 +233,7 @@ fn appetite(kind: &WidgetKind) -> f32 {
         | WidgetKind::ApprovalCard { .. }
         | WidgetKind::CommandPalette { .. }
         | WidgetKind::MediaTransport { .. }
+        | WidgetKind::DawDeck { .. }
         | WidgetKind::ModelTelemetry { .. }
         | WidgetKind::SpanTimeline { .. }
         | WidgetKind::StateTimeline { .. }

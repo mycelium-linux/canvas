@@ -187,6 +187,7 @@ pub const KNOWN_WIDGET_KINDS: &[&str] = &[
     "ticker",
     "gauge",
     "meter",
+    "daw_deck",
     "histogram",
     "spectral_waterfall",
     "heatmap",
@@ -303,6 +304,20 @@ pub enum WidgetKind {
         value: f32,
         #[serde(default = "default_meter_style")]
         style: MeterStyle,
+    },
+    /// Live studio transport with reel motion, piano-roll notes, and channel meters.
+    DawDeck {
+        title: String,
+        playing: bool,
+        paused: bool,
+        #[serde(default)]
+        recording: bool,
+        #[serde(default)]
+        bpm: Option<f64>,
+        position_ticks: u64,
+        cycle_ticks: u64,
+        tracks: Vec<DawTrack>,
+        notes: Vec<DawNote>,
     },
     /// Prometheus histogram buckets rendered as an operational distribution.
     Histogram {
@@ -1481,6 +1496,27 @@ pub struct SocialFeedPost {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DawTrack {
+    pub label: String,
+    pub level: f32,
+    #[serde(default)]
+    pub clipping: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DawNote {
+    pub track: String,
+    pub tick: u64,
+    pub length_ticks: u64,
+    pub note: u8,
+    pub velocity: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct NodeSummaryItem {
     pub label: String,
     pub state: StatusLevel,
@@ -1946,6 +1982,46 @@ impl WidgetSpec {
                 value.is_finite() && (0.0..=1.0).contains(value),
                 "meter value must be finite within 0..1",
             )?,
+            WidgetKind::DawDeck {
+                title,
+                bpm,
+                position_ticks,
+                cycle_ticks,
+                tracks,
+                notes,
+                ..
+            } => {
+                bounded_label(title, "DAW deck title")?;
+                check(
+                    bpm.is_none_or(|value| value.is_finite() && (20.0..=300.0).contains(&value)),
+                    "DAW deck BPM must be 20..300",
+                )?;
+                check(*cycle_ticks > 0, "DAW deck cycle must be non-zero")?;
+                check(
+                    *position_ticks < *cycle_ticks,
+                    "DAW deck position exceeds cycle",
+                )?;
+                check(
+                    !tracks.is_empty() && tracks.len() <= 32,
+                    "DAW deck requires 1-32 tracks",
+                )?;
+                check(notes.len() <= 256, "DAW deck exceeds 256 notes")?;
+                for track in tracks {
+                    bounded_label(&track.label, "DAW track label")?;
+                    check(
+                        track.level.is_finite() && (0.0..=1.0).contains(&track.level),
+                        "DAW track level must be within 0..1",
+                    )?;
+                }
+                for note in notes {
+                    bounded_label(&note.track, "DAW note track")?;
+                    check(
+                        note.note <= 127 && note.velocity <= 127 && note.length_ticks > 0,
+                        "DAW note is invalid",
+                    )?;
+                    check(note.tick < *cycle_ticks, "DAW note starts outside cycle")?;
+                }
+            }
             WidgetKind::Histogram {
                 title,
                 buckets,
@@ -3055,6 +3131,7 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
         WidgetKind::MediaTransport { .. } | WidgetKind::ModelTelemetry { .. } => {
             SizeHint::new(280.0, 180.0, 540.0, 340.0, 1.8)
         }
+        WidgetKind::DawDeck { .. } => SizeHint::new(420.0, 260.0, 760.0, 520.0, 1.2),
         WidgetKind::SpanTimeline { .. } => SizeHint::new(300.0, 160.0, 600.0, 320.0, 2.4),
         // A cell smaller than this is a colour with no shape; four rows is the
         // fewest that reads as a matrix rather than a bar chart.

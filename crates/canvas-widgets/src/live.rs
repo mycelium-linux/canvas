@@ -6,12 +6,12 @@
 //! all render through one library.
 
 use crate::{
-    ApprovalStatus, BurnRateWindow, ChartType, ClockMode, DistributionGroup, DistributionStyle,
-    EventEntry, HeatmapStyle, HierarchyNode, HierarchyStyle, MeterStyle, MetricBoardStyle,
-    ModelAnnotation, ModelView, NetworkLink, NetworkLinkKind, NetworkNode, NetworkNodeKind,
-    NetworkSegment, NetworkSegmentKind, NeuralEdge, NeuralNode, RichCardFormat, SpanTimelineStyle,
-    SpatialBounds, SpatialTrack, StateLane, StatusLevel, StatusState, TargetMetric, TimedSpan,
-    WidgetChrome, WidgetDataState, WidgetKind, WidgetSpec,
+    ApprovalStatus, BurnRateWindow, ChartType, ClockMode, DawNote, DawTrack, DistributionGroup,
+    DistributionStyle, EventEntry, HeatmapStyle, HierarchyNode, HierarchyStyle, MeterStyle,
+    MetricBoardStyle, ModelAnnotation, ModelView, NetworkLink, NetworkLinkKind, NetworkNode,
+    NetworkNodeKind, NetworkSegment, NetworkSegmentKind, NeuralEdge, NeuralNode, RichCardFormat,
+    SpanTimelineStyle, SpatialBounds, SpatialTrack, StateLane, StatusLevel, StatusState,
+    TargetMetric, TimedSpan, WidgetChrome, WidgetDataState, WidgetKind, WidgetSpec,
 };
 use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
@@ -641,6 +641,64 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                 visual,
             )
         }
+        WidgetKind::DawDeck {
+            title,
+            playing,
+            paused,
+            recording,
+            bpm,
+            position_ticks,
+            cycle_ticks,
+            tracks,
+            notes,
+        } => panel(
+            spec,
+            column![
+                row![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    space::horizontal(),
+                    text(format!(
+                        "{} · {} · {}",
+                        if *recording {
+                            "● REC"
+                        } else if *playing {
+                            "▶ PLAY"
+                        } else if *paused {
+                            "Ⅱ PAUSE"
+                        } else {
+                            "■ STOP"
+                        },
+                        bpm.map_or_else(|| "-- BPM".into(), |value| format!("{value:.1} BPM")),
+                        format!(
+                            "{:02}:{:02}",
+                            position_ticks / 24 / 4,
+                            (position_ticks / 24) % 4 + 1
+                        ),
+                    ))
+                    .size(metrics.small)
+                    .color(color(if *recording {
+                        palette.danger
+                    } else {
+                        palette.text_muted
+                    })),
+                ],
+                Canvas::new(DawDeckProgram {
+                    playing: *playing,
+                    recording: *recording,
+                    position_ticks: *position_ticks,
+                    cycle_ticks: *cycle_ticks,
+                    tracks: tracks.clone(),
+                    notes: notes.clone(),
+                    palette: *palette,
+                    label_size: metrics.micro,
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .spacing(metrics.space_2)
+            .into(),
+            visual,
+        ),
         WidgetKind::Gauge { value, label } => {
             let pct = format!("{:.0}%", value);
             let label = label.clone().unwrap_or_default();
@@ -2310,6 +2368,175 @@ impl<Message> canvas::Program<Message> for NetworkTopologyProgram {
                         ..Default::default()
                     });
                 }
+            }
+        })
+    }
+}
+
+struct DawDeckProgram {
+    playing: bool,
+    recording: bool,
+    position_ticks: u64,
+    cycle_ticks: u64,
+    tracks: Vec<DawTrack>,
+    notes: Vec<DawNote>,
+    palette: ThemePalette,
+    label_size: f32,
+}
+
+impl<Message> canvas::Program<Message> for DawDeckProgram {
+    type State = CacheState;
+
+    fn draw(
+        &self,
+        state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let key = self.tracks.iter().fold(
+            Key::new()
+                .add_u64(self.position_ticks)
+                .add_u64(self.cycle_ticks)
+                .add_usize(self.notes.len()),
+            |key, track| key.add_str(&track.label).add_f32(track.level),
+        );
+        state.draw_cached(renderer, bounds.size(), key.build(), |frame| {
+            let ink = color(self.palette.text);
+            let muted = color(self.palette.text_muted);
+            let accent = color(self.palette.primary);
+            let playhead = if self.recording {
+                color(self.palette.danger)
+            } else {
+                accent
+            };
+            let phase = self.position_ticks as f32 / self.cycle_ticks.max(1) as f32;
+
+            let reel_y = bounds.height * 0.23;
+            let reel_r = (bounds.height * 0.13).clamp(26.0, 58.0);
+            for center_x in [bounds.width * 0.18, bounds.width * 0.38] {
+                let center = Point::new(center_x, reel_y);
+                frame.stroke(
+                    &Path::circle(center, reel_r),
+                    canvas::Stroke::default().with_width(2.0).with_color(muted),
+                );
+                frame.stroke(
+                    &Path::circle(center, reel_r * 0.32),
+                    canvas::Stroke::default().with_width(2.0).with_color(accent),
+                );
+                for spoke in 0..3 {
+                    let angle =
+                        phase * std::f32::consts::TAU + spoke as f32 * std::f32::consts::TAU / 3.0;
+                    let end = Point::new(
+                        center.x + angle.cos() * reel_r * 0.82,
+                        center.y + angle.sin() * reel_r * 0.82,
+                    );
+                    frame.stroke(
+                        &Path::line(center, end),
+                        canvas::Stroke::default()
+                            .with_width(3.0)
+                            .with_color(with_alpha(accent, if self.playing { 0.9 } else { 0.5 })),
+                    );
+                }
+                frame.fill(&Path::circle(center, 4.0), accent);
+            }
+            frame.stroke(
+                &Path::line(
+                    Point::new(bounds.width * 0.18 + reel_r, reel_y),
+                    Point::new(bounds.width * 0.38 - reel_r, reel_y),
+                ),
+                canvas::Stroke::default().with_width(1.0).with_color(muted),
+            );
+
+            let roll = Rectangle::new(
+                Point::new(14.0, bounds.height * 0.48),
+                Size::new(bounds.width * 0.65, bounds.height * 0.47),
+            );
+            for step in 0..=16 {
+                let x = roll.x + roll.width * step as f32 / 16.0;
+                frame.stroke(
+                    &Path::line(Point::new(x, roll.y), Point::new(x, roll.y + roll.height)),
+                    canvas::Stroke::default()
+                        .with_width(if step % 4 == 0 { 1.0 } else { 0.5 })
+                        .with_color(with_alpha(muted, if step % 4 == 0 { 0.38 } else { 0.16 })),
+                );
+            }
+            for lane in 0..=12 {
+                let y = roll.y + roll.height * lane as f32 / 12.0;
+                frame.stroke(
+                    &Path::line(Point::new(roll.x, y), Point::new(roll.x + roll.width, y)),
+                    canvas::Stroke::default()
+                        .with_width(0.5)
+                        .with_color(with_alpha(muted, 0.14)),
+                );
+            }
+            let min_note = self.notes.iter().map(|note| note.note).min().unwrap_or(36);
+            let max_note = self
+                .notes
+                .iter()
+                .map(|note| note.note)
+                .max()
+                .unwrap_or(84)
+                .max(min_note + 1);
+            for note in &self.notes {
+                let x = roll.x + roll.width * note.tick as f32 / self.cycle_ticks.max(1) as f32;
+                let width = (roll.width * note.length_ticks as f32
+                    / self.cycle_ticks.max(1) as f32)
+                    .max(3.0);
+                let pitch = (note.note - min_note) as f32 / (max_note - min_note) as f32;
+                let y = roll.y + roll.height * (1.0 - pitch);
+                let rect = Path::rounded_rectangle(
+                    Point::new(x, y - 4.0),
+                    Size::new(width, 7.0),
+                    2.0.into(),
+                );
+                frame.fill(
+                    &rect,
+                    with_alpha(accent, 0.35 + note.velocity as f32 / 127.0 * 0.65),
+                );
+            }
+            let head_x = roll.x + roll.width * phase;
+            frame.stroke(
+                &Path::line(
+                    Point::new(head_x, roll.y),
+                    Point::new(head_x, roll.y + roll.height),
+                ),
+                canvas::Stroke::default()
+                    .with_width(2.0)
+                    .with_color(playhead),
+            );
+
+            let meter_x = bounds.width * 0.72;
+            let meter_top = 24.0;
+            let meter_height = bounds.height * 0.68;
+            let shown = self.tracks.len().min(10);
+            let slot = ((bounds.width - meter_x - 12.0) / shown.max(1) as f32).max(16.0);
+            for (index, track) in self.tracks.iter().take(shown).enumerate() {
+                let x = meter_x + index as f32 * slot;
+                let h = meter_height * track.level.clamp(0.0, 1.0);
+                let bar = Path::rounded_rectangle(
+                    Point::new(x, meter_top + meter_height - h),
+                    Size::new((slot - 6.0).max(4.0), h),
+                    2.0.into(),
+                );
+                frame.fill(
+                    &bar,
+                    if track.clipping {
+                        color(self.palette.danger)
+                    } else if track.level > 0.82 {
+                        color(self.palette.warning)
+                    } else {
+                        color(self.palette.success)
+                    },
+                );
+                frame.fill_text(canvas::Text {
+                    content: track.label.clone(),
+                    position: Point::new(x, meter_top + meter_height + 15.0),
+                    color: ink,
+                    size: iced::Pixels((self.label_size - 1.0).max(8.0)),
+                    ..Default::default()
+                });
             }
         })
     }

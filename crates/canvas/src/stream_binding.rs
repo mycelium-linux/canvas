@@ -504,6 +504,10 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/mycelium-mesh-v1.lua"),
     ),
     (
+        "synesthesia-daw-v1",
+        include_str!("../../../config/binders/synesthesia-daw-v1.lua"),
+    ),
+    (
         "span-timeline-v1",
         include_str!("../../../config/binders/span-timeline-v1.lua"),
     ),
@@ -1706,6 +1710,54 @@ mod tests {
         assert!(nodes[2].label.contains("VLAN 35"));
         assert_eq!(edges.len(), 2, "site-to-peer and site-to-VLAN edges");
         assert_eq!(target.data.state, canvas_widgets::WidgetDataState::Partial);
+    }
+
+    #[test]
+    fn synesthesia_daw_binder_preserves_transport_notes_and_meters() {
+        let mut target = test_spec(WidgetKind::DawDeck {
+            title: "Waiting".into(),
+            playing: false,
+            paused: false,
+            recording: false,
+            bpm: None,
+            position_ticks: 0,
+            cycle_ticks: 1,
+            tracks: vec![canvas_widgets::DawTrack {
+                label: "API".into(),
+                level: 0.0,
+                clipping: false,
+            }],
+            notes: Vec::new(),
+        });
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "synesthesia".into(),
+            stream: "daw".into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            project_id: Some("home".into()),
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({"title":"Studio","playing":true,"paused":false,"recording":true,"bpm":104.0,
+                "position_ticks":12,"cycle_ticks":96,"tracks":[{"label":"IN4","level":0.75,"clipping":false}],
+                "notes":[{"track":"piano","tick":0,"length_ticks":6,"note":60,"velocity":100}]}),
+        };
+        apply_named_adapter("synesthesia-daw-v1", &event, &mut target)
+            .expect("DAW snapshot renders");
+        let WidgetKind::DawDeck {
+            playing,
+            recording,
+            bpm,
+            tracks,
+            notes,
+            ..
+        } = target.kind
+        else {
+            panic!("DAW binder changed widget family")
+        };
+        assert!(playing && recording);
+        assert_eq!(bpm, Some(104.0));
+        assert_eq!(tracks[0].level, 0.75);
+        assert_eq!(notes[0].note, 60);
     }
 
     #[test]

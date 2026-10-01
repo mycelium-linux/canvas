@@ -1,0 +1,17 @@
+[Unit]
+Description=Publish Synesthesia DAW telemetry into Canvas
+After=canvas-surface.service synesthesia-console.service
+Wants=canvas-surface.service synesthesia-console.service
+
+[Service]
+Environment=HOME=/home/ajm
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Type=simple
+User=ajm
+Environment=SYNESTHESIA_DAW_URL=http://192.168.10.74:7893/v1/daw
+ExecStart=/usr/local/bin/canvas-synesthesia-observer
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
