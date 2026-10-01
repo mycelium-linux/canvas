@@ -60,34 +60,38 @@ pub fn refresh_feed(
     previous: &[TrendItem],
 ) -> Payload {
     let mut unique = BTreeMap::new();
+    let combined = config.subreddits.join("+");
     let mut failures = Vec::new();
     let mut successful = 0;
-    for sub in &config.subreddits {
-        match fetch(&FeedKind::Reddit { sub: sub.clone() }, http) {
-            Ok(feed) => {
-                successful += 1;
-                for (index, row) in feed.rows.into_iter().enumerate() {
-                    let id = row
+    match fetch(
+        &FeedKind::Reddit {
+            sub: combined.clone(),
+        },
+        http,
+    ) {
+        Ok(feed) => {
+            successful = config.subreddits.len();
+            for (index, row) in feed.rows.into_iter().enumerate() {
+                let id = row
+                    .url
+                    .clone()
+                    .unwrap_or_else(|| format!("reddit:{combined}:{}", row.title));
+                unique.entry(id.clone()).or_insert(TrendItem {
+                    id,
+                    text: row.title,
+                    author: row.by.unwrap_or_else(|| "reddit".into()),
+                    url: row
                         .url
-                        .clone()
-                        .unwrap_or_else(|| format!("reddit:{sub}:{}", row.title));
-                    unique.entry(id.clone()).or_insert(TrendItem {
-                        id,
-                        text: row.title,
-                        author: row.by.unwrap_or_else(|| format!("r/{sub}")),
-                        url: row
-                            .url
-                            .unwrap_or_else(|| format!("https://reddit.com/r/{sub}")),
-                        created_at_ms: now_ms,
-                        age_secs: row.age_secs.unwrap_or(0),
-                        engagement_score: row.score.unwrap_or(0),
-                        rank_score: 100_000u64.saturating_sub(index as u64),
-                        matches: vec![format!("r-{sub}")],
-                    });
-                }
+                        .unwrap_or_else(|| format!("https://reddit.com/r/{combined}")),
+                    created_at_ms: now_ms,
+                    age_secs: row.age_secs.unwrap_or(0),
+                    engagement_score: row.score.unwrap_or(0),
+                    rank_score: 100_000u64.saturating_sub(index as u64),
+                    matches: vec!["reddit".into()],
+                });
             }
-            Err(error) => failures.push(format!("r/{sub}: {error}")),
         }
+        Err(error) => failures.push(format!("r/{combined}: {error}")),
     }
     let mut items: Vec<_> = if successful == 0 {
         previous.to_vec()
