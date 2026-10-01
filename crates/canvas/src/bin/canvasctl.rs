@@ -250,9 +250,10 @@ fn handle_catalog(tokens: &[String]) -> Result<(), String> {
     send_mutation(Command::ApplyDocument { document })
 }
 
-/// Six widgets remain legible on the smallest supported 1280x720 Canvas.
-/// A catalog is a visual inspection surface, not an index thumbnail sheet.
-const CATALOG_PAGE_SIZE: usize = 6;
+/// The TV catalog is an index wall: 24 specimens fill a 6x4 grid at 1280x720.
+/// Individual widgets can still be focused when they need close inspection.
+const CATALOG_PAGE_SIZE: usize = 24;
+const CATALOG_COLUMNS: u32 = 6;
 
 fn catalog_document(directory: &str, page: usize) -> Result<WorkspaceDocument, String> {
     if page == 0 {
@@ -299,7 +300,7 @@ fn catalog_document(directory: &str, page: usize) -> Result<WorkspaceDocument, S
     let first = (page - 1) * CATALOG_PAGE_SIZE;
     let last = (first + CATALOG_PAGE_SIZE).min(all_ids.len());
     let ids = &all_ids[first..last];
-    let columns = if ids.len() <= 2 { ids.len() as u32 } else { 3 };
+    let columns = (ids.len() as u32).min(CATALOG_COLUMNS);
     let rows = (ids.len() as u32).div_ceil(columns.max(1));
     Ok(WorkspaceDocument {
         pages: Vec::new(),
@@ -833,8 +834,8 @@ mod catalog_tests {
             };
             assert!(placements.len() <= CATALOG_PAGE_SIZE);
             for placement in &placements {
-                assert!(placement.bounds.width >= 1.0 / 3.0);
-                assert!(placement.bounds.height >= 0.5);
+                assert!(placement.bounds.width >= 1.0 / CATALOG_COLUMNS as f32);
+                assert!(placement.bounds.height >= 0.25);
             }
             ids.extend(placements.into_iter().map(|placement| placement.surface_id));
         }
