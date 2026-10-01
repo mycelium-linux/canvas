@@ -1664,43 +1664,76 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
             visual,
         ),
         WidgetKind::StatusList { title, nodes } => {
-            let lines =
-                nodes
-                    .iter()
-                    .take(8)
-                    .fold(column![].spacing(metrics.space_2), |column, node| {
-                        column.push(
-                            row![
-                                status_dot(status_color(node.state, palette), 8.0),
-                                text(&node.label)
-                                    .size(metrics.small)
-                                    .color(color(palette.text)),
-                                space::horizontal(),
-                                text(node.detail.clone().unwrap_or_default())
-                                    .size(metrics.small)
-                                    .color(color(palette.text_muted))
-                            ]
-                            .spacing(metrics.space_2),
-                        )
-                    });
-            let lines = if let Some(overflow) = overflow_label(nodes.len(), 8, "nodes") {
-                lines.push(
-                    text(overflow)
-                        .size(metrics.small)
-                        .color(color(palette.warning)),
-                )
-            } else {
-                lines
-            };
+            let title = title.clone();
+            let nodes = nodes.clone();
+            let visual = *visual;
             panel(
                 spec,
-                column![
-                    text(title).size(metrics.body).color(color(palette.text)),
-                    lines
-                ]
-                .spacing(metrics.space_2)
+                responsive(move |bounds| {
+                    let metrics = visual.metrics;
+                    let palette = visual.palette;
+                    let available = (bounds.height - metrics.large - metrics.space_4).max(1.0);
+                    let columns = usize::from(bounds.width >= 840.0 && nodes.len() >= 4) + 1;
+                    let minimum_card_height = metrics.body + metrics.small + metrics.space_4 * 2.0;
+                    let row_capacity = ((available / minimum_card_height).floor() as usize).max(1);
+                    let shown = nodes.len().min(row_capacity * columns);
+                    let mut cards = column![].spacing(metrics.space_2).height(Length::Fill);
+                    for (row_index, chunk) in nodes[..shown].chunks(columns).enumerate() {
+                        let mut card_row = row![]
+                            .spacing(metrics.space_2)
+                            .height(Length::FillPortion(1));
+                        for (column_index, node) in chunk.iter().enumerate() {
+                            let index = row_index * columns + column_index;
+                            let fill = with_alpha(
+                                color(if index % 2 == 0 {
+                                    palette.surface_muted
+                                } else {
+                                    palette.surface
+                                }),
+                                if index % 2 == 0 { 0.52 } else { 0.28 },
+                            );
+                            card_row = card_row.push(
+                                container(primitive_list_row(
+                                    node.label.clone(),
+                                    node.detail.clone(),
+                                    Some(status_color(node.state, &palette)),
+                                    &visual,
+                                ))
+                                .padding([metrics.space_3, metrics.space_4])
+                                .width(Length::FillPortion(1))
+                                .height(Length::Fill)
+                                .align_y(iced::alignment::Vertical::Center)
+                                .style(move |_| {
+                                    container::Style {
+                                        background: Some(fill.into()),
+                                        border: iced::Border {
+                                            color: with_alpha(color(palette.border), 0.42),
+                                            width: 1.0,
+                                            radius: metrics.radius_sm.into(),
+                                        },
+                                        ..Default::default()
+                                    }
+                                }),
+                            );
+                        }
+                        if chunk.len() < columns {
+                            card_row = card_row.push(space().width(Length::FillPortion(1)));
+                        }
+                        cards = cards.push(card_row);
+                    }
+                    if let Some(overflow) = overflow_label(nodes.len(), shown, "systems") {
+                        cards = cards.push(
+                            text(overflow)
+                                .size(metrics.small)
+                                .color(color(palette.warning)),
+                        );
+                    }
+                    column![primitive_header(title.clone(), None, &visual), cards]
+                        .spacing(metrics.space_3)
+                        .into()
+                })
                 .into(),
-                visual,
+                &visual,
             )
         }
         WidgetKind::NeuralGraph {
@@ -2517,6 +2550,7 @@ pub(crate) fn panel<'a, Message: 'a>(
     // Resolved before the closure below: capturing `visual` would tie the style
     // to the theme's lifetime, and Color is Copy.
     let border = freshness(spec.data.state, visual).border;
+    let accent = data_state_color(spec.data.state, &visual.palette);
     let compact = spec.effective_chrome() == WidgetChrome::Frameless;
     let content: Element<'a, Message> = match spec.data.state {
         WidgetDataState::Loading
@@ -2547,27 +2581,52 @@ pub(crate) fn panel<'a, Message: 'a>(
             layout = layout.push(footer);
         }
     }
-    container(layout)
-        .padding(if compact {
-            metrics.space_2
-        } else {
-            metrics.space_4
-        })
+    let rail = container(space())
         .width(Length::Fill)
-        .height(Length::Fill)
+        .height(Length::Fixed(3.0))
         .style(move |_| container::Style {
-            background: Some(with_alpha(surface, panel_opacity).into()),
+            background: Some(
+                Color {
+                    a: if spec.data.state == WidgetDataState::Ready {
+                        0.78
+                    } else {
+                        1.0
+                    },
+                    ..accent
+                }
+                .into(),
+            ),
             border: iced::Border {
-                color: border,
-                width: 1.0,
-                radius: metrics.radius_lg.into(),
+                radius: metrics.radius_sm.into(),
+                ..Default::default()
             },
-            // No shadow. The host draws a plane with its own shadow behind every
-            // widget surface, and a second concentric one at a near-identical
-            // radius is the single clearest signal that this is unfinished.
             ..Default::default()
-        })
-        .into()
+        });
+    container(column![rail, layout].spacing(if compact {
+        metrics.space_1
+    } else {
+        metrics.space_3
+    }))
+    .padding(if compact {
+        metrics.space_2
+    } else {
+        metrics.space_4
+    })
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(move |_| container::Style {
+        background: Some(with_alpha(surface, panel_opacity).into()),
+        border: iced::Border {
+            color: border,
+            width: 1.0,
+            radius: metrics.radius_lg.into(),
+        },
+        // No shadow. The host draws a plane with its own shadow behind every
+        // widget surface, and a second concentric one at a near-identical
+        // radius is the single clearest signal that this is unfinished.
+        ..Default::default()
+    })
+    .into()
 }
 
 /// How a data state marks the widget it belongs to.

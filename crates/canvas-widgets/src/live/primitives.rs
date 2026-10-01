@@ -21,14 +21,43 @@ pub(super) fn header<'a, Message: 'a>(
 ) -> Element<'a, Message> {
     let metrics = visual.metrics;
     let palette = visual.palette;
+    let context = context.filter(|value| !value.is_empty());
+    let context: Element<'a, Message> = context.map_or_else(
+        || space().width(Length::Shrink).into(),
+        |context| {
+            container(
+                text(context)
+                    .size(metrics.micro)
+                    .color(color(palette.text_muted)),
+            )
+            .padding([metrics.space_1 * 0.5, metrics.space_2])
+            .style(move |_| container::Style {
+                background: Some(
+                    Color {
+                        a: 0.58,
+                        ..color(palette.surface_muted)
+                    }
+                    .into(),
+                ),
+                border: iced::Border {
+                    color: Color {
+                        a: 0.55,
+                        ..color(palette.border_strong)
+                    },
+                    width: 1.0,
+                    radius: metrics.radius_sm.into(),
+                },
+                ..Default::default()
+            })
+            .into()
+        },
+    );
     row![
         text(title.into())
-            .size(metrics.body)
+            .size(metrics.large)
             .color(color(palette.text)),
         space::horizontal(),
-        text(context.unwrap_or_default())
-            .size(metrics.small)
-            .color(color(palette.text_muted)),
+        context,
     ]
     .align_y(iced::alignment::Vertical::Center)
     .into()
