@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     collections::BTreeMap,
+    net::Ipv4Addr,
     process::{Command, ExitCode},
     thread,
     time::Duration,
@@ -144,6 +145,36 @@ fn bounded_id(text: String) -> String {
     text.chars().take(16).collect()
 }
 
+fn is_physical_segment(segment: &TopologySegment) -> bool {
+    let routable = segment.subnet.as_ref().is_some_and(|(address, prefix)| {
+        address.parse::<Ipv4Addr>().is_ok_and(|network| {
+            *prefix >= 8
+                && !network.is_unspecified()
+                && !network.is_loopback()
+                && !network.is_multicast()
+        })
+    });
+    routable
+        && segment.origins.iter().any(|origin| {
+            let interface = origin.rsplit(':').next().unwrap_or_default();
+            interface.starts_with("en")
+                || interface.starts_with("eth")
+                || interface.starts_with("wl")
+        })
+}
+
+fn ipv4_in_subnet(address: Ipv4Addr, network: Ipv4Addr, prefix: u8) -> bool {
+    if prefix > 32 {
+        return false;
+    }
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    u32::from(address) & mask == u32::from(network) & mask
+}
+
 fn project(peers: Vec<PeerView>, now_seconds: u64) -> Vec<PeerSummary> {
     let mut peers = peers
         .into_iter()
@@ -179,20 +210,22 @@ fn project_segments(topology: TopologyView) -> Vec<SegmentSummary> {
         .segments
         .into_values()
         .map(|segment| {
-            let site = segment.origins.iter().find_map(|origin| {
-                origin
-                    .split_once('/')
-                    .map(|(site, _)| bounded(site.to_owned()))
-            });
+            let subnet = segment
+                .subnet
+                .as_ref()
+                .map(|(address, prefix)| format!("{address}/{prefix}"));
+            let site = if is_physical_segment(&segment) {
+                subnet.clone()
+            } else {
+                Some("virtual".into())
+            };
             SegmentSummary {
                 label: bounded(segment.domain_name.unwrap_or_else(|| segment.id.clone())),
                 id: bounded(segment.id),
                 kind: bounded(segment.kind),
                 site,
                 vlan: segment.vlan,
-                subnet: segment
-                    .subnet
-                    .map(|(address, prefix)| format!("{address}/{prefix}")),
+                subnet,
                 gateway: segment.gw.map(bounded),
             }
         })
@@ -205,6 +238,45 @@ fn project_segments(topology: TopologyView) -> Vec<SegmentSummary> {
 fn project_vantage(
     topology: &serde_json::Value,
 ) -> (Vec<VantageNodeSummary>, Vec<AdvertisementSummary>, usize) {
+    let discovered_lans = topology["segments"]
+        .as_object()
+        .into_iter()
+        .flat_map(|segments| segments.values())
+        .filter_map(|segment| {
+            let origin = segment["origins"].as_array()?.first()?.as_str()?;
+            let interface = origin.rsplit(':').next().unwrap_or_default();
+            if !(interface.starts_with("en")
+                || interface.starts_with("eth")
+                || interface.starts_with("wl"))
+            {
+                return None;
+            }
+            let subnet = segment["subnet"].as_array()?;
+            let network = subnet.first()?.as_str()?.parse::<Ipv4Addr>().ok()?;
+            let prefix = u8::try_from(subnet.get(1)?.as_u64()?).ok()?;
+            if prefix < 8
+                || network.is_unspecified()
+                || network.is_loopback()
+                || network.is_multicast()
+            {
+                return None;
+            }
+            Some((network, prefix))
+        })
+        .collect::<Vec<_>>();
+    let mut lan_observers = BTreeMap::new();
+    for lan in discovered_lans {
+        *lan_observers.entry(lan).or_insert(0usize) += 1;
+    }
+    let mut physical_lans = lan_observers
+        .into_iter()
+        .map(|((network, prefix), observers)| {
+            (network, prefix, format!("{network}/{prefix}"), observers)
+        })
+        .collect::<Vec<_>>();
+    physical_lans.sort_by_key(|(_, prefix, _, observers)| {
+        (std::cmp::Reverse(*observers), std::cmp::Reverse(*prefix))
+    });
     let mut nodes = topology["nodes"]
         .as_object()
         .into_iter()
@@ -221,11 +293,28 @@ fn project_vantage(
                 .or(host)
                 .unwrap_or(&id)
                 .to_owned();
-            let site = node["sites"]
-                .as_array()
-                .and_then(|sites| sites.first())
-                .and_then(|site| site.as_str())
-                .map(|site| bounded(site.to_owned()));
+            let site = node["ips"]
+                .as_object()
+                .into_iter()
+                .flat_map(|ips| ips.keys())
+                .filter_map(|address| address.parse::<Ipv4Addr>().ok())
+                .flat_map(|address| {
+                    physical_lans
+                        .iter()
+                        .filter(move |(network, prefix, _, _)| {
+                            ipv4_in_subnet(address, *network, *prefix)
+                        })
+                        .map(|(_, prefix, label, observers)| (*observers, *prefix, label.clone()))
+                })
+                .max_by_key(|(observers, prefix, _)| (*observers, *prefix))
+                .map(|(_, _, label)| label)
+                .or_else(|| {
+                    node["sites"]
+                        .as_array()
+                        .and_then(|sites| sites.first())
+                        .and_then(|site| site.as_str())
+                        .map(|_| "mesh".to_owned())
+                });
             let device = node["device"].as_bool().unwrap_or(false);
             let kind =
                 annotation["kind"]
@@ -294,12 +383,22 @@ fn project_vantage(
         .into_iter()
         .flat_map(|items| items.iter())
         .map(|(id, item)| {
-            let site = item["origins"]
+            let site = item["addresses"]
                 .as_array()
-                .and_then(|origins| origins.first())
-                .and_then(|origin| origin.as_str())
-                .and_then(|origin| origin.split_once('/'))
-                .map(|(site, _)| bounded(site.to_owned()));
+                .into_iter()
+                .flatten()
+                .filter_map(|address| address.as_str()?.parse::<Ipv4Addr>().ok())
+                .flat_map(|address| {
+                    physical_lans
+                        .iter()
+                        .filter(move |(network, prefix, _, _)| {
+                            ipv4_in_subnet(address, *network, *prefix)
+                        })
+                        .map(|(_, prefix, label, observers)| (*observers, *prefix, label.clone()))
+                })
+                .max_by_key(|(observers, prefix, _)| (*observers, *prefix))
+                .map(|(_, _, label)| label)
+                .or_else(|| Some("mesh".into()));
             AdvertisementSummary {
                 id: bounded(id.clone()),
                 label: bounded(item["instance"].as_str().unwrap_or(id).to_owned()),

@@ -6,7 +6,7 @@ if type(p) ~= "table" or type(p.peers) ~= "table" then
 end
 
 local nodes, edges = canvas.array(), canvas.array()
-local sites, peer_ids = {}, {}
+local sites, peer_ids, seen_labels, seen_sites = {}, {}, {}, {}
 local warnings, site_count, segment_count, vlan_count, observed_count, service_count = 0, 0, 0, 0, 0, 0
 
 -- Presentation-only compatibility while the remaining legacy node is migrated.
@@ -38,29 +38,28 @@ local function health(peer)
   return state, age, math.max(0, math.min(1, 1 - age / 120))
 end
 
-for i = 1, #p.peers do
-  local site = display_site(tostring(p.peers[i].site or "unknown"))
-  ensure_site(site)
-end
-
 if type(p.nodes) == "table" then
   for i = 1, #p.nodes do
     local item = p.nodes[i]
     local site = display_site(tostring(item.site or "observed"))
     ensure_site(site)
     observed_count = observed_count + 1
-    local ips = type(item.ips) == "table" and table.concat(item.ips, " · ") or ""
     local label = tostring(item.label or item.id or "observed")
-    if ips ~= "" then label = label .. " · " .. ips end
-    if tonumber(item.capacity_mbps) then label = label .. " · " .. tostring(item.capacity_mbps) .. "M cap" end
-    if tonumber(item.services) and item.services > 0 then label = label .. " · " .. tostring(item.services) .. " svc" end
+    seen_labels[string.lower(label)] = true
+    seen_sites[string.lower(label)] = site
+    local facts = canvas.array()
+    local ips = type(item.ips) == "table" and table.concat(item.ips, ", ") or ""
+    if ips ~= "" then facts[#facts + 1] = ips end
+    if tonumber(item.capacity_mbps) then facts[#facts + 1] = tostring(item.capacity_mbps) .. "M capacity" end
+    if tonumber(item.ports) then facts[#facts + 1] = tostring(item.links_up or 0) .. "/" .. tostring(item.ports) .. " links up" end
+    if tonumber(item.services) and item.services > 0 then facts[#facts + 1] = tostring(item.services) .. " services" end
     if tonumber(item.overlays) and item.overlays > 0 then
-      label = label .. " · mesh " .. tostring(item.overlays_online or 0) .. "/" .. tostring(item.overlays)
+      facts[#facts + 1] = "mesh " .. tostring(item.overlays_online or 0) .. "/" .. tostring(item.overlays)
     end
     label = string.sub(label, 1, 128)
     local id = "observed:" .. tostring(i)
     local state = tonumber(item.links_down) and item.links_down > 0 and "warning" or "neutral"
-    nodes[#nodes + 1] = {id=id,label=label,group=site,heat=item.device and 0.62 or 0.22,state=state}
+    nodes[#nodes + 1] = {id=id,label=label,detail=string.sub(table.concat(facts, " · "),1,512),group=site,heat=item.device and 0.62 or 0.22,state=state}
     edges[#edges + 1] = {from=sites[site],to=id,heat=item.device and 0.48 or 0.18}
   end
 end
@@ -73,27 +72,42 @@ if type(p.advertisements) == "table" then
     service_count = service_count + 1
     local id = "service:" .. tostring(i)
     local label = tostring(item.label or item.service_type or "service")
-    if item.target then label = label .. " · " .. tostring(item.target) end
-    if item.port then label = label .. ":" .. tostring(item.port) end
     label = string.sub(label, 1, 128)
-    nodes[#nodes + 1] = {id=id,label=label,group=site,heat=0.3,state="good"}
+    local endpoint = tostring(item.service_type or "service")
+    if item.target then endpoint = endpoint .. " · " .. tostring(item.target) end
+    if item.port then endpoint = endpoint .. ":" .. tostring(item.port) end
+    nodes[#nodes + 1] = {id=id,label=label,detail=string.sub(endpoint,1,512),group=site,heat=0.3,state="good"}
     edges[#edges + 1] = {from=sites[site],to=id,heat=0.24}
   end
 end
 
 local observer
+local peer_site_lans = {}
 for i = 1, #p.peers do
   local peer = p.peers[i]
-  local id = "peer:" .. tostring(i)
-  local site = display_site(tostring(peer.site or "unknown"))
-  local state, _, heat = health(peer)
-  if state ~= "good" then warnings = warnings + 1 end
-  nodes[#nodes + 1] = {
-    id=id, label=tostring(peer.hostname or "peer"), group=site, heat=heat, state=state
-  }
-  edges[#edges + 1] = {from=sites[site], to=id, heat=0.28}
-  peer_ids[i] = id
-  if tostring(peer.hostname) == "home-pi" then observer = id end
+  local observed_site = seen_sites[string.lower(tostring(peer.hostname or ""))]
+  if observed_site then
+    peer_site_lans[display_site(tostring(peer.site or "unknown"))] = observed_site
+  end
+end
+for i = 1, #p.peers do
+  local peer = p.peers[i]
+  if not seen_labels[string.lower(tostring(peer.hostname or ""))] then
+    local id = "peer:" .. tostring(i)
+    local advertised_site = display_site(tostring(peer.site or "unknown"))
+    local site = peer_site_lans[advertised_site] or advertised_site
+    ensure_site(site)
+    local state, _, heat = health(peer)
+    if state ~= "good" then warnings = warnings + 1 end
+    nodes[#nodes + 1] = {
+      id=id, label=tostring(peer.hostname or "peer"),
+      detail=tostring(peer.platform or "") .. " " .. tostring(peer.architecture or "") .. " · seen " .. tostring(peer.age_seconds or "?") .. "s ago",
+      group=site, heat=heat, state=state
+    }
+    edges[#edges + 1] = {from=sites[site], to=id, heat=0.28}
+    peer_ids[i] = id
+    if tostring(peer.hostname) == "home-pi" then observer = id end
+  end
 end
 
 -- The peer list is home-pi's observed gossip adjacency, not a claimed full mesh.
@@ -101,7 +115,7 @@ if observer then
   for i = 1, #p.peers do
     local peer = p.peers[i]
     local id = peer_ids[i]
-    if id ~= observer then
+    if id and id ~= observer then
       local _, _, heat = health(peer)
       edges[#edges + 1] = {from=observer, to=id, heat=heat}
     end
@@ -114,12 +128,14 @@ if type(p.segments) == "table" then
     segment_count = segment_count + 1
     local vlan = tonumber(segment.vlan)
     local site = display_site(tostring(segment.site or "unknown"))
+    ensure_site(site)
     if vlan then vlan_count = vlan_count + 1 end
     local id = "segment:" .. tostring(i)
     nodes[#nodes + 1] = {
       id=id,
       label=vlan and ("VLAN " .. tostring(vlan) .. " · " .. tostring(segment.label))
         or tostring(segment.label),
+      detail=tostring(segment.kind or "segment") .. (segment.subnet and (" · " .. tostring(segment.subnet)) or "") .. (segment.gateway and (" · gateway " .. tostring(segment.gateway)) or ""),
       group=sites[site] and site or "segments", heat=0.45, state="neutral"
     }
     if sites[site] then edges[#edges + 1] = {from=sites[site],to=id,heat=0.4} end

@@ -21,8 +21,8 @@ use canvas_core::{ThemeMetrics, ThemePalette, VisualTheme};
 use iced::mouse;
 use iced::widget::canvas::{Cache, Geometry, Path};
 use iced::widget::{
-    Canvas, canvas, column, container, image, progress_bar, responsive, row, scrollable, space,
-    text,
+    canvas, column, container, image, progress_bar, responsive, row, scrollable, space, text,
+    Canvas,
 };
 use iced::{Color, ContentFit, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
@@ -370,12 +370,10 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
             let tile_color = color(palette.surface);
             let alert_color = color(palette.danger);
             let tiles: Vec<Element<'_, Message>> = if items.is_empty() {
-                vec![
-                    text("No projects")
-                        .size(metrics.body)
-                        .color(color(palette.text))
-                        .into(),
-                ]
+                vec![text("No projects")
+                    .size(metrics.body)
+                    .color(color(palette.text))
+                    .into()]
             } else {
                 items
                     .iter()
@@ -2606,7 +2604,7 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
-        _cursor: mouse::Cursor,
+        cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let mut started = state.started.borrow_mut();
         let start = *started.get_or_insert_with(Instant::now);
@@ -2617,6 +2615,7 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
         };
         drop(started);
         let topology = self.nodes.iter().any(|node| node.id.starts_with("site:"));
+        let dense = topology && self.nodes.len() > 48;
         let key = self.nodes.iter().fold(
             Key::new()
                 .add_usize(self.edges.len())
@@ -2645,7 +2644,7 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
                 key.add_f32(edge.heat)
             }
         });
-        state
+        let graph = state
             .cache
             .draw_cached(renderer, bounds.size(), key.build(), |frame| {
                 if self.nodes.is_empty() {
@@ -2762,18 +2761,75 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
                             0.3 + heat * 0.7,
                         ),
                     );
-                    frame.fill_text(canvas::Text {
-                        content: node.label.clone(),
-                        position: Point::new(
-                            (position.x + radius + 5.0).min((bounds.width - 112.0).max(4.0)),
-                            (position.y + 4.0).min(bounds.height - 4.0),
-                        ),
-                        color: color(self.palette.text),
-                        size: iced::Pixels(self.label_size),
-                        ..Default::default()
-                    });
+                    if !dense
+                        || node.id.starts_with("site:")
+                        || matches!(node.state, StatusLevel::Warning | StatusLevel::Critical)
+                    {
+                        frame.fill_text(canvas::Text {
+                            content: node.label.clone(),
+                            position: Point::new(
+                                (position.x + radius + 5.0).min((bounds.width - 112.0).max(4.0)),
+                                (position.y + 4.0).min(bounds.height - 4.0),
+                            ),
+                            color: color(self.palette.text),
+                            size: iced::Pixels(self.label_size),
+                            ..Default::default()
+                        });
+                    }
                 }
+            });
+
+        let mut output = graph;
+        let Some(pointer) = cursor.position_in(bounds) else {
+            return output;
+        };
+        let positions = if self.dag {
+            dag_layout(&self.nodes, &self.edges, bounds.size())
+        } else {
+            animated_neural_layout(&self.nodes, bounds.size(), settle)
+        };
+        let hovered = self
+            .nodes
+            .iter()
+            .filter_map(|node| {
+                let position = positions.get(&node.id)?;
+                let distance =
+                    ((position.x - pointer.x).powi(2) + (position.y - pointer.y).powi(2)).sqrt();
+                (distance <= 18.0).then_some((distance, node))
             })
+            .min_by(|left, right| left.0.total_cmp(&right.0));
+        let Some((_, node)) = hovered else {
+            return output;
+        };
+        let detail = node.detail.as_deref().unwrap_or(&node.label);
+        let mut overlay = canvas::Frame::new(renderer, bounds.size());
+        let width = (bounds.width * 0.42).clamp(320.0, 760.0);
+        let height = 58.0;
+        let origin = Point::new(18.0, (bounds.height - height - 18.0).max(0.0));
+        let panel = Path::rounded_rectangle(origin, Size::new(width, height), 7.0.into());
+        overlay.fill(&panel, with_alpha(color(self.palette.surface), 0.96));
+        overlay.stroke(
+            &panel,
+            canvas::Stroke::default()
+                .with_width(1.0)
+                .with_color(status_color(node.state, &self.palette)),
+        );
+        overlay.fill_text(canvas::Text {
+            content: node.label.clone(),
+            position: Point::new(origin.x + 12.0, origin.y + 21.0),
+            color: color(self.palette.text),
+            size: iced::Pixels(self.label_size * 1.05),
+            ..Default::default()
+        });
+        overlay.fill_text(canvas::Text {
+            content: detail.to_owned(),
+            position: Point::new(origin.x + 12.0, origin.y + 43.0),
+            color: color(self.palette.text_muted),
+            size: iced::Pixels(self.label_size * 0.9),
+            ..Default::default()
+        });
+        output.push(overlay.into_geometry());
+        output
     }
 }
 
@@ -6318,6 +6374,7 @@ mod tests {
             NeuralNode {
                 id: "a".into(),
                 label: "A".into(),
+                detail: None,
                 group: Some("client".into()),
                 heat: 0.0,
                 state: StatusLevel::Neutral,
@@ -6325,6 +6382,7 @@ mod tests {
             NeuralNode {
                 id: "b".into(),
                 label: "B".into(),
+                detail: None,
                 group: Some("gateway".into()),
                 heat: 1.0,
                 state: StatusLevel::Good,
@@ -6332,6 +6390,7 @@ mod tests {
             NeuralNode {
                 id: "c".into(),
                 label: "C".into(),
+                detail: None,
                 group: Some("gateway".into()),
                 heat: 0.5,
                 state: StatusLevel::Warning,
@@ -6350,6 +6409,7 @@ mod tests {
         let node = |id: &str, group: &str| NeuralNode {
             id: id.into(),
             label: id.into(),
+            detail: None,
             group: Some(group.into()),
             heat: 0.5,
             state: StatusLevel::Good,
@@ -6366,11 +6426,9 @@ mod tests {
         let hub = layout["site:1"];
         assert_eq!(hub.x, 600.0);
         assert_ne!(layout["home-pi"].x, layout["agora-one"].x);
-        assert!(
-            layout
-                .values()
-                .all(|point| point.y >= 24.0 && point.y <= 256.0)
-        );
+        assert!(layout
+            .values()
+            .all(|point| point.y >= 24.0 && point.y <= 256.0));
 
         let later = animated_neural_layout(&nodes, Size::new(1200.0, 280.0), 0.5);
         assert_ne!(later["home-pi"], layout["home-pi"]);
@@ -6382,6 +6440,7 @@ mod tests {
         let node = |id: &str| NeuralNode {
             id: id.into(),
             label: id.into(),
+            detail: None,
             group: None,
             heat: 0.0,
             state: StatusLevel::Neutral,

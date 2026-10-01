@@ -1716,12 +1716,12 @@ mod tests {
             "site, observed device, service, peer, and VLAN are graph vertices"
         );
         assert!(nodes.iter().any(|node| node.label == "wagar-house"));
-        assert!(nodes
-            .iter()
-            .any(|node| node.label.contains("Living room speaker")
-                && node.label.contains("1000M cap")
-                && node.label.contains("3 svc")
-                && node.label.contains("mesh 1/1")));
+        assert!(nodes.iter().any(|node| node.label == "Living room speaker"
+            && node.detail.as_deref().is_some_and(|detail| {
+                detail.contains("1000M capacity")
+                    && detail.contains("3 services")
+                    && detail.contains("mesh 1/1")
+            })));
         assert!(nodes.iter().any(|node| node.label.contains("VLAN 35")));
         assert_eq!(
             edges.len(),
