@@ -94,6 +94,16 @@ struct VantageNodeSummary {
     kind: String,
     device: bool,
     ips: Vec<String>,
+    mac: Option<String>,
+    hostnames: Vec<String>,
+    ports: usize,
+    links_up: usize,
+    links_down: usize,
+    capacity_mbps: Option<u64>,
+    services: usize,
+    overlays: usize,
+    overlays_online: usize,
+    origins: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -104,6 +114,9 @@ struct AdvertisementSummary {
     service_type: String,
     target: Option<String>,
     port: Option<u16>,
+    addresses: Vec<String>,
+    interface: Option<String>,
+    last_seen: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -181,7 +194,7 @@ fn project_segments(topology: TopologyView) -> Vec<SegmentSummary> {
         })
         .collect::<Vec<_>>();
     segments.sort_by(|left, right| left.id.cmp(&right.id));
-    segments.truncate(32);
+    segments.truncate(64);
     segments
 }
 
@@ -221,6 +234,31 @@ fn project_vantage(
                 .take(4)
                 .cloned()
                 .collect();
+            let hostnames = node["hostnames"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|hostname| hostname.as_str())
+                .take(4)
+                .map(|hostname| bounded(hostname.to_owned()))
+                .collect();
+            let ports = node["ports"].as_object();
+            let links_up = ports
+                .into_iter()
+                .flat_map(|ports| ports.values())
+                .filter(|port| port["state"].as_str() == Some("up"))
+                .count();
+            let links_down = ports
+                .into_iter()
+                .flat_map(|ports| ports.values())
+                .filter(|port| port["state"].as_str() == Some("down"))
+                .count();
+            let capacity_mbps = ports
+                .into_iter()
+                .flat_map(|ports| ports.values())
+                .filter_map(|port| port["speed_mbps"].as_u64())
+                .max();
+            let overlays = node["overlays"].as_object();
             Some(VantageNodeSummary {
                 id: bounded(id),
                 label: bounded(label),
@@ -228,6 +266,20 @@ fn project_vantage(
                 kind: bounded(kind.to_owned()),
                 device,
                 ips,
+                mac: node["mac"].as_str().map(|mac| bounded(mac.to_owned())),
+                hostnames,
+                ports: ports.map_or(0, serde_json::Map::len),
+                links_up,
+                links_down,
+                capacity_mbps,
+                services: node["services"].as_object().map_or(0, serde_json::Map::len),
+                overlays: overlays.map_or(0, serde_json::Map::len),
+                overlays_online: overlays
+                    .into_iter()
+                    .flat_map(|overlays| overlays.values())
+                    .filter(|overlay| overlay["online"].as_bool() == Some(true))
+                    .count(),
+                origins: node["origins"].as_array().map_or(0, Vec::len),
             })
         })
         .collect::<Vec<_>>();
@@ -260,6 +312,18 @@ fn project_vantage(
                 port: item["port"]
                     .as_u64()
                     .and_then(|port| u16::try_from(port).ok()),
+                addresses: item["addresses"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|address| address.as_str())
+                    .take(4)
+                    .map(str::to_owned)
+                    .collect(),
+                interface: item["interface"]
+                    .as_str()
+                    .map(|value| bounded(value.to_owned())),
+                last_seen: item["last_seen"].as_u64(),
             }
         })
         .collect::<Vec<_>>();
@@ -290,26 +354,18 @@ fn snapshot(binary: &str, now_ms: u64) -> serde_json::Value {
             &["releases", "list", "--json"],
         )?)
         .map_err(|error| format!("decode releases: {error}"))?;
-        let mut topology =
+        let topology =
             serde_json::from_slice::<TopologyView>(&query(binary, &["topology", "--json"])?)
                 .map_err(|error| format!("decode topology: {error}"))?;
-        let mut raw_topology =
+        let raw_topology =
             serde_json::from_slice::<serde_json::Value>(&query(binary, &["topology", "--json"])?)
                 .map_err(|error| format!("decode vantage: {error}"))?;
-        if raw_topology["nodes"]
-            .as_object()
-            .is_none_or(|nodes| nodes.is_empty())
-        {
-            if let Some(path) = std::env::var_os("MYCELIUM_VANTAGE_SNAPSHOT") {
-                let bytes = std::fs::read(path)
-                    .map_err(|error| format!("read vantage snapshot: {error}"))?;
-                topology = serde_json::from_slice(&bytes)
-                    .map_err(|error| format!("decode vantage topology: {error}"))?;
-                raw_topology = serde_json::from_slice(&bytes)
-                    .map_err(|error| format!("decode vantage snapshot: {error}"))?;
-            }
-        }
         let (nodes, advertisements, conflicts) = project_vantage(&raw_topology);
+        if nodes.is_empty() {
+            return Err("gossiped topology is empty; run mycelium scan on an observer".into());
+        }
+        let leases = raw_topology["leases"].as_array().map_or(0, Vec::len);
+        let observers = raw_topology["updated_from"].as_array().map_or(0, Vec::len);
         Ok::<_, String>((
             project(peers, now_ms / 1000),
             releases,
@@ -317,10 +373,21 @@ fn snapshot(binary: &str, now_ms: u64) -> serde_json::Value {
             nodes,
             advertisements,
             conflicts,
+            leases,
+            observers,
         ))
     })();
     let payload = match result {
-        Ok((peers, mut releases, segments, nodes, advertisements, conflicts)) => {
+        Ok((
+            peers,
+            mut releases,
+            segments,
+            nodes,
+            advertisements,
+            conflicts,
+            leases,
+            observers,
+        )) => {
             releases.truncate(16);
             for release in &mut releases {
                 release.component = bounded(std::mem::take(&mut release.component));
@@ -328,7 +395,7 @@ fn snapshot(binary: &str, now_ms: u64) -> serde_json::Value {
                 release.channel = bounded(std::mem::take(&mut release.channel));
                 release.target = bounded(std::mem::take(&mut release.target));
             }
-            json!({ "peers": peers, "segments": segments, "nodes": nodes, "advertisements": advertisements, "conflicts": conflicts, "releases": releases, "degraded": false })
+            json!({ "peers": peers, "segments": segments, "nodes": nodes, "advertisements": advertisements, "conflicts": conflicts, "leases": leases, "observers": observers, "releases": releases, "topology_source": "mycelium-gossip", "degraded": false })
         }
         Err(error) => {
             json!({ "peers": [], "segments": [], "nodes": [], "advertisements": [], "conflicts": 0, "releases": [], "degraded": true, "error": bounded(error) })
@@ -406,6 +473,46 @@ mod tests {
                 .get("process_leaders"),
             None
         );
+    }
+
+    #[test]
+    fn vantage_projection_preserves_rich_gossiped_network_facts() {
+        let topology = json!({
+            "nodes": {"switch": {
+                "id":"switch", "sites":["wagar-house"], "device":true,
+                "annotation":{"name":"Core Switch","kind":"switch"},
+                "ips":{"10.0.0.2":{}}, "mac":"00:11:22:33:44:55",
+                "hostnames":["switch.local"],
+                "ports": {
+                    "1":{"state":"up","speed_mbps":1000},
+                    "2":{"state":"down","speed_mbps":100}
+                },
+                "services":{"ssh":{}},
+                "overlays":{"mycelium":{"online":true},"other":{"online":false}},
+                "origins":["wagar-house/observer-a","titan/observer-b"]
+            }},
+            "advertisements": {"raop": {
+                "instance":"Living Room", "service_type":"_raop._tcp",
+                "target":"speaker.local", "port":7000,
+                "addresses":["10.0.0.20"], "interface":"en0", "last_seen":42,
+                "origins":["wagar-house/observer-a"]
+            }},
+            "conflicts":[{"field":"hostname"}]
+        });
+        let (nodes, advertisements, conflicts) = project_vantage(&topology);
+        assert_eq!(conflicts, 1);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].ports, 2);
+        assert_eq!(nodes[0].links_up, 1);
+        assert_eq!(nodes[0].links_down, 1);
+        assert_eq!(nodes[0].capacity_mbps, Some(1000));
+        assert_eq!(nodes[0].services, 1);
+        assert_eq!(nodes[0].overlays, 2);
+        assert_eq!(nodes[0].overlays_online, 1);
+        assert_eq!(nodes[0].origins, 2);
+        assert_eq!(advertisements[0].addresses, ["10.0.0.20"]);
+        assert_eq!(advertisements[0].interface.as_deref(), Some("en0"));
+        assert_eq!(advertisements[0].last_seen, Some(42));
     }
 
     #[test]

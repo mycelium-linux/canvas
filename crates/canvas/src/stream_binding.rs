@@ -12,8 +12,8 @@ use std::os::unix::{
 };
 use std::path::PathBuf;
 use std::sync::{
-    Arc, Mutex,
     atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -187,9 +187,9 @@ fn global_artifact_path(id: &str) -> Option<PathBuf> {
 /// Re-exported from canvas-core so stream_binding callers can validate
 /// without a separate import. See DECLARED_CONTRACTS and is_declared_contract
 /// in canvas-core for the canonical registry.
-pub use canvas_core::{DECLARED_CONTRACTS, is_declared_contract};
+pub use canvas_core::{is_declared_contract, DECLARED_CONTRACTS};
 
-pub use crate::stream_contract::{STREAM_SCHEMA_VERSION, StreamEnvelope};
+pub use crate::stream_contract::{StreamEnvelope, STREAM_SCHEMA_VERSION};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StreamStats {
@@ -957,11 +957,11 @@ pub fn apply_briefing_binder(source: &str, event: &StreamEnvelope) -> Result<Bri
 mod tests {
     use super::*;
     use canvas_widgets::{
-        WIDGET_SCHEMA_VERSION, WidgetChrome, WidgetKind,
         quant::{
             BacktestEvidence, BacktestPoint, BacktestSeries, BacktestSeriesRole, Candle,
             QuantWidget,
         },
+        WidgetChrome, WidgetKind, WIDGET_SCHEMA_VERSION,
     };
 
     #[test]
@@ -1691,7 +1691,9 @@ mod tests {
                 }],
                 "segments": [{"id":"home/vlan:35","label":"Audio","kind":"vlan","site":"home",
                     "vlan":35,"subnet":"10.35.0.0/24","gateway":"10.35.0.1"}],
-                "nodes": [{"id":"speaker","label":"Living room speaker","site":"home","kind":"audio","device":true,"ips":["10.35.0.20"]}],
+                "nodes": [{"id":"speaker","label":"Living room speaker","site":"home","kind":"audio","device":true,
+                    "ips":["10.35.0.20"],"ports":2,"links_up":2,"links_down":0,"capacity_mbps":1000,
+                    "services":3,"overlays":1,"overlays_online":1,"origins":2}],
                 "advertisements": [{"id":"raop","label":"Living Room","site":"home","service_type":"_raop._tcp","target":"speaker.local","port":7000}],
                 "conflicts": 0,
                 "releases": [{"component":"canvas","version":"0.1.0","channel":"canary","target":"aarch64-unknown-linux-gnu"}],
@@ -1707,18 +1709,19 @@ mod tests {
         else {
             panic!("mesh binder changed widget family")
         };
-        assert!(title.contains("1 peers · 1 observed · 1 services · 1 sites · 1 VLANs"));
+        assert!(title.contains("1 peers · 1 nodes · 1 services · 1 sites · 1 VLANs"));
         assert_eq!(
             nodes.len(),
             5,
             "site, observed device, service, peer, and VLAN are graph vertices"
         );
         assert!(nodes.iter().any(|node| node.label == "wagar-house"));
-        assert!(
-            nodes
-                .iter()
-                .any(|node| node.label.contains("Living room speaker"))
-        );
+        assert!(nodes
+            .iter()
+            .any(|node| node.label.contains("Living room speaker")
+                && node.label.contains("1000M cap")
+                && node.label.contains("3 svc")
+                && node.label.contains("mesh 1/1")));
         assert!(nodes.iter().any(|node| node.label.contains("VLAN 35")));
         assert_eq!(
             edges.len(),
