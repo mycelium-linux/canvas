@@ -32,8 +32,8 @@
     {
       "id": "mesh", "title": "Mycelium mesh",
       "content": { "kind": "widget", "spec": {
-        "schema_version": 2, "id": "mesh", "kind": "network_topology", "title": "Mycelium mesh",
-        "segments": [], "nodes": [], "links": [], "conflicts": 0,
+        "schema_version": 2, "id": "mesh", "kind": "neural_graph", "title": "Mycelium web",
+        "nodes": [], "edges": [],
         "theme": null, "refresh_ms": 5000, "chrome": "integrated",
         "data": { "state": "loading", "source": "mycelium/mesh", "observed_at": null, "window": "live", "detail": "Awaiting peer snapshot", "provenance": "live" }
       }}, "inputs": [{ "id": "mesh", "contract": "canvas.widget.snapshot.v1" }]

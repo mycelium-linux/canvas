@@ -1664,12 +1664,10 @@ mod tests {
 
     #[test]
     fn mycelium_mesh_binder_surfaces_sites_vlans_links_and_pressure() {
-        let mut target = test_spec(WidgetKind::NetworkTopology {
+        let mut target = test_spec(WidgetKind::NeuralGraph {
             title: "Waiting".into(),
-            segments: Vec::new(),
             nodes: Vec::new(),
-            links: Vec::new(),
-            conflicts: 0,
+            edges: Vec::new(),
         });
         let event = StreamEnvelope {
             schema_version: STREAM_SCHEMA_VERSION,
@@ -1694,21 +1692,19 @@ mod tests {
             }),
         };
         apply_named_adapter("mycelium-mesh-v1", &event, &mut target).expect("mesh renders");
-        let WidgetKind::NetworkTopology {
+        let WidgetKind::NeuralGraph {
             title,
-            segments,
             nodes,
-            links,
-            ..
+            edges,
         } = target.kind
         else {
             panic!("mesh binder changed widget family")
         };
         assert!(title.contains("1 peers · 1 sites · 1 VLANs"));
-        assert_eq!(segments.len(), 2);
-        assert_eq!(segments[1].vlan, Some(35));
-        assert_eq!(nodes[0].state, canvas_widgets::StatusLevel::Critical);
-        assert!(links.is_empty(), "the observer does not link to itself");
+        assert_eq!(nodes.len(), 3, "site, peer, and VLAN are graph vertices");
+        assert_eq!(nodes[1].state, canvas_widgets::StatusLevel::Critical);
+        assert!(nodes[2].label.contains("VLAN 35"));
+        assert_eq!(edges.len(), 2, "site-to-peer and site-to-VLAN edges");
         assert_eq!(target.data.state, canvas_widgets::WidgetDataState::Partial);
     }
 
