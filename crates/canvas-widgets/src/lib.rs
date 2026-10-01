@@ -1011,15 +1011,16 @@ mod mutation_tests {
     fn snapshot_cannot_change_widget_family() {
         let mut spec = stat();
         let before = spec.clone();
-        assert!(spec
-            .apply_mutation(WidgetMutation::Snapshot {
+        assert!(
+            spec.apply_mutation(WidgetMutation::Snapshot {
                 widget: WidgetKind::Gauge {
                     value: 50.0,
                     label: None,
                 },
                 data: WidgetData::default(),
             })
-            .is_err());
+            .is_err()
+        );
         assert_eq!(spec, before);
     }
 
@@ -1712,7 +1713,7 @@ fn validate_graph(
                 && ids.insert(node.id.as_str()),
             &format!("{label} graph nodes require unique, bounded IDs"),
         )?;
-        bounded_label(&node.label, &format!("{label} graph node label"))?;
+        bounded_graph_label(&node.label, &format!("{label} graph node label"))?;
         optional_bounded_text(&node.detail, &format!("{label} graph node detail"), 512)?;
         optional_label(&node.group, &format!("{label} graph node group"))?;
         check(
@@ -2640,7 +2641,7 @@ impl WidgetSpec {
                             && ids.insert(node.id.as_str()),
                         "neural graph nodes require unique, bounded IDs",
                     )?;
-                    bounded_label(&node.label, "neural graph node label")?;
+                    bounded_graph_label(&node.label, "neural graph node label")?;
                     optional_bounded_text(&node.detail, "neural graph node detail", 512)?;
                     optional_label(&node.group, "neural graph node group")?;
                     check(
@@ -2948,17 +2949,20 @@ impl WidgetInput {
 }
 
 fn check(condition: bool, message: &str) -> Result<()> {
-    if condition {
-        Ok(())
-    } else {
-        err(message)
-    }
+    if condition { Ok(()) } else { err(message) }
 }
 
 fn bounded_label(value: &str, name: &str) -> Result<()> {
     check(
         !value.is_empty() && value.len() <= 128,
         &format!("{name} must contain 1-128 bytes"),
+    )
+}
+
+fn bounded_graph_label(value: &str, name: &str) -> Result<()> {
+    check(
+        value.len() <= 128,
+        &format!("{name} must contain at most 128 bytes"),
     )
 }
 

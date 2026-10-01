@@ -96,6 +96,7 @@ struct VantageNodeSummary {
     id: String,
     label: String,
     site: Option<String>,
+    segments: Vec<String>,
     kind: String,
     device: bool,
     ips: Vec<String>,
@@ -205,25 +206,46 @@ fn project(peers: Vec<PeerView>, now_seconds: u64) -> Vec<PeerSummary> {
     peers
 }
 
-fn project_segments(topology: TopologyView) -> Vec<SegmentSummary> {
+fn canonical_site(raw: &str, aliases: &BTreeMap<String, String>) -> String {
+    aliases
+        .get(&raw.to_ascii_lowercase())
+        .cloned()
+        .unwrap_or_else(|| match raw {
+            "home" => "wagar-house".to_owned(),
+            _ => raw.to_owned(),
+        })
+}
+
+fn segment_site(segment: &TopologySegment, aliases: &BTreeMap<String, String>) -> String {
+    let observer = segment
+        .origins
+        .first()
+        .and_then(|origin| origin.split('/').next())
+        .or_else(|| segment.id.split('/').next())
+        .unwrap_or("unknown");
+    canonical_site(observer, aliases)
+}
+
+fn project_segments(
+    topology: TopologyView,
+    aliases: &BTreeMap<String, String>,
+) -> Vec<SegmentSummary> {
     let mut segments = topology
         .segments
         .into_values()
+        .filter(|segment| is_physical_segment(segment) || segment.vlan.is_some())
         .map(|segment| {
             let subnet = segment
                 .subnet
                 .as_ref()
                 .map(|(address, prefix)| format!("{address}/{prefix}"));
-            let site = if is_physical_segment(&segment) {
-                subnet.clone()
-            } else {
-                Some("virtual".into())
-            };
+            let site = segment_site(&segment, aliases);
+            let identity = subnet.as_deref().unwrap_or(&segment.id);
             SegmentSummary {
-                label: bounded(segment.domain_name.unwrap_or_else(|| segment.id.clone())),
-                id: bounded(segment.id),
+                label: bounded(segment.domain_name.unwrap_or_else(|| identity.to_owned())),
+                id: bounded(format!("{site}|{identity}")),
                 kind: bounded(segment.kind),
-                site,
+                site: Some(bounded(site)),
                 vlan: segment.vlan,
                 subnet,
                 gateway: segment.gw.map(bounded),
@@ -231,12 +253,14 @@ fn project_segments(topology: TopologyView) -> Vec<SegmentSummary> {
         })
         .collect::<Vec<_>>();
     segments.sort_by(|left, right| left.id.cmp(&right.id));
+    segments.dedup_by(|left, right| left.id == right.id);
     segments.truncate(64);
     segments
 }
 
 fn project_vantage(
     topology: &serde_json::Value,
+    aliases: &BTreeMap<String, String>,
 ) -> (Vec<VantageNodeSummary>, Vec<AdvertisementSummary>, usize) {
     let discovered_lans = topology["segments"]
         .as_object()
@@ -261,7 +285,8 @@ fn project_vantage(
             {
                 return None;
             }
-            Some((network, prefix))
+            let observer = origin.split('/').next()?;
+            Some((canonical_site(observer, aliases), network, prefix))
         })
         .collect::<Vec<_>>();
     let mut lan_observers = BTreeMap::new();
@@ -270,11 +295,13 @@ fn project_vantage(
     }
     let mut physical_lans = lan_observers
         .into_iter()
-        .map(|((network, prefix), observers)| {
-            (network, prefix, format!("{network}/{prefix}"), observers)
+        .map(|((site, network, prefix), observers)| {
+            let subnet = format!("{network}/{prefix}");
+            let id = format!("{site}|{subnet}");
+            (site, network, prefix, id, observers)
         })
         .collect::<Vec<_>>();
-    physical_lans.sort_by_key(|(_, prefix, _, observers)| {
+    physical_lans.sort_by_key(|(_, _, prefix, _, observers)| {
         (std::cmp::Reverse(*observers), std::cmp::Reverse(*prefix))
     });
     let mut nodes = topology["nodes"]
@@ -288,11 +315,21 @@ fn project_vantage(
                 .as_array()
                 .and_then(|names| names.first())
                 .and_then(|name| name.as_str());
-            let label = annotation["name"]
+            let mut label = annotation["name"]
                 .as_str()
                 .or(host)
                 .unwrap_or(&id)
                 .to_owned();
+            if label.to_ascii_lowercase().contains("userdata:") {
+                label.clear();
+            }
+            let observed_sites = node["sites"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|site| site.as_str())
+                .map(|site| canonical_site(site, aliases))
+                .collect::<Vec<_>>();
             let site = node["ips"]
                 .as_object()
                 .into_iter()
@@ -301,20 +338,32 @@ fn project_vantage(
                 .flat_map(|address| {
                     physical_lans
                         .iter()
-                        .filter(move |(network, prefix, _, _)| {
+                        .filter(|(site, _, _, _, _)| observed_sites.contains(site))
+                        .filter(move |(_, network, prefix, _, _)| {
                             ipv4_in_subnet(address, *network, *prefix)
                         })
-                        .map(|(_, prefix, label, observers)| (*observers, *prefix, label.clone()))
+                        .map(|(site, _, prefix, _, observers)| (*observers, *prefix, site.clone()))
                 })
                 .max_by_key(|(observers, prefix, _)| (*observers, *prefix))
                 .map(|(_, _, label)| label)
-                .or_else(|| {
-                    node["sites"]
-                        .as_array()
-                        .and_then(|sites| sites.first())
-                        .and_then(|site| site.as_str())
-                        .map(|_| "mesh".to_owned())
-                });
+                .or_else(|| observed_sites.first().cloned());
+            let mut segments = node["ips"]
+                .as_object()
+                .into_iter()
+                .flat_map(|ips| ips.keys())
+                .filter_map(|address| address.parse::<Ipv4Addr>().ok())
+                .flat_map(|address| {
+                    physical_lans
+                        .iter()
+                        .filter(|(site, _, _, _, _)| observed_sites.contains(site))
+                        .filter(move |(_, network, prefix, _, _)| {
+                            ipv4_in_subnet(address, *network, *prefix)
+                        })
+                        .map(|(_, _, _, id, _)| id.clone())
+                })
+                .collect::<Vec<_>>();
+            segments.sort();
+            segments.dedup();
             let device = node["device"].as_bool().unwrap_or(false);
             let kind =
                 annotation["kind"]
@@ -356,6 +405,7 @@ fn project_vantage(
                 id: bounded(id),
                 label: bounded(label),
                 site,
+                segments,
                 kind: bounded(kind.to_owned()),
                 device,
                 ips,
@@ -383,22 +433,12 @@ fn project_vantage(
         .into_iter()
         .flat_map(|items| items.iter())
         .map(|(id, item)| {
-            let site = item["addresses"]
+            let site = item["origins"]
                 .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|address| address.as_str()?.parse::<Ipv4Addr>().ok())
-                .flat_map(|address| {
-                    physical_lans
-                        .iter()
-                        .filter(move |(network, prefix, _, _)| {
-                            ipv4_in_subnet(address, *network, *prefix)
-                        })
-                        .map(|(_, prefix, label, observers)| (*observers, *prefix, label.clone()))
-                })
-                .max_by_key(|(observers, prefix, _)| (*observers, *prefix))
-                .map(|(_, _, label)| label)
-                .or_else(|| Some("mesh".into()));
+                .and_then(|origins| origins.first())
+                .and_then(|origin| origin.as_str())
+                .and_then(|origin| origin.split('/').next())
+                .map(|observer| canonical_site(observer, aliases));
             AdvertisementSummary {
                 id: bounded(id.clone()),
                 label: bounded(item["instance"].as_str().unwrap_or(id).to_owned()),
@@ -463,16 +503,21 @@ fn snapshot(binary: &str, now_ms: u64) -> serde_json::Value {
         let raw_topology =
             serde_json::from_slice::<serde_json::Value>(&query(binary, &["topology", "--json"])?)
                 .map_err(|error| format!("decode vantage: {error}"))?;
-        let (nodes, advertisements, conflicts) = project_vantage(&raw_topology);
+        let peers = project(peers, now_ms / 1000);
+        let aliases = peers
+            .iter()
+            .map(|peer| (peer.hostname.to_ascii_lowercase(), peer.site.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let (nodes, advertisements, conflicts) = project_vantage(&raw_topology, &aliases);
         if nodes.is_empty() {
             return Err("gossiped topology is empty; run mycelium scan on an observer".into());
         }
         let leases = raw_topology["leases"].as_array().map_or(0, Vec::len);
         let observers = raw_topology["updated_from"].as_array().map_or(0, Vec::len);
         Ok::<_, String>((
-            project(peers, now_ms / 1000),
+            peers,
             releases,
-            project_segments(topology),
+            project_segments(topology, &aliases),
             nodes,
             advertisements,
             conflicts,
@@ -610,7 +655,7 @@ mod tests {
             }},
             "conflicts":[{"field":"hostname"}]
         });
-        let (nodes, advertisements, conflicts) = project_vantage(&topology);
+        let (nodes, advertisements, conflicts) = project_vantage(&topology, &BTreeMap::new());
         assert_eq!(conflicts, 1);
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].ports, 2);
@@ -624,6 +669,32 @@ mod tests {
         assert_eq!(advertisements[0].addresses, ["10.0.0.20"]);
         assert_eq!(advertisements[0].interface.as_deref(), Some("en0"));
         assert_eq!(advertisements[0].last_seen, Some(42));
+    }
+
+    #[test]
+    fn overlapping_subnets_deduplicate_only_inside_a_canonical_site() {
+        let topology: TopologyView = serde_json::from_value(json!({"segments": {
+            "pris/lan": {"id":"pris/192.168.1.0/24","kind":"lan","subnet":["192.168.1.0",24],"origins":["pris/linux-pris:ip-route:en0"]},
+            "spark/lan": {"id":"spark/192.168.1.0/24","kind":"lan","subnet":["192.168.1.0",24],"origins":["spark-3539/linux-spark:ip-route:en0"]},
+            "titan/lan": {"id":"titan/192.168.1.0/24","kind":"lan","subnet":["192.168.1.0",24],"origins":["titan/linux-titan:ip-route:en0"]}
+        }})).unwrap();
+        let aliases = BTreeMap::from([
+            ("pris".to_owned(), "fpl".to_owned()),
+            ("spark-3539".to_owned(), "fpl".to_owned()),
+            ("titan".to_owned(), "titan".to_owned()),
+        ]);
+        let segments = project_segments(topology, &aliases);
+        assert_eq!(segments.len(), 2);
+        assert!(
+            segments
+                .iter()
+                .any(|segment| segment.id == "fpl|192.168.1.0/24")
+        );
+        assert!(
+            segments
+                .iter()
+                .any(|segment| segment.id == "titan|192.168.1.0/24")
+        );
     }
 
     #[test]

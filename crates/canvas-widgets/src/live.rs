@@ -21,8 +21,8 @@ use canvas_core::{ThemeMetrics, ThemePalette, VisualTheme};
 use iced::mouse;
 use iced::widget::canvas::{Cache, Geometry, Path};
 use iced::widget::{
-    canvas, column, container, image, progress_bar, responsive, row, scrollable, space, text,
-    Canvas,
+    Canvas, canvas, column, container, image, progress_bar, responsive, row, scrollable, space,
+    text,
 };
 use iced::{Color, ContentFit, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
@@ -370,10 +370,12 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
             let tile_color = color(palette.surface);
             let alert_color = color(palette.danger);
             let tiles: Vec<Element<'_, Message>> = if items.is_empty() {
-                vec![text("No projects")
-                    .size(metrics.body)
-                    .color(color(palette.text))
-                    .into()]
+                vec![
+                    text("No projects")
+                        .size(metrics.body)
+                        .color(color(palette.text))
+                        .into(),
+                ]
             } else {
                 items
                     .iter()
@@ -2595,7 +2597,8 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
         }
         let mut started = state.started.borrow_mut();
         let start = *started.get_or_insert_with(Instant::now);
-        (start.elapsed() < GRAPH_SETTLE).then(iced::widget::Action::request_redraw)
+        let topology = self.nodes.iter().any(|node| node.id.starts_with("site:"));
+        (topology || start.elapsed() < GRAPH_SETTLE).then(iced::widget::Action::request_redraw)
     }
 
     fn draw(
@@ -2663,6 +2666,46 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
                 } else {
                     animated_neural_layout(&self.nodes, bounds.size(), settle)
                 };
+                if topology {
+                    for site in self
+                        .nodes
+                        .iter()
+                        .filter(|node| node.id.starts_with("site:"))
+                    {
+                        let Some(hub) = positions.get(&site.id) else {
+                            continue;
+                        };
+                        let mut min_x = hub.x;
+                        let mut max_x = hub.x;
+                        let mut min_y = hub.y;
+                        let mut max_y = hub.y;
+                        for member in self
+                            .nodes
+                            .iter()
+                            .filter(|node| node.group.as_deref() == Some(site.label.as_str()))
+                        {
+                            if let Some(point) = positions.get(&member.id) {
+                                min_x = min_x.min(point.x);
+                                max_x = max_x.max(point.x);
+                                min_y = min_y.min(point.y);
+                                max_y = max_y.max(point.y);
+                            }
+                        }
+                        let origin = Point::new((min_x - 22.0).max(2.0), (min_y - 22.0).max(2.0));
+                        let size = Size::new(
+                            (max_x - min_x + 44.0).min(bounds.width - origin.x - 2.0),
+                            (max_y - min_y + 44.0).min(bounds.height - origin.y - 2.0),
+                        );
+                        let zone = Path::rounded_rectangle(origin, size, 18.0.into());
+                        frame.fill(&zone, with_alpha(color(self.palette.surface_muted), 0.08));
+                        frame.stroke(
+                            &zone,
+                            canvas::Stroke::default()
+                                .with_width(1.0)
+                                .with_color(with_alpha(color(self.palette.border), 0.3)),
+                        );
+                    }
+                }
                 let idle_edge = with_alpha(color(self.palette.border), 0.42);
                 for edge in &self.edges {
                     let (Some(from), Some(to)) =
@@ -2692,20 +2735,6 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
                             .with_width(1.0 + edge.heat * 3.0)
                             .with_color(active),
                     );
-                    if edge.heat > 0.02 {
-                        let travel = (settle * (0.45 + edge.heat * 0.9)
-                            + stable_phase(&edge.from)
-                            + stable_phase(&edge.to) * 0.37)
-                            .fract();
-                        let pulse = Point::new(
-                            from.x + (to.x - from.x) * travel,
-                            from.y + (to.y - from.y) * travel,
-                        );
-                        frame.fill(
-                            &Path::circle(pulse, 2.5 + edge.heat * 3.5),
-                            with_alpha(color(self.palette.primary), 0.7 + edge.heat * 0.3),
-                        );
-                    }
                 }
 
                 for node in &self.nodes {
@@ -2780,13 +2809,34 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
             });
 
         let mut output = graph;
-        let Some(pointer) = cursor.position_in(bounds) else {
-            return output;
-        };
         let positions = if self.dag {
             dag_layout(&self.nodes, &self.edges, bounds.size())
         } else {
             animated_neural_layout(&self.nodes, bounds.size(), settle)
+        };
+        if topology && settle >= 1.0 {
+            let mut activity = canvas::Frame::new(renderer, bounds.size());
+            let phase = (start.elapsed().as_secs_f32() * 0.12).fract();
+            for edge in self.edges.iter().filter(|edge| edge.heat > 0.02) {
+                let (Some(from), Some(to)) = (positions.get(&edge.from), positions.get(&edge.to))
+                else {
+                    continue;
+                };
+                let travel =
+                    (phase + stable_phase(&edge.from) + stable_phase(&edge.to) * 0.37).fract();
+                let pulse = Point::new(
+                    from.x + (to.x - from.x) * travel,
+                    from.y + (to.y - from.y) * travel,
+                );
+                activity.fill(
+                    &Path::circle(pulse, 1.8 + edge.heat * 2.2),
+                    with_alpha(color(self.palette.primary), 0.45 + edge.heat * 0.4),
+                );
+            }
+            output.push(activity.into_geometry());
+        }
+        let Some(pointer) = cursor.position_in(bounds) else {
+            return output;
         };
         let hovered = self
             .nodes
@@ -2919,13 +2969,17 @@ fn topology_web_layout_at_phase(
         .filter(|node| node.id.starts_with("site:"))
         .collect::<Vec<_>>();
     let mut positions = std::collections::BTreeMap::new();
-    let cell_width = size.width / sites.len().max(1) as f32;
+    let center = Point::new(size.width * 0.5, size.height * 0.5);
+    let hub_radius_x = (size.width * 0.34).max(80.0);
+    let hub_radius_y = (size.height * 0.28).max(64.0);
     for (site_index, site) in sites.iter().enumerate() {
-        let center = Point::new(
-            cell_width * (site_index as f32 + 0.5),
-            size.height * 0.5 - (1.0 - settle) * 12.0,
+        let hub_angle = -std::f32::consts::FRAC_PI_2
+            + std::f32::consts::TAU * site_index as f32 / sites.len().max(1) as f32;
+        let hub = Point::new(
+            center.x + hub_angle.cos() * hub_radius_x * settle,
+            center.y + hub_angle.sin() * hub_radius_y * settle,
         );
-        positions.insert(site.id.clone(), center);
+        positions.insert(site.id.clone(), hub);
         let site_name = site.label.as_str();
         let members = nodes
             .iter()
@@ -2933,8 +2987,8 @@ fn topology_web_layout_at_phase(
                 !node.id.starts_with("site:") && node.group.as_deref() == Some(site_name)
             })
             .collect::<Vec<_>>();
-        let radius_x = (cell_width * 0.27).min(150.0).max(48.0);
-        let radius_y = (size.height * 0.24).max(28.0);
+        let radius_x = (size.width / sites.len().max(3) as f32 * 0.28).clamp(38.0, 105.0);
+        let radius_y = (size.height * 0.13).clamp(34.0, 115.0);
         for (index, node) in members.iter().enumerate() {
             let angle = -std::f32::consts::FRAC_PI_2
                 + std::f32::consts::TAU * index as f32 / members.len().max(1) as f32;
@@ -2942,8 +2996,8 @@ fn topology_web_layout_at_phase(
             positions.insert(
                 node.id.clone(),
                 Point::new(
-                    center.x + angle.cos() * radius_x * spring,
-                    center.y + angle.sin() * radius_y * spring,
+                    hub.x + angle.cos() * radius_x * spring,
+                    hub.y + angle.sin() * radius_y * spring,
                 ),
             );
         }
@@ -2953,9 +3007,15 @@ fn topology_web_layout_at_phase(
         .filter(|node| !positions.contains_key(&node.id))
         .collect::<Vec<_>>();
     for (index, node) in unplaced.iter().enumerate() {
+        let angle = -std::f32::consts::FRAC_PI_2
+            + std::f32::consts::TAU * index as f32 / unplaced.len().max(1) as f32;
+        let band = if index % 2 == 0 { 0.43 } else { 0.37 };
         positions.insert(
             node.id.clone(),
-            Point::new(32.0 + index as f32 * 96.0, (size.height - 24.0).max(24.0)),
+            Point::new(
+                center.x + angle.cos() * size.width * band * settle,
+                center.y + angle.sin() * size.height * band * settle,
+            ),
         );
     }
     positions
@@ -6426,9 +6486,11 @@ mod tests {
         let hub = layout["site:1"];
         assert_eq!(hub.x, 600.0);
         assert_ne!(layout["home-pi"].x, layout["agora-one"].x);
-        assert!(layout
-            .values()
-            .all(|point| point.y >= 24.0 && point.y <= 256.0));
+        assert!(
+            layout
+                .values()
+                .all(|point| point.y >= 24.0 && point.y <= 256.0)
+        );
 
         let later = animated_neural_layout(&nodes, Size::new(1200.0, 280.0), 0.5);
         assert_ne!(later["home-pi"], layout["home-pi"]);
