@@ -10,6 +10,10 @@ use std::{
 const OWNER: &str = "mycelium";
 const STREAM: &str = "mesh";
 const MAX_TEXT_CHARS: usize = 64;
+// Canvas accepts 64 KiB stream messages and Linux AF_UNIX datagrams support
+// them. Keep headroom for framing. macOS really is capped at 2 KiB, so retain
+// the portable ceiling there instead of promising a send the kernel rejects.
+const LINUX_TOPOLOGY_DATAGRAM: usize = 60 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct PeerView {
@@ -408,8 +412,16 @@ fn snapshot(binary: &str, now_ms: u64) -> serde_json::Value {
     }))
 }
 
-fn fit_snapshot(mut event: serde_json::Value) -> serde_json::Value {
-    let budget = canvas_feeds::MAX_DATAGRAM - canvas_feeds::ENVELOPE_OVERHEAD;
+fn fit_snapshot(event: serde_json::Value) -> serde_json::Value {
+    let budget = if cfg!(target_os = "macos") {
+        canvas_feeds::MAX_DATAGRAM - canvas_feeds::ENVELOPE_OVERHEAD
+    } else {
+        LINUX_TOPOLOGY_DATAGRAM - canvas_feeds::ENVELOPE_OVERHEAD
+    };
+    fit_snapshot_to(event, budget)
+}
+
+fn fit_snapshot_to(mut event: serde_json::Value, budget: usize) -> serde_json::Value {
     while serde_json::to_vec(&event).map_or(usize::MAX, |bytes| bytes.len()) > budget {
         let removed = event
             .pointer_mut("/payload/releases")
@@ -530,11 +542,40 @@ mod tests {
             "contract": "canvas.widget.snapshot.v1", "sequence": 1, "emitted_at_ms": 1,
             "payload": { "peers": vec![peer; 12], "segments": [], "releases": [], "degraded": false }
         });
-        let fitted = fit_snapshot(event);
+        let fitted = fit_snapshot_to(
+            event,
+            canvas_feeds::MAX_DATAGRAM - canvas_feeds::ENVELOPE_OVERHEAD,
+        );
         assert!(
             serde_json::to_vec(&fitted).unwrap().len()
                 <= canvas_feeds::MAX_DATAGRAM - canvas_feeds::ENVELOPE_OVERHEAD
         );
         assert_eq!(fitted.pointer("/payload/truncated"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn linux_topology_budget_preserves_ninety_rich_nodes() {
+        let nodes = (0..90)
+            .map(|index| json!({
+                "id": format!("node-{index}"), "label": format!("Network node {index}"),
+                "site": "wagar-house", "kind": "device", "device": true,
+                "ips": [format!("10.0.0.{index}")], "mac": format!("00:11:22:33:44:{index:02x}"),
+                "hostnames": [format!("node-{index}.local")], "ports": 2,
+                "links_up": 2, "links_down": 0, "capacity_mbps": 1000,
+                "services": 2, "overlays": 1, "overlays_online": 1, "origins": 2
+            }))
+            .collect::<Vec<_>>();
+        let event = json!({
+            "schema_version": 1, "owner": OWNER, "stream": STREAM,
+            "contract": "canvas.widget.snapshot.v1", "sequence": 1, "emitted_at_ms": 1,
+            "payload": { "peers": [], "segments": [], "nodes": nodes,
+                "advertisements": [], "releases": [], "degraded": false }
+        });
+        let fitted = fit_snapshot_to(
+            event,
+            LINUX_TOPOLOGY_DATAGRAM - canvas_feeds::ENVELOPE_OVERHEAD,
+        );
+        assert_eq!(fitted["payload"]["nodes"].as_array().unwrap().len(), 90);
+        assert_eq!(fitted.pointer("/payload/truncated"), None);
     }
 }

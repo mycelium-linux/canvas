@@ -7,7 +7,7 @@ end
 
 local nodes, edges = canvas.array(), canvas.array()
 local sites, peer_ids = {}, {}
-local warnings, site_count, vlan_count, observed_count, service_count = 0, 0, 0, 0, 0
+local warnings, site_count, segment_count, vlan_count, observed_count, service_count = 0, 0, 0, 0, 0, 0
 
 -- Presentation-only compatibility while the remaining legacy node is migrated.
 -- Mycelium remains the owner of the raw advertised site identity.
@@ -57,6 +57,7 @@ if type(p.nodes) == "table" then
     if tonumber(item.overlays) and item.overlays > 0 then
       label = label .. " · mesh " .. tostring(item.overlays_online or 0) .. "/" .. tostring(item.overlays)
     end
+    label = string.sub(label, 1, 128)
     local id = "observed:" .. tostring(i)
     local state = tonumber(item.links_down) and item.links_down > 0 and "warning" or "neutral"
     nodes[#nodes + 1] = {id=id,label=label,group=site,heat=item.device and 0.62 or 0.22,state=state}
@@ -74,6 +75,7 @@ if type(p.advertisements) == "table" then
     local label = tostring(item.label or item.service_type or "service")
     if item.target then label = label .. " · " .. tostring(item.target) end
     if item.port then label = label .. ":" .. tostring(item.port) end
+    label = string.sub(label, 1, 128)
     nodes[#nodes + 1] = {id=id,label=label,group=site,heat=0.3,state="good"}
     edges[#edges + 1] = {from=sites[site],to=id,heat=0.24}
   end
@@ -109,6 +111,7 @@ end
 if type(p.segments) == "table" then
   for i = 1, #p.segments do
     local segment = p.segments[i]
+    segment_count = segment_count + 1
     local vlan = tonumber(segment.vlan)
     local site = display_site(tostring(segment.site or "unknown"))
     if vlan then vlan_count = vlan_count + 1 end
@@ -132,8 +135,8 @@ end
 
 return {
   kind="snapshot",
-  widget={kind="neural_graph",title=string.format("Mycelium live vantage · %d peers · %d nodes · %d services · %d sites · %d VLANs · %d leases · %d conflicts · %d observations",
-    #p.peers,observed_count,service_count,site_count,vlan_count,tonumber(p.leases) or 0,tonumber(p.conflicts) or 0,tonumber(p.observers) or 0),nodes=nodes,edges=edges},
+  widget={kind="neural_graph",title=string.format("Mycelium · %d peers · %d nodes · %d svc · %d sites · %d segments · %d VLANs · %d views · %d conflicts",
+    #p.peers,observed_count,service_count,site_count,segment_count,vlan_count,tonumber(p.observers) or 0,tonumber(p.conflicts) or 0),nodes=nodes,edges=edges},
   data={
     state=(p.degraded or warnings > 0 or vlan_count == 0) and "partial" or "ready",
     source="mycelium/mesh",provenance="live",

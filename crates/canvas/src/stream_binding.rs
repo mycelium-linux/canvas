@@ -1709,7 +1709,7 @@ mod tests {
         else {
             panic!("mesh binder changed widget family")
         };
-        assert!(title.contains("1 peers · 1 nodes · 1 services · 1 sites · 1 VLANs"));
+        assert!(title.contains("1 peers · 1 nodes · 1 svc · 1 sites · 1 segments · 1 VLANs"));
         assert_eq!(
             nodes.len(),
             5,
