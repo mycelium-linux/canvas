@@ -22,7 +22,7 @@ struct Transport {
 
 #[derive(Deserialize, serde::Serialize)]
 struct Note {
-    track: String,
+    track: usize,
     tick: u64,
     length_ticks: u64,
     note: u8,
@@ -125,7 +125,7 @@ mod tests {
                 position_ticks: 12,
                 cycle_ticks: 96,
                 notes: vec![Note {
-                    track: "piano".into(),
+                    track: 0,
                     tick: 0,
                     length_ticks: 6,
                     note: 60,
@@ -143,6 +143,7 @@ mod tests {
         assert_eq!(value["recording"], true);
         assert_eq!(value["tracks"].as_array().unwrap().len(), 3);
         assert_eq!(value["notes"][0]["note"], 60);
+        assert_eq!(value["notes"][0]["track"], 0);
     }
 }
 
