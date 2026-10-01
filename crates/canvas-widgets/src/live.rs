@@ -2685,6 +2685,14 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
                         with_alpha(semantic, 0.08 + heat * 0.16),
                     );
                 }
+                if node.id.starts_with("site:") {
+                    frame.stroke(
+                        &Path::circle(*position, radius + 11.0),
+                        canvas::Stroke::default()
+                            .with_width(1.0)
+                            .with_color(with_alpha(semantic, 0.38)),
+                    );
+                }
                 frame.fill(
                     &Path::circle(*position, radius),
                     lerp_oklch(
@@ -2695,7 +2703,10 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
                 );
                 frame.fill_text(canvas::Text {
                     content: node.label.clone(),
-                    position: Point::new(position.x + radius + 5.0, position.y + 4.0),
+                    position: Point::new(
+                        (position.x + radius + 5.0).min((bounds.width - 112.0).max(4.0)),
+                        (position.y + 4.0).min(bounds.height - 4.0),
+                    ),
                     color: color(self.palette.text),
                     size: iced::Pixels(self.label_size),
                     ..Default::default()
@@ -2708,6 +2719,16 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
 /// Deterministic grouped columns: stable input order within each first-seen
 /// group, with ungrouped nodes sharing the final/default column.
 fn neural_layout(nodes: &[NeuralNode], size: Size) -> std::collections::BTreeMap<String, Point> {
+    if nodes.iter().any(|node| node.id.starts_with("site:")) {
+        return topology_web_layout(nodes, size);
+    }
+    grouped_column_layout(nodes, size)
+}
+
+fn grouped_column_layout(
+    nodes: &[NeuralNode],
+    size: Size,
+) -> std::collections::BTreeMap<String, Point> {
     let mut groups: Vec<(String, Vec<&NeuralNode>)> = Vec::new();
     for node in nodes {
         let group = node.group.as_deref().unwrap_or("nodes");
@@ -2732,6 +2753,63 @@ fn neural_layout(nodes: &[NeuralNode], size: Size) -> std::collections::BTreeMap
             let y = margin_y + usable_h * (row + 1) as f32 / (members.len() + 1) as f32;
             positions.insert(node.id.clone(), Point::new(x, y));
         }
+    }
+    positions
+}
+
+/// Deterministic hub-and-orbit layout for topology snapshots. A wide, shallow
+/// wall surface needs real radial separation; grouped columns collapse into a
+/// card row and make site-to-peer edges unreadable.
+fn topology_web_layout(
+    nodes: &[NeuralNode],
+    size: Size,
+) -> std::collections::BTreeMap<String, Point> {
+    let sites = nodes
+        .iter()
+        .filter(|node| node.id.starts_with("site:"))
+        .collect::<Vec<_>>();
+    let mut positions = std::collections::BTreeMap::new();
+    let cell_width = size.width / sites.len().max(1) as f32;
+    for (site_index, site) in sites.iter().enumerate() {
+        let center = Point::new(
+            cell_width * (site_index as f32 + 0.5),
+            size.height * 0.5,
+        );
+        positions.insert(site.id.clone(), center);
+        let site_name = site.id.trim_start_matches("site:");
+        let members = nodes
+            .iter()
+            .filter(|node| {
+                !node.id.starts_with("site:")
+                    && node.group.as_deref() == Some(site_name)
+            })
+            .collect::<Vec<_>>();
+        let radius_x = (cell_width * 0.38).min(220.0).max(72.0);
+        let radius_y = (size.height * 0.32).max(34.0);
+        for (index, node) in members.iter().enumerate() {
+            let angle = -std::f32::consts::FRAC_PI_2
+                + std::f32::consts::TAU * index as f32 / members.len().max(1) as f32;
+            positions.insert(
+                node.id.clone(),
+                Point::new(
+                    center.x + angle.cos() * radius_x,
+                    center.y + angle.sin() * radius_y,
+                ),
+            );
+        }
+    }
+    let unplaced = nodes
+        .iter()
+        .filter(|node| !positions.contains_key(&node.id))
+        .collect::<Vec<_>>();
+    for (index, node) in unplaced.iter().enumerate() {
+        positions.insert(
+            node.id.clone(),
+            Point::new(
+                32.0 + index as f32 * 96.0,
+                (size.height - 24.0).max(24.0),
+            ),
+        );
     }
     positions
 }
@@ -6174,6 +6252,28 @@ mod tests {
         assert!(first["a"].x < first["b"].x);
         assert_eq!(first["b"].x, first["c"].x);
         assert!(first["b"].y < first["c"].y);
+    }
+
+    #[test]
+    fn topology_web_orbits_site_members_in_a_wide_band() {
+        let node = |id: &str, group: &str| NeuralNode {
+            id: id.into(),
+            label: id.into(),
+            group: Some(group.into()),
+            heat: 0.5,
+            state: StatusLevel::Good,
+        };
+        let nodes = vec![
+            node("site:home", "sites"),
+            node("home-pi", "home"),
+            node("agora-one", "home"),
+            node("segment:lan", "home"),
+        ];
+        let layout = neural_layout(&nodes, Size::new(1200.0, 280.0));
+        let hub = layout["site:home"];
+        assert_eq!(hub, Point::new(600.0, 140.0));
+        assert_ne!(layout["home-pi"].x, layout["agora-one"].x);
+        assert!(layout.values().all(|point| point.y >= 24.0 && point.y <= 256.0));
     }
 
     #[test]
