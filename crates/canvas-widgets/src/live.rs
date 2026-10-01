@@ -28,12 +28,16 @@ use iced::{Color, ContentFit, Element, Length, Point, Rectangle, Renderer, Size,
 
 pub mod app_chrome;
 mod clock;
+mod primitives;
 mod quality;
 mod quant;
 mod signal_scene;
 mod wasm_cdg;
 mod wasm_hyperspace;
 use clock::AnalogClockProgram;
+use primitives::{
+    header as primitive_header, list_row as primitive_list_row, metric as primitive_metric,
+};
 
 pub fn loading_rails<Message: 'static>(visual: VisualTheme) -> Element<'static, Message> {
     let palette = visual.palette;
@@ -197,37 +201,14 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
             } else {
                 color(palette.text)
             };
-            let mut value_line = row![
-                text(format_quantity(*value, unit.as_deref()))
-                    .size(metrics.hero)
-                    .color(value_color),
-                text(if unit.as_deref() == Some("$") {
-                    String::new()
-                } else {
-                    unit.clone().unwrap_or_default()
-                })
-                .size(metrics.small)
-                .color(color(palette.text_muted)),
-            ]
-            .spacing(metrics.space_1)
-            .align_y(iced::alignment::Vertical::Bottom);
-            if let Some(change) = change {
-                value_line =
-                    value_line.push(text(format!("{change:+.1}%")).size(metrics.small).color(
-                        if *change >= 0.0 {
-                            color(palette.success)
-                        } else {
-                            color(palette.danger)
-                        },
-                    ));
-            }
-            // Label above the value, as the gauge also does: the label names the
-            // metric, and a name reads as a caption rather than a footnote.
             let body = column![
-                text(label)
-                    .size(metrics.small)
-                    .color(color(palette.text_muted)),
-                value_line,
+                primitive_metric(
+                    label.clone(),
+                    format_quantity(*value, unit.as_deref()),
+                    change.map(|value| format!("{value:+.1}%")),
+                    value_color,
+                    visual,
+                ),
                 Canvas::new(SparklineProgram {
                     values: history.clone(),
                     color: accent,
@@ -345,13 +326,7 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                 color(palette.text_muted),
             );
             let body = column![
-                row![
-                    text(title).size(metrics.body).color(color(palette.text)),
-                    space::horizontal(),
-                    text(unit.clone().unwrap_or_default())
-                        .size(metrics.small)
-                        .color(color(palette.text_muted)),
-                ],
+                primitive_header(title.clone(), unit.clone(), visual),
                 legend,
                 Canvas::new(TimeSeriesProgram {
                     series: series
@@ -393,36 +368,24 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
             orientation: _,
         } => {
             let tile_color = color(palette.surface);
-            let label_color = color(palette.text);
             let alert_color = color(palette.danger);
             let tiles: Vec<Element<'_, Message>> = if items.is_empty() {
                 vec![
                     text("No projects")
                         .size(metrics.body)
-                        .color(label_color)
+                        .color(color(palette.text))
                         .into(),
                 ]
             } else {
                 items
                     .iter()
                     .map(|item| {
-                        let dot = if item.unread {
-                            container(space::horizontal())
-                                .width(Length::Fixed(8.0))
-                                .height(Length::Fixed(8.0))
-                                .style(move |_| container::Style {
-                                    background: Some(alert_color.into()),
-                                    ..Default::default()
-                                })
-                        } else {
-                            container(space::horizontal())
-                                .width(Length::Fixed(8.0))
-                                .height(Length::Fixed(8.0))
-                        };
-                        container(
-                            row![dot, text(&item.label).size(metrics.body).color(label_color),]
-                                .spacing(metrics.space_1),
-                        )
+                        container(primitive_list_row(
+                            item.label.clone(),
+                            None,
+                            item.unread.then_some(alert_color),
+                            visual,
+                        ))
                         .padding(4)
                         .style(move |_| container::Style {
                             background: Some(tile_color.into()),
@@ -684,15 +647,13 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
             panel(
                 spec,
                 iced::widget::Column::<Message>::new()
-                    // Same order as Stat — label, value, then the track the
-                    // value fills. The two disagreeing was the tell that
-                    // neither had been placed on purpose.
-                    .push(
-                        text(label)
-                            .size(metrics.small)
-                            .color(color(palette.text_muted)),
-                    )
-                    .push(text(pct).size(metrics.hero).color(color(palette.text)))
+                    .push(primitive_metric(
+                        label,
+                        pct,
+                        None,
+                        color(palette.text),
+                        visual,
+                    ))
                     .push(
                         Canvas::new(GaugeProgram {
                             value: *value,
@@ -716,13 +677,7 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
         } => panel(
             spec,
             column![
-                row![
-                    text(title).size(metrics.body).color(color(palette.text)),
-                    space::horizontal(),
-                    text(unit.clone().unwrap_or_default())
-                        .size(metrics.small)
-                        .color(color(palette.text_muted))
-                ],
+                primitive_header(title.clone(), unit.clone(), visual),
                 Canvas::new(HistogramProgram {
                     values: buckets.iter().map(|bucket| bucket.count as f32).collect(),
                     color: color(palette.info),
