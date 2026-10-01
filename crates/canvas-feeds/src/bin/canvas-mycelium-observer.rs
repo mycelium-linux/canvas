@@ -86,6 +86,26 @@ struct SegmentSummary {
     gateway: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct VantageNodeSummary {
+    id: String,
+    label: String,
+    site: Option<String>,
+    kind: String,
+    device: bool,
+    ips: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdvertisementSummary {
+    id: String,
+    label: String,
+    site: Option<String>,
+    service_type: String,
+    target: Option<String>,
+    port: Option<u16>,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct ReleaseSummary {
     #[serde(default = "default_component")]
@@ -165,6 +185,90 @@ fn project_segments(topology: TopologyView) -> Vec<SegmentSummary> {
     segments
 }
 
+fn project_vantage(
+    topology: &serde_json::Value,
+) -> (Vec<VantageNodeSummary>, Vec<AdvertisementSummary>, usize) {
+    let mut nodes = topology["nodes"]
+        .as_object()
+        .into_iter()
+        .flat_map(|nodes| nodes.values())
+        .filter_map(|node| {
+            let id = node["id"].as_str()?.to_owned();
+            let annotation = &node["annotation"];
+            let host = node["hostnames"]
+                .as_array()
+                .and_then(|names| names.first())
+                .and_then(|name| name.as_str());
+            let label = annotation["name"]
+                .as_str()
+                .or(host)
+                .unwrap_or(&id)
+                .to_owned();
+            let site = node["sites"]
+                .as_array()
+                .and_then(|sites| sites.first())
+                .and_then(|site| site.as_str())
+                .map(|site| bounded(site.to_owned()));
+            let device = node["device"].as_bool().unwrap_or(false);
+            let kind =
+                annotation["kind"]
+                    .as_str()
+                    .unwrap_or(if device { "device" } else { "observed" });
+            let ips = node["ips"]
+                .as_object()
+                .into_iter()
+                .flat_map(|ips| ips.keys())
+                .take(4)
+                .cloned()
+                .collect();
+            Some(VantageNodeSummary {
+                id: bounded(id),
+                label: bounded(label),
+                site,
+                kind: bounded(kind.to_owned()),
+                device,
+                ips,
+            })
+        })
+        .collect::<Vec<_>>();
+    nodes.sort_by(|left, right| (&left.site, &left.label).cmp(&(&right.site, &right.label)));
+    nodes.truncate(160);
+    let mut advertisements = topology["advertisements"]
+        .as_object()
+        .into_iter()
+        .flat_map(|items| items.iter())
+        .map(|(id, item)| {
+            let site = item["origins"]
+                .as_array()
+                .and_then(|origins| origins.first())
+                .and_then(|origin| origin.as_str())
+                .and_then(|origin| origin.split_once('/'))
+                .map(|(site, _)| bounded(site.to_owned()));
+            AdvertisementSummary {
+                id: bounded(id.clone()),
+                label: bounded(item["instance"].as_str().unwrap_or(id).to_owned()),
+                site,
+                service_type: bounded(
+                    item["service_type"]
+                        .as_str()
+                        .unwrap_or("service")
+                        .to_owned(),
+                ),
+                target: item["target"]
+                    .as_str()
+                    .map(|value| bounded(value.to_owned())),
+                port: item["port"]
+                    .as_u64()
+                    .and_then(|port| u16::try_from(port).ok()),
+            }
+        })
+        .collect::<Vec<_>>();
+    advertisements.sort_by(|left, right| left.label.cmp(&right.label));
+    advertisements.truncate(48);
+    let conflicts = topology["conflicts"].as_array().map_or(0, Vec::len);
+    (nodes, advertisements, conflicts)
+}
+
 fn query(binary: &str, args: &[&str]) -> Result<Vec<u8>, String> {
     let output = Command::new(binary)
         .args(args)
@@ -186,17 +290,37 @@ fn snapshot(binary: &str, now_ms: u64) -> serde_json::Value {
             &["releases", "list", "--json"],
         )?)
         .map_err(|error| format!("decode releases: {error}"))?;
-        let topology =
+        let mut topology =
             serde_json::from_slice::<TopologyView>(&query(binary, &["topology", "--json"])?)
                 .map_err(|error| format!("decode topology: {error}"))?;
+        let mut raw_topology =
+            serde_json::from_slice::<serde_json::Value>(&query(binary, &["topology", "--json"])?)
+                .map_err(|error| format!("decode vantage: {error}"))?;
+        if raw_topology["nodes"]
+            .as_object()
+            .is_none_or(|nodes| nodes.is_empty())
+        {
+            if let Some(path) = std::env::var_os("MYCELIUM_VANTAGE_SNAPSHOT") {
+                let bytes = std::fs::read(path)
+                    .map_err(|error| format!("read vantage snapshot: {error}"))?;
+                topology = serde_json::from_slice(&bytes)
+                    .map_err(|error| format!("decode vantage topology: {error}"))?;
+                raw_topology = serde_json::from_slice(&bytes)
+                    .map_err(|error| format!("decode vantage snapshot: {error}"))?;
+            }
+        }
+        let (nodes, advertisements, conflicts) = project_vantage(&raw_topology);
         Ok::<_, String>((
             project(peers, now_ms / 1000),
             releases,
             project_segments(topology),
+            nodes,
+            advertisements,
+            conflicts,
         ))
     })();
     let payload = match result {
-        Ok((peers, mut releases, segments)) => {
+        Ok((peers, mut releases, segments, nodes, advertisements, conflicts)) => {
             releases.truncate(16);
             for release in &mut releases {
                 release.component = bounded(std::mem::take(&mut release.component));
@@ -204,10 +328,10 @@ fn snapshot(binary: &str, now_ms: u64) -> serde_json::Value {
                 release.channel = bounded(std::mem::take(&mut release.channel));
                 release.target = bounded(std::mem::take(&mut release.target));
             }
-            json!({ "peers": peers, "segments": segments, "releases": releases, "degraded": false })
+            json!({ "peers": peers, "segments": segments, "nodes": nodes, "advertisements": advertisements, "conflicts": conflicts, "releases": releases, "degraded": false })
         }
         Err(error) => {
-            json!({ "peers": [], "segments": [], "releases": [], "degraded": true, "error": bounded(error) })
+            json!({ "peers": [], "segments": [], "nodes": [], "advertisements": [], "conflicts": 0, "releases": [], "degraded": true, "error": bounded(error) })
         }
     };
     fit_snapshot(json!({
@@ -224,6 +348,14 @@ fn fit_snapshot(mut event: serde_json::Value) -> serde_json::Value {
             .pointer_mut("/payload/releases")
             .and_then(|value| value.as_array_mut())
             .is_some_and(|releases| releases.pop().is_some())
+            || event
+                .pointer_mut("/payload/advertisements")
+                .and_then(|value| value.as_array_mut())
+                .is_some_and(|items| items.pop().is_some())
+            || event
+                .pointer_mut("/payload/nodes")
+                .and_then(|value| value.as_array_mut())
+                .is_some_and(|nodes| nodes.len() > 1 && nodes.pop().is_some())
             || event
                 .pointer_mut("/payload/segments")
                 .and_then(|value| value.as_array_mut())

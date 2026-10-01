@@ -59,8 +59,7 @@
     }
   ],
   "layout": { "kind": "canvas", "placements": [
-    { "surface_id": "daw", "bounds": { "x": 0.0, "y": 0.0, "width": 1.0, "height": 0.68 }, "layer": 0 },
-    { "surface_id": "mesh", "bounds": { "x": 0.0, "y": 0.68, "width": 1.0, "height": 0.32 }, "layer": 0 }
+    { "surface_id": "daw", "bounds": { "x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0 }, "layer": 0 }
   ]},
   "bindings": [
     {
@@ -88,5 +87,7 @@
       "adapter": "home-systems-v1", "delivery": { "mode": "latest" }
     }
   ],
-  "pages": [], "active_page": 0, "focused_surface_id": null
+  "pages": [
+    { "name": "Mycelium", "layout": { "kind": "surface", "surface_id": "mesh" } }
+  ], "active_page": 1, "focused_surface_id": null
 }

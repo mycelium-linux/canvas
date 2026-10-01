@@ -2784,8 +2784,8 @@ fn topology_web_layout(
                     && node.group.as_deref() == Some(site_name)
             })
             .collect::<Vec<_>>();
-        let radius_x = (cell_width * 0.38).min(220.0).max(72.0);
-        let radius_y = (size.height * 0.32).max(34.0);
+        let radius_x = (cell_width * 0.27).min(150.0).max(48.0);
+        let radius_y = (size.height * 0.24).max(28.0);
         for (index, node) in members.iter().enumerate() {
             let angle = -std::f32::consts::FRAC_PI_2
                 + std::f32::consts::TAU * index as f32 / members.len().max(1) as f32;

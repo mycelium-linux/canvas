@@ -1691,6 +1691,9 @@ mod tests {
                 }],
                 "segments": [{"id":"home/vlan:35","label":"Audio","kind":"vlan","site":"home",
                     "vlan":35,"subnet":"10.35.0.0/24","gateway":"10.35.0.1"}],
+                "nodes": [{"id":"speaker","label":"Living room speaker","site":"home","kind":"audio","device":true,"ips":["10.35.0.20"]}],
+                "advertisements": [{"id":"raop","label":"Living Room","site":"home","service_type":"_raop._tcp","target":"speaker.local","port":7000}],
+                "conflicts": 0,
                 "releases": [{"component":"canvas","version":"0.1.0","channel":"canary","target":"aarch64-unknown-linux-gnu"}],
                 "degraded": false
             }),
@@ -1704,11 +1707,12 @@ mod tests {
         else {
             panic!("mesh binder changed widget family")
         };
-        assert!(title.contains("1 peers · 1 sites · 1 VLANs"));
-        assert_eq!(nodes.len(), 3, "site, peer, and VLAN are graph vertices");
-        assert_eq!(nodes[1].state, canvas_widgets::StatusLevel::Critical);
-        assert!(nodes[2].label.contains("VLAN 35"));
-        assert_eq!(edges.len(), 2, "site-to-peer and site-to-VLAN edges");
+        assert!(title.contains("1 peers · 1 observed · 1 services · 1 sites · 1 VLANs"));
+        assert_eq!(nodes.len(), 5, "site, observed device, service, peer, and VLAN are graph vertices");
+        assert!(nodes.iter().any(|node| node.label == "wagar-house"));
+        assert!(nodes.iter().any(|node| node.label.contains("Living room speaker")));
+        assert!(nodes.iter().any(|node| node.label.contains("VLAN 35")));
+        assert_eq!(edges.len(), 4, "every discovered fact is attached to its site");
         assert_eq!(target.data.state, canvas_widgets::WidgetDataState::Partial);
     }
 
