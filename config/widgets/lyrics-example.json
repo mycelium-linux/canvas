@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "kind": "lyrics_display",
   "id": "mpd-lyrics",
   "title": "Now Playing",
@@ -31,7 +31,6 @@
   "style": "hyperspace",
   "scroll_offset": 1.5,
   "highlight_intensity": 0.8,
-  "theme": "home",
   "refresh_ms": 100,
   "chrome": "frameless",
   "data": {

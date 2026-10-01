@@ -217,6 +217,7 @@ pub const KNOWN_WIDGET_KINDS: &[&str] = &[
     "text",
     "module",
     "launcher",
+    "hyperspace_shader",
     "lyrics_display",
     "cdg_viewer",
 ];

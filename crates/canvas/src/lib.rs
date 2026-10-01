@@ -1863,11 +1863,16 @@ mod tests {
             .expect("widget-catalog.json must deserialize as a WorkspaceDocument");
         doc.validate(&catalog())
             .expect("widget-catalog.json must pass validation");
-        assert_eq!(doc.surfaces.len(), 9);
+        assert_eq!(doc.surfaces.len(), 49);
         let Layout::Canvas { placements } = &doc.layout else {
             panic!("widget catalog must use a tiled canvas layout")
         };
-        assert_eq!(placements.len(), doc.surfaces.len());
+        assert_eq!(placements.len(), 9);
+        assert_eq!(doc.pages.len(), 5);
+        assert!(doc.pages.iter().all(|page| match &page.layout {
+            Layout::Canvas { placements } => placements.len() <= 9,
+            _ => false,
+        }));
     }
 
     #[test]

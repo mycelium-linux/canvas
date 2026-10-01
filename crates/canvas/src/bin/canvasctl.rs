@@ -812,6 +812,19 @@ mod catalog_tests {
             .count();
         let page_count = fixture_count.div_ceil(CATALOG_PAGE_SIZE);
         let mut ids = std::collections::BTreeSet::new();
+        let mut kinds = std::collections::BTreeSet::new();
+        for entry in fs::read_dir(&directory).unwrap().filter_map(Result::ok) {
+            if !entry
+                .path()
+                .extension()
+                .is_some_and(|value| value == "json")
+            {
+                continue;
+            }
+            let value: serde_json::Value =
+                serde_json::from_slice(&fs::read(entry.path()).unwrap()).unwrap();
+            kinds.insert(value["kind"].as_str().unwrap().to_owned());
+        }
         for page in 1..=page_count {
             let document = catalog_document(&directory, page).expect("catalog page builds");
             assert_eq!(document.surfaces.len(), fixture_count);
@@ -826,6 +839,14 @@ mod catalog_tests {
             ids.extend(placements.into_iter().map(|placement| placement.surface_id));
         }
         assert_eq!(ids.len(), fixture_count);
+        assert_eq!(
+            kinds,
+            canvas_widgets::KNOWN_WIDGET_KINDS
+                .iter()
+                .map(|kind| (*kind).to_owned())
+                .collect(),
+            "config/widgets must contain at least one specimen of every widget kind"
+        );
         assert!(catalog_document(&directory, 0).is_err());
         assert!(catalog_document(&directory, page_count + 1).is_err());
     }
