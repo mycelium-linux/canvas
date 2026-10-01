@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "component": "canvas",
+  "destination": "/usr/local/bin/canvas",
+  "candidate_check": {
+    "args": ["_self-check"]
+  },
+  "service": {
+    "kind": "systemd_system",
+    "unit": "canvas-surface.service"
+  },
+  "health_check": {
+    "program": "/usr/bin/systemctl",
+    "args": ["is-active", "--quiet", "canvas-surface.service"]
+  },
+  "health_timeout_seconds": 20
+}

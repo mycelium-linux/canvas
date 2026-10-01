@@ -10840,6 +10840,13 @@ fn background_redraw_interval() -> Duration {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if matches!(
+        std::env::args().nth(1).as_deref(),
+        Some("--version" | "_self-check")
+    ) {
+        println!("canvas {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if std::env::args_os().len() != 1 {
         return Err("canvas takes no commands; control it through its owner-local socket".into());
     }
