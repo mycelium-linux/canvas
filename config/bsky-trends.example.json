@@ -6,26 +6,14 @@
   "max_items": 12,
   "recency_half_life_minutes": 90,
   "weights": { "likes": 1, "reposts": 3, "replies": 2, "quotes": 3, "bookmarks": 0 },
-  "saved": [
-    {
-      "id": "fpl-account",
-      "label": "FPL account",
-      "query": "",
-      "topics": [],
-      "accounts": ["ajmwagar.fpl.dev"],
-      "include": [],
-      "exclude": [],
-      "language": null
-    },
-    {
-      "id": "audio-tech",
-      "label": "Audio and technology",
-      "query": "",
-      "topics": ["audio engineering", "synthesizer", "Rust", "artificial intelligence"],
-      "accounts": [],
-      "include": [],
-      "exclude": ["airdrop", "giveaway"],
-      "language": "en"
-    }
-  ]
+  "saved": [{
+    "id": "home",
+    "label": "Following",
+    "query": "home",
+    "topics": [],
+    "accounts": [],
+    "include": [],
+    "exclude": ["airdrop", "giveaway"],
+    "language": null
+  }]
 }

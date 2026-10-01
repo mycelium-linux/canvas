@@ -1,35 +1,65 @@
 //! Bluesky AppView adapter for the shared Canvas social-trends contract.
 use crate::x_trends::{ApiPost, ApiResponse, ApiUser, Includes, Metrics, SavedFeed, XApi};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_APPVIEW: &str = "https://api.bsky.app";
+pub const DEFAULT_PDS: &str = "https://bsky.social";
 
 pub struct BlueskyApi {
     client: reqwest::blocking::Client,
-    appview: String,
+    pds: String,
+    access_jwt: String,
 }
 impl BlueskyApi {
-    pub fn new(appview: &str) -> Result<Self, String> {
-        let appview = appview.trim_end_matches('/');
-        if !appview.starts_with("https://") {
-            return Err("Bluesky AppView must use https".into());
+    pub fn login(pds: &str, identifier: &str, app_password: &str) -> Result<Self, String> {
+        let pds = pds.trim_end_matches('/');
+        if !pds.starts_with("https://") {
+            return Err("Bluesky PDS must use https".into());
+        }
+        if identifier.trim().is_empty() || app_password.trim().is_empty() {
+            return Err("BSKY_IDENTIFIER and BSKY_APP_PASSWORD are required for the home timeline".into());
         }
         let client = reqwest::blocking::Client::builder()
             .user_agent("canvas-bsky-trends/0.1")
             .timeout(std::time::Duration::from_secs(15))
             .build()
             .map_err(|e| e.to_string())?;
+        let response = client
+            .post(format!("{pds}/xrpc/com.atproto.server.createSession"))
+            .json(&SessionRequest { identifier, password: app_password })
+            .send()
+            .map_err(|e| format!("Bluesky login failed: {e}"))?;
+        if !response.status().is_success() {
+            return Err(format!("Bluesky login returned HTTP {}", response.status()));
+        }
+        let session: SessionResponse = response
+            .json()
+            .map_err(|e| format!("invalid Bluesky login response: {e}"))?;
         Ok(Self {
             client,
-            appview: appview.into(),
+            pds: pds.into(),
+            access_jwt: session.access_jwt,
         })
     }
 }
 
+#[derive(Serialize)]
+struct SessionRequest<'a> {
+    identifier: &'a str,
+    password: &'a str,
+}
+#[derive(Deserialize)]
+struct SessionResponse {
+    #[serde(rename = "accessJwt")]
+    access_jwt: String,
+}
 #[derive(Debug, Deserialize)]
-struct SearchResponse {
+struct TimelineResponse {
     #[serde(default)]
-    posts: Vec<PostView>,
+    feed: Vec<FeedView>,
+}
+#[derive(Debug, Deserialize)]
+struct FeedView {
+    post: PostView,
 }
 #[derive(Debug, Deserialize)]
 struct PostView {
@@ -58,52 +88,24 @@ struct Record {
 }
 
 impl XApi for BlueskyApi {
-    fn recent(&self, saved: &SavedFeed) -> Result<ApiResponse, String> {
-        let mut terms = Vec::new();
-        if !saved.query.trim().is_empty() {
-            terms.push(saved.query.trim().to_owned());
+    fn recent(&self, _saved: &SavedFeed) -> Result<ApiResponse, String> {
+        let response = self
+            .client
+            .get(format!("{}/xrpc/app.bsky.feed.getTimeline", self.pds))
+            .bearer_auth(&self.access_jwt)
+            .query(&[("limit", "100")])
+            .send()
+            .map_err(|e| format!("Bluesky timeline request failed: {e}"))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "Bluesky timeline returned HTTP {}",
+                response.status()
+            ));
         }
-        terms.extend(saved.topics.iter().cloned());
-        let query = if terms.is_empty() {
-            "*".into()
-        } else {
-            terms.join(" OR ")
-        };
-        let authors: Vec<Option<&str>> = if saved.accounts.is_empty() {
-            vec![None]
-        } else {
-            saved
-                .accounts
-                .iter()
-                .map(|v| Some(v.trim_start_matches('@')))
-                .collect()
-        };
-        let mut posts = Vec::new();
-        for author in authors {
-            let mut request = self
-                .client
-                .get(format!("{}/xrpc/app.bsky.feed.searchPosts", self.appview))
-                .query(&[("q", query.as_str()), ("sort", "latest"), ("limit", "100")]);
-            if let Some(author) = author {
-                request = request.query(&[("author", author)]);
-            }
-            if let Some(language) = saved.language.as_deref() {
-                request = request.query(&[("lang", language)]);
-            }
-            let response = request
-                .send()
-                .map_err(|e| format!("Bluesky request failed: {e}"))?;
-            if !response.status().is_success() {
-                return Err(format!(
-                    "Bluesky AppView returned HTTP {}",
-                    response.status()
-                ));
-            }
-            let response: SearchResponse = response
-                .json()
-                .map_err(|e| format!("invalid Bluesky response: {e}"))?;
-            posts.extend(response.posts);
-        }
+        let response: TimelineResponse = response
+            .json()
+            .map_err(|e| format!("invalid Bluesky timeline response: {e}"))?;
+        let posts = response.feed.into_iter().map(|item| item.post);
         let mut users = std::collections::BTreeMap::new();
         let data = posts
             .into_iter()
@@ -145,7 +147,11 @@ impl XApi for BlueskyApi {
 mod tests {
     use super::*;
     #[test]
-    fn appview_requires_tls() {
-        assert!(BlueskyApi::new("http://example.test").is_err());
+    fn pds_requires_tls() {
+        assert!(BlueskyApi::login("http://example.test", "me.test", "secret").is_err());
+    }
+    #[test]
+    fn home_timeline_requires_credentials() {
+        assert!(BlueskyApi::login("https://example.test", "", "").is_err());
     }
 }

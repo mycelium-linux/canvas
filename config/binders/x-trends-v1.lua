@@ -25,7 +25,7 @@ local function age(seconds)
   return string.format("%dh", math.floor(seconds / 3600))
 end
 
-local posts = {}
+local posts = canvas.array()
 for i = 1, math.min(#event.payload.items, 12) do
   local item = event.payload.items[i]
   posts[#posts + 1] = {
@@ -34,7 +34,7 @@ for i = 1, math.min(#event.payload.items, 12) do
     text = clip(item.text, 280),
     age = age(item.age_secs),
     engagement = item.engagement_score or 0,
-    matches = item.matches or {},
+    matches = canvas.array(item.matches),
     url = item.url,
   }
 end
@@ -45,9 +45,9 @@ return {
     kind = "social_feed",
     title = event.payload.title or "Social / War Room",
     status = event.payload.status.health,
-    detail = event.payload.status.detail,
+    detail = clip(event.payload.status.detail, 128),
     posts = posts,
     rotate_seconds = 8,
   },
-  data = { state = degraded and "error" or "ready", source = "social:trend-feed", detail = event.payload.status.mode .. " | " .. event.payload.status.detail, provenance = "live" },
+  data = { state = degraded and "error" or "ready", source = "social:trend-feed", detail = clip(event.payload.status.mode .. " | " .. event.payload.status.detail, 256), provenance = "live" },
 }

@@ -1,7 +1,7 @@
 //! Poll Bluesky's public AppView into Canvas's social trend contract.
 use canvas_feeds::{
     self,
-    bsky_trends::{BlueskyApi, DEFAULT_APPVIEW},
+    bsky_trends::{BlueskyApi, DEFAULT_PDS},
     x_trends::{self, Config},
 };
 use std::{
@@ -30,8 +30,10 @@ fn main() -> ExitCode {
         eprintln!("canvas-bsky-trends: invalid config: {e}");
         return ExitCode::from(2);
     }
-    let appview = env::var("BSKY_APPVIEW_URL").unwrap_or_else(|_| DEFAULT_APPVIEW.into());
-    let api = match BlueskyApi::new(&appview) {
+    let pds = env::var("BSKY_PDS_URL").unwrap_or_else(|_| DEFAULT_PDS.into());
+    let identifier = env::var("BSKY_IDENTIFIER").unwrap_or_default();
+    let app_password = env::var("BSKY_APP_PASSWORD").unwrap_or_default();
+    let api = match BlueskyApi::login(&pds, &identifier, &app_password) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("canvas-bsky-trends: {e}");

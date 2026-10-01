@@ -9,6 +9,7 @@ User=ajm
 Environment=HOME=/home/ajm
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 ExecStart=/usr/local/bin/canvas-bsky-trends --config /etc/canvas/bsky-trends.json
+EnvironmentFile=-/etc/canvas/bsky-trends.env
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

@@ -2495,6 +2495,47 @@ mod tests {
     }
 
     #[test]
+    fn social_feed_binder_accepts_empty_degraded_feed() {
+        let mut target = WidgetSpec {
+            schema_version: WIDGET_SCHEMA_VERSION,
+            id: "reddit-war-room-feed".into(),
+            kind: WidgetKind::SocialFeed {
+                title: "Reddit / War Room".into(),
+                status: "healthy".into(),
+                detail: None,
+                posts: Vec::new(),
+                rotate_seconds: 8,
+            },
+            theme: None,
+            refresh_ms: None,
+            chrome: WidgetChrome::DragOnly,
+            data: canvas_widgets::WidgetData::default(),
+        };
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "feeds".into(),
+            stream: "reddit-war-room".into(),
+            contract: "canvas.social.trends.v1".into(),
+            project_id: None,
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "title": "Reddit / War Room",
+                "status": {"health":"degraded","mode":"polling","detail":"x".repeat(300)},
+                "items": []
+            }),
+        };
+        apply_named_adapter("x-trends-v1", &event, &mut target)
+            .expect("empty degraded feeds remain typed arrays");
+        let WidgetKind::SocialFeed { status, detail, posts, .. } = &target.kind else {
+            panic!("social feed")
+        };
+        assert_eq!(status, "degraded");
+        assert!(posts.is_empty());
+        assert_eq!(detail.as_deref().map(str::len), Some(128));
+    }
+
+    #[test]
     fn feed_headlines_keeps_a_multibyte_dash_ending_exactly_at_the_clip_edge() {
         // The live HN shape that poisoned a whole batch: a 51-char ASCII
         // title, an em dash (3 bytes) at 53..55, and clip's limit of 55 —
