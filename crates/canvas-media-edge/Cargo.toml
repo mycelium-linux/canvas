@@ -27,3 +27,7 @@ path = "src/main.rs"
 [[bin]]
 name = "canvas-media-announce"
 path = "src/bin/announce.rs"
+
+[[bin]]
+name = "canvas-simulator-stream"
+path = "src/bin/simulator.rs"
