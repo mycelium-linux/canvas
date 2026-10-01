@@ -1663,10 +1663,13 @@ mod tests {
     }
 
     #[test]
-    fn mycelium_mesh_binder_surfaces_pressure_and_release_count() {
-        let mut target = test_spec(WidgetKind::StatusList {
+    fn mycelium_mesh_binder_surfaces_sites_vlans_links_and_pressure() {
+        let mut target = test_spec(WidgetKind::NetworkTopology {
             title: "Waiting".into(),
+            segments: Vec::new(),
             nodes: Vec::new(),
+            links: Vec::new(),
+            conflicts: 0,
         });
         let event = StreamEnvelope {
             schema_version: STREAM_SCHEMA_VERSION,
@@ -1678,21 +1681,34 @@ mod tests {
             emitted_at_ms: now_ms(),
             payload: serde_json::json!({
                 "peers": [{
+                    "id":"node-home-pi",
                     "hostname":"home-pi","site":"home","platform":"linux","architecture":"aarch64",
                     "version":"0.1.0","age_seconds":4,"load_1":9.0,"logical_cpus":4,
                     "memory_available_bytes":10,"memory_total_bytes":100,"root_available_bytes":10737418240_u64,
                     "root_total_bytes":1000,"ssh_listening":true
                 }],
+                "segments": [{"id":"home/vlan:35","label":"Audio","kind":"vlan","site":"home",
+                    "vlan":35,"subnet":"10.35.0.0/24","gateway":"10.35.0.1"}],
                 "releases": [{"component":"canvas","version":"0.1.0","channel":"canary","target":"aarch64-unknown-linux-gnu"}],
                 "degraded": false
             }),
         };
         apply_named_adapter("mycelium-mesh-v1", &event, &mut target).expect("mesh renders");
-        let WidgetKind::StatusList { title, nodes } = target.kind else {
+        let WidgetKind::NetworkTopology {
+            title,
+            segments,
+            nodes,
+            links,
+            ..
+        } = target.kind
+        else {
             panic!("mesh binder changed widget family")
         };
-        assert!(title.contains("1 peers · 1 releases"));
+        assert!(title.contains("1 peers · 1 sites · 1 VLANs"));
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[1].vlan, Some(35));
         assert_eq!(nodes[0].state, canvas_widgets::StatusLevel::Critical);
+        assert!(links.is_empty(), "the observer does not link to itself");
         assert_eq!(target.data.state, canvas_widgets::WidgetDataState::Partial);
     }
 

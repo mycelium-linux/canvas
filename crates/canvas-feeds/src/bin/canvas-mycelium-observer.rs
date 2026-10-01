@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
+    collections::BTreeMap,
     process::{Command, ExitCode},
     thread,
     time::Duration,
@@ -19,11 +20,11 @@ struct PeerView {
 
 #[derive(Debug, Deserialize)]
 struct PeerHello {
+    node_id: String,
     hostname: String,
     site: String,
     platform: String,
     architecture: String,
-    daemon_version: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,31 +34,56 @@ struct PeerHealth {
     memory_total_bytes: u64,
     memory_available_bytes: u64,
     filesystems: Vec<FilesystemHealth>,
-    ssh_listening: bool,
 }
 
 #[derive(Debug, Deserialize)]
 struct FilesystemHealth {
     mount: String,
-    total_bytes: u64,
     available_bytes: u64,
 }
 
 #[derive(Debug, Serialize)]
 struct PeerSummary {
+    id: String,
     hostname: String,
     site: String,
     platform: String,
     architecture: String,
-    version: String,
     age_seconds: u64,
     load_1: f64,
     logical_cpus: u32,
     memory_available_bytes: u64,
     memory_total_bytes: u64,
     root_available_bytes: Option<u64>,
-    root_total_bytes: Option<u64>,
-    ssh_listening: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct TopologyView {
+    #[serde(default)]
+    segments: BTreeMap<String, TopologySegment>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TopologySegment {
+    id: String,
+    kind: String,
+    vlan: Option<u16>,
+    subnet: Option<(String, u8)>,
+    gw: Option<String>,
+    domain_name: Option<String>,
+    #[serde(default)]
+    origins: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SegmentSummary {
+    id: String,
+    label: String,
+    kind: String,
+    site: Option<String>,
+    vlan: Option<u16>,
+    subnet: Option<String>,
+    gateway: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -77,6 +103,10 @@ fn bounded(text: String) -> String {
     text.chars().take(MAX_TEXT_CHARS).collect()
 }
 
+fn bounded_id(text: String) -> String {
+    text.chars().take(16).collect()
+}
+
 fn project(peers: Vec<PeerView>, now_seconds: u64) -> Vec<PeerSummary> {
     let mut peers = peers
         .into_iter()
@@ -88,25 +118,51 @@ fn project(peers: Vec<PeerView>, now_seconds: u64) -> Vec<PeerSummary> {
                 .iter()
                 .find(|filesystem| filesystem.mount == "/");
             Some(PeerSummary {
+                id: bounded_id(hello.node_id),
                 hostname: bounded(hello.hostname),
                 site: bounded(hello.site),
                 platform: bounded(hello.platform),
                 architecture: bounded(hello.architecture),
-                version: bounded(hello.daemon_version),
                 age_seconds: now_seconds.saturating_sub(peer.last_seen),
                 load_1: health.load_average[0],
                 logical_cpus: health.logical_cpus,
                 memory_available_bytes: health.memory_available_bytes,
                 memory_total_bytes: health.memory_total_bytes,
                 root_available_bytes: root.map(|filesystem| filesystem.available_bytes),
-                root_total_bytes: root.map(|filesystem| filesystem.total_bytes),
-                ssh_listening: health.ssh_listening,
             })
         })
         .collect::<Vec<_>>();
     peers.sort_by(|left, right| (&left.site, &left.hostname).cmp(&(&right.site, &right.hostname)));
     peers.truncate(12);
     peers
+}
+
+fn project_segments(topology: TopologyView) -> Vec<SegmentSummary> {
+    let mut segments = topology
+        .segments
+        .into_values()
+        .map(|segment| {
+            let site = segment.origins.iter().find_map(|origin| {
+                origin
+                    .split_once('/')
+                    .map(|(site, _)| bounded(site.to_owned()))
+            });
+            SegmentSummary {
+                label: bounded(segment.domain_name.unwrap_or_else(|| segment.id.clone())),
+                id: bounded(segment.id),
+                kind: bounded(segment.kind),
+                site,
+                vlan: segment.vlan,
+                subnet: segment
+                    .subnet
+                    .map(|(address, prefix)| format!("{address}/{prefix}")),
+                gateway: segment.gw.map(bounded),
+            }
+        })
+        .collect::<Vec<_>>();
+    segments.sort_by(|left, right| left.id.cmp(&right.id));
+    segments.truncate(32);
+    segments
 }
 
 fn query(binary: &str, args: &[&str]) -> Result<Vec<u8>, String> {
@@ -130,10 +186,17 @@ fn snapshot(binary: &str, now_ms: u64) -> serde_json::Value {
             &["releases", "list", "--json"],
         )?)
         .map_err(|error| format!("decode releases: {error}"))?;
-        Ok::<_, String>((project(peers, now_ms / 1000), releases))
+        let topology =
+            serde_json::from_slice::<TopologyView>(&query(binary, &["topology", "--json"])?)
+                .map_err(|error| format!("decode topology: {error}"))?;
+        Ok::<_, String>((
+            project(peers, now_ms / 1000),
+            releases,
+            project_segments(topology),
+        ))
     })();
     let payload = match result {
-        Ok((peers, mut releases)) => {
+        Ok((peers, mut releases, segments)) => {
             releases.truncate(16);
             for release in &mut releases {
                 release.component = bounded(std::mem::take(&mut release.component));
@@ -141,10 +204,10 @@ fn snapshot(binary: &str, now_ms: u64) -> serde_json::Value {
                 release.channel = bounded(std::mem::take(&mut release.channel));
                 release.target = bounded(std::mem::take(&mut release.target));
             }
-            json!({ "peers": peers, "releases": releases, "degraded": false })
+            json!({ "peers": peers, "segments": segments, "releases": releases, "degraded": false })
         }
         Err(error) => {
-            json!({ "peers": [], "releases": [], "degraded": true, "error": bounded(error) })
+            json!({ "peers": [], "segments": [], "releases": [], "degraded": true, "error": bounded(error) })
         }
     };
     fit_snapshot(json!({
@@ -161,6 +224,10 @@ fn fit_snapshot(mut event: serde_json::Value) -> serde_json::Value {
             .pointer_mut("/payload/releases")
             .and_then(|value| value.as_array_mut())
             .is_some_and(|releases| releases.pop().is_some())
+            || event
+                .pointer_mut("/payload/segments")
+                .and_then(|value| value.as_array_mut())
+                .is_some_and(|segments| segments.pop().is_some())
             || event
                 .pointer_mut("/payload/peers")
                 .and_then(|value| value.as_array_mut())
@@ -191,7 +258,7 @@ mod tests {
     #[test]
     fn projection_is_bounded_and_keeps_only_canvas_health_facts() {
         let peer: PeerView = serde_json::from_value(json!({
-            "hello": {"hostname":"home-pi","site":"home","platform":"linux","architecture":"aarch64","daemon_version":"0.1.0"},
+            "hello": {"node_id":"abc","hostname":"home-pi","site":"home","platform":"linux","architecture":"aarch64","daemon_version":"0.1.0"},
             "health": {"load_average":[1.5,1.0,0.5],"logical_cpus":4,"memory_total_bytes":100,"memory_available_bytes":25,
                 "filesystems":[{"mount":"/","total_bytes":1000,"available_bytes":400}],"ssh_listening":true,
                 "process_leaders":[{"name":"secret-process-detail"}]},
@@ -212,7 +279,7 @@ mod tests {
     #[test]
     fn mesh_snapshot_fits_the_portable_datagram_budget() {
         let peer = json!({
-            "hostname": "x".repeat(64), "site": "x".repeat(64),
+            "id": "x".repeat(64), "hostname": "x".repeat(64), "site": "x".repeat(64),
             "platform": "x".repeat(64), "architecture": "x".repeat(64),
             "version": "x".repeat(64), "age_seconds": 1, "load_1": 1.0,
             "logical_cpus": 4, "memory_available_bytes": 1,
@@ -222,7 +289,7 @@ mod tests {
         let event = json!({
             "schema_version": 1, "owner": OWNER, "stream": STREAM,
             "contract": "canvas.widget.snapshot.v1", "sequence": 1, "emitted_at_ms": 1,
-            "payload": { "peers": vec![peer; 12], "releases": [], "degraded": false }
+            "payload": { "peers": vec![peer; 12], "segments": [], "releases": [], "degraded": false }
         });
         let fitted = fit_snapshot(event);
         assert!(
