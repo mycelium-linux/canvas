@@ -39,3 +39,7 @@ path = "src/bin/canvas-x-trends.rs"
 [[bin]]
 name = "canvas-bsky-trends"
 path = "src/bin/canvas-bsky-trends.rs"
+
+[[bin]]
+name = "canvas-reddit-trends"
+path = "src/bin/canvas-reddit-trends.rs"

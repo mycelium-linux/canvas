@@ -1475,23 +1475,37 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                     container(
                         column![
                             row![
-                                text(format!("@{}", post.author)).size(metrics.body).color(accent),
+                                text(format!("@{}", post.author))
+                                    .size(metrics.body)
+                                    .color(accent),
                                 space::horizontal(),
-                                text(&post.age).size(metrics.small).color(color(palette.text_muted)),
+                                text(&post.age)
+                                    .size(metrics.small)
+                                    .color(color(palette.text_muted)),
                             ],
-                            text(&post.text).size(metrics.body).color(color(palette.text)).width(Length::Fill),
+                            text(&post.text)
+                                .size(metrics.body)
+                                .color(color(palette.text))
+                                .width(Length::Fill),
                             row![
-                                text(format!("{} interactions", post.engagement)).size(metrics.small).color(color(palette.text_muted)),
+                                text(format!("{} interactions", post.engagement))
+                                    .size(metrics.small)
+                                    .color(color(palette.text_muted)),
                                 space::horizontal(),
                                 text(matches).size(metrics.small).color(accent),
                             ],
-                        ].spacing(metrics.space_2),
+                        ]
+                        .spacing(metrics.space_2),
                     )
                     .padding(metrics.space_3)
                     .width(Length::Fill)
                     .style(move |_| container::Style {
                         background: Some(surface.into()),
-                        border: iced::Border { color: accent, width: 1.0, radius: metrics.radius_md.into() },
+                        border: iced::Border {
+                            color: accent,
+                            width: 1.0,
+                            radius: metrics.radius_md.into(),
+                        },
                         ..Default::default()
                     }),
                 );
@@ -1515,10 +1529,15 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                             if posts.is_empty() { 0 } else { start + 1 },
                             posts.len(),
                             rotate_seconds
-                        )).size(metrics.small).color(color(palette.text_muted)),
-                    ].spacing(metrics.space_2),
+                        ))
+                        .size(metrics.small)
+                        .color(color(palette.text_muted)),
+                    ]
+                    .spacing(metrics.space_2),
                     cards,
-                ].spacing(metrics.space_3).into(),
+                ]
+                .spacing(metrics.space_3)
+                .into(),
                 visual,
             )
         }
