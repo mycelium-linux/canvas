@@ -638,6 +638,7 @@ fn surface_title_visible(mode: SurfaceTitleMode, focused: bool) -> bool {
 #[derive(Debug, Clone)]
 enum EngineeringArtifact {
     Local(PathBuf),
+    LocalModel(PathBuf),
     RemoteText { base: String, path: String },
     RemoteModel { base: String, path: String },
     Unavailable(String),
@@ -1670,6 +1671,17 @@ impl App {
                                     load_content(surface_id, path, title, viewport, scale_factor)
                                 },
                                 |result| Message::EngineeringArtifactLoaded(Box::new(result)),
+                            );
+                        }
+                        Some(EngineeringArtifact::LocalModel(path)) => {
+                            let surface_id = format!("artifact-{}", entry.id);
+                            let title = entry.display_name;
+                            self.engineering_browser = None;
+                            self.status = format!("Loading {title}…");
+                            self.bump();
+                            return Task::perform(
+                                async move { prepare_local_model(surface_id, title, path) },
+                                |result| Message::EngineeringModelPrepared(Box::new(result)),
                             );
                         }
                         Some(EngineeringArtifact::RemoteText { base, path }) => {
@@ -10019,7 +10031,9 @@ fn merge_lob_body(
                 bytes,
                 modified_at_ms: modified,
             });
-            let locator = if native_file_supported(media_type) {
+            let locator = if native_model_supported(media_type) {
+                EngineeringArtifact::LocalModel(path)
+            } else if native_file_supported(media_type) {
                 EngineeringArtifact::Local(path)
             } else {
                 EngineeringArtifact::Unavailable(format!(
@@ -10121,7 +10135,9 @@ fn push_owner_file(
         bytes: metadata.len(),
         modified_at_ms: modified,
     });
-    let locator = if native_file_supported(media_type) {
+    let locator = if native_model_supported(media_type) {
+        EngineeringArtifact::LocalModel(path)
+    } else if native_file_supported(media_type) {
         EngineeringArtifact::Local(path)
     } else {
         EngineeringArtifact::Unavailable(format!(
@@ -10149,10 +10165,17 @@ fn media_type_for_path(path: &Path) -> &'static str {
         "txt" => "text/plain",
         "csv" => "text/csv",
         "kicad_pcb" => "application/x-kicad-pcb",
+        "stl" => "model/stl",
+        "glb" => "model/gltf-binary",
+        "gltf" => "model/gltf+json",
         "zip" => "application/zip",
         "html" => "text/html",
         _ => "application/octet-stream",
     }
+}
+
+fn native_model_supported(media_type: &str) -> bool {
+    media_type == "model/stl"
 }
 
 fn native_file_supported(media_type: &str) -> bool {
@@ -10856,6 +10879,29 @@ fn prepare_remote_model(
     canvas_core::write_atomic(&destination, &stl)
         .map_err(|error| Failure::invalid(format!("Could not publish model: {error}")))?;
     let _ = fs::remove_dir_all(&scratch);
+    Ok((surface_id, title))
+}
+
+fn prepare_local_model(
+    surface_id: String,
+    title: String,
+    path: PathBuf,
+) -> Result<(String, String), Failure> {
+    let path = canonical_regular_file(&path)?;
+    if path.extension().and_then(|value| value.to_str()) != Some("stl") {
+        return Err(Failure::invalid(
+            "Only STL is currently supported for local native models",
+        ));
+    }
+    let bytes = fs::read(&path).map_err(|error| Failure::invalid(error.to_string()))?;
+    if bytes.len() < 84 || bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(Failure::resource("STL model is empty or invalid"));
+    }
+    let steps = transmog_steps_dir()?;
+    fs::create_dir_all(&steps).map_err(|error| Failure::invalid(error.to_string()))?;
+    let destination = steps.join(format!("step-{}.stl", unix_ms()));
+    canvas_core::write_atomic(&destination, &bytes)
+        .map_err(|error| Failure::invalid(format!("Could not publish model: {error}")))?;
     Ok((surface_id, title))
 }
 
