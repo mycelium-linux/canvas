@@ -345,7 +345,10 @@ fn normalize_hn_item(item: &Value, source: &'static str) -> Option<Headline> {
 fn fetch_reddit(http: &dyn Http, sub: &str) -> Result<Feed, Error> {
     // Reddit gates its JSON API behind a login wall (302 to /login) for
     // unauthenticated clients; the RSS view of the same listing stays open.
-    let url = format!("https://www.reddit.com/r/{sub}/hot.rss");
+    // The canonical www host aggressively rate-limits even low-frequency
+    // server-side RSS consumers. old.reddit.com serves the same official Atom
+    // listing without forcing the producer into OAuth just to read headlines.
+    let url = format!("https://old.reddit.com/r/{sub}/hot.rss");
     let body = http.get_text(&url)?;
     let items = parse_rss_items(&body);
     if items.is_empty() {
@@ -715,7 +718,7 @@ mod tests {
                    <entry><title>Post two</title><link href=\"https://e.com/2\"/></entry></feed>";
         let mut text = std::collections::BTreeMap::new();
         text.insert(
-            "https://www.reddit.com/r/programming/hot.rss".into(),
+            "https://old.reddit.com/r/programming/hot.rss".into(),
             xml.to_string(),
         );
         let http = FakeHttp {
