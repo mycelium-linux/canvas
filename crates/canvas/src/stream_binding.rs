@@ -500,6 +500,10 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/mycelium-topology-v1.lua"),
     ),
     (
+        "mycelium-mesh-v1",
+        include_str!("../../../config/binders/mycelium-mesh-v1.lua"),
+    ),
+    (
         "span-timeline-v1",
         include_str!("../../../config/binders/span-timeline-v1.lua"),
     ),
@@ -1656,6 +1660,40 @@ mod tests {
         assert_eq!(pris_node.segments, ["pris/vlan:35"]);
         assert_eq!(titan_node.sites, ["titan"]);
         assert_eq!(titan_node.segments, ["titan/vlan:35"]);
+    }
+
+    #[test]
+    fn mycelium_mesh_binder_surfaces_pressure_and_release_count() {
+        let mut target = test_spec(WidgetKind::StatusList {
+            title: "Waiting".into(),
+            nodes: Vec::new(),
+        });
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "mycelium".into(),
+            stream: "mesh".into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            project_id: Some("home".into()),
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "peers": [{
+                    "hostname":"home-pi","site":"home","platform":"linux","architecture":"aarch64",
+                    "version":"0.1.0","age_seconds":4,"load_1":9.0,"logical_cpus":4,
+                    "memory_available_bytes":10,"memory_total_bytes":100,"root_available_bytes":10737418240_u64,
+                    "root_total_bytes":1000,"ssh_listening":true
+                }],
+                "releases": [{"component":"canvas","version":"0.1.0","channel":"canary","target":"aarch64-unknown-linux-gnu"}],
+                "degraded": false
+            }),
+        };
+        apply_named_adapter("mycelium-mesh-v1", &event, &mut target).expect("mesh renders");
+        let WidgetKind::StatusList { title, nodes } = target.kind else {
+            panic!("mesh binder changed widget family")
+        };
+        assert!(title.contains("1 peers · 1 releases"));
+        assert_eq!(nodes[0].state, canvas_widgets::StatusLevel::Critical);
+        assert_eq!(target.data.state, canvas_widgets::WidgetDataState::Partial);
     }
 
     #[test]
