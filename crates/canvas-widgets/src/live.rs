@@ -2483,8 +2483,8 @@ impl<Message> canvas::Program<Message> for DawDeckProgram {
                 let cycle = self.cycle_ticks.max(1);
                 let tick = note.tick % cycle;
                 let x = roll.x + roll.width * tick as f32 / cycle as f32;
-                let width = (roll.width * note.length_ticks.min(cycle) as f32 / cycle as f32)
-                    .max(3.0);
+                let width =
+                    (roll.width * note.length_ticks.min(cycle) as f32 / cycle as f32).max(3.0);
                 let pitch = (note.note - min_note) as f32 / (max_note - min_note) as f32;
                 let y = roll.y + roll.height * (1.0 - pitch);
                 let rect = Path::rounded_rectangle(
@@ -2572,6 +2572,21 @@ struct NeuralGraphProgram {
 impl<Message> canvas::Program<Message> for NeuralGraphProgram {
     type State = CacheState;
 
+    fn update(
+        &self,
+        _state: &mut Self::State,
+        event: &canvas::Event,
+        _bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Option<iced::widget::Action<Message>> {
+        (!self.dag
+            && matches!(
+                event,
+                canvas::Event::Window(iced::window::Event::RedrawRequested(_))
+            ))
+        .then(iced::widget::Action::request_redraw)
+    }
+
     fn draw(
         &self,
         state: &Self::State,
@@ -2580,15 +2595,22 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let key = self
-            .nodes
-            .iter()
-            .fold(Key::new().add_usize(self.edges.len()), |key, node| {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let phase = (now_ms % 12_000) as f32 / 12_000.0;
+        let key = self.nodes.iter().fold(
+            Key::new()
+                .add_usize(self.edges.len())
+                .add_u64(if self.dag { 0 } else { now_ms / 33 }),
+            |key, node| {
                 key.add_str(&node.id)
                     .add_str(&node.label)
                     .add_f32(node.heat)
                     .add_u64(node.state as u64)
-            });
+            },
+        );
         let key = self.edges.iter().fold(key, |key, edge| {
             key.add_str(&edge.from).add_str(&edge.to).add_f32(edge.heat)
         });
@@ -2607,7 +2629,7 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
             let positions = if self.dag {
                 dag_layout(&self.nodes, &self.edges, bounds.size())
             } else {
-                neural_layout(&self.nodes, bounds.size())
+                animated_neural_layout(&self.nodes, bounds.size(), phase)
             };
             let idle_edge = with_alpha(color(self.palette.border), 0.42);
             for edge in &self.edges {
@@ -2638,9 +2660,13 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
                         .with_color(active),
                 );
                 if edge.heat > 0.02 {
+                    let travel = (phase * (0.45 + edge.heat * 0.9)
+                        + stable_phase(&edge.from)
+                        + stable_phase(&edge.to) * 0.37)
+                        .fract();
                     let pulse = Point::new(
-                        from.x + (to.x - from.x) * edge.heat,
-                        from.y + (to.y - from.y) * edge.heat,
+                        from.x + (to.x - from.x) * travel,
+                        from.y + (to.y - from.y) * travel,
                     );
                     frame.fill(
                         &Path::circle(pulse, 2.5 + edge.heat * 3.5),
@@ -2655,7 +2681,10 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
                 };
                 let semantic = status_color(node.state, &self.palette);
                 let heat = node.heat.clamp(0.0, 1.0);
-                let radius = 5.0 + heat * 7.0;
+                let bounce = ((phase + stable_phase(&node.id)) * std::f32::consts::TAU)
+                    .sin()
+                    .abs();
+                let radius = 5.0 + heat * 7.0 + bounce * (1.0 + heat * 2.5);
                 if self.dag {
                     let node_size = Size::new(108.0, 32.0);
                     let origin = Point::new(
@@ -2725,6 +2754,24 @@ fn neural_layout(nodes: &[NeuralNode], size: Size) -> std::collections::BTreeMap
     grouped_column_layout(nodes, size)
 }
 
+fn stable_phase(value: &str) -> f32 {
+    let hash = value.bytes().fold(2_166_136_261_u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(16_777_619)
+    });
+    hash as f32 / u32::MAX as f32
+}
+
+fn animated_neural_layout(
+    nodes: &[NeuralNode],
+    size: Size,
+    phase: f32,
+) -> std::collections::BTreeMap<String, Point> {
+    if !nodes.iter().any(|node| node.id.starts_with("site:")) {
+        return neural_layout(nodes, size);
+    }
+    topology_web_layout_at_phase(nodes, size, phase)
+}
+
 fn grouped_column_layout(
     nodes: &[NeuralNode],
     size: Size,
@@ -2764,6 +2811,14 @@ fn topology_web_layout(
     nodes: &[NeuralNode],
     size: Size,
 ) -> std::collections::BTreeMap<String, Point> {
+    topology_web_layout_at_phase(nodes, size, 0.0)
+}
+
+fn topology_web_layout_at_phase(
+    nodes: &[NeuralNode],
+    size: Size,
+    phase: f32,
+) -> std::collections::BTreeMap<String, Point> {
     let sites = nodes
         .iter()
         .filter(|node| node.id.starts_with("site:"))
@@ -2771,29 +2826,34 @@ fn topology_web_layout(
     let mut positions = std::collections::BTreeMap::new();
     let cell_width = size.width / sites.len().max(1) as f32;
     for (site_index, site) in sites.iter().enumerate() {
+        let site_phase = phase + stable_phase(&site.id);
         let center = Point::new(
             cell_width * (site_index as f32 + 0.5),
-            size.height * 0.5,
+            size.height * 0.5
+                + (site_phase * std::f32::consts::TAU).sin() * size.height.min(220.0) * 0.045,
         );
         positions.insert(site.id.clone(), center);
-        let site_name = site.id.trim_start_matches("site:");
+        let site_name = site.label.as_str();
         let members = nodes
             .iter()
             .filter(|node| {
-                !node.id.starts_with("site:")
-                    && node.group.as_deref() == Some(site_name)
+                !node.id.starts_with("site:") && node.group.as_deref() == Some(site_name)
             })
             .collect::<Vec<_>>();
         let radius_x = (cell_width * 0.27).min(150.0).max(48.0);
         let radius_y = (size.height * 0.24).max(28.0);
         for (index, node) in members.iter().enumerate() {
+            let seed = stable_phase(&node.id);
+            let direction = if index % 2 == 0 { 1.0 } else { -1.0 };
             let angle = -std::f32::consts::FRAC_PI_2
-                + std::f32::consts::TAU * index as f32 / members.len().max(1) as f32;
+                + std::f32::consts::TAU * index as f32 / members.len().max(1) as f32
+                + direction * std::f32::consts::TAU * phase * (0.055 + seed * 0.035);
+            let spring = 1.0 + ((phase * 1.7 + seed) * std::f32::consts::TAU).sin() * 0.09;
             positions.insert(
                 node.id.clone(),
                 Point::new(
-                    center.x + angle.cos() * radius_x,
-                    center.y + angle.sin() * radius_y,
+                    center.x + angle.cos() * radius_x * spring,
+                    center.y + angle.sin() * radius_y * spring,
                 ),
             );
         }
@@ -2805,10 +2865,7 @@ fn topology_web_layout(
     for (index, node) in unplaced.iter().enumerate() {
         positions.insert(
             node.id.clone(),
-            Point::new(
-                32.0 + index as f32 * 96.0,
-                (size.height - 24.0).max(24.0),
-            ),
+            Point::new(32.0 + index as f32 * 96.0, (size.height - 24.0).max(24.0)),
         );
     }
     positions
@@ -6263,17 +6320,27 @@ mod tests {
             heat: 0.5,
             state: StatusLevel::Good,
         };
+        let mut site = node("site:1", "sites");
+        site.label = "home".into();
         let nodes = vec![
-            node("site:home", "sites"),
+            site,
             node("home-pi", "home"),
             node("agora-one", "home"),
             node("segment:lan", "home"),
         ];
         let layout = neural_layout(&nodes, Size::new(1200.0, 280.0));
-        let hub = layout["site:home"];
-        assert_eq!(hub, Point::new(600.0, 140.0));
+        let hub = layout["site:1"];
+        assert_eq!(hub.x, 600.0);
         assert_ne!(layout["home-pi"].x, layout["agora-one"].x);
-        assert!(layout.values().all(|point| point.y >= 24.0 && point.y <= 256.0));
+        assert!(
+            layout
+                .values()
+                .all(|point| point.y >= 24.0 && point.y <= 256.0)
+        );
+
+        let later = animated_neural_layout(&nodes, Size::new(1200.0, 280.0), 0.5);
+        assert_ne!(later["home-pi"], layout["home-pi"]);
+        assert_ne!(later["site:1"], hub);
     }
 
     #[test]

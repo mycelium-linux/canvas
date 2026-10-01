@@ -1708,11 +1708,23 @@ mod tests {
             panic!("mesh binder changed widget family")
         };
         assert!(title.contains("1 peers · 1 observed · 1 services · 1 sites · 1 VLANs"));
-        assert_eq!(nodes.len(), 5, "site, observed device, service, peer, and VLAN are graph vertices");
+        assert_eq!(
+            nodes.len(),
+            5,
+            "site, observed device, service, peer, and VLAN are graph vertices"
+        );
         assert!(nodes.iter().any(|node| node.label == "wagar-house"));
-        assert!(nodes.iter().any(|node| node.label.contains("Living room speaker")));
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node.label.contains("Living room speaker"))
+        );
         assert!(nodes.iter().any(|node| node.label.contains("VLAN 35")));
-        assert_eq!(edges.len(), 4, "every discovered fact is attached to its site");
+        assert_eq!(
+            edges.len(),
+            4,
+            "every discovered fact is attached to its site"
+        );
         assert_eq!(target.data.state, canvas_widgets::WidgetDataState::Partial);
     }
 

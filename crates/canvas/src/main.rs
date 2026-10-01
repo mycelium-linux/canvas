@@ -585,6 +585,22 @@ fn placement_surface_ids(layout: &Layout) -> Vec<String> {
     }
 }
 
+/// Resolve the one surface represented by a non-canvas layout.
+///
+/// Layout identity is authoritative. Focus is interaction state and can point
+/// at a surface parked on another page, so it must never decide what a
+/// `Surface` or `Stack` page renders.
+fn single_surface_id<'a>(layout: &'a Layout, focused: Option<&'a str>) -> Option<&'a str> {
+    match layout {
+        Layout::Surface { surface_id } => Some(surface_id),
+        Layout::Stack {
+            active_surface_id, ..
+        } => Some(active_surface_id),
+        Layout::Split { .. } => focused,
+        Layout::Empty | Layout::Canvas { .. } => None,
+    }
+}
+
 /// Recover the operational-view identity already encoded in materialized
 /// surface ids. This keeps restart state inferred from the document instead of
 /// persisting a second view-name field that could drift from its layout.
@@ -8491,10 +8507,7 @@ impl App {
                     stack(surfaces).into()
                 }
             }
-            _ => self
-                .document
-                .focused_surface_id
-                .as_ref()
+            layout => single_surface_id(layout, self.document.focused_surface_id.as_deref())
                 .and_then(|id| self.decoded.get(id))
                 .map_or_else(
                     || {
@@ -14591,6 +14604,24 @@ mod tests {
         if let Some(parent) = app.workspace_store_path.parent() {
             let _ = std::fs::remove_dir_all(parent);
         }
+    }
+
+    #[test]
+    fn surface_page_identity_wins_over_stale_focus() {
+        let layout = Layout::Surface {
+            surface_id: "mesh".into(),
+        };
+        assert_eq!(single_surface_id(&layout, Some("daw")), Some("mesh"));
+        assert_eq!(single_surface_id(&layout, None), Some("mesh"));
+    }
+
+    #[test]
+    fn stack_page_uses_its_active_surface_without_focus() {
+        let layout = Layout::Stack {
+            surface_ids: vec!["daw".into(), "mesh".into()],
+            active_surface_id: "mesh".into(),
+        };
+        assert_eq!(single_surface_id(&layout, None), Some("mesh"));
     }
 
     #[test]
