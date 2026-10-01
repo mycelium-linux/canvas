@@ -36,7 +36,7 @@
         "playing": false, "paused": false, "recording": false, "bpm": null,
         "position_ticks": 0, "cycle_ticks": 1,
         "tracks": [{"label":"API","level":0.0,"clipping":false}], "notes": [],
-        "theme": null, "refresh_ms": 250, "chrome": "integrated",
+        "theme": null, "refresh_ms": 50, "chrome": "integrated",
         "data": { "state": "loading", "source": "synesthesia/daw", "observed_at": null, "window": "live", "detail": "Awaiting studio telemetry", "provenance": "live" }
       }}, "inputs": [{ "id": "daw", "contract": "canvas.widget.snapshot.v1" }]
     },
@@ -59,10 +59,8 @@
     }
   ],
   "layout": { "kind": "canvas", "placements": [
-    { "surface_id": "clock", "bounds": { "x": 0.0, "y": 0.0, "width": 0.38, "height": 0.48 }, "layer": 0 },
-    { "surface_id": "now-playing", "bounds": { "x": 0.0, "y": 0.48, "width": 0.38, "height": 0.52 }, "layer": 0 },
-    { "surface_id": "daw", "bounds": { "x": 0.38, "y": 0.0, "width": 0.62, "height": 0.70 }, "layer": 0 },
-    { "surface_id": "mesh", "bounds": { "x": 0.38, "y": 0.70, "width": 0.62, "height": 0.30 }, "layer": 0 }
+    { "surface_id": "daw", "bounds": { "x": 0.0, "y": 0.0, "width": 1.0, "height": 0.68 }, "layer": 0 },
+    { "surface_id": "mesh", "bounds": { "x": 0.0, "y": 0.68, "width": 1.0, "height": 0.32 }, "layer": 0 }
   ]},
   "bindings": [
     {

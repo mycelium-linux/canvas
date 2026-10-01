@@ -2480,9 +2480,10 @@ impl<Message> canvas::Program<Message> for DawDeckProgram {
                 .unwrap_or(84)
                 .max(min_note + 1);
             for note in &self.notes {
-                let x = roll.x + roll.width * note.tick as f32 / self.cycle_ticks.max(1) as f32;
-                let width = (roll.width * note.length_ticks as f32
-                    / self.cycle_ticks.max(1) as f32)
+                let cycle = self.cycle_ticks.max(1);
+                let tick = note.tick % cycle;
+                let x = roll.x + roll.width * tick as f32 / cycle as f32;
+                let width = (roll.width * note.length_ticks.min(cycle) as f32 / cycle as f32)
                     .max(3.0);
                 let pitch = (note.note - min_note) as f32 / (max_note - min_note) as f32;
                 let y = roll.y + roll.height * (1.0 - pitch);
@@ -2491,10 +2492,28 @@ impl<Message> canvas::Program<Message> for DawDeckProgram {
                     Size::new(width, 7.0),
                     2.0.into(),
                 );
+                let note_color = match note.track.parse::<usize>().unwrap_or(0) % 4 {
+                    0 => accent,
+                    1 => color(self.palette.info),
+                    2 => color(self.palette.success),
+                    _ => color(self.palette.warning),
+                };
                 frame.fill(
                     &rect,
-                    with_alpha(accent, 0.35 + note.velocity as f32 / 127.0 * 0.65),
+                    with_alpha(note_color, 0.35 + note.velocity as f32 / 127.0 * 0.65),
                 );
+                let overflow = x + width - (roll.x + roll.width);
+                if overflow > 0.0 {
+                    let wrapped = Path::rounded_rectangle(
+                        Point::new(roll.x, y - 4.0),
+                        Size::new(overflow, 7.0),
+                        2.0.into(),
+                    );
+                    frame.fill(
+                        &wrapped,
+                        with_alpha(note_color, 0.35 + note.velocity as f32 / 127.0 * 0.65),
+                    );
+                }
             }
             let head_x = roll.x + roll.width * phase;
             frame.stroke(

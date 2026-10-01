@@ -20,7 +20,7 @@ struct Transport {
     notes: Vec<Note>,
 }
 
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 struct Note {
     track: usize,
     tick: u64,
@@ -43,44 +43,46 @@ struct Recording {
 }
 
 fn payload(snapshot: Snapshot) -> serde_json::Value {
-    let mut tracks = snapshot
-        .meters
-        .input_peaks
+    let mut tracks = snapshot.meters.output_peaks
         .into_iter()
+        .take(2)
         .enumerate()
-        .filter(|(_, level)| *level > 0.001)
-        .map(|(index, level)| json!({"label":format!("IN{}", index + 1),"level":level.clamp(0.0,1.0),"clipping":snapshot.meters.input_clips > 0 && level >= 0.999}))
+        .map(|(index, peak)| json!({"label":format!("OUT{}", index + 1),"level":meter_level(peak),"clipping":snapshot.meters.output_clips > 0 && peak >= 0.999}))
         .collect::<Vec<_>>();
-    tracks.extend(snapshot.meters.output_peaks.into_iter().take(2).enumerate().map(|(index, level)| {
-        json!({"label":format!("OUT{}", index + 1),"level":level.clamp(0.0,1.0),"clipping":snapshot.meters.output_clips > 0 && level >= 0.999})
+    tracks.extend(snapshot.meters.input_peaks.into_iter().take(8).enumerate().map(|(index, peak)| {
+        json!({"label":format!("IN{}", index + 1),"level":meter_level(peak),"clipping":snapshot.meters.input_clips > 0 && peak >= 0.999})
     }));
-    tracks.sort_by(|left, right| {
-        right["level"]
-            .as_f64()
-            .partial_cmp(&left["level"].as_f64())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    tracks.truncate(10);
+    let notes = evenly_sample(snapshot.transport.notes, 192);
     json!({
         "title":"Synesthesia studio", "playing":snapshot.transport.playing,
         "paused":snapshot.transport.paused, "recording":snapshot.recording.active,
         "bpm":snapshot.transport.bpm, "position_ticks":snapshot.transport.position_ticks,
         "cycle_ticks":snapshot.transport.cycle_ticks.max(1), "tracks":tracks,
-        "notes":snapshot.transport.notes.into_iter().take(128).collect::<Vec<_>>()
+        "notes":notes
     })
 }
 
-fn envelope(endpoint: &str, now: u64) -> serde_json::Value {
-    let result = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .and_then(|client| {
-            client
-                .get(endpoint)
-                .send()?
-                .error_for_status()?
-                .json::<Snapshot>()
-        });
+fn meter_level(peak: f32) -> f32 {
+    ((20.0 * peak.max(0.001).log10() + 60.0) / 60.0).clamp(0.0, 1.0)
+}
+
+fn evenly_sample(notes: Vec<Note>, limit: usize) -> Vec<Note> {
+    if notes.len() <= limit {
+        return notes;
+    }
+    let len = notes.len();
+    (0..limit)
+        .map(|index| index * len / limit)
+        .map(|index| notes[index].clone())
+        .collect()
+}
+
+fn envelope(client: &reqwest::blocking::Client, endpoint: &str, now: u64) -> serde_json::Value {
+    let result = client
+        .get(endpoint)
+        .send()
+        .and_then(|response| response.error_for_status())
+        .and_then(|response| response.json::<Snapshot>());
     let payload = match result {
         Ok(snapshot) => payload(snapshot),
         Err(error) => {
@@ -141,20 +143,49 @@ mod tests {
             recording: Recording { active: true },
         });
         assert_eq!(value["recording"], true);
-        assert_eq!(value["tracks"].as_array().unwrap().len(), 3);
+        assert_eq!(value["tracks"].as_array().unwrap().len(), 4);
+        assert_eq!(value["tracks"][0]["label"], "OUT1");
+        assert_eq!(value["tracks"][1]["label"], "OUT2");
         assert_eq!(value["notes"][0]["note"], 60);
         assert_eq!(value["notes"][0]["track"], 0);
+    }
+
+    #[test]
+    fn piano_roll_sampling_preserves_the_whole_loop() {
+        let notes = (0..256)
+            .map(|tick| Note { track: 0, tick, length_ticks: 1, note: 60, velocity: 90 })
+            .collect();
+        let sampled = evenly_sample(notes, 192);
+        assert_eq!(sampled.first().unwrap().tick, 0);
+        assert!(sampled.last().unwrap().tick >= 254);
+    }
+
+    #[test]
+    fn meters_use_decibel_height() {
+        assert!((meter_level(1.0) - 1.0).abs() < f32::EPSILON);
+        assert!((meter_level(0.1) - (2.0 / 3.0)).abs() < 0.001);
+        assert_eq!(meter_level(0.001), 0.0);
     }
 }
 
 fn main() -> ExitCode {
     let endpoint = std::env::var("SYNESTHESIA_DAW_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:7893/v1/daw".into());
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("canvas-synesthesia-observer: build HTTP client: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     loop {
         let now = canvas_feeds::now_ms();
-        if let Err(error) = canvas_feeds::send_raw(&envelope(&endpoint, now)) {
+        if let Err(error) = canvas_feeds::send_raw(&envelope(&client, &endpoint, now)) {
             eprintln!("canvas-synesthesia-observer: {error}");
         }
-        thread::sleep(Duration::from_millis(250));
+        thread::sleep(Duration::from_millis(50));
     }
 }
