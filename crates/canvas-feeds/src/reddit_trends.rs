@@ -59,39 +59,39 @@ pub fn refresh_feed(
     now_ms: u64,
     previous: &[TrendItem],
 ) -> Payload {
-    let mut unique = BTreeMap::new();
-    let combined = config.subreddits.join("+");
+    let mut unique: BTreeMap<_, _> = previous
+        .iter()
+        .cloned()
+        .map(|item| (item.id.clone(), item))
+        .collect();
+    let cycle = now_ms / (config.refresh_seconds * 1000);
+    let sub = &config.subreddits[cycle as usize % config.subreddits.len()];
     let mut failures = Vec::new();
     let mut successful = 0;
-    match fetch(
-        &FeedKind::Reddit {
-            sub: combined.clone(),
-        },
-        http,
-    ) {
+    match fetch(&FeedKind::Reddit { sub: sub.clone() }, http) {
         Ok(feed) => {
-            successful = config.subreddits.len();
+            successful = 1;
             for (index, row) in feed.rows.into_iter().enumerate() {
                 let id = row
                     .url
                     .clone()
-                    .unwrap_or_else(|| format!("reddit:{combined}:{}", row.title));
+                    .unwrap_or_else(|| format!("reddit:{sub}:{}", row.title));
                 unique.entry(id.clone()).or_insert(TrendItem {
                     id,
                     text: row.title,
                     author: row.by.unwrap_or_else(|| "reddit".into()),
                     url: row
                         .url
-                        .unwrap_or_else(|| format!("https://reddit.com/r/{combined}")),
+                        .unwrap_or_else(|| format!("https://reddit.com/r/{sub}")),
                     created_at_ms: now_ms,
                     age_secs: row.age_secs.unwrap_or(0),
                     engagement_score: row.score.unwrap_or(0),
                     rank_score: 100_000u64.saturating_sub(index as u64),
-                    matches: vec!["reddit".into()],
+                    matches: vec![format!("r-{sub}")],
                 });
             }
         }
-        Err(error) => failures.push(format!("r/{combined}: {error}")),
+        Err(error) => failures.push(format!("r/{sub}: {error}")),
     }
     let mut items: Vec<_> = if successful == 0 {
         previous.to_vec()
@@ -114,7 +114,7 @@ pub fn refresh_feed(
             },
             mode: "polling",
             detail: if failures.is_empty() {
-                format!("{} subreddits live", successful)
+                format!("r/{sub} refreshed · {} configured", config.subreddits.len())
             } else {
                 failures.join("; ")
             },
