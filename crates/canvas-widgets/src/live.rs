@@ -2569,22 +2569,35 @@ struct NeuralGraphProgram {
     dag: bool,
 }
 
+#[derive(Default)]
+struct NeuralGraphState {
+    cache: CacheState,
+    started: RefCell<Option<Instant>>,
+}
+
+const GRAPH_SETTLE: Duration = Duration::from_millis(620);
+
 impl<Message> canvas::Program<Message> for NeuralGraphProgram {
-    type State = CacheState;
+    type State = NeuralGraphState;
 
     fn update(
         &self,
-        _state: &mut Self::State,
+        state: &mut Self::State,
         event: &canvas::Event,
         _bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Option<iced::widget::Action<Message>> {
-        (!self.dag
-            && matches!(
+        if self.dag
+            || !matches!(
                 event,
                 canvas::Event::Window(iced::window::Event::RedrawRequested(_))
-            ))
-        .then(iced::widget::Action::request_redraw)
+            )
+        {
+            return None;
+        }
+        let mut started = state.started.borrow_mut();
+        let start = *started.get_or_insert_with(Instant::now);
+        (start.elapsed() < GRAPH_SETTLE).then(iced::widget::Action::request_redraw)
     }
 
     fn draw(
@@ -2595,153 +2608,172 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        let phase = (now_ms % 12_000) as f32 / 12_000.0;
+        let mut started = state.started.borrow_mut();
+        let start = *started.get_or_insert_with(Instant::now);
+        let settle = if self.dag {
+            1.0
+        } else {
+            (start.elapsed().as_secs_f32() / GRAPH_SETTLE.as_secs_f32()).min(1.0)
+        };
+        drop(started);
+        let topology = self.nodes.iter().any(|node| node.id.starts_with("site:"));
         let key = self.nodes.iter().fold(
             Key::new()
                 .add_usize(self.edges.len())
-                .add_u64(if self.dag { 0 } else { now_ms / 33 }),
+                .add_u64(if settle < 1.0 {
+                    (settle * 30.0) as u64
+                } else {
+                    31
+                }),
             |key, node| {
-                key.add_str(&node.id)
+                let key = key
+                    .add_str(&node.id)
                     .add_str(&node.label)
-                    .add_f32(node.heat)
-                    .add_u64(node.state as u64)
+                    .add_u64(node.state as u64);
+                if topology {
+                    key
+                } else {
+                    key.add_f32(node.heat)
+                }
             },
         );
         let key = self.edges.iter().fold(key, |key, edge| {
-            key.add_str(&edge.from).add_str(&edge.to).add_f32(edge.heat)
-        });
-        state.draw_cached(renderer, bounds.size(), key.build(), |frame| {
-            if self.nodes.is_empty() {
-                frame.fill_text(canvas::Text {
-                    content: "Waiting for neural activity".into(),
-                    position: Point::new(12.0, bounds.height * 0.5),
-                    color: color(self.palette.text_muted),
-                    size: iced::Pixels(self.label_size),
-                    ..Default::default()
-                });
-                return;
-            }
-
-            let positions = if self.dag {
-                dag_layout(&self.nodes, &self.edges, bounds.size())
+            let key = key.add_str(&edge.from).add_str(&edge.to);
+            if topology {
+                key
             } else {
-                animated_neural_layout(&self.nodes, bounds.size(), phase)
-            };
-            let idle_edge = with_alpha(color(self.palette.border), 0.42);
-            for edge in &self.edges {
-                let (Some(from), Some(to)) = (positions.get(&edge.from), positions.get(&edge.to))
-                else {
-                    continue;
-                };
-                let active = lerp_oklch(
-                    idle_edge,
-                    color(self.palette.primary),
-                    edge.heat.clamp(0.0, 1.0),
-                );
-                let path = if self.dag {
-                    Path::new(|path| {
-                        let mid = (from.y + to.y) * 0.5;
-                        path.move_to(*from);
-                        path.line_to(Point::new(from.x, mid));
-                        path.line_to(Point::new(to.x, mid));
-                        path.line_to(*to);
-                    })
-                } else {
-                    Path::line(*from, *to)
-                };
-                frame.stroke(
-                    &path,
-                    canvas::Stroke::default()
-                        .with_width(1.0 + edge.heat * 3.0)
-                        .with_color(active),
-                );
-                if edge.heat > 0.02 {
-                    let travel = (phase * (0.45 + edge.heat * 0.9)
-                        + stable_phase(&edge.from)
-                        + stable_phase(&edge.to) * 0.37)
-                        .fract();
-                    let pulse = Point::new(
-                        from.x + (to.x - from.x) * travel,
-                        from.y + (to.y - from.y) * travel,
-                    );
-                    frame.fill(
-                        &Path::circle(pulse, 2.5 + edge.heat * 3.5),
-                        with_alpha(color(self.palette.primary), 0.7 + edge.heat * 0.3),
-                    );
-                }
+                key.add_f32(edge.heat)
             }
+        });
+        state
+            .cache
+            .draw_cached(renderer, bounds.size(), key.build(), |frame| {
+                if self.nodes.is_empty() {
+                    frame.fill_text(canvas::Text {
+                        content: "Waiting for neural activity".into(),
+                        position: Point::new(12.0, bounds.height * 0.5),
+                        color: color(self.palette.text_muted),
+                        size: iced::Pixels(self.label_size),
+                        ..Default::default()
+                    });
+                    return;
+                }
 
-            for node in &self.nodes {
-                let Some(position) = positions.get(&node.id) else {
-                    continue;
+                let positions = if self.dag {
+                    dag_layout(&self.nodes, &self.edges, bounds.size())
+                } else {
+                    animated_neural_layout(&self.nodes, bounds.size(), settle)
                 };
-                let semantic = status_color(node.state, &self.palette);
-                let heat = node.heat.clamp(0.0, 1.0);
-                let bounce = ((phase + stable_phase(&node.id)) * std::f32::consts::TAU)
-                    .sin()
-                    .abs();
-                let radius = 5.0 + heat * 7.0 + bounce * (1.0 + heat * 2.5);
-                if self.dag {
-                    let node_size = Size::new(108.0, 32.0);
-                    let origin = Point::new(
-                        position.x - node_size.width * 0.5,
-                        position.y - node_size.height * 0.5,
+                let idle_edge = with_alpha(color(self.palette.border), 0.42);
+                for edge in &self.edges {
+                    let (Some(from), Some(to)) =
+                        (positions.get(&edge.from), positions.get(&edge.to))
+                    else {
+                        continue;
+                    };
+                    let active = lerp_oklch(
+                        idle_edge,
+                        color(self.palette.primary),
+                        edge.heat.clamp(0.0, 1.0),
                     );
-                    let shape = Path::rounded_rectangle(origin, node_size, 3.0.into());
-                    frame.fill(&shape, color(self.palette.surface_muted));
+                    let path = if self.dag {
+                        Path::new(|path| {
+                            let mid = (from.y + to.y) * 0.5;
+                            path.move_to(*from);
+                            path.line_to(Point::new(from.x, mid));
+                            path.line_to(Point::new(to.x, mid));
+                            path.line_to(*to);
+                        })
+                    } else {
+                        Path::line(*from, *to)
+                    };
                     frame.stroke(
-                        &shape,
+                        &path,
                         canvas::Stroke::default()
-                            .with_width(1.0 + heat * 2.0)
-                            .with_color(semantic),
+                            .with_width(1.0 + edge.heat * 3.0)
+                            .with_color(active),
+                    );
+                    if edge.heat > 0.02 {
+                        let travel = (settle * (0.45 + edge.heat * 0.9)
+                            + stable_phase(&edge.from)
+                            + stable_phase(&edge.to) * 0.37)
+                            .fract();
+                        let pulse = Point::new(
+                            from.x + (to.x - from.x) * travel,
+                            from.y + (to.y - from.y) * travel,
+                        );
+                        frame.fill(
+                            &Path::circle(pulse, 2.5 + edge.heat * 3.5),
+                            with_alpha(color(self.palette.primary), 0.7 + edge.heat * 0.3),
+                        );
+                    }
+                }
+
+                for node in &self.nodes {
+                    let Some(position) = positions.get(&node.id) else {
+                        continue;
+                    };
+                    let semantic = status_color(node.state, &self.palette);
+                    let heat = node.heat.clamp(0.0, 1.0);
+                    let bounce = (settle * std::f32::consts::PI).sin().max(0.0);
+                    let radius = 5.0 + heat * 7.0 + bounce * (1.0 + heat * 2.5);
+                    if self.dag {
+                        let node_size = Size::new(108.0, 32.0);
+                        let origin = Point::new(
+                            position.x - node_size.width * 0.5,
+                            position.y - node_size.height * 0.5,
+                        );
+                        let shape = Path::rounded_rectangle(origin, node_size, 3.0.into());
+                        frame.fill(&shape, color(self.palette.surface_muted));
+                        frame.stroke(
+                            &shape,
+                            canvas::Stroke::default()
+                                .with_width(1.0 + heat * 2.0)
+                                .with_color(semantic),
+                        );
+                        frame.fill_text(canvas::Text {
+                            content: node.label.clone(),
+                            position: Point::new(origin.x + 8.0, position.y + 4.0),
+                            color: color(self.palette.text),
+                            size: iced::Pixels(self.label_size),
+                            ..Default::default()
+                        });
+                        continue;
+                    }
+                    if heat > 0.02 {
+                        frame.fill(
+                            &Path::circle(*position, radius + 7.0 * heat),
+                            with_alpha(semantic, 0.08 + heat * 0.16),
+                        );
+                    }
+                    if node.id.starts_with("site:") {
+                        frame.stroke(
+                            &Path::circle(*position, radius + 11.0),
+                            canvas::Stroke::default()
+                                .with_width(1.0)
+                                .with_color(with_alpha(semantic, 0.38)),
+                        );
+                    }
+                    frame.fill(
+                        &Path::circle(*position, radius),
+                        lerp_oklch(
+                            color(self.palette.surface_muted),
+                            semantic,
+                            0.3 + heat * 0.7,
+                        ),
                     );
                     frame.fill_text(canvas::Text {
                         content: node.label.clone(),
-                        position: Point::new(origin.x + 8.0, position.y + 4.0),
+                        position: Point::new(
+                            (position.x + radius + 5.0).min((bounds.width - 112.0).max(4.0)),
+                            (position.y + 4.0).min(bounds.height - 4.0),
+                        ),
                         color: color(self.palette.text),
                         size: iced::Pixels(self.label_size),
                         ..Default::default()
                     });
-                    continue;
                 }
-                if heat > 0.02 {
-                    frame.fill(
-                        &Path::circle(*position, radius + 7.0 * heat),
-                        with_alpha(semantic, 0.08 + heat * 0.16),
-                    );
-                }
-                if node.id.starts_with("site:") {
-                    frame.stroke(
-                        &Path::circle(*position, radius + 11.0),
-                        canvas::Stroke::default()
-                            .with_width(1.0)
-                            .with_color(with_alpha(semantic, 0.38)),
-                    );
-                }
-                frame.fill(
-                    &Path::circle(*position, radius),
-                    lerp_oklch(
-                        color(self.palette.surface_muted),
-                        semantic,
-                        0.3 + heat * 0.7,
-                    ),
-                );
-                frame.fill_text(canvas::Text {
-                    content: node.label.clone(),
-                    position: Point::new(
-                        (position.x + radius + 5.0).min((bounds.width - 112.0).max(4.0)),
-                        (position.y + 4.0).min(bounds.height - 4.0),
-                    ),
-                    color: color(self.palette.text),
-                    size: iced::Pixels(self.label_size),
-                    ..Default::default()
-                });
-            }
-        })
+            })
     }
 }
 
@@ -2761,15 +2793,22 @@ fn stable_phase(value: &str) -> f32 {
     hash as f32 / u32::MAX as f32
 }
 
+fn ease_out_back(progress: f32) -> f32 {
+    let c1 = 1.70158;
+    let c3 = c1 + 1.0;
+    let x = progress.clamp(0.0, 1.0) - 1.0;
+    1.0 + c3 * x.powi(3) + c1 * x.powi(2)
+}
+
 fn animated_neural_layout(
     nodes: &[NeuralNode],
     size: Size,
-    phase: f32,
+    settle: f32,
 ) -> std::collections::BTreeMap<String, Point> {
     if !nodes.iter().any(|node| node.id.starts_with("site:")) {
         return neural_layout(nodes, size);
     }
-    topology_web_layout_at_phase(nodes, size, phase)
+    topology_web_layout_at_phase(nodes, size, settle)
 }
 
 fn grouped_column_layout(
@@ -2811,13 +2850,13 @@ fn topology_web_layout(
     nodes: &[NeuralNode],
     size: Size,
 ) -> std::collections::BTreeMap<String, Point> {
-    topology_web_layout_at_phase(nodes, size, 0.0)
+    topology_web_layout_at_phase(nodes, size, 1.0)
 }
 
 fn topology_web_layout_at_phase(
     nodes: &[NeuralNode],
     size: Size,
-    phase: f32,
+    settle: f32,
 ) -> std::collections::BTreeMap<String, Point> {
     let sites = nodes
         .iter()
@@ -2826,11 +2865,9 @@ fn topology_web_layout_at_phase(
     let mut positions = std::collections::BTreeMap::new();
     let cell_width = size.width / sites.len().max(1) as f32;
     for (site_index, site) in sites.iter().enumerate() {
-        let site_phase = phase + stable_phase(&site.id);
         let center = Point::new(
             cell_width * (site_index as f32 + 0.5),
-            size.height * 0.5
-                + (site_phase * std::f32::consts::TAU).sin() * size.height.min(220.0) * 0.045,
+            size.height * 0.5 - (1.0 - settle) * 12.0,
         );
         positions.insert(site.id.clone(), center);
         let site_name = site.label.as_str();
@@ -2843,12 +2880,9 @@ fn topology_web_layout_at_phase(
         let radius_x = (cell_width * 0.27).min(150.0).max(48.0);
         let radius_y = (size.height * 0.24).max(28.0);
         for (index, node) in members.iter().enumerate() {
-            let seed = stable_phase(&node.id);
-            let direction = if index % 2 == 0 { 1.0 } else { -1.0 };
             let angle = -std::f32::consts::FRAC_PI_2
-                + std::f32::consts::TAU * index as f32 / members.len().max(1) as f32
-                + direction * std::f32::consts::TAU * phase * (0.055 + seed * 0.035);
-            let spring = 1.0 + ((phase * 1.7 + seed) * std::f32::consts::TAU).sin() * 0.09;
+                + std::f32::consts::TAU * index as f32 / members.len().max(1) as f32;
+            let spring = ease_out_back(settle);
             positions.insert(
                 node.id.clone(),
                 Point::new(
