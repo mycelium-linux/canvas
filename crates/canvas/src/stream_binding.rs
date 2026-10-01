@@ -697,6 +697,14 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         "jarvis-notifications-v1",
         include_str!("../../../config/binders/jarvis-notifications-v1.lua"),
     ),
+    (
+        "home-systems-v1",
+        include_str!("../../../config/binders/home-systems-v1.lua"),
+    ),
+    (
+        "x-trends-v1",
+        include_str!("../../../config/binders/x-trends-v1.lua"),
+    ),
 ];
 
 fn built_in_adapter_source(adapter: &str) -> Option<&'static str> {
@@ -2527,7 +2535,13 @@ mod tests {
         };
         apply_named_adapter("x-trends-v1", &event, &mut target)
             .expect("empty degraded feeds remain typed arrays");
-        let WidgetKind::SocialFeed { status, detail, posts, .. } = &target.kind else {
+        let WidgetKind::SocialFeed {
+            status,
+            detail,
+            posts,
+            ..
+        } = &target.kind
+        else {
             panic!("social feed")
         };
         assert_eq!(status, "degraded");

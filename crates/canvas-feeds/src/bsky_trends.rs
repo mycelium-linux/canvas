@@ -16,7 +16,9 @@ impl BlueskyApi {
             return Err("Bluesky PDS must use https".into());
         }
         if identifier.trim().is_empty() || app_password.trim().is_empty() {
-            return Err("BSKY_IDENTIFIER and BSKY_APP_PASSWORD are required for the home timeline".into());
+            return Err(
+                "BSKY_IDENTIFIER and BSKY_APP_PASSWORD are required for the home timeline".into(),
+            );
         }
         let client = reqwest::blocking::Client::builder()
             .user_agent("canvas-bsky-trends/0.1")
@@ -25,7 +27,10 @@ impl BlueskyApi {
             .map_err(|e| e.to_string())?;
         let response = client
             .post(format!("{pds}/xrpc/com.atproto.server.createSession"))
-            .json(&SessionRequest { identifier, password: app_password })
+            .json(&SessionRequest {
+                identifier,
+                password: app_password,
+            })
             .send()
             .map_err(|e| format!("Bluesky login failed: {e}"))?;
         if !response.status().is_success() {
