@@ -27,3 +27,7 @@ path = "src/bin/canvas-comics.rs"
 [[bin]]
 name = "canvas-now-playing"
 path = "src/bin/canvas-now-playing.rs"
+
+[[bin]]
+name = "canvas-host-observer"
+path = "src/bin/canvas-host-observer.rs"

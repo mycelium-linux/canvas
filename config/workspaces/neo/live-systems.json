@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "id": "home-live-systems",
+  "project_id": "home",
+  "revision": 1,
+  "theme": { "source": "project" },
+  "background": { "kind": "shader", "shader_id": "smoke-rings", "speed": 0.6 },
+  "chrome": { "title": "hidden", "canvas_padding": 18, "surface_gap": 12 },
+  "surfaces": [
+    {
+      "id": "clock", "title": "Clock",
+      "content": { "kind": "widget", "spec": {
+        "schema_version": 2, "id": "clock", "kind": "clock", "format": "%H:%M:%S", "mode": "analog",
+        "theme": null, "refresh_ms": 16, "chrome": "frameless",
+        "data": { "state": "ready", "source": "home-pi", "observed_at": null, "window": "live", "detail": null, "provenance": "live" }
+      }}, "inputs": []
+    },
+    {
+      "id": "now-playing-art", "title": "Now playing artwork source",
+      "content": { "kind": "live_image", "source_id": "now-playing-art" }, "inputs": []
+    },
+    {
+      "id": "now-playing", "title": "Now playing",
+      "content": { "kind": "widget", "spec": {
+        "schema_version": 2, "id": "now-playing", "kind": "media_card", "title": "Waiting for playback",
+        "artist": "MPD / Spotify", "album": null, "source": "Media", "artwork_source": "now-playing-art",
+        "elapsed_seconds": 0.0, "duration_seconds": 0.0, "observed_at_ms": 0, "playing": false,
+        "theme": null, "refresh_ms": 1000, "chrome": "frameless",
+        "data": { "state": "loading", "source": "media", "observed_at": null, "window": "live", "detail": "Awaiting playback", "provenance": "live" }
+      }}, "inputs": [{ "id": "media", "contract": "canvas.widget.snapshot.v1" }]
+    },
+    {
+      "id": "systems", "title": "Systems",
+      "content": { "kind": "widget", "spec": {
+        "schema_version": 2, "id": "systems", "kind": "status_list", "title": "home-pi · live systems", "nodes": [],
+        "theme": null, "refresh_ms": 5000, "chrome": "integrated",
+        "data": { "state": "loading", "source": "systemd", "observed_at": null, "window": "live", "detail": "Awaiting first observation", "provenance": "live" }
+      }}, "inputs": [{ "id": "services", "contract": "canvas.widget.snapshot.v1" }]
+    }
+  ],
+  "layout": { "kind": "canvas", "placements": [
+    { "surface_id": "clock", "bounds": { "x": 0.0, "y": 0.0, "width": 0.38, "height": 0.48 }, "layer": 0 },
+    { "surface_id": "now-playing", "bounds": { "x": 0.0, "y": 0.48, "width": 0.38, "height": 0.52 }, "layer": 0 },
+    { "surface_id": "systems", "bounds": { "x": 0.38, "y": 0.0, "width": 0.62, "height": 1.0 }, "layer": 0 }
+  ]},
+  "bindings": [
+    {
+      "id": "now-playing-media",
+      "source": { "owner": "home-pi-media", "stream": "now-playing", "contract": "canvas.music.nowplaying.v1" },
+      "target": { "surface_id": "now-playing", "input_id": "media" },
+      "adapter": "music-nowplaying-v1", "delivery": { "mode": "latest" }
+    },
+    {
+      "id": "home-systems-live",
+      "source": { "owner": "home-pi", "stream": "systems", "contract": "canvas.widget.snapshot.v1" },
+      "target": { "surface_id": "systems", "input_id": "services" },
+      "adapter": "home-systems-v1", "delivery": { "mode": "latest" }
+    }
+  ],
+  "pages": [], "active_page": 0, "focused_surface_id": null
+}
