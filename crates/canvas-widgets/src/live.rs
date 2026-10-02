@@ -778,14 +778,16 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                 Canvas::new(SpectralWaterfallProgram {
                     rows: rows.clone(),
                     ramp: vec![
-                        color(palette.background_strong),
-                        color(palette.info),
-                        color(palette.primary),
-                        color(palette.warning),
-                        color(palette.danger),
+                        Color::from_rgb8(0, 2, 12),
+                        Color::from_rgb8(0, 20, 92),
+                        Color::from_rgb8(0, 83, 214),
+                        Color::from_rgb8(0, 222, 255),
+                        Color::from_rgb8(255, 230, 0),
+                        Color::from_rgb8(242, 38, 19),
+                        Color::WHITE,
                     ],
-                    label: color(palette.text_muted),
-                    scan: color(palette.text),
+                    label: Color::from_rgb8(170, 205, 232),
+                    scan: Color::from_rgb8(225, 250, 255),
                     label_size: metrics.micro,
                     min_frequency: *min_frequency,
                     max_frequency: *max_frequency,
@@ -3156,9 +3158,14 @@ pub(crate) fn panel<'a, Message: 'a>(
     body: Element<'a, Message>,
     visual: &VisualTheme,
 ) -> Element<'a, Message> {
-    let surface = color(visual.surface_raised);
+    let spectral = matches!(&spec.kind, WidgetKind::SpectralWaterfall { .. });
+    let surface = if spectral {
+        Color::from_rgb8(0, 2, 12)
+    } else {
+        color(visual.surface_raised)
+    };
     let metrics = visual.metrics;
-    let panel_opacity = visual.panel_opacity;
+    let panel_opacity = if spectral { 1.0 } else { visual.panel_opacity };
     // Resolved before the closure below: capturing `visual` would tie the style
     // to the theme's lifetime, and Color is Copy.
     let border = freshness(spec.data.state, visual).border;
@@ -3950,8 +3957,12 @@ impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
                 );
             }
 
-            let columns = ((waterfall.width / 2.0).ceil() as usize).clamp(32, 512);
-            let display_rows = ((waterfall.height / 2.0).ceil() as usize).clamp(16, 256);
+            // Draw at the information density of the source rather than at
+            // display-pixel density. The former 2 px grid generated ~130k
+            // paths per RF frame at 1080p while the receiver only supplies
+            // 128 bins × at most 180 retained rows.
+            let columns = self.rows.last().map_or(32, |row| row.len().clamp(32, 512));
+            let display_rows = self.rows.len().clamp(1, 256);
             let cell_w = waterfall.width / columns as f32;
             let cell_h = waterfall.height / display_rows as f32;
             for row_index in 0..display_rows {
@@ -3979,11 +3990,15 @@ impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
             // Latest FFT is rendered as a continuous luminous trace above its
             // retained history. This is real frame data, never an idle animation.
             let latest = self.rows.last().expect("non-empty spectrum history");
+            let previous = self.rows.iter().rev().nth(1).unwrap_or(latest);
             let mut trace = canvas::path::Builder::new();
             for index in 0..latest.len() {
                 let x = spectrum.x
                     + spectrum.width * index as f32 / latest.len().saturating_sub(1).max(1) as f32;
-                let y = spectrum.y + spectrum.height * (1.0 - latest[index].clamp(0.0, 1.0));
+                // Light temporal interpolation calms single-frame FFT jitter
+                // without modifying the raw waterfall history.
+                let value = previous[index] + (latest[index] - previous[index]) * 0.72;
+                let y = spectrum.y + spectrum.height * (1.0 - value.clamp(0.0, 1.0));
                 if index == 0 {
                     trace.move_to(Point::new(x, y));
                 } else {
@@ -4009,11 +4024,11 @@ impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
                 frame.stroke(
                     &Path::line(
                         Point::new(tuned_x, spectrum.y),
-                        Point::new(tuned_x, waterfall.y + waterfall.height),
+                        Point::new(tuned_x, spectrum.y + 8.0),
                     ),
                     canvas::Stroke::default()
-                        .with_width(1.0)
-                        .with_color(with_alpha(self.scan, 0.72)),
+                        .with_width(2.0)
+                        .with_color(self.scan),
                 );
                 frame.fill_text(canvas::Text {
                     content: format!(

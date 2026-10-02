@@ -921,7 +921,7 @@ impl WidgetSpec {
             // Incoming FFT rows move independently of clocks and other widgets.
             // A modest cadence keeps the waterfall flowing without asking the
             // host for display-rate frames.
-            WidgetKind::SpectralWaterfall { .. } => Some(80),
+            WidgetKind::SpectralWaterfall { .. } => Some(40),
             _ => None,
         }
     }
