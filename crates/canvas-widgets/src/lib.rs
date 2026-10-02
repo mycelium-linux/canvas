@@ -188,6 +188,7 @@ pub const KNOWN_WIDGET_KINDS: &[&str] = &[
     "gauge",
     "meter",
     "daw_deck",
+    "mix_field",
     "histogram",
     "spectral_waterfall",
     "heatmap",
@@ -318,6 +319,13 @@ pub enum WidgetKind {
         cycle_ticks: u64,
         tracks: Vec<DawTrack>,
         notes: Vec<DawNote>,
+    },
+    /// Source energy positioned across the stereo field. Synesthesia owns the
+    /// measurements; Canvas only renders this bounded projection.
+    MixField {
+        title: String,
+        surface: String,
+        strips: Vec<MixFieldStrip>,
     },
     /// Prometheus histogram buckets rendered as an operational distribution.
     Histogram {
@@ -951,6 +959,11 @@ impl WidgetSpec {
                 if radio.is_some() {
                     *current_radio = radio;
                 }
+                // A validated frame is the authoritative readiness signal.
+                // Leaving the initial loading state intact hides real rows
+                // behind the host's loading presentation forever.
+                self.data.state = WidgetDataState::Ready;
+                self.data.detail = None;
             }
             (current, WidgetMutation::Snapshot { widget, data })
                 if same_widget_kind(current, &widget) =>
@@ -1022,7 +1035,11 @@ mod mutation_tests {
             theme: Some("project".into()),
             refresh_ms: Some(1_000),
             chrome: WidgetChrome::DragOnly,
-            data: WidgetData::default(),
+            data: WidgetData {
+                state: WidgetDataState::Loading,
+                detail: Some("Awaiting RF frames".into()),
+                ..Default::default()
+            },
         }
     }
 
@@ -1098,6 +1115,8 @@ mod mutation_tests {
         assert_eq!(rows.len(), 8);
         assert_eq!(rows[0][0], 0.2);
         assert_eq!(rows[7][0], 0.9);
+        assert_eq!(spec.data.state, WidgetDataState::Ready);
+        assert_eq!(spec.data.detail, None);
     }
 
     #[test]
@@ -1545,6 +1564,25 @@ pub struct DawTrack {
     pub level: f32,
     #[serde(default)]
     pub clipping: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MixFieldStrip {
+    pub index: usize,
+    pub cc: u8,
+    pub label: String,
+    pub gain: f32,
+    pub active: bool,
+    pub peak: f32,
+    pub stereo_position: f32,
+    pub left_peak: f32,
+    pub right_peak: f32,
+    /// Optional normalized low-to-high frequency energy, populated by a
+    /// separate analyzer rather than the real-time mixer.
+    #[serde(default)]
+    pub bands: Vec<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2074,6 +2112,42 @@ impl WidgetSpec {
                         "DAW note is invalid",
                     )?;
                     check(note.tick < *cycle_ticks, "DAW note starts outside cycle")?;
+                }
+            }
+            WidgetKind::MixField {
+                title,
+                surface,
+                strips,
+            } => {
+                bounded_label(title, "mix field title")?;
+                bounded_label(surface, "mix field surface")?;
+                check(
+                    !strips.is_empty() && strips.len() <= 8,
+                    "mix field requires 1-8 strips",
+                )?;
+                for strip in strips {
+                    bounded_label(&strip.label, "mix field strip label")?;
+                    check(
+                        strip.index > 0 && strip.index <= 8,
+                        "mix field strip index must be 1-8",
+                    )?;
+                    check(strip.cc <= 127, "mix field CC must be MIDI-safe")?;
+                    check(
+                        [strip.gain, strip.peak, strip.left_peak, strip.right_peak]
+                            .into_iter()
+                            .all(|value| value.is_finite() && (0.0..=2.0).contains(&value))
+                            && strip.stereo_position.is_finite()
+                            && (-1.0..=1.0).contains(&strip.stereo_position),
+                        "mix field levels and stereo position must be finite and bounded",
+                    )?;
+                    check(
+                        strip.bands.len() <= 64
+                            && strip
+                                .bands
+                                .iter()
+                                .all(|value| value.is_finite() && (0.0..=1.0).contains(value)),
+                        "mix field exceeds 64 normalized bands",
+                    )?;
                 }
             }
             WidgetKind::Histogram {
@@ -3211,7 +3285,9 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
         WidgetKind::MediaTransport { .. } | WidgetKind::ModelTelemetry { .. } => {
             SizeHint::new(280.0, 180.0, 540.0, 340.0, 1.8)
         }
-        WidgetKind::DawDeck { .. } => SizeHint::new(420.0, 260.0, 760.0, 520.0, 1.2),
+        WidgetKind::DawDeck { .. } | WidgetKind::MixField { .. } => {
+            SizeHint::new(420.0, 260.0, 760.0, 520.0, 1.2)
+        }
         WidgetKind::SpanTimeline { .. } => SizeHint::new(300.0, 160.0, 600.0, 320.0, 2.4),
         // A cell smaller than this is a colour with no shape; four rows is the
         // fewest that reads as a matrix rather than a bar chart.
