@@ -2597,8 +2597,8 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
         }
         let mut started = state.started.borrow_mut();
         let start = *started.get_or_insert_with(Instant::now);
-        let topology = self.nodes.iter().any(|node| node.id.starts_with("site:"));
-        (topology || start.elapsed() < GRAPH_SETTLE).then(iced::widget::Action::request_redraw)
+        let live_activity = self.edges.iter().any(|edge| edge.activity > 0.0);
+        (live_activity || start.elapsed() < GRAPH_SETTLE).then(iced::widget::Action::request_redraw)
     }
 
     fn draw(
@@ -2817,20 +2817,22 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
         if topology && settle >= 1.0 {
             let mut activity = canvas::Frame::new(renderer, bounds.size());
             let phase = (start.elapsed().as_secs_f32() * 0.12).fract();
-            for edge in self.edges.iter().filter(|edge| edge.heat > 0.02) {
+            for edge in self.edges.iter().filter(|edge| edge.activity > 0.0) {
                 let (Some(from), Some(to)) = (positions.get(&edge.from), positions.get(&edge.to))
                 else {
                     continue;
                 };
+                let rate = edge.activity.clamp(1.0, 8.0).sqrt();
                 let travel =
-                    (phase + stable_phase(&edge.from) + stable_phase(&edge.to) * 0.37).fract();
+                    (phase * rate + stable_phase(&edge.from) + stable_phase(&edge.to) * 0.37)
+                        .fract();
                 let pulse = Point::new(
                     from.x + (to.x - from.x) * travel,
                     from.y + (to.y - from.y) * travel,
                 );
                 activity.fill(
-                    &Path::circle(pulse, 1.8 + edge.heat * 2.2),
-                    with_alpha(color(self.palette.primary), 0.45 + edge.heat * 0.4),
+                    &Path::circle(pulse, 2.2 + rate * 0.7),
+                    with_alpha(color(self.palette.primary), 0.62 + rate * 0.04),
                 );
             }
             output.push(activity.into_geometry());
@@ -6512,6 +6514,7 @@ mod tests {
             from: from.into(),
             to: to.into(),
             heat: 0.0,
+            activity: 0.0,
         };
         let edges = vec![
             edge("root", "child-a"),

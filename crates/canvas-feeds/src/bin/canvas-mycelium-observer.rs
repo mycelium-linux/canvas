@@ -39,6 +39,8 @@ struct PeerHealth {
     memory_total_bytes: u64,
     memory_available_bytes: u64,
     filesystems: Vec<FilesystemHealth>,
+    #[serde(default)]
+    established_ssh_sessions: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +62,7 @@ struct PeerSummary {
     memory_available_bytes: u64,
     memory_total_bytes: u64,
     root_available_bytes: Option<u64>,
+    established_ssh_sessions: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -198,6 +201,7 @@ fn project(peers: Vec<PeerView>, now_seconds: u64) -> Vec<PeerSummary> {
                 memory_available_bytes: health.memory_available_bytes,
                 memory_total_bytes: health.memory_total_bytes,
                 root_available_bytes: root.map(|filesystem| filesystem.available_bytes),
+                established_ssh_sessions: health.established_ssh_sessions,
             })
         })
         .collect::<Vec<_>>();

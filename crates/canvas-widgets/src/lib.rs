@@ -1550,6 +1550,9 @@ pub struct NeuralEdge {
     pub to: String,
     /// Host-computed recency, from idle (0) to just traversed (1).
     pub heat: f32,
+    /// Measured live activity on this edge. Zero means no animated traffic.
+    #[serde(default)]
+    pub activity: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1729,9 +1732,11 @@ fn validate_graph(
                 && edge.from != edge.to
                 && pairs.insert((edge.from.as_str(), edge.to.as_str()))
                 && edge.heat.is_finite()
-                && (0.0..=1.0).contains(&edge.heat),
+                && (0.0..=1.0).contains(&edge.heat)
+                && edge.activity.is_finite()
+                && (0.0..=1024.0).contains(&edge.activity),
             &format!(
-                "{label} graph edges require distinct known nodes, unique pairs, and heat within 0..1"
+                "{label} graph edges require distinct known nodes, unique pairs, heat within 0..1, and bounded activity"
             ),
         )?;
     }
@@ -2657,8 +2662,10 @@ impl WidgetSpec {
                             && edge.from != edge.to
                             && pairs.insert((edge.from.as_str(), edge.to.as_str()))
                             && edge.heat.is_finite()
-                            && (0.0..=1.0).contains(&edge.heat),
-                        "neural graph edges require distinct known nodes, unique pairs, and heat within 0..1",
+                            && (0.0..=1.0).contains(&edge.heat)
+                            && edge.activity.is_finite()
+                            && (0.0..=1024.0).contains(&edge.activity),
+                        "neural graph edges require distinct known nodes, unique pairs, heat within 0..1, and bounded activity",
                     )?;
                 }
             }

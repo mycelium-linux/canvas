@@ -8,7 +8,21 @@ end
 local nodes, edges = canvas.array(), canvas.array()
 local sites = {}
 local segments = {}
-local warnings, site_count, segment_count, vlan_count, observed_count, service_count = 0, 0, 0, 0, 0, 0
+local peer_ssh = {}
+local warnings, site_count, segment_count, vlan_count, observed_count, service_count, ssh_count = 0, 0, 0, 0, 0, 0, 0
+
+local function identity(value)
+  return string.gsub(string.lower(tostring(value or "")), "[^%w]", "")
+end
+
+for i = 1, #p.peers do
+  local peer = p.peers[i]
+  local sessions = tonumber(peer.established_ssh_sessions) or 0
+  if sessions > 0 then
+    peer_ssh[identity(peer.hostname)] = sessions
+    ssh_count = ssh_count + sessions
+  end
+end
 
 -- Presentation-only compatibility while the remaining legacy node is migrated.
 -- Mycelium remains the owner of the raw advertised site identity.
@@ -86,13 +100,15 @@ if type(p.nodes) == "table" then
     end
     local id = "observed:" .. tostring(i)
     local state = tonumber(item.links_down) and item.links_down > 0 and "warning" or "neutral"
+    local ssh_sessions = peer_ssh[identity(label)] or 0
+    if ssh_sessions > 0 then facts[#facts + 1] = "SSH ×" .. tostring(ssh_sessions) end
     nodes[#nodes + 1] = {id=id,label=label,detail=string.sub(table.concat(facts, " · "),1,512),group=site,heat=item.device and 0.62 or 0.22,state=state}
     local memberships = type(item.segments) == "table" and item.segments or canvas.array()
     if #memberships == 0 and site then memberships[1] = site end
     for membership_index = 1, #memberships do
       local membership = tostring(memberships[membership_index])
       local segment_id = segments[membership]
-      if segment_id then edges[#edges + 1] = {from=segment_id,to=id,heat=item.device and 0.48 or 0.18} end
+      if segment_id then edges[#edges + 1] = {from=segment_id,to=id,heat=item.device and 0.48 or 0.18,activity=ssh_sessions} end
     end
   end
 end
@@ -128,8 +144,8 @@ end
 
 return {
   kind="snapshot",
-  widget={kind="neural_graph",title=string.format("Mycelium · %d peers · %d nodes · %d svc · %d sites · %d segments · %d VLANs · %d views · %d conflicts",
-    #p.peers,observed_count,service_count,site_count,segment_count,vlan_count,tonumber(p.observers) or 0,tonumber(p.conflicts) or 0),nodes=nodes,edges=edges},
+  widget={kind="neural_graph",title=string.format("Mycelium · %d peers · %d nodes · %d svc · %d sites · %d segments · %d VLANs · %d SSH · %d views · %d conflicts",
+    #p.peers,observed_count,service_count,site_count,segment_count,vlan_count,ssh_count,tonumber(p.observers) or 0,tonumber(p.conflicts) or 0),nodes=nodes,edges=edges},
   data={
     state=(p.degraded or warnings > 0 or vlan_count == 0) and "partial" or "ready",
     source="mycelium/mesh",provenance="live",

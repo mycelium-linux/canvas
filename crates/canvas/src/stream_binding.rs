@@ -1684,9 +1684,9 @@ mod tests {
             payload: serde_json::json!({
                 "peers": [{
                     "id":"node-home-pi",
-                    "hostname":"home-pi","site":"home","platform":"linux","architecture":"aarch64",
+                    "hostname":"Living room speaker","site":"home","platform":"linux","architecture":"aarch64",
                     "version":"0.1.0","age_seconds":4,"load_1":9.0,"logical_cpus":4,
-                    "memory_available_bytes":10,"memory_total_bytes":100,"root_available_bytes":10737418240_u64,
+                    "memory_available_bytes":10,"memory_total_bytes":100,"root_available_bytes":10737418240_u64,"established_ssh_sessions":2,
                     "root_total_bytes":1000,"ssh_listening":true
                 }],
                 "segments": [{"id":"home/vlan:35","label":"Audio","kind":"vlan","site":"home",
@@ -1728,6 +1728,7 @@ mod tests {
             3,
             "every discovered fact is attached to its site"
         );
+        assert!(edges.iter().any(|edge| edge.activity == 2.0));
         assert_eq!(target.data.state, canvas_widgets::WidgetDataState::Partial);
     }
 
