@@ -9,6 +9,7 @@ use canvas_core::{
     ThemeSelection,
     desktop::{Wallpaper, WallpaperReceipt, WallpaperRequest},
     layout::Rect,
+    notification::Notification,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -156,6 +157,11 @@ pub enum Command {
     },
     DismissIndicator {
         indicator_id: String,
+    },
+    /// Present a short-lived, deduplicated notification above every workspace.
+    /// Producers own delivery; Canvas owns its visual lifetime.
+    ShowNotification {
+        notification: Notification,
     },
     SetMesh {
         mesh: MeshSnapshot,
@@ -704,6 +710,9 @@ pub enum Receipt {
     IndicatorDismissed {
         indicator_id: String,
     },
+    NotificationShown {
+        notification_id: String,
+    },
     MeshSet {
         node_count: usize,
     },
@@ -1059,6 +1068,7 @@ impl ControlRequest {
                     return Err("invalid status indicator id".into());
                 }
             }
+            Command::ShowNotification { notification } => notification.validate()?,
             Command::SetMesh { mesh } => mesh.validate()?,
             Command::SetPresence { presence } => presence.validate()?,
             Command::ShowPresencePreview { preview } => preview.validate()?,
@@ -1788,6 +1798,9 @@ pub mod text {
                     }
                     Receipt::IndicatorDismissed { indicator_id } => {
                         format!("dismissed={}", indicator_id)
+                    }
+                    Receipt::NotificationShown { notification_id } => {
+                        format!("notification={notification_id}")
                     }
                     Receipt::MeshSet { node_count } => format!("mesh={node_count}"),
                     Receipt::ShuttingDown => "shutting down".to_string(),

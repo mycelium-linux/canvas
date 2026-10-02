@@ -12,6 +12,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+rumqttc = { version = "0.25", default-features = false }
 
 [lib]
 name = "canvas_feeds"
@@ -36,6 +37,10 @@ path = "src/bin/canvas-host-observer.rs"
 [[bin]]
 name = "canvas-mycelium-observer"
 path = "src/bin/canvas-mycelium-observer.rs"
+
+[[bin]]
+name = "canvas-mycelium-events"
+path = "src/bin/canvas-mycelium-events.rs"
 
 [[bin]]
 name = "canvas-synesthesia-observer"

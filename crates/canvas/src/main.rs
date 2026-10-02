@@ -34,6 +34,7 @@ use base64::Engine as _;
 use canvas_core::display_watch::{DisplayWatch, WatchStatus};
 use canvas_core::global_hotkey::{GlobalHotkey, HotkeySpec};
 use canvas_core::{Catalog, ThemePalette, VisualTheme, desktop::WallpaperRequest, layout::Rect};
+use canvas_core::notification::Notification;
 use iced::mouse;
 use iced::widget::canvas::Canvas;
 use iced::widget::{
@@ -61,6 +62,7 @@ use std::time::{Duration, Instant};
 use unibus_media::CameraDetections;
 
 mod indicator;
+mod notification;
 mod keyboard_input;
 mod presence;
 use ::canvas::screensaver;
@@ -84,6 +86,14 @@ const MAX_PDF_PAGES: u32 = 10_000;
 /// Largest single-frame gap accepted by the screensaver delta-time clock.
 const MAX_SCREENSAVER_FRAME_DELTA: Duration = Duration::from_millis(250);
 const METRICS_REFRESH: Duration = Duration::from_secs(2);
+const NOTIFICATION_LIFETIME: Duration = Duration::from_secs(9);
+const MAX_VISIBLE_NOTIFICATIONS: usize = 4;
+
+#[derive(Debug, Clone)]
+struct TransientNotification {
+    notification: Notification,
+    shown_at: Instant,
+}
 #[cfg(feature = "lua-scenes")]
 const STREAM_FIRST_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(feature = "lua-scenes")]
@@ -738,6 +748,7 @@ struct App {
     module_day: u32,
     shared_views: BTreeMap<String, SharedViewDocument>,
     indicators: BTreeMap<String, StatusIndicator>,
+    notifications: Vec<TransientNotification>,
     mesh: Option<MeshSnapshot>,
     presence: Option<PresenceSnapshot>,
     presence_received: Option<Instant>,
@@ -1116,6 +1127,7 @@ impl App {
             module_day: ::canvas::hud::local_parts(now_unix_ms()).day,
             shared_views: BTreeMap::new(),
             indicators: BTreeMap::new(),
+            notifications: Vec::new(),
             mesh: None,
             presence: None,
             presence_received: None,
@@ -1605,6 +1617,12 @@ impl App {
                 self.navigate_pdf(surface_id, target, None)
             }
             Message::Tick => {
+                let previous_notification_count = self.notifications.len();
+                self.notifications
+                    .retain(|item| item.shown_at.elapsed() < NOTIFICATION_LIFETIME);
+                if self.notifications.len() != previous_notification_count {
+                    self.bump();
+                }
                 if self
                     .focus_emphasis_started
                     .is_some_and(|started| started.elapsed() >= FOCUS_EMPHASIS_DURATION)
@@ -2427,6 +2445,25 @@ impl App {
                 Err(error) => {
                     eprintln!("Canvas rejected task status: {error}");
                     self.emit_event(format!("task_status_rejected error={error}"));
+                }
+            }
+        }
+        let notification_events = events
+            .extract_if(.., |event| event.contract == canvas_core::notification::CONTRACT)
+            .collect::<Vec<_>>();
+        for event in notification_events {
+            match serde_json::from_value::<Notification>(event.payload) {
+                Ok(notification) => {
+                    if let Err(error) = notification.validate() {
+                        eprintln!("Canvas rejected notification: {error}");
+                        self.emit_event(format!("notification_rejected error={error}"));
+                    } else {
+                        self.present_notification(notification);
+                    }
+                }
+                Err(error) => {
+                    eprintln!("Canvas rejected notification: {error}");
+                    self.emit_event(format!("notification_rejected error={error}"));
                 }
             }
         }
@@ -4265,6 +4302,18 @@ impl App {
                 );
                 Task::none()
             }
+            Command::ShowNotification { notification } => {
+                let notification_id = notification.id.clone();
+                self.present_notification(notification);
+                self.status = format!("Showing notification {notification_id}.");
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::NotificationShown { notification_id },
+                    },
+                );
+                Task::none()
+            }
             Command::SetMesh { mesh } => {
                 let node_count = mesh.nodes.len();
                 if self.mesh.as_ref() != Some(&mesh) {
@@ -5258,6 +5307,19 @@ impl App {
                 })
             }
         }
+    }
+
+    fn present_notification(&mut self, notification: Notification) {
+        self.notifications
+            .retain(|item| item.notification.id != notification.id);
+        self.notifications.push(TransientNotification {
+            notification,
+            shown_at: Instant::now(),
+        });
+        if self.notifications.len() > MAX_VISIBLE_NOTIFICATIONS {
+            self.notifications.remove(0);
+        }
+        self.bump();
     }
 
     fn refresh_terminal(&mut self) {
@@ -8909,6 +8971,19 @@ impl App {
             ));
         }
 
+        if !self.notifications.is_empty() {
+            layers.push(notification::view(
+                &self.notifications,
+                NOTIFICATION_LIFETIME,
+                notification::NotificationPalette {
+                    panel: surface_color,
+                    border: border_color,
+                    text: text_color,
+                    muted,
+                },
+            ));
+        }
+
         let presence_palette = presence::PresencePalette {
             panel: Color {
                 a: 0.94,
@@ -10924,6 +10999,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .subscription(|app| {
         let animated = app.visible_indicator_id.is_some()
+            || !app.notifications.is_empty()
             || app.presence_preview.is_some()
             || app.transition.is_some()
             || app.focus_emphasis_started.is_some();
