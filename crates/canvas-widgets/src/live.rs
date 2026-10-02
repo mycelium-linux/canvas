@@ -4017,12 +4017,28 @@ impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
                 );
                 frame.fill_text(canvas::Text {
                     content: format!(
-                        "{}  G{} · {}   {:.0}/{:.0} dBFS",
+                        "{}{}  {:.3} MHz · {:.3} MS/s{}{}   G{} · {}",
+                        radio
+                            .owner
+                            .as_deref()
+                            .map(|owner| format!("{owner} / "))
+                            .unwrap_or_default(),
                         radio.session_id,
+                        radio.center_frequency_hz / 1_000_000.0,
+                        radio.span_hz / 1_000_000.0,
+                        radio
+                            .gain_db
+                            .map(|gain| format!(" · {gain:.1} dB"))
+                            .unwrap_or_default(),
+                        radio
+                            .ends_at_ms
+                            .map(|end| format!(
+                                " · {}m left",
+                                end.saturating_sub(radio.observed_at_ms) / 60_000
+                            ))
+                            .unwrap_or_default(),
                         radio.generation,
                         radio.sequence,
-                        radio.ceiling_dbfs,
-                        radio.floor_dbfs,
                     ),
                     position: Point::new(spectrum.x + 5.0, spectrum.y + 4.0),
                     color: with_alpha(self.label, 0.82),

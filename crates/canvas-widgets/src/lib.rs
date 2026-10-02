@@ -724,6 +724,14 @@ pub struct RadioSpectrumState {
     pub span_hz: f64,
     pub floor_dbfs: f32,
     pub ceiling_dbfs: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gain_db: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ends_at_ms: Option<i64>,
 }
 
 /// A paced step in a Canvas briefing presentation.

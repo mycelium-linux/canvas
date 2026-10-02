@@ -47,6 +47,10 @@ if p.schema_version ~= nil then
     span_hz = tonumber(p.span_hz),
     floor_dbfs = floor_db,
     ceiling_dbfs = ceiling_db,
+    owner = p.tuning and p.tuning.owner or nil,
+    gain_db = p.tuning and tonumber(p.tuning.gain_db) or nil,
+    started_at_ms = p.tuning and tonumber(p.tuning.started_at_ms) or nil,
+    ends_at_ms = p.tuning and tonumber(p.tuning.ends_at_ms) or nil,
   }
 end
 
