@@ -9,6 +9,7 @@ Environment=XDG_RUNTIME_DIR=/run/user/1000
 Type=simple
 User=ajm
 Environment=SYNESTHESIA_DAW_URL=http://192.168.10.74:7893/v1/daw
+Environment=SYNESTHESIA_STUDIO_URL=http://192.168.10.74:7893/v1/studio
 ExecStart=/usr/local/bin/canvas-synesthesia-observer
 Restart=always
 RestartSec=2

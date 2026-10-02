@@ -542,6 +542,14 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/synesthesia-daw-v1.lua"),
     ),
     (
+        "synesthesia-routing-v1",
+        include_str!("../../../config/binders/synesthesia-routing-v1.lua"),
+    ),
+    (
+        "synesthesia-quality-v1",
+        include_str!("../../../config/binders/synesthesia-quality-v1.lua"),
+    ),
+    (
         "span-timeline-v1",
         include_str!("../../../config/binders/span-timeline-v1.lua"),
     ),
@@ -1819,6 +1827,44 @@ mod tests {
         assert_eq!(bpm, Some(104.0));
         assert_eq!(tracks[0].level, 0.75);
         assert_eq!(notes[0].note, 60);
+    }
+
+    #[test]
+    fn synesthesia_routing_and_quality_use_generic_quality_widgets() {
+        let mut routing = test_spec(WidgetKind::StatusList {
+            title: "Waiting".into(),
+            nodes: vec![],
+        });
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "synesthesia".into(),
+            stream: "studio-routing".into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            project_id: Some("home".into()),
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({"routes":[{"label":"launchkey → piano","state":"good","detail":"MIDI"}],"inventory":{"controllers":2,"instruments":4,"sources":10,"inserts":4}}),
+        };
+        apply_named_adapter("synesthesia-routing-v1", &event, &mut routing)
+            .expect("routing renders");
+        assert!(
+            matches!(routing.kind, WidgetKind::StatusList { ref nodes, .. } if nodes.len() == 1)
+        );
+
+        let mut quality = test_spec(WidgetKind::MetricBoard {
+            title: "Waiting".into(),
+            style: canvas_widgets::MetricBoardStyle::Bullet,
+            metrics: vec![],
+            unit: Some("dB".into()),
+        });
+        let mut quality_event = event;
+        quality_event.stream = "studio-quality".into();
+        quality_event.payload = serde_json::json!({"metrics":[{"label":"Output headroom","value":8.0,"max":60.0,"target":6.0,"state":"good"}],"detail":"0 output clips"});
+        apply_named_adapter("synesthesia-quality-v1", &quality_event, &mut quality)
+            .expect("quality renders");
+        assert!(
+            matches!(quality.kind, WidgetKind::MetricBoard { ref metrics, .. } if metrics.len() == 1)
+        );
     }
 
     #[test]
