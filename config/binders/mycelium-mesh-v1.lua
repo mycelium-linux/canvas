@@ -10,7 +10,7 @@ local sites = {}
 local segments = {}
 local edge_pairs = {}
 local peer_ssh = {}
-local warnings, site_count, segment_count, vlan_count, observed_count, service_count, ssh_count, wireguard_count, overlay_count = 0, 0, 0, 0, 0, 0, 0, 0, 0
+local warnings, site_count, segment_count, vlan_count, observed_count, service_count, ssh_count, wireguard_count, overlay_count, wan_count = 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 
 local function identity(value)
   return string.gsub(string.lower(tostring(value or "")), "[^%w]", "")
@@ -120,6 +120,11 @@ if type(p.nodes) == "table" then
     if type(item.overlay_endpoints) == "table" and #item.overlay_endpoints > 0 then
       facts[#facts + 1] = "WAN " .. table.concat(item.overlay_endpoints, ", ")
     end
+    local visible_label = label
+    if type(item.wan_ips) == "table" and #item.wan_ips > 0 then
+      wan_count = wan_count + #item.wan_ips
+      visible_label = label .. " · WAN " .. table.concat(item.wan_ips, "/")
+    end
     if type(item.overlay_relays) == "table" and #item.overlay_relays > 0 then
       facts[#facts + 1] = "DERP " .. table.concat(item.overlay_relays, ", ")
     end
@@ -132,7 +137,7 @@ if type(p.nodes) == "table" then
     if ssh_sessions > 0 then facts[#facts + 1] = "SSH ×" .. tostring(ssh_sessions) end
     local node_heat = item.device and 0.62 or 0.22
     if tonumber(item.overlays_active) and item.overlays_active > 0 then node_heat = 0.88 end
-    nodes[#nodes + 1] = {id=id,label=label,detail=string.sub(table.concat(facts, " · "),1,512),group=site,heat=node_heat,state=state}
+    nodes[#nodes + 1] = {id=id,label=string.sub(visible_label,1,128),detail=string.sub(table.concat(facts, " · "),1,512),group=site,heat=node_heat,state=state}
     local memberships = type(item.segments) == "table" and item.segments or canvas.array()
     if #memberships == 0 and site then memberships[1] = site end
     for membership_index = 1, #memberships do
@@ -200,8 +205,8 @@ end
 
 return {
   kind="snapshot",
-  widget={kind="neural_graph",title=string.format("Mesh · %d peers · %d nodes · %d svc · %d sites · %d LAN · %d VLAN · %d direct · %d WG · %d SSH",
-    #p.peers,observed_count,service_count,site_count,segment_count,vlan_count,overlay_count,wireguard_count,ssh_count),nodes=nodes,edges=edges},
+  widget={kind="neural_graph",title=string.format("Mesh · %d peers · %d nodes · %d sites · %d LAN · %d direct · %d WAN · %d WG · %d SSH",
+    #p.peers,observed_count,site_count,segment_count,overlay_count,wan_count,wireguard_count,ssh_count),nodes=nodes,edges=edges},
   data={
     state=(p.degraded or warnings > 0 or vlan_count == 0) and "partial" or "ready",
     source="mycelium/mesh",provenance="live",

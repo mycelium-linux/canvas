@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     collections::BTreeMap,
-    net::Ipv4Addr,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     process::{Command, ExitCode},
     thread,
     time::Duration,
@@ -115,6 +115,7 @@ struct VantageNodeSummary {
     overlays_active: usize,
     overlay_sites: Vec<String>,
     overlay_endpoints: Vec<String>,
+    wan_ips: Vec<String>,
     overlay_relays: Vec<String>,
     routed_lans: Vec<String>,
     origins: usize,
@@ -191,6 +192,29 @@ fn ipv4_in_subnet(address: Ipv4Addr, network: Ipv4Addr, prefix: u8) -> bool {
         u32::MAX << (32 - prefix)
     };
     u32::from(address) & mask == u32::from(network) & mask
+}
+
+fn public_endpoint_ip(endpoint: &str) -> Option<String> {
+    let ip = endpoint.parse::<SocketAddr>().ok()?.ip();
+    let public = match ip {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            !ip.is_private()
+                && !ip.is_loopback()
+                && !ip.is_link_local()
+                && !ip.is_multicast()
+                && !ip.is_unspecified()
+                && !(octets[0] == 100 && (64..=127).contains(&octets[1]))
+        }
+        IpAddr::V6(ip) => {
+            !ip.is_loopback()
+                && !ip.is_multicast()
+                && !ip.is_unspecified()
+                && (ip.segments()[0] & 0xfe00) != 0xfc00
+                && (ip.segments()[0] & 0xffc0) != 0xfe80
+        }
+    };
+    public.then(|| ip.to_string())
 }
 
 fn project(peers: Vec<PeerView>, now_seconds: u64) -> Vec<PeerSummary> {
@@ -442,6 +466,12 @@ fn project_vantage(
                 .collect::<Vec<_>>();
             overlay_endpoints.sort();
             overlay_endpoints.dedup();
+            let mut wan_ips = overlay_endpoints
+                .iter()
+                .filter_map(|endpoint| public_endpoint_ip(endpoint))
+                .collect::<Vec<_>>();
+            wan_ips.sort();
+            wan_ips.dedup();
             let mut overlay_relays = active_overlays
                 .iter()
                 .filter_map(|overlay| overlay["relay"].as_str())
@@ -481,6 +511,7 @@ fn project_vantage(
                 overlays_active: active_overlays.len(),
                 overlay_sites,
                 overlay_endpoints,
+                wan_ips,
                 overlay_relays,
                 routed_lans,
                 origins: node["origins"].as_array().map_or(0, Vec::len),
@@ -776,6 +807,17 @@ mod tests {
                 .iter()
                 .any(|segment| segment.id == "titan|192.168.1.0/24")
         );
+    }
+
+    #[test]
+    fn wan_projection_excludes_private_and_overlay_address_space() {
+        assert_eq!(
+            public_endpoint_ip("172.92.135.28:41641").as_deref(),
+            Some("172.92.135.28")
+        );
+        assert_eq!(public_endpoint_ip("192.168.10.82:41641"), None);
+        assert_eq!(public_endpoint_ip("100.70.187.127:41641"), None);
+        assert_eq!(public_endpoint_ip("[fd00::1]:51820"), None);
     }
 
     #[test]
