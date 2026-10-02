@@ -112,6 +112,11 @@ struct VantageNodeSummary {
     services: usize,
     overlays: usize,
     overlays_online: usize,
+    overlays_active: usize,
+    overlay_sites: Vec<String>,
+    overlay_endpoints: Vec<String>,
+    overlay_relays: Vec<String>,
+    routed_lans: Vec<String>,
     origins: usize,
 }
 
@@ -135,6 +140,15 @@ struct ReleaseSummary {
     version: String,
     channel: String,
     target: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct WireGuardSummary {
+    hostname: String,
+    site: String,
+    endpoint: Option<String>,
+    advertised_prefixes: Vec<String>,
+    generation: u64,
 }
 
 fn default_component() -> String {
@@ -405,6 +419,44 @@ fn project_vantage(
                 .filter_map(|port| port["speed_mbps"].as_u64())
                 .max();
             let overlays = node["overlays"].as_object();
+            let active_overlays = overlays
+                .into_iter()
+                .flat_map(|overlays| overlays.values())
+                .filter(|overlay| overlay["active"].as_bool() == Some(true))
+                .collect::<Vec<_>>();
+            let mut overlay_sites = active_overlays
+                .iter()
+                .filter_map(|overlay| {
+                    overlay
+                        .pointer("/origin/site")
+                        .and_then(|site| site.as_str())
+                })
+                .map(|site| canonical_site(site, aliases))
+                .collect::<Vec<_>>();
+            overlay_sites.sort();
+            overlay_sites.dedup();
+            let mut overlay_endpoints = active_overlays
+                .iter()
+                .filter_map(|overlay| overlay["endpoint"].as_str())
+                .map(|endpoint| bounded(endpoint.to_owned()))
+                .collect::<Vec<_>>();
+            overlay_endpoints.sort();
+            overlay_endpoints.dedup();
+            let mut overlay_relays = active_overlays
+                .iter()
+                .filter_map(|overlay| overlay["relay"].as_str())
+                .map(|relay| bounded(relay.to_owned()))
+                .collect::<Vec<_>>();
+            overlay_relays.sort();
+            overlay_relays.dedup();
+            let mut routed_lans = active_overlays
+                .iter()
+                .flat_map(|overlay| overlay["routed_lans"].as_array().into_iter().flatten())
+                .filter_map(|lan| lan.as_str())
+                .map(|lan| bounded(lan.to_owned()))
+                .collect::<Vec<_>>();
+            routed_lans.sort();
+            routed_lans.dedup();
             Some(VantageNodeSummary {
                 id: bounded(id),
                 label: bounded(label),
@@ -426,6 +478,11 @@ fn project_vantage(
                     .flat_map(|overlays| overlays.values())
                     .filter(|overlay| overlay["online"].as_bool() == Some(true))
                     .count(),
+                overlays_active: active_overlays.len(),
+                overlay_sites,
+                overlay_endpoints,
+                overlay_relays,
+                routed_lans,
                 origins: node["origins"].as_array().map_or(0, Vec::len),
             })
         })
@@ -492,7 +549,27 @@ fn query(binary: &str, args: &[&str]) -> Result<Vec<u8>, String> {
     Ok(output.stdout)
 }
 
+fn project_wireguard(binary: &str) -> (Vec<WireGuardSummary>, Option<String>) {
+    match query(binary, &["wireguard", "bindings", "--json"]) {
+        Ok(bytes) => match serde_json::from_slice::<Vec<WireGuardSummary>>(&bytes) {
+            Ok(mut bindings) => {
+                bindings.sort_by(|left, right| {
+                    (&left.site, &left.hostname).cmp(&(&right.site, &right.hostname))
+                });
+                bindings.truncate(32);
+                (bindings, None)
+            }
+            Err(error) => (
+                Vec::new(),
+                Some(format!("decode WireGuard bindings: {error}")),
+            ),
+        },
+        Err(error) => (Vec::new(), Some(bounded(error))),
+    }
+}
+
 fn snapshot(binary: &str, now_ms: u64) -> serde_json::Value {
+    let (wireguard, wireguard_error) = project_wireguard(binary);
     let result = (|| {
         let peers = serde_json::from_slice::<Vec<PeerView>>(&query(binary, &["peers", "--json"])?)
             .map_err(|error| format!("decode peers: {error}"))?;
@@ -547,10 +624,10 @@ fn snapshot(binary: &str, now_ms: u64) -> serde_json::Value {
                 release.channel = bounded(std::mem::take(&mut release.channel));
                 release.target = bounded(std::mem::take(&mut release.target));
             }
-            json!({ "peers": peers, "segments": segments, "nodes": nodes, "advertisements": advertisements, "conflicts": conflicts, "leases": leases, "observers": observers, "releases": releases, "topology_source": "mycelium-gossip", "degraded": false })
+            json!({ "peers": peers, "segments": segments, "nodes": nodes, "advertisements": advertisements, "wireguard": wireguard, "wireguard_error": wireguard_error, "conflicts": conflicts, "leases": leases, "observers": observers, "releases": releases, "topology_source": "mycelium-gossip", "degraded": false })
         }
         Err(error) => {
-            json!({ "peers": [], "segments": [], "nodes": [], "advertisements": [], "conflicts": 0, "releases": [], "degraded": true, "error": bounded(error) })
+            json!({ "peers": [], "segments": [], "nodes": [], "advertisements": [], "wireguard": wireguard, "wireguard_error": wireguard_error, "conflicts": 0, "releases": [], "degraded": true, "error": bounded(error) })
         }
     };
     fit_snapshot(json!({

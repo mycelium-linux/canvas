@@ -1695,6 +1695,7 @@ mod tests {
                     "segments":["home/vlan:35"],"ips":["10.35.0.20"],"ports":2,"links_up":2,"links_down":0,"capacity_mbps":1000,
                     "services":3,"overlays":1,"overlays_online":1,"origins":2}],
                 "advertisements": [{"id":"raop","label":"Living Room","site":"home","service_type":"_raop._tcp","target":"speaker.local","port":7000}],
+                "wireguard": [{"hostname":"home-pi","site":"home","endpoint":"203.0.113.8:51820","advertised_prefixes":["10.35.0.0/24"],"generation":42}],
                 "conflicts": 0,
                 "releases": [{"component":"canvas","version":"0.1.0","channel":"canary","target":"aarch64-unknown-linux-gnu"}],
                 "degraded": false
@@ -1709,11 +1710,11 @@ mod tests {
         else {
             panic!("mesh binder changed widget family")
         };
-        assert!(title.contains("1 peers · 1 nodes · 1 svc · 1 sites · 1 segments · 1 VLANs"));
+        assert!(title.contains("1 peers · 1 nodes · 1 svc · 1 sites · 1 LAN · 1 VLAN"));
         assert_eq!(
             nodes.len(),
-            4,
-            "site, observed device, service, and VLAN are graph vertices; peers are evidence, not duplicate nodes"
+            5,
+            "site, observed device, service, VLAN, and WireGuard binding are graph vertices; peers are evidence, not duplicate nodes"
         );
         assert!(nodes.iter().any(|node| node.label == "wagar-house"));
         assert!(nodes.iter().any(|node| node.label == "Living room speaker"
@@ -1723,9 +1724,15 @@ mod tests {
                     && detail.contains("mesh 1/1")
             })));
         assert!(nodes.iter().any(|node| node.label.contains("VLAN 35")));
+        assert!(nodes.iter().any(|node| {
+            node.label == "WG · home-pi"
+                && node.detail.as_deref().is_some_and(|detail| {
+                    detail.contains("203.0.113.8:51820") && detail.contains("10.35.0.0/24")
+                })
+        }));
         assert_eq!(
             edges.len(),
-            3,
+            4,
             "every discovered fact is attached to its site"
         );
         assert!(edges.iter().any(|edge| edge.activity == 2.0));

@@ -8,8 +8,9 @@ end
 local nodes, edges = canvas.array(), canvas.array()
 local sites = {}
 local segments = {}
+local edge_pairs = {}
 local peer_ssh = {}
-local warnings, site_count, segment_count, vlan_count, observed_count, service_count, ssh_count = 0, 0, 0, 0, 0, 0, 0
+local warnings, site_count, segment_count, vlan_count, observed_count, service_count, ssh_count, wireguard_count, overlay_count = 0, 0, 0, 0, 0, 0, 0, 0, 0
 
 local function identity(value)
   return string.gsub(string.lower(tostring(value or "")), "[^%w]", "")
@@ -48,6 +49,20 @@ local function ensure_site(site)
   return sites[site]
 end
 
+local function add_edge(from, to, heat, activity)
+  if not from or not to or from == to then return end
+  local key = tostring(from) .. "\0" .. tostring(to)
+  local existing = edge_pairs[key]
+  if existing then
+    existing.heat = math.max(existing.heat or 0, heat or 0)
+    existing.activity = math.max(existing.activity or 0, activity or 0)
+    return
+  end
+  local edge = {from=from,to=to,heat=heat or 0,activity=activity or 0}
+  edge_pairs[key] = edge
+  edges[#edges + 1] = edge
+end
+
 if type(p.segments) == "table" then
   for i = 1, #p.segments do
     local segment = p.segments[i]
@@ -65,7 +80,7 @@ if type(p.segments) == "table" then
       detail=tostring(segment.kind or "segment") .. (segment.subnet and (" · " .. tostring(segment.subnet)) or "") .. (segment.gateway and (" · gateway " .. tostring(segment.gateway)) or ""),
       group=site, heat=0.45, state="neutral"
     }
-    if site_id then edges[#edges + 1] = {from=site_id,to=id,heat=0.4} end
+    add_edge(site_id, id, 0.4, 0)
   end
 end
 
@@ -98,6 +113,19 @@ if type(p.nodes) == "table" then
     if tonumber(item.overlays) and item.overlays > 0 then
       facts[#facts + 1] = "mesh " .. tostring(item.overlays_online or 0) .. "/" .. tostring(item.overlays)
     end
+    if tonumber(item.overlays_active) and item.overlays_active > 0 then
+      overlay_count = overlay_count + item.overlays_active
+      facts[#facts + 1] = tostring(item.overlays_active) .. " direct overlay views"
+    end
+    if type(item.overlay_endpoints) == "table" and #item.overlay_endpoints > 0 then
+      facts[#facts + 1] = "WAN " .. table.concat(item.overlay_endpoints, ", ")
+    end
+    if type(item.overlay_relays) == "table" and #item.overlay_relays > 0 then
+      facts[#facts + 1] = "DERP " .. table.concat(item.overlay_relays, ", ")
+    end
+    if type(item.routed_lans) == "table" and #item.routed_lans > 0 then
+      facts[#facts + 1] = "routes " .. table.concat(item.routed_lans, ", ")
+    end
     local id = "observed:" .. tostring(i)
     local state = tonumber(item.links_down) and item.links_down > 0 and "warning" or "neutral"
     local ssh_sessions = peer_ssh[identity(label)] or 0
@@ -108,7 +136,14 @@ if type(p.nodes) == "table" then
     for membership_index = 1, #memberships do
       local membership = tostring(memberships[membership_index])
       local segment_id = segments[membership]
-      if segment_id then edges[#edges + 1] = {from=segment_id,to=id,heat=item.device and 0.48 or 0.18,activity=ssh_sessions} end
+      add_edge(segment_id, id, item.device and 0.48 or 0.18, ssh_sessions)
+    end
+    if type(item.overlay_sites) == "table" then
+      for overlay_index = 1, #item.overlay_sites do
+        local overlay_site = display_site(tostring(item.overlay_sites[overlay_index]))
+        local overlay_site_id = ensure_site(overlay_site)
+        add_edge(overlay_site_id, id, 0.82, 0)
+      end
     end
   end
 end
@@ -125,7 +160,26 @@ if type(p.advertisements) == "table" then
     if item.target then endpoint = endpoint .. " · " .. tostring(item.target) end
     if item.port then endpoint = endpoint .. ":" .. tostring(item.port) end
     nodes[#nodes + 1] = {id=id,label=label,detail=string.sub(endpoint,1,512),group=site,heat=0.3,state="good"}
-    if site then edges[#edges + 1] = {from=sites[site],to=id,heat=0.24} end
+    if site then add_edge(sites[site], id, 0.24, 0) end
+  end
+end
+
+if type(p.wireguard) == "table" then
+  for i = 1, #p.wireguard do
+    local binding = p.wireguard[i]
+    local site = display_site(tostring(binding.site or "unknown"))
+    local site_id = ensure_site(site)
+    wireguard_count = wireguard_count + 1
+    local endpoint = tostring(binding.endpoint or "endpoint unobserved")
+    local prefixes = type(binding.advertised_prefixes) == "table" and table.concat(binding.advertised_prefixes, ", ") or ""
+    local detail = endpoint
+    if prefixes ~= "" then detail = detail .. " · routes " .. prefixes end
+    nodes[#nodes + 1] = {
+      id="wireguard:" .. tostring(i), label="WG · " .. clean_label(binding.hostname),
+      detail=string.sub(detail,1,512), group=site, heat=binding.endpoint and 0.8 or 0.35,
+      state=binding.endpoint and "good" or "warning"
+    }
+    add_edge(site_id, "wireguard:" .. tostring(i), 0.7, 0)
   end
 end
 
@@ -144,8 +198,8 @@ end
 
 return {
   kind="snapshot",
-  widget={kind="neural_graph",title=string.format("Mycelium · %d peers · %d nodes · %d svc · %d sites · %d segments · %d VLANs · %d SSH · %d views · %d conflicts",
-    #p.peers,observed_count,service_count,site_count,segment_count,vlan_count,ssh_count,tonumber(p.observers) or 0,tonumber(p.conflicts) or 0),nodes=nodes,edges=edges},
+  widget={kind="neural_graph",title=string.format("Mesh · %d peers · %d nodes · %d svc · %d sites · %d LAN · %d VLAN · %d direct · %d WG · %d SSH",
+    #p.peers,observed_count,service_count,site_count,segment_count,vlan_count,overlay_count,wireguard_count,ssh_count),nodes=nodes,edges=edges},
   data={
     state=(p.degraded or warnings > 0 or vlan_count == 0) and "partial" or "ready",
     source="mycelium/mesh",provenance="live",
