@@ -60,6 +60,7 @@ pub const DECLARED_CONTRACTS: &[&str] = &[
     "market.trade.v1",
     "mev.opportunity.v1",
     "panopticon.map.v1",
+    "radioman.spectrum.v1",
     "transmog.build.status.v1",
 ];
 
