@@ -1,7 +1,8 @@
 [Unit]
 Description=Publish Radioman spectrum into Canvas
 After=canvas-surface.service network-online.target
-Wants=canvas-surface.service network-online.target
+Requires=canvas-surface.service
+Wants=network-online.target
 
 [Service]
 Type=simple
