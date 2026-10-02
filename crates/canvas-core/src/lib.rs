@@ -10,6 +10,7 @@ use std::{
 pub use coherence_tokens;
 pub mod appearance;
 pub mod boot_budget;
+pub mod chunk;
 pub mod desktop;
 pub mod desktop_theme;
 pub mod display_watch;
@@ -39,6 +40,7 @@ pub const DECLARED_CONTRACTS: &[&str] = &[
     "canvas.agent.activity.v1",
     "canvas.agent.attention.v1",
     "canvas.briefing.beat.v1",
+    "canvas.stream.chunk.v1",
     "canvas.image.rgba.v1",
     "canvas.music.nowplaying.v1",
     "canvas.prometheus.v1",

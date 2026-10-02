@@ -599,6 +599,91 @@ pub fn send_raw(event: &Value) -> Result<(), Error> {
     Ok(())
 }
 
+/// Send one logical stream envelope, splitting it into independently bounded
+/// Canvas-owned chunks when the local AF_UNIX datagram ceiling requires it.
+/// Canvas publishes the logical event only after complete digest-verified
+/// reassembly, so a dropped chunk leaves the previous retained snapshot live.
+pub fn send_chunked(event: &Value, datagram_limit: usize) -> Result<(), Error> {
+    for envelope in chunk_envelopes(event, datagram_limit)? {
+        send_raw(&envelope)?;
+    }
+    Ok(())
+}
+
+/// Encode a logical event as one raw envelope or a sequence of independently
+/// bounded chunk envelopes. This pure half of [`send_chunked`] is shared by
+/// tests and producers that need to inspect the transport projection.
+pub fn chunk_envelopes(event: &Value, datagram_limit: usize) -> Result<Vec<Value>, Error> {
+    const CHUNK_BYTES: usize = 700;
+    let bytes = serde_json::to_vec(event).map_err(|error| Error::Send {
+        detail: error.to_string(),
+    })?;
+    if bytes.len() <= datagram_limit {
+        return Ok(vec![event.clone()]);
+    }
+    if bytes.len() > canvas_core::chunk::MAX_GENERATION_BYTES {
+        return Err(Error::Send {
+            detail: format!(
+                "logical stream event is {} bytes; chunk generations are limited to {}",
+                bytes.len(),
+                canvas_core::chunk::MAX_GENERATION_BYTES
+            ),
+        });
+    }
+    let count = bytes.len().div_ceil(CHUNK_BYTES);
+    if count > canvas_core::chunk::MAX_CHUNKS {
+        return Err(Error::Send {
+            detail: format!("logical stream event requires {count} chunks"),
+        });
+    }
+    let owner = event["owner"]
+        .as_str()
+        .ok_or_else(|| Error::Send {
+            detail: "logical stream event has no owner".into(),
+        })?
+        .to_owned();
+    let stream = event["stream"]
+        .as_str()
+        .ok_or_else(|| Error::Send {
+            detail: "logical stream event has no stream".into(),
+        })?
+        .to_owned();
+    let sequence = event["sequence"].as_u64().unwrap_or_else(now_ms);
+    let digest = canvas_core::chunk::sha256_hex(&bytes);
+    let generation_id = format!("{owner}-{stream}-{sequence}-{}", &digest[..16]);
+    let expires_at_ms = now_ms().saturating_add(canvas_core::chunk::DEFAULT_EXPIRY_MS);
+    let mut envelopes = Vec::with_capacity(count);
+    for (index, part) in bytes.chunks(CHUNK_BYTES).enumerate() {
+        let chunk = canvas_core::chunk::StreamChunk {
+            generation_id: generation_id.clone(),
+            index: index as u16,
+            count: count as u16,
+            payload_sha256: digest.clone(),
+            expires_at_ms,
+            payload_hex: canvas_core::chunk::encode_hex(part),
+        };
+        let envelope = json!({
+            "schema_version": SCHEMA_VERSION,
+            "owner": &owner,
+            "stream": &stream,
+            "contract": canvas_core::chunk::CONTRACT,
+            "sequence": sequence,
+            "emitted_at_ms": now_ms(),
+            "payload": chunk,
+        });
+        let encoded = serde_json::to_vec(&envelope).map_err(|error| Error::Send {
+            detail: error.to_string(),
+        })?;
+        if encoded.len() > datagram_limit {
+            return Err(Error::Send {
+                detail: format!("chunk envelope is {} bytes", encoded.len()),
+            });
+        }
+        envelopes.push(envelope);
+    }
+    Ok(envelopes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

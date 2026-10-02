@@ -11,6 +11,7 @@ schemars.workspace = true
 coherence-tokens.workspace = true
 unibus.workspace = true
 toml = "0.8"
+sha2 = "0.10"
 
 [[bin]]
 name = "canvas-core-ctl"

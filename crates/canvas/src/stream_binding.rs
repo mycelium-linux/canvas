@@ -340,6 +340,7 @@ pub fn start_server() -> Result<(StreamInbox, StreamSocketGuard)> {
 fn receive(socket: UnixDatagram, inbox: StreamInbox) {
     let mut bytes = vec![0; MAX_STREAM_MESSAGE + 1];
     let mut consecutive_failures: u32 = 0;
+    let mut chunks = canvas_core::chunk::Reassembler::default();
     loop {
         let size = match socket.recv(&mut bytes) {
             Ok(size) => {
@@ -373,6 +374,39 @@ fn receive(socket: UnixDatagram, inbox: StreamInbox) {
                 event.validate()?;
                 Ok(event)
             }) {
+            Ok(event) if event.contract == canvas_core::chunk::CONTRACT => {
+                let owner = event.owner.clone();
+                let stream = event.stream.clone();
+                let chunk =
+                    serde_json::from_value::<canvas_core::chunk::StreamChunk>(event.payload)
+                        .map_err(|error| Error(format!("invalid stream chunk: {error}")));
+                match chunk.and_then(|chunk| chunks.push(chunk, now_ms()).map_err(Error)) {
+                    Ok(Some(payload)) => {
+                        let logical = serde_json::from_slice::<StreamEnvelope>(&payload)
+                            .map_err(|error| {
+                                Error(format!("invalid reassembled stream event: {error}"))
+                            })
+                            .and_then(|event| {
+                                event.validate()?;
+                                if event.contract == canvas_core::chunk::CONTRACT
+                                    || event.owner != owner
+                                    || event.stream != stream
+                                {
+                                    return Err(Error(
+                                        "reassembled stream identity mismatch".into(),
+                                    ));
+                                }
+                                Ok(event)
+                            });
+                        match logical {
+                            Ok(event) => inbox.push(event),
+                            Err(error) => eprintln!("Canvas rejected chunk generation: {error}"),
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => eprintln!("Canvas rejected stream chunk: {error}"),
+                }
+            }
             Ok(event) => inbox.push(event),
             Err(error) => eprintln!("Canvas rejected stream event: {error}"),
         }

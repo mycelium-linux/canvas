@@ -661,23 +661,22 @@ fn snapshot(binary: &str, now_ms: u64) -> serde_json::Value {
             json!({ "peers": [], "segments": [], "nodes": [], "advertisements": [], "wireguard": wireguard, "wireguard_error": wireguard_error, "conflicts": 0, "releases": [], "degraded": true, "error": bounded(error) })
         }
     };
-    fit_snapshot(json!({
+    json!({
         "schema_version": 1, "owner": OWNER, "stream": STREAM,
         "contract": "canvas.widget.snapshot.v1", "sequence": now_ms, "emitted_at_ms": now_ms,
         "payload": payload
-    }))
+    })
 }
 
-fn fit_snapshot(event: serde_json::Value) -> serde_json::Value {
-    let budget = if cfg!(target_os = "macos") {
-        canvas_feeds::MAX_DATAGRAM - canvas_feeds::ENVELOPE_OVERHEAD
-    } else {
-        LINUX_TOPOLOGY_DATAGRAM - canvas_feeds::ENVELOPE_OVERHEAD
-    };
-    fit_snapshot_to(event, budget)
-}
-
-fn fit_snapshot_to(mut event: serde_json::Value, budget: usize) -> serde_json::Value {
+/// Explicit degraded fallback for snapshots too large for one bounded Canvas
+/// generation. Normal macOS delivery is chunked and never calls this path.
+fn degraded_fallback_to(
+    mut event: serde_json::Value,
+    budget: usize,
+    reason: &str,
+) -> serde_json::Value {
+    event["payload"]["degraded"] = json!(true);
+    event["payload"]["error"] = json!(bounded(reason.to_owned()));
     while serde_json::to_vec(&event).map_or(usize::MAX, |bytes| bytes.len()) > budget {
         let removed = event
             .pointer_mut("/payload/releases")
@@ -711,7 +710,21 @@ fn main() -> ExitCode {
     let binary = std::env::var("MYCELIUM_BIN").unwrap_or_else(|_| "mycelium".into());
     loop {
         let now = canvas_feeds::now_ms();
-        if let Err(error) = canvas_feeds::send_raw(&snapshot(&binary, now)) {
+        let mut event = snapshot(&binary, now);
+        let datagram_limit = if cfg!(target_os = "macos") {
+            canvas_feeds::MAX_DATAGRAM
+        } else {
+            LINUX_TOPOLOGY_DATAGRAM
+        };
+        let logical_bytes = serde_json::to_vec(&event).map_or(usize::MAX, |bytes| bytes.len());
+        if logical_bytes > canvas_core::chunk::MAX_GENERATION_BYTES {
+            event = degraded_fallback_to(
+                event,
+                datagram_limit.saturating_sub(canvas_feeds::ENVELOPE_OVERHEAD),
+                "topology exceeds Canvas's bounded chunk generation",
+            );
+        }
+        if let Err(error) = canvas_feeds::send_chunked(&event, datagram_limit) {
             eprintln!("canvas-mycelium-observer: publish: {error}");
         }
         thread::sleep(Duration::from_secs(5));
@@ -821,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn mesh_snapshot_fits_the_portable_datagram_budget() {
+    fn macos_chunks_preserve_the_complete_peer_generation() {
         let peer = json!({
             "id": "x".repeat(64), "hostname": "x".repeat(64), "site": "x".repeat(64),
             "platform": "x".repeat(64), "architecture": "x".repeat(64),
@@ -835,15 +848,21 @@ mod tests {
             "contract": "canvas.widget.snapshot.v1", "sequence": 1, "emitted_at_ms": 1,
             "payload": { "peers": vec![peer; 12], "segments": [], "releases": [], "degraded": false }
         });
-        let fitted = fit_snapshot_to(
-            event,
-            canvas_feeds::MAX_DATAGRAM - canvas_feeds::ENVELOPE_OVERHEAD,
-        );
-        assert!(
-            serde_json::to_vec(&fitted).unwrap().len()
-                <= canvas_feeds::MAX_DATAGRAM - canvas_feeds::ENVELOPE_OVERHEAD
-        );
-        assert_eq!(fitted.pointer("/payload/truncated"), Some(&json!(true)));
+        let expected = serde_json::to_vec(&event).unwrap();
+        let envelopes = canvas_feeds::chunk_envelopes(&event, canvas_feeds::MAX_DATAGRAM).unwrap();
+        assert!(envelopes.len() > 1);
+        assert!(envelopes.iter().all(|chunk| serde_json::to_vec(chunk).unwrap().len() <= canvas_feeds::MAX_DATAGRAM));
+        let mut reassembler = canvas_core::chunk::Reassembler::default();
+        let mut published = None;
+        for envelope in envelopes.into_iter().rev() {
+            let chunk = serde_json::from_value(envelope["payload"].clone()).unwrap();
+            if let Some(bytes) = reassembler.push(chunk, 1).unwrap() {
+                published = Some(bytes);
+            }
+        }
+        let published = serde_json::from_slice::<serde_json::Value>(&published.unwrap()).unwrap();
+        assert_eq!(published["payload"]["peers"].as_array().unwrap().len(), 12);
+        assert_eq!(serde_json::to_vec(&published).unwrap(), expected);
     }
 
     #[test]
@@ -864,11 +883,10 @@ mod tests {
             "payload": { "peers": [], "segments": [], "nodes": nodes,
                 "advertisements": [], "releases": [], "degraded": false }
         });
-        let fitted = fit_snapshot_to(
-            event,
-            LINUX_TOPOLOGY_DATAGRAM - canvas_feeds::ENVELOPE_OVERHEAD,
+        assert!(
+            serde_json::to_vec(&event).unwrap().len() <= canvas_core::chunk::MAX_GENERATION_BYTES
         );
-        assert_eq!(fitted["payload"]["nodes"].as_array().unwrap().len(), 90);
-        assert_eq!(fitted.pointer("/payload/truncated"), None);
+        assert_eq!(event["payload"]["nodes"].as_array().unwrap().len(), 90);
+        assert_eq!(event.pointer("/payload/truncated"), None);
     }
 }
