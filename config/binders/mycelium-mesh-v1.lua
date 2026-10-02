@@ -130,7 +130,9 @@ if type(p.nodes) == "table" then
     local state = tonumber(item.links_down) and item.links_down > 0 and "warning" or "neutral"
     local ssh_sessions = peer_ssh[identity(label)] or 0
     if ssh_sessions > 0 then facts[#facts + 1] = "SSH ×" .. tostring(ssh_sessions) end
-    nodes[#nodes + 1] = {id=id,label=label,detail=string.sub(table.concat(facts, " · "),1,512),group=site,heat=item.device and 0.62 or 0.22,state=state}
+    local node_heat = item.device and 0.62 or 0.22
+    if tonumber(item.overlays_active) and item.overlays_active > 0 then node_heat = 0.88 end
+    nodes[#nodes + 1] = {id=id,label=label,detail=string.sub(table.concat(facts, " · "),1,512),group=site,heat=node_heat,state=state}
     local memberships = type(item.segments) == "table" and item.segments or canvas.array()
     if #memberships == 0 and site then memberships[1] = site end
     for membership_index = 1, #memberships do

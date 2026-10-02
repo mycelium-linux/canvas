@@ -2667,6 +2667,17 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
                     animated_neural_layout(&self.nodes, bounds.size(), settle)
                 };
                 if topology {
+                    let nexus = Path::circle(
+                        Point::new(bounds.width * 0.5, bounds.height * 0.5),
+                        (bounds.height * 0.115).clamp(52.0, 118.0),
+                    );
+                    frame.fill(&nexus, with_alpha(color(self.palette.primary), 0.025));
+                    frame.stroke(
+                        &nexus,
+                        canvas::Stroke::default()
+                            .with_width(1.0)
+                            .with_color(with_alpha(color(self.palette.primary), 0.14)),
+                    );
                     for site in self
                         .nodes
                         .iter()
@@ -2697,12 +2708,12 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
                             (max_y - min_y + 44.0).min(bounds.height - origin.y - 2.0),
                         );
                         let zone = Path::rounded_rectangle(origin, size, 18.0.into());
-                        frame.fill(&zone, with_alpha(color(self.palette.surface_muted), 0.08));
+                        frame.fill(&zone, with_alpha(color(self.palette.surface_muted), 0.13));
                         frame.stroke(
                             &zone,
                             canvas::Stroke::default()
-                                .with_width(1.0)
-                                .with_color(with_alpha(color(self.palette.border), 0.3)),
+                                .with_width(1.2)
+                                .with_color(with_alpha(color(self.palette.primary), 0.2)),
                         );
                     }
                 }
@@ -2726,13 +2737,31 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
                             path.line_to(Point::new(to.x, mid));
                             path.line_to(*to);
                         })
+                    } else if topology && edge.heat >= 0.75 {
+                        Path::new(|path| {
+                            let midpoint = Point::new((from.x + to.x) * 0.5, (from.y + to.y) * 0.5);
+                            let dx = to.x - from.x;
+                            let dy = to.y - from.y;
+                            let length = (dx * dx + dy * dy).sqrt().max(1.0);
+                            let bend = (length * 0.075).clamp(12.0, 54.0);
+                            let control = Point::new(
+                                midpoint.x - dy / length * bend,
+                                midpoint.y + dx / length * bend,
+                            );
+                            path.move_to(*from);
+                            path.quadratic_curve_to(control, *to);
+                        })
                     } else {
                         Path::line(*from, *to)
                     };
                     frame.stroke(
                         &path,
                         canvas::Stroke::default()
-                            .with_width(1.0 + edge.heat * 3.0)
+                            .with_width(if topology && edge.heat >= 0.75 {
+                                1.4 + edge.heat * 1.8
+                            } else {
+                                0.7 + edge.heat * 1.5
+                            })
                             .with_color(active),
                     );
                 }
@@ -2782,16 +2811,40 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
                                 .with_color(with_alpha(semantic, 0.38)),
                         );
                     }
-                    frame.fill(
-                        &Path::circle(*position, radius),
-                        lerp_oklch(
-                            color(self.palette.surface_muted),
-                            semantic,
-                            0.3 + heat * 0.7,
-                        ),
+                    if topology && heat >= 0.75 {
+                        frame.stroke(
+                            &Path::circle(*position, radius + 8.0),
+                            canvas::Stroke::default()
+                                .with_width(1.4)
+                                .with_color(with_alpha(color(self.palette.primary), 0.62)),
+                        );
+                    }
+                    let fill = lerp_oklch(
+                        color(self.palette.surface_muted),
+                        semantic,
+                        0.3 + heat * 0.7,
                     );
+                    if node.id.starts_with("segment:") {
+                        let diamond = Path::new(|path| {
+                            path.move_to(Point::new(position.x, position.y - radius));
+                            path.line_to(Point::new(position.x + radius, position.y));
+                            path.line_to(Point::new(position.x, position.y + radius));
+                            path.line_to(Point::new(position.x - radius, position.y));
+                            path.close();
+                        });
+                        frame.fill(&diamond, fill);
+                        frame.stroke(
+                            &diamond,
+                            canvas::Stroke::default()
+                                .with_width(1.0)
+                                .with_color(with_alpha(semantic, 0.72)),
+                        );
+                    } else {
+                        frame.fill(&Path::circle(*position, radius), fill);
+                    }
                     if !dense
                         || node.id.starts_with("site:")
+                        || heat >= 0.75
                         || matches!(node.state, StatusLevel::Warning | StatusLevel::Critical)
                     {
                         frame.fill_text(canvas::Text {
@@ -2989,8 +3042,8 @@ fn topology_web_layout_at_phase(
                 !node.id.starts_with("site:") && node.group.as_deref() == Some(site_name)
             })
             .collect::<Vec<_>>();
-        let radius_x = (size.width / sites.len().max(3) as f32 * 0.28).clamp(38.0, 105.0);
-        let radius_y = (size.height * 0.13).clamp(34.0, 115.0);
+        let radius_x = (size.width / sites.len().max(3) as f32 * 0.36).clamp(52.0, 150.0);
+        let radius_y = (size.height * 0.17).clamp(46.0, 150.0);
         for (index, node) in members.iter().enumerate() {
             let angle = -std::f32::consts::FRAC_PI_2
                 + std::f32::consts::TAU * index as f32 / members.len().max(1) as f32;
@@ -3008,10 +3061,33 @@ fn topology_web_layout_at_phase(
         .iter()
         .filter(|node| !positions.contains_key(&node.id))
         .collect::<Vec<_>>();
-    for (index, node) in unplaced.iter().enumerate() {
+    let transit = unplaced
+        .iter()
+        .copied()
+        .filter(|node| node.heat >= 0.75 || node.id.starts_with("wireguard:"))
+        .collect::<Vec<_>>();
+    for (index, node) in transit.iter().enumerate() {
         let angle = -std::f32::consts::FRAC_PI_2
-            + std::f32::consts::TAU * index as f32 / unplaced.len().max(1) as f32;
-        let band = if index % 2 == 0 { 0.43 } else { 0.37 };
+            + std::f32::consts::TAU * index as f32 / transit.len().max(1) as f32;
+        let ring_x = (size.width * 0.105).clamp(70.0, 185.0);
+        let ring_y = (size.height * 0.095).clamp(54.0, 105.0);
+        positions.insert(
+            node.id.clone(),
+            Point::new(
+                center.x + angle.cos() * ring_x * settle,
+                center.y + angle.sin() * ring_y * settle,
+            ),
+        );
+    }
+    let peripheral = unplaced
+        .iter()
+        .copied()
+        .filter(|node| !positions.contains_key(&node.id))
+        .collect::<Vec<_>>();
+    for (index, node) in peripheral.iter().enumerate() {
+        let angle = -std::f32::consts::FRAC_PI_2
+            + std::f32::consts::TAU * index as f32 / peripheral.len().max(1) as f32;
+        let band = if index % 2 == 0 { 0.44 } else { 0.405 };
         positions.insert(
             node.id.clone(),
             Point::new(
