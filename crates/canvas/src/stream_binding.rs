@@ -1875,6 +1875,7 @@ mod tests {
             max_frequency: 108.0,
             unit: Some("MHz".into()),
             history: 8,
+            radio: None,
         });
         let event = StreamEnvelope {
             schema_version: STREAM_SCHEMA_VERSION,
@@ -1884,15 +1885,31 @@ mod tests {
             project_id: Some("dock".into()),
             sequence: 1,
             emitted_at_ms: now_ms(),
-            payload: serde_json::json!({"bins":[0.0,0.1,0.2,0.9,0.4,0.2,0.1,0.0]}),
+            payload: serde_json::json!({
+                "schema_version": 1,
+                "session_id": "rtl-sdr/adsb/window-test",
+                "generation": 4,
+                "sequence": 91,
+                "observed_at_ms": 1770000000000_i64,
+                "bins_dbfs": vec![-31.0; 64],
+                "center_frequency_hz": 1090000000.0,
+                "span_hz": 2400000.0,
+                "floor_dbfs": -110.0,
+                "ceiling_dbfs": -20.0
+            }),
         };
         apply_named_adapter("spectral-frame-v1", &event, &mut target)
             .expect("spectrum frame appends");
-        let WidgetKind::SpectralWaterfall { rows, .. } = target.kind else {
+        let WidgetKind::SpectralWaterfall { rows, radio, .. } = target.kind else {
             panic!("spectral binder changed widget family")
         };
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0][3], 0.9);
+        assert_eq!(rows[0].len(), 64);
+        assert!((rows[0][3] - 79.0 / 90.0).abs() < 0.001);
+        let radio = radio.expect("Radioman metadata retained");
+        assert_eq!(radio.center_frequency_hz, 1_090_000_000.0);
+        assert_eq!(radio.session_id, "rtl-sdr/adsb/window-test");
+        assert_eq!(radio.span_hz, 2_400_000.0);
     }
 
     #[test]

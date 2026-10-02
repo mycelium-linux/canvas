@@ -9,13 +9,14 @@ use crate::{
     ApprovalStatus, BurnRateWindow, ChartType, ClockMode, DawNote, DawTrack, DistributionGroup,
     DistributionStyle, EventEntry, HeatmapStyle, HierarchyNode, HierarchyStyle, MeterStyle,
     MetricBoardStyle, ModelAnnotation, ModelView, NetworkLink, NetworkLinkKind, NetworkNode,
-    NetworkNodeKind, NetworkSegment, NetworkSegmentKind, NeuralEdge, NeuralNode, RichCardFormat,
-    SpanTimelineStyle, SpatialBounds, SpatialTrack, StateLane, StatusLevel, StatusState,
-    TargetMetric, TimedSpan, WidgetChrome, WidgetDataState, WidgetKind, WidgetSpec,
+    NetworkNodeKind, NetworkSegment, NetworkSegmentKind, NeuralEdge, NeuralNode,
+    RadioSpectrumState, RichCardFormat, SpanTimelineStyle, SpatialBounds, SpatialTrack, StateLane,
+    StatusLevel, StatusState, TargetMetric, TimedSpan, WidgetChrome, WidgetDataState, WidgetKind,
+    WidgetSpec,
 };
 use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use canvas_core::{ThemeMetrics, ThemePalette, VisualTheme};
 use iced::mouse;
@@ -757,6 +758,7 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
             min_frequency,
             max_frequency,
             unit,
+            radio,
             ..
         } => panel(
             spec,
@@ -788,6 +790,7 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                     min_frequency: *min_frequency,
                     max_frequency: *max_frequency,
                     unit: unit.clone().unwrap_or_else(|| "Hz".into()),
+                    radio: radio.clone(),
                 })
                 .width(Length::Fill)
                 .height(Length::Fill),
@@ -3853,6 +3856,7 @@ struct SpectralWaterfallProgram {
     min_frequency: f64,
     max_frequency: f64,
     unit: String,
+    radio: Option<RadioSpectrumState>,
 }
 
 fn sample_spectrum(rows: &[Vec<f32>], x: f32, y: f32) -> f32 {
@@ -3899,8 +3903,9 @@ impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
             .ramp
             .iter()
             .fold(key, |key, color| key.add_color(*color))
+            .add_str(&format!("{:?}", self.radio))
             .build();
-        let mut output = state.draw_cached(renderer, bounds.size(), key, |frame| {
+        state.draw_cached(renderer, bounds.size(), key, |frame| {
             if self.rows.is_empty() || self.ramp.len() < 2 {
                 frame.fill_text(canvas::Text {
                     content: "Waiting for spectrum frames".into(),
@@ -3912,15 +3917,45 @@ impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
                 return;
             }
             let layout = PlotFrame::bottom_axis(bounds.size(), self.label_size);
-            // Source frames are intentionally bounded and may be sparse. The
-            // retained renderer resamples them into a dense field so a dozen
-            // bins do not become a dozen giant boxes on a large wall.
-            let columns = ((layout.plot.width / 3.0).ceil() as usize).clamp(24, 384);
-            let display_rows = ((layout.plot.height / 2.5).ceil() as usize).clamp(16, 192);
-            let cell_w = layout.plot.width / columns as f32;
-            let cell_h = layout.plot.height / display_rows as f32;
+            let spectrum_height = (layout.plot.height * 0.34).max(46.0);
+            let gap = 5.0;
+            let spectrum = Rectangle {
+                x: layout.plot.x,
+                y: layout.plot.y,
+                width: layout.plot.width,
+                height: spectrum_height.min(layout.plot.height * 0.48),
+            };
+            let waterfall = Rectangle {
+                x: layout.plot.x,
+                y: spectrum.y + spectrum.height + gap,
+                width: layout.plot.width,
+                height: (layout.plot.height - spectrum.height - gap).max(1.0),
+            };
+
+            // A shared frequency grid makes the FFT and time history read as a
+            // single instrument rather than two unrelated charts.
+            for fraction in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+                let x = layout.plot.x + layout.plot.width * fraction;
+                frame.stroke(
+                    &Path::line(
+                        Point::new(x, spectrum.y),
+                        Point::new(x, waterfall.y + waterfall.height),
+                    ),
+                    canvas::Stroke::default()
+                        .with_width(if fraction == 0.5 { 1.2 } else { 0.6 })
+                        .with_color(with_alpha(
+                            self.label,
+                            if fraction == 0.5 { 0.28 } else { 0.13 },
+                        )),
+                );
+            }
+
+            let columns = ((waterfall.width / 2.0).ceil() as usize).clamp(32, 512);
+            let display_rows = ((waterfall.height / 2.0).ceil() as usize).clamp(16, 256);
+            let cell_w = waterfall.width / columns as f32;
+            let cell_h = waterfall.height / display_rows as f32;
             for row_index in 0..display_rows {
-                let y = layout.plot.y + row_index as f32 * cell_h;
+                let y = waterfall.y + row_index as f32 * cell_h;
                 for column in 0..columns {
                     let value = sample_spectrum(
                         &self.rows,
@@ -3933,19 +3968,84 @@ impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
                     let fill = lerp_oklch(self.ramp[index], self.ramp[next], scaled.fract());
                     frame.fill(
                         &Path::rectangle(
-                            Point::new(layout.plot.x + column as f32 * cell_w, y),
+                            Point::new(waterfall.x + column as f32 * cell_w, y),
                             Size::new(cell_w + 0.35, cell_h + 0.35),
                         ),
                         fill,
                     );
                 }
             }
+
+            // Latest FFT is rendered as a continuous luminous trace above its
+            // retained history. This is real frame data, never an idle animation.
+            let latest = self.rows.last().expect("non-empty spectrum history");
+            let mut trace = canvas::path::Builder::new();
+            for index in 0..latest.len() {
+                let x = spectrum.x
+                    + spectrum.width * index as f32 / latest.len().saturating_sub(1).max(1) as f32;
+                let y = spectrum.y + spectrum.height * (1.0 - latest[index].clamp(0.0, 1.0));
+                if index == 0 {
+                    trace.move_to(Point::new(x, y));
+                } else {
+                    trace.line_to(Point::new(x, y));
+                }
+            }
+            let trace = trace.build();
+            frame.stroke(
+                &trace,
+                canvas::Stroke::default()
+                    .with_width(4.0)
+                    .with_color(with_alpha(self.scan, 0.16)),
+            );
+            frame.stroke(
+                &trace,
+                canvas::Stroke::default()
+                    .with_width(1.35)
+                    .with_color(self.scan),
+            );
+
+            if let Some(radio) = &self.radio {
+                let tuned_x = spectrum.x + spectrum.width * 0.5;
+                frame.stroke(
+                    &Path::line(
+                        Point::new(tuned_x, spectrum.y),
+                        Point::new(tuned_x, waterfall.y + waterfall.height),
+                    ),
+                    canvas::Stroke::default()
+                        .with_width(1.0)
+                        .with_color(with_alpha(self.scan, 0.72)),
+                );
+                frame.fill_text(canvas::Text {
+                    content: format!(
+                        "{}  G{} · {}   {:.0}/{:.0} dBFS",
+                        radio.session_id,
+                        radio.generation,
+                        radio.sequence,
+                        radio.ceiling_dbfs,
+                        radio.floor_dbfs,
+                    ),
+                    position: Point::new(spectrum.x + 5.0, spectrum.y + 4.0),
+                    color: with_alpha(self.label, 0.82),
+                    size: iced::Pixels(self.label_size),
+                    ..Default::default()
+                });
+            }
+            let (min_frequency, max_frequency, unit) = self.radio.as_ref().map_or(
+                (self.min_frequency, self.max_frequency, self.unit.as_str()),
+                |radio| {
+                    (
+                        (radio.center_frequency_hz - radio.span_hz * 0.5) / 1_000_000.0,
+                        (radio.center_frequency_hz + radio.span_hz * 0.5) / 1_000_000.0,
+                        "MHz",
+                    )
+                },
+            );
             for (fraction, frequency) in [
-                (0.0, self.min_frequency),
-                (0.5, (self.min_frequency + self.max_frequency) * 0.5),
-                (1.0, self.max_frequency),
+                (0.0, min_frequency),
+                (0.5, (min_frequency + max_frequency) * 0.5),
+                (1.0, max_frequency),
             ] {
-                let label = format!("{} {}", short_value(frequency), self.unit);
+                let label = format!("{} {}", short_value(frequency), unit);
                 let width = label.chars().count() as f32 * self.label_size * 0.52;
                 frame.fill_text(canvas::Text {
                     content: label,
@@ -3958,29 +4058,7 @@ impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
                     ..Default::default()
                 });
             }
-        });
-        if !self.rows.is_empty() {
-            let phase = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs_f32()
-                .rem_euclid(3.0)
-                / 3.0;
-            let mut overlay = canvas::Frame::new(renderer, bounds.size());
-            let layout = PlotFrame::bottom_axis(bounds.size(), self.label_size);
-            let y = layout.plot.y + phase * layout.plot.height;
-            overlay.stroke(
-                &Path::line(
-                    Point::new(layout.plot.x, y),
-                    Point::new(layout.plot.x + layout.plot.width, y),
-                ),
-                canvas::Stroke::default()
-                    .with_width(1.0)
-                    .with_color(with_alpha(self.scan, 0.28)),
-            );
-            output.push(overlay.into_geometry());
-        }
-        output
+        })
     }
 }
 

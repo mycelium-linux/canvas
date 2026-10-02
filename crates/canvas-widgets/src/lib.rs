@@ -337,6 +337,10 @@ pub enum WidgetKind {
         unit: Option<String>,
         #[serde(default = "default_waterfall_history")]
         history: usize,
+        /// Latest radio-domain frame metadata. Radioman owns these facts;
+        /// Canvas retains only the bounded projection needed to draw them.
+        #[serde(default)]
+        radio: Option<RadioSpectrumState>,
     },
     /// Dense row/column intensity matrix for latency, load, and correlation.
     Heatmap {
@@ -691,6 +695,8 @@ pub enum WidgetMutation {
     },
     SpectralFrame {
         bins: Vec<f32>,
+        #[serde(default)]
+        radio: Option<RadioSpectrumState>,
     },
     /// Replace only a widget's bounded, typed data payload. Layout, identity,
     /// theme and chrome remain owned by the saved Canvas view.
@@ -699,6 +705,25 @@ pub enum WidgetMutation {
         #[serde(default)]
         data: WidgetData,
     },
+}
+
+/// Narrow presentation projection of a radio spectrum frame.
+///
+/// This deliberately contains no device, tuning, or session commands. Those
+/// belong to Radioman; Canvas only needs enough state to render the instrument.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RadioSpectrumState {
+    pub schema_version: u32,
+    pub session_id: String,
+    pub generation: u64,
+    pub sequence: u64,
+    pub observed_at_ms: i64,
+    pub center_frequency_hz: f64,
+    pub span_hz: f64,
+    pub floor_dbfs: f32,
+    pub ceiling_dbfs: f32,
 }
 
 /// A paced step in a Canvas briefing presentation.
@@ -891,15 +916,21 @@ impl WidgetSpec {
                 widget.apply(mutation)?;
             }
             (
-                WidgetKind::SpectralWaterfall { rows, history, .. },
-                WidgetMutation::SpectralFrame { bins },
+                WidgetKind::SpectralWaterfall {
+                    rows,
+                    history,
+                    radio: current_radio,
+                    ..
+                },
+                WidgetMutation::SpectralFrame { bins, radio },
             ) => {
+                let valid_width = if radio.is_some() { 64..=4096 } else { 8..=1024 };
                 check(
-                    (8..=1024).contains(&bins.len())
+                    valid_width.contains(&bins.len())
                         && bins
                             .iter()
                             .all(|value| value.is_finite() && (0.0..=1.0).contains(value)),
-                    "spectral frame requires 8-1024 normalized bins",
+                    "spectral frame requires 64-4096 Radioman bins or 8-1024 legacy bins",
                 )?;
                 check(
                     rows.first().is_none_or(|row| row.len() == bins.len()),
@@ -908,6 +939,9 @@ impl WidgetSpec {
                 rows.push(bins);
                 if rows.len() > *history {
                     rows.drain(..rows.len() - *history);
+                }
+                if radio.is_some() {
+                    *current_radio = radio;
                 }
             }
             (current, WidgetMutation::Snapshot { widget, data })
@@ -1036,6 +1070,7 @@ mod mutation_tests {
                 max_frequency: 108.0,
                 unit: Some("MHz".into()),
                 history: 8,
+                radio: None,
             },
             theme: None,
             refresh_ms: None,
@@ -1045,6 +1080,7 @@ mod mutation_tests {
         for frame in 0..10 {
             spec.apply_mutation(WidgetMutation::SpectralFrame {
                 bins: vec![frame as f32 / 10.0; 8],
+                radio: None,
             })
             .unwrap();
         }
@@ -2059,6 +2095,7 @@ impl WidgetSpec {
                 max_frequency,
                 unit,
                 history,
+                radio,
             } => {
                 bounded_label(title, "spectral waterfall title")?;
                 optional_label(unit, "spectral waterfall unit")?;
@@ -2078,7 +2115,7 @@ impl WidgetSpec {
                 )?;
                 if let Some(width) = rows.first().map(Vec::len) {
                     check(
-                        (8..=1024).contains(&width)
+                        (8..=4096).contains(&width)
                             && rows.iter().all(|row| {
                                 row.len() == width
                                     && row.iter().all(|value| {
@@ -2086,6 +2123,21 @@ impl WidgetSpec {
                                     })
                             }),
                         "spectral waterfall rows require 8-1024 equal normalized bins",
+                    )?;
+                }
+                if let Some(radio) = radio {
+                    check(
+                        radio.schema_version == 1
+                            && !radio.session_id.is_empty()
+                            && radio.session_id.len() <= 128
+                            && radio.center_frequency_hz.is_finite()
+                            && radio.center_frequency_hz > 0.0
+                            && radio.span_hz.is_finite()
+                            && radio.span_hz > 0.0
+                            && radio.floor_dbfs.is_finite()
+                            && radio.ceiling_dbfs.is_finite()
+                            && radio.floor_dbfs < radio.ceiling_dbfs,
+                        "radio spectrum metadata is invalid",
                     )?;
                 }
             }
@@ -3267,6 +3319,7 @@ mod tests {
                 max_frequency: 108.0,
                 unit: Some("MHz".into()),
                 history: 96,
+                radio: None,
             },
             WidgetKind::RankedBar {
                 title: "t".into(),
