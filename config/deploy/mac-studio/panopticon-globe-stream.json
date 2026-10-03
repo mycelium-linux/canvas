@@ -2,7 +2,7 @@
   "width": 1280,
   "height": 720,
   "frames_per_second": 24,
-  "endpoint": "udp://192.168.10.74:5604?pkt_size=1316",
+  "local_frame_path": "/tmp/dock/canvas/video-frames/panopticon-globe.rgba",
   "ffmpeg_binary": "/opt/homebrew/bin/ffmpeg",
   "snapshot_path": "/Users/ajmwagar/src/fpl/dock/crates/canvas/tests/fixtures/spatial_snapshot_v1.json",
   "theme": {

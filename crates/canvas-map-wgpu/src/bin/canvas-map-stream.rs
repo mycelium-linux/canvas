@@ -24,7 +24,10 @@ struct Config {
     width: u32,
     height: u32,
     frames_per_second: u32,
-    endpoint: String,
+    #[serde(default)]
+    endpoint: Option<String>,
+    #[serde(default)]
+    local_frame_path: Option<String>,
     ffmpeg_binary: String,
     snapshot_path: String,
     theme: ThemePalette,
@@ -54,6 +57,7 @@ impl Encoder {
             ((config.width as u64 * config.height as u64 * config.frames_per_second as u64) / 85)
                 .clamp(1_500_000, 12_000_000);
         let bitrate = bitrate.to_string();
+        let endpoint = config.endpoint.as_deref().context("missing UDP endpoint")?;
         let mut child = Command::new(&config.ffmpeg_binary)
             .args([
                 "-hide_banner",
@@ -95,7 +99,7 @@ impl Encoder {
                 "+resend_headers",
                 "-f",
                 "mpegts",
-                &config.endpoint,
+                endpoint,
             ])
             .stdin(Stdio::piped())
             .spawn()
@@ -148,9 +152,12 @@ fn validate(config: &Config) -> Result<()> {
         "frames_per_second must be 1..=60"
     );
     ensure!(
-        config.endpoint.starts_with("udp://"),
-        "endpoint must use udp://"
+        config.endpoint.is_some() ^ config.local_frame_path.is_some(),
+        "set exactly one of endpoint or local_frame_path"
     );
+    if let Some(endpoint) = &config.endpoint {
+        ensure!(endpoint.starts_with("udp://"), "endpoint must use udp://");
+    }
     ensure!(
         config.camera.orbit_degrees_per_second.is_finite(),
         "orbit speed must be finite"
@@ -204,13 +211,28 @@ async fn run(config: Config, snapshot: canvas::map::spatial::SpatialFeatureSet) 
     let mut renderer = GlobeRenderer::new(&device, format);
     renderer.set_features(&device, &snapshot)?;
     let palette = SpatialPalette::from_theme(&config.theme);
-    let mut encoder_process = Encoder::spawn(&config)?;
+    let mut encoder_process = config
+        .endpoint
+        .as_ref()
+        .map(|_| Encoder::spawn(&config))
+        .transpose()?;
+    if let Some(path) = &config.local_frame_path {
+        publish_frame_size(path, config.width, config.height)?;
+    }
     let interval = Duration::from_secs_f64(1.0 / f64::from(config.frames_per_second));
     let started = Instant::now();
     let mut deadline = started;
     eprintln!(
         "canvas-map-stream: adapter='{}' {}x{}@{} -> {}",
-        adapter_info.name, config.width, config.height, config.frames_per_second, config.endpoint
+        adapter_info.name,
+        config.width,
+        config.height,
+        config.frames_per_second,
+        config
+            .endpoint
+            .as_deref()
+            .or(config.local_frame_path.as_deref())
+            .unwrap()
     );
 
     loop {
@@ -270,7 +292,11 @@ async fn run(config: Config, snapshot: canvas::map::spatial::SpatialFeatureSet) 
         }
         drop(mapped);
         readback.unmap();
-        encoder_process.write_frame(&rgba)?;
+        if let Some(encoder) = &mut encoder_process {
+            encoder.write_frame(&rgba)?;
+        } else if let Some(path) = &config.local_frame_path {
+            publish_frame(path, &rgba)?;
+        }
 
         deadline += interval;
         if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
@@ -279,6 +305,21 @@ async fn run(config: Config, snapshot: canvas::map::spatial::SpatialFeatureSet) 
             deadline = Instant::now();
         }
     }
+}
+
+fn publish_frame_size(frame_path: &str, width: u32, height: u32) -> Result<()> {
+    let path = std::path::Path::new(frame_path);
+    let parent = path.parent().context("local frame path needs a parent")?;
+    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    std::fs::write(path.with_extension("size"), format!("{width}x{height}"))
+        .context("publish local frame size")
+}
+
+fn publish_frame(frame_path: &str, rgba: &[u8]) -> Result<()> {
+    let path = std::path::Path::new(frame_path);
+    let temporary = path.with_extension("rgba.next");
+    std::fs::write(&temporary, rgba).context("write local frame")?;
+    std::fs::rename(&temporary, path).context("publish local frame atomically")
 }
 
 fn wrap_longitude(longitude: f64) -> f64 {
