@@ -211,6 +211,8 @@ pub const KNOWN_WIDGET_KINDS: &[&str] = &[
     "table",
     "event_log",
     "social_feed",
+    "wiki_race_hud",
+    "wiki_race_trace",
     "status_list",
     "neural_graph",
     "network_topology",
@@ -522,6 +524,37 @@ pub enum WidgetKind {
         #[serde(default = "default_social_feed_rotate_seconds")]
         rotate_seconds: u64,
     },
+    /// Presentation projection for a deterministic wiki race.
+    ///
+    /// The race runner owns navigation and publishes snapshots. Canvas only
+    /// derives the two visible clocks and advertises opaque start/stop action
+    /// ids for the host to route; it never reaches into a browser session.
+    WikiRaceHud {
+        start_page: String,
+        target_page: String,
+        #[serde(default)]
+        clicks: u32,
+        status: WikiRaceStatus,
+        #[serde(default)]
+        started_at_ms: Option<i64>,
+        #[serde(default)]
+        finished_at_ms: Option<i64>,
+        /// Time already spent on presentation-only focus/hesitation holds.
+        #[serde(default)]
+        presentation_hold_ms: u64,
+        /// Beginning of a currently active presentation hold, when any.
+        #[serde(default)]
+        hold_started_at_ms: Option<i64>,
+        start_action: String,
+        stop_action: String,
+    },
+    /// Read-only structured execution trace from a wiki-race runner.
+    WikiRaceTrace {
+        title: String,
+        entries: Vec<WikiRaceTraceEntry>,
+        #[serde(default = "default_true")]
+        follow: bool,
+    },
     /// Compact health summary for nodes, agents, or DAG stages.
     ///
     /// Renamed from `node_summary` in schema version 2; old specs are
@@ -669,6 +702,156 @@ pub enum ClockMode {
     #[default]
     Digital,
     Analog,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum WikiRaceStatus {
+    #[default]
+    Ready,
+    Racing,
+    Holding,
+    Finished,
+    Stopped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WikiRaceTiming {
+    pub wall_ms: u64,
+    pub race_ms: u64,
+    pub final_time: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WikiRaceTraceEntry {
+    pub sequence: u64,
+    pub observed_at: String,
+    #[serde(default)]
+    pub selected_choice: Option<String>,
+    #[serde(default)]
+    pub destination_url: Option<String>,
+    #[serde(default)]
+    pub decision_ms: Option<u64>,
+    #[serde(default)]
+    pub navigation_ms: Option<u64>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+impl WikiRaceStatus {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Finished | Self::Stopped)
+    }
+}
+
+/// Derive display clocks from one race snapshot and the host's current time.
+/// Saturating arithmetic keeps a clock monotonic across skewed observations.
+pub fn wiki_race_timing(
+    status: WikiRaceStatus,
+    started_at_ms: Option<i64>,
+    finished_at_ms: Option<i64>,
+    presentation_hold_ms: u64,
+    hold_started_at_ms: Option<i64>,
+    now_ms: i64,
+) -> WikiRaceTiming {
+    let Some(started_at_ms) = started_at_ms else {
+        return WikiRaceTiming {
+            wall_ms: 0,
+            race_ms: 0,
+            final_time: false,
+        };
+    };
+    let final_time = status.is_terminal();
+    let end_ms = if final_time {
+        finished_at_ms.unwrap_or(now_ms)
+    } else {
+        now_ms
+    };
+    let wall_ms = end_ms.saturating_sub(started_at_ms) as u64;
+    let active_hold_ms = if matches!(status, WikiRaceStatus::Holding) {
+        hold_started_at_ms
+            .map(|hold| end_ms.saturating_sub(hold) as u64)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    WikiRaceTiming {
+        wall_ms,
+        race_ms: wall_ms.saturating_sub(presentation_hold_ms.saturating_add(active_hold_ms)),
+        final_time,
+    }
+}
+
+#[cfg(test)]
+mod wiki_race_timing_tests {
+    use super::*;
+
+    #[test]
+    fn live_race_clock_excludes_completed_and_active_presentation_holds() {
+        let timing = wiki_race_timing(
+            WikiRaceStatus::Holding,
+            Some(1_000),
+            None,
+            3_000,
+            Some(8_000),
+            11_000,
+        );
+        assert_eq!(timing.wall_ms, 10_000);
+        assert_eq!(timing.race_ms, 4_000);
+        assert!(!timing.final_time);
+    }
+
+    #[test]
+    fn completed_race_freezes_both_clocks() {
+        let timing = wiki_race_timing(
+            WikiRaceStatus::Finished,
+            Some(1_000),
+            Some(9_500),
+            1_500,
+            None,
+            30_000,
+        );
+        assert_eq!(timing.wall_ms, 8_500);
+        assert_eq!(timing.race_ms, 7_000);
+        assert!(timing.final_time);
+    }
+
+    #[test]
+    fn trace_contract_rejects_empty_and_out_of_order_entries() {
+        let spec = |entries| WidgetSpec {
+            schema_version: WIDGET_SCHEMA_VERSION,
+            id: "race-trace".into(),
+            kind: WidgetKind::WikiRaceTrace {
+                title: "Surf race trace".into(),
+                entries,
+                follow: true,
+            },
+            theme: None,
+            refresh_ms: None,
+            chrome: WidgetChrome::Integrated,
+            data: WidgetData::default(),
+        };
+        let entry = |sequence, choice: Option<&str>| WikiRaceTraceEntry {
+            sequence,
+            observed_at: "2026-10-02T21:42:00Z".into(),
+            selected_choice: choice.map(str::to_owned),
+            destination_url: None,
+            decision_ms: Some(24),
+            navigation_ms: None,
+            error: None,
+        };
+
+        assert!(spec(vec![entry(1, Some("The Matrix"))]).validate().is_ok());
+        assert!(spec(vec![entry(1, None)]).validate().is_err());
+        assert!(
+            spec(vec![entry(2, Some("first")), entry(1, Some("second"))])
+                .validate()
+                .is_err()
+        );
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -923,6 +1106,10 @@ impl WidgetSpec {
             // A modest cadence keeps the waterfall flowing without asking the
             // host for display-rate frames.
             WidgetKind::SpectralWaterfall { .. } => Some(40),
+            WidgetKind::WikiRaceHud {
+                status: WikiRaceStatus::Racing | WikiRaceStatus::Holding,
+                ..
+            } => Some(40),
             _ => None,
         }
     }
@@ -2753,6 +2940,77 @@ impl WidgetSpec {
                     check(post.matches.len() <= 16, "social post has too many matches")?;
                 }
             }
+            WidgetKind::WikiRaceHud {
+                start_page,
+                target_page,
+                status,
+                started_at_ms,
+                finished_at_ms,
+                presentation_hold_ms,
+                hold_started_at_ms,
+                start_action,
+                stop_action,
+                ..
+            } => {
+                bounded_label(start_page, "wiki race start page")?;
+                bounded_label(target_page, "wiki race target page")?;
+                bounded_label(start_action, "wiki race start action")?;
+                bounded_label(stop_action, "wiki race stop action")?;
+                check(start_page != target_page, "wiki race pages must differ")?;
+                check(
+                    matches!(status, WikiRaceStatus::Ready) == started_at_ms.is_none(),
+                    "only a ready wiki race may omit started_at_ms",
+                )?;
+                check(
+                    status.is_terminal() == finished_at_ms.is_some(),
+                    "terminal wiki race status and finished_at_ms must agree",
+                )?;
+                check(
+                    matches!(status, WikiRaceStatus::Holding) == hold_started_at_ms.is_some(),
+                    "wiki race hold status and hold_started_at_ms must agree",
+                )?;
+                if let (Some(start), Some(finish)) = (started_at_ms, finished_at_ms) {
+                    check(finish >= start, "wiki race cannot finish before it starts")?;
+                    check(
+                        *presentation_hold_ms <= finish.saturating_sub(*start) as u64,
+                        "wiki race holds cannot exceed elapsed time",
+                    )?;
+                }
+            }
+            WidgetKind::WikiRaceTrace { title, entries, .. } => {
+                bounded_label(title, "wiki race trace title")?;
+                check(entries.len() <= 256, "wiki race trace exceeds 256 entries")?;
+                let mut previous_sequence = None;
+                for entry in entries {
+                    bounded_label(&entry.observed_at, "wiki race trace observed time")?;
+                    optional_bounded_text(
+                        &entry.selected_choice,
+                        "wiki race selected choice",
+                        MAX_INPUT_TEXT_BYTES,
+                    )?;
+                    optional_bounded_text(
+                        &entry.destination_url,
+                        "wiki race destination URL",
+                        MAX_INPUT_TEXT_BYTES,
+                    )?;
+                    optional_bounded_text(
+                        &entry.error,
+                        "wiki race trace error",
+                        MAX_INPUT_TEXT_BYTES,
+                    )?;
+                    check(
+                        entry.selected_choice.is_some()
+                            || entry.destination_url.is_some()
+                            || entry.error.is_some(),
+                        "wiki race trace entry must carry a choice, destination, or error",
+                    )?;
+                    check(
+                        previous_sequence.is_none_or(|previous| entry.sequence > previous),
+                        "wiki race trace sequences must increase",
+                    )?;
+                    previous_sequence = Some(entry.sequence);
+                }
+            }
             WidgetKind::StatusList { title, nodes } => {
                 bounded_label(title, "node summary title")?;
                 check(nodes.len() <= 256, "node summary exceeds 256 nodes")?;
@@ -3283,9 +3541,10 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
         WidgetKind::RichCard { .. }
         | WidgetKind::ApprovalCard { .. }
         | WidgetKind::CommandPalette { .. } => SizeHint::new(280.0, 180.0, 520.0, 360.0, 1.5),
-        WidgetKind::MediaTransport { .. } | WidgetKind::ModelTelemetry { .. } => {
-            SizeHint::new(280.0, 180.0, 540.0, 340.0, 1.8)
-        }
+        WidgetKind::MediaTransport { .. }
+        | WidgetKind::ModelTelemetry { .. }
+        | WidgetKind::WikiRaceHud { .. } => SizeHint::new(280.0, 180.0, 540.0, 340.0, 1.8),
+        WidgetKind::WikiRaceTrace { .. } => SizeHint::new(300.0, 140.0, 600.0, 260.0, 2.4),
         WidgetKind::DawDeck { .. } | WidgetKind::MixField { .. } => {
             SizeHint::new(420.0, 260.0, 760.0, 520.0, 1.2)
         }

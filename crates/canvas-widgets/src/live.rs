@@ -36,6 +36,7 @@ mod signal_scene;
 mod spectral_waterfall;
 mod wasm_cdg;
 mod wasm_hyperspace;
+mod wiki_race;
 use clock::AnalogClockProgram;
 use primitives::{
     header as primitive_header, list_row as primitive_list_row, metric as primitive_metric,
@@ -1612,6 +1613,43 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                 visual,
             )
         }
+        WidgetKind::WikiRaceHud {
+            start_page,
+            target_page,
+            clicks,
+            status,
+            started_at_ms,
+            finished_at_ms,
+            presentation_hold_ms,
+            hold_started_at_ms,
+            ..
+        } => panel(
+            spec,
+            wiki_race::body(
+                wiki_race::WikiRaceView {
+                    start_page,
+                    target_page,
+                    clicks: *clicks,
+                    status: *status,
+                    started_at_ms: *started_at_ms,
+                    finished_at_ms: *finished_at_ms,
+                    presentation_hold_ms: *presentation_hold_ms,
+                    hold_started_at_ms: *hold_started_at_ms,
+                    now_ms: now.epoch_millis,
+                },
+                visual,
+            ),
+            visual,
+        ),
+        WidgetKind::WikiRaceTrace {
+            title,
+            entries,
+            follow,
+        } => panel(
+            spec,
+            wiki_race::trace(title, entries, *follow, visual),
+            visual,
+        ),
         WidgetKind::MediaTransport {
             title,
             source,
