@@ -364,6 +364,7 @@ impl VisualBackend for GlobeBackend {
     }
 }
 
+/// @implements url:https://epsg.org/guidance-notes.html Guidance Note 7-2 §2.2.1 -- geographic to geocentric conversion on the WGS84 ellipsoid
 pub fn geodetic_to_ecef(
     latitude_degrees: f64,
     longitude_degrees: f64,

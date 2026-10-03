@@ -1,0 +1,15 @@
+[package]
+name = "canvas-map-wgpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+canvas.workspace = true
+wgpu = "27"
+
+[dev-dependencies]
+canvas-core.workspace = true
+pollster = "0.4"
+serde_json.workspace = true
