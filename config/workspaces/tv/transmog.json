@@ -10,14 +10,8 @@
     {
       "id": "transmog-files",
       "title": "Project",
-      "content": { "kind": "widget", "spec": {
-        "schema_version": 2, "id": "transmog-files", "kind": "table",
-        "title": "Project files", "columns": ["Name", "Kind", "Folder", "Size"], "rows": [],
-        "theme": null, "refresh_ms": null, "chrome": "integrated",
-        "data": { "state": "loading", "source": "alfalfa:transmog", "observed_at": null,
-          "window": "current revision", "detail": "Loading project manifest", "provenance": "live" }
-      } },
-      "inputs": [{ "id": "results", "contract": "canvas.widget.snapshot.v1" }]
+      "content": { "kind": "project_browser", "project_id": "transmog" },
+      "inputs": []
     },
     {
       "id": "transmog-part", "title": "Model",
@@ -30,8 +24,8 @@
       "content": { "kind": "widget", "spec": {
         "schema_version": 2, "id": "transmog-run", "kind": "status_list", "title": "Waiting for a run",
         "nodes": [], "theme": null, "refresh_ms": 250, "chrome": "integrated",
-        "data": { "state": "loading", "source": "eval.watch.v1", "observed_at": null,
-          "window": "live", "detail": "RLCD execution summary", "provenance": "live" }
+        "data": { "state": "no_data", "source": "eval.watch.v1", "observed_at": null,
+          "window": "live", "detail": "No active RLCD run", "provenance": "live" }
       } },
       "inputs": [{ "id": "run", "contract": "canvas.run.watch.v1" }]
     },
@@ -40,8 +34,8 @@
       "content": { "kind": "widget", "spec": {
         "schema_version": 2, "id": "transmog-decisions", "kind": "dag_graph", "title": "Waiting for decisions",
         "nodes": [], "edges": [], "theme": null, "refresh_ms": 250, "chrome": "integrated",
-        "data": { "state": "loading", "source": "eval.watch.v1", "observed_at": null,
-          "window": "live", "detail": "RLCD decision trace", "provenance": "live" }
+        "data": { "state": "no_data", "source": "eval.watch.v1", "observed_at": null,
+          "window": "live", "detail": "No active RLCD run", "provenance": "live" }
       } },
       "inputs": [{ "id": "run", "contract": "canvas.run.watch.v1" }]
     },
@@ -50,8 +44,8 @@
       "content": { "kind": "widget", "spec": {
         "schema_version": 2, "id": "transmog-checks", "kind": "status_list", "title": "Waiting for verification",
         "nodes": [], "theme": null, "refresh_ms": 250, "chrome": "integrated",
-        "data": { "state": "loading", "source": "eval.watch.v1", "observed_at": null,
-          "window": "live", "detail": "RLCD verdicts", "provenance": "live" }
+        "data": { "state": "no_data", "source": "eval.watch.v1", "observed_at": null,
+          "window": "live", "detail": "No active RLCD run", "provenance": "live" }
       } },
       "inputs": [{ "id": "run", "contract": "canvas.run.watch.v1" }]
     },
@@ -60,8 +54,8 @@
       "content": { "kind": "widget", "spec": {
         "schema_version": 2, "id": "transmog-events", "kind": "event_log", "title": "Run timeline",
         "entries": [], "follow": true, "theme": null, "refresh_ms": 250, "chrome": "integrated",
-        "data": { "state": "loading", "source": "eval.watch.v1", "observed_at": null,
-          "window": "live", "detail": "Build, assembly, and evaluation events", "provenance": "live" }
+        "data": { "state": "no_data", "source": "eval.watch.v1", "observed_at": null,
+          "window": "live", "detail": "No active RLCD run", "provenance": "live" }
       } },
       "inputs": [{ "id": "run", "contract": "canvas.run.watch.v1" }]
     },
@@ -90,12 +84,6 @@
       "source": { "owner": "mac-studio-transmog", "stream": "transmog-timeline", "contract": "transmog.build.status.v1" },
       "target": { "surface_id": "transmog-part", "input_id": "timeline" },
       "adapter": "transmog-build-v1", "delivery": { "mode": "latest" }
-    },
-    {
-      "id": "transmog-files-live",
-      "source": { "owner": "canvas-artifact-index", "stream": "transmog-artifacts", "contract": "canvas.artifact.search.v1" },
-      "target": { "surface_id": "transmog-files", "input_id": "results" },
-      "adapter": "alfalfa-manifest-search-v1", "delivery": { "mode": "latest" }
     },
     {
       "id": "transmog-run-live",

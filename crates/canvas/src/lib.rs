@@ -475,6 +475,11 @@ pub enum SurfaceContent {
     ProjectResource {
         resource_id: String,
     },
+    /// Native file/part browser backed by an engineering owner's manifest.
+    /// The owner resolves artifacts; Canvas owns only navigation.
+    ProjectBrowser {
+        project_id: String,
+    },
     Asset {
         asset: AssetRef,
     },
@@ -562,8 +567,9 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// The `kind` tags this build can render. Anything else is a newer Canvas.
-const KNOWN_SURFACE_KINDS: [&str; 10] = [
+const KNOWN_SURFACE_KINDS: [&str; 11] = [
     "project_resource",
+    "project_browser",
     "asset",
     "chart",
     "widget",
@@ -580,6 +586,7 @@ impl SurfaceContent {
     pub fn kind_tag(&self) -> &str {
         match self {
             Self::ProjectResource { .. } => "project_resource",
+            Self::ProjectBrowser { .. } => "project_browser",
             Self::Asset { .. } => "asset",
             Self::Chart { .. } => "chart",
             Self::Widget { .. } => "widget",
@@ -653,6 +660,9 @@ enum Known {
     ProjectResource {
         resource_id: String,
     },
+    ProjectBrowser {
+        project_id: String,
+    },
     Asset {
         asset: AssetRef,
     },
@@ -701,6 +711,9 @@ impl Known {
         match self {
             Self::ProjectResource { resource_id } => {
                 SurfaceContent::ProjectResource { resource_id }
+            }
+            Self::ProjectBrowser { project_id } => {
+                SurfaceContent::ProjectBrowser { project_id }
             }
             Self::Asset { asset } => SurfaceContent::Asset { asset },
             Self::Chart { chart } => SurfaceContent::Chart { chart },
@@ -1298,6 +1311,12 @@ impl WorkspaceDocument {
                         )?;
                     }
                 }
+                SurfaceContent::ProjectBrowser { project_id } => {
+                    check(
+                        visible(project_id) && project_id.len() <= 128,
+                        "Invalid project browser id",
+                    )?;
+                }
                 SurfaceContent::Terminal { resource_id } => {
                     if let Some(project) = project {
                         let resource = project
@@ -1885,10 +1904,10 @@ mod tests {
             4,
             "RLCD owns one shared run contract projected into four native views"
         );
-        assert!(doc.bindings.iter().any(|binding| {
-            binding.source.contract == "canvas.artifact.search.v1"
-                && binding.target.surface_id == "transmog-files"
-        }));
+        assert!(doc.surfaces.iter().any(|surface| matches!(
+            &surface.content,
+            SurfaceContent::ProjectBrowser { project_id } if project_id == "transmog"
+        )));
     }
 
     #[test]

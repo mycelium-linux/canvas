@@ -295,6 +295,9 @@ enum ContentSource {
     Widget {
         spec: canvas_widgets::WidgetSpec,
     },
+    ProjectBrowser {
+        browser: Box<EngineeringBrowser>,
+    },
     /// A line being typed on the wall, plus what has already been sent.
     ///
     /// `draft` lives here rather than in the document because a half-typed
@@ -462,6 +465,10 @@ enum Message {
     ShellProjects,
     ShellNewTask,
     EngineeringBrowser(BrowserAction),
+    ProjectBrowserAction {
+        surface_id: String,
+        action: BrowserAction,
+    },
     EngineeringBrowserClose,
     EngineeringArtifactLoaded(Box<Result<LoadedContent, Failure>>),
     EngineeringModelPrepared(Box<Result<(String, String), Failure>>),
@@ -1293,7 +1300,9 @@ impl App {
             #[cfg(unix)]
             workspace_mirror: ::canvas::workspace_mirror::Publisher::new(),
         };
-        if let Some(project) = app
+        if !app.document.surfaces.iter().any(|surface| {
+            matches!(surface.content, SurfaceContent::ProjectBrowser { .. })
+        }) && let Some(project) = app
             .engineering_projects
             .get(&app.document.project_id)
             .cloned()
@@ -1670,6 +1679,79 @@ impl App {
         self.emit_event(format!("jump_navigate {} {:?}", project_id, view_id));
     }
 
+    fn open_engineering_entry(
+        &mut self,
+        project: &EngineeringProject,
+        entry: ManifestEntry,
+        model_surface: Option<&str>,
+    ) -> Task<Message> {
+        let Some(artifact) = project.artifacts.get(&entry.id).cloned() else {
+            self.status = "The owner did not provide an artifact locator.".into();
+            self.bump();
+            return Task::none();
+        };
+        match artifact {
+            EngineeringArtifact::Local(path) => {
+                let viewport = self.media_viewport();
+                let scale_factor = self.scale_factor;
+                let surface_id = format!("artifact-{}", entry.id);
+                let title = Some(entry.display_name);
+                Task::perform(
+                    async move { load_content(surface_id, path, title, viewport, scale_factor) },
+                    |result| Message::EngineeringArtifactLoaded(Box::new(result)),
+                )
+            }
+            EngineeringArtifact::LocalModel(path) => {
+                let surface_id = model_surface
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("artifact-{}", entry.id));
+                let title = entry.display_name;
+                self.status = format!("Loading {title}…");
+                self.bump();
+                Task::perform(
+                    async move { prepare_local_model(surface_id, title, path) },
+                    |result| Message::EngineeringModelPrepared(Box::new(result)),
+                )
+            }
+            EngineeringArtifact::RemoteText { base, path } => {
+                let viewport = self.media_viewport();
+                let scale_factor = self.scale_factor;
+                let surface_id = format!("artifact-{}", entry.id);
+                let title = Some(entry.display_name);
+                Task::perform(
+                    async move {
+                        load_remote_text_content(
+                            surface_id,
+                            base,
+                            path,
+                            title,
+                            viewport,
+                            scale_factor,
+                        )
+                    },
+                    |result| Message::EngineeringArtifactLoaded(Box::new(result)),
+                )
+            }
+            EngineeringArtifact::RemoteModel { base, path } => {
+                let surface_id = model_surface
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("artifact-{}", entry.id));
+                let title = entry.display_name;
+                self.status = format!("Loading {title}…");
+                self.bump();
+                Task::perform(
+                    async move { prepare_remote_model(surface_id, title, base, path) },
+                    |result| Message::EngineeringModelPrepared(Box::new(result)),
+                )
+            }
+            EngineeringArtifact::Unavailable(reason) => {
+                self.status = reason;
+                self.bump();
+                Task::none()
+            }
+        }
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::ShellBack => {
@@ -1685,77 +1767,46 @@ impl App {
                 let Some(browser) = self.engineering_browser.as_mut() else {
                     return Task::none();
                 };
-                match browser.project.manifest.apply(&mut browser.state, action) {
-                    Ok(Some(entry)) => match browser.project.artifacts.get(&entry.id).cloned() {
-                        Some(EngineeringArtifact::Local(path)) => {
-                            let viewport = self.media_viewport();
-                            let scale_factor = self.scale_factor;
-                            let surface_id = format!("artifact-{}", entry.id);
-                            let title = Some(entry.display_name);
-                            self.engineering_browser = None;
-                            return Task::perform(
-                                async move {
-                                    load_content(surface_id, path, title, viewport, scale_factor)
-                                },
-                                |result| Message::EngineeringArtifactLoaded(Box::new(result)),
-                            );
-                        }
-                        Some(EngineeringArtifact::LocalModel(path)) => {
-                            let surface_id = format!("artifact-{}", entry.id);
-                            let title = entry.display_name;
-                            self.engineering_browser = None;
-                            self.status = format!("Loading {title}…");
-                            self.bump();
-                            return Task::perform(
-                                async move { prepare_local_model(surface_id, title, path) },
-                                |result| Message::EngineeringModelPrepared(Box::new(result)),
-                            );
-                        }
-                        Some(EngineeringArtifact::RemoteText { base, path }) => {
-                            let viewport = self.media_viewport();
-                            let scale_factor = self.scale_factor;
-                            let surface_id = format!("artifact-{}", entry.id);
-                            let title = Some(entry.display_name);
-                            self.engineering_browser = None;
-                            return Task::perform(
-                                async move {
-                                    load_remote_text_content(
-                                        surface_id,
-                                        base,
-                                        path,
-                                        title,
-                                        viewport,
-                                        scale_factor,
-                                    )
-                                },
-                                |result| Message::EngineeringArtifactLoaded(Box::new(result)),
-                            );
-                        }
-                        Some(EngineeringArtifact::RemoteModel { base, path }) => {
-                            let surface_id = format!("artifact-{}", entry.id);
-                            let title = entry.display_name;
-                            self.engineering_browser = None;
-                            self.status = format!("Loading {title}…");
-                            self.bump();
-                            return Task::perform(
-                                async move { prepare_remote_model(surface_id, title, base, path) },
-                                |result| Message::EngineeringModelPrepared(Box::new(result)),
-                            );
-                        }
-                        Some(EngineeringArtifact::Unavailable(reason)) => {
-                            self.status = reason;
-                        }
-                        None => {
-                            self.status = "The owner did not provide an artifact locator.".into()
-                        }
-                    },
-                    Ok(None) => {}
-                    Err(error) => self.status = error.to_string(),
-                }
+                let opened = match browser.project.manifest.apply(&mut browser.state, action) {
+                    Ok(Some(entry)) => Some((browser.project.clone(), entry)),
+                    Ok(None) => None,
+                    Err(error) => {
+                        self.status = error.to_string();
+                        None
+                    }
+                };
                 if let Some(browser) = self.engineering_browser.as_mut()
                     && let Ok(model) = browser.project.manifest.browse(&browser.state, 512)
                 {
                     browser.model = model;
+                }
+                if let Some((project, entry)) = opened {
+                    self.engineering_browser = None;
+                    return self.open_engineering_entry(&project, entry, None);
+                }
+                self.bump();
+                Task::none()
+            }
+            Message::ProjectBrowserAction { surface_id, action } => {
+                let opened = self.decoded.get_mut(&surface_id).and_then(|surface| {
+                    let ContentSource::ProjectBrowser { browser } = &mut surface.source else {
+                        return None;
+                    };
+                    match browser.project.manifest.apply(&mut browser.state, action) {
+                        Ok(entry) => {
+                            if let Ok(model) = browser.project.manifest.browse(&browser.state, 512) {
+                                browser.model = model;
+                            }
+                            entry.map(|entry| (browser.project.clone(), entry))
+                        }
+                        Err(error) => {
+                            self.status = error.to_string();
+                            None
+                        }
+                    }
+                });
+                if let Some((project, entry)) = opened {
+                    return self.open_engineering_entry(&project, entry, Some("transmog-part"));
                 }
                 self.bump();
                 Task::none()
@@ -4214,6 +4265,11 @@ impl App {
                 self.start_transition();
                 self.document = document;
                 self.workspaces = next;
+                if self.document.surfaces.iter().any(|surface| {
+                    matches!(surface.content, SurfaceContent::ProjectBrowser { .. })
+                }) {
+                    self.engineering_browser = None;
+                }
                 if self.document.focused_surface_id.is_some()
                     && (self.document.focused_surface_id != previous_focus || presentation_changed)
                 {
@@ -4255,6 +4311,11 @@ impl App {
                         let background_changed = self.document.background != document.background;
                         self.start_transition();
                         self.document = document;
+                        if self.document.surfaces.iter().any(|surface| {
+                            matches!(surface.content, SurfaceContent::ProjectBrowser { .. })
+                        }) {
+                            self.engineering_browser = None;
+                        }
                         if self.document.focused_surface_id != previous_focus || emphasizes_focus {
                             self.begin_focus_emphasis();
                         }
@@ -7052,6 +7113,33 @@ impl App {
                 continue;
             }
             let (content, source) = match &surface.content {
+                SurfaceContent::ProjectBrowser {
+                    project_id: resource_id,
+                } => {
+                    match self
+                        .engineering_projects
+                        .get(resource_id)
+                        .cloned()
+                        .and_then(|project| Self::engineering_browser_for(project).ok())
+                    {
+                        Some(browser) => (
+                            ContentKind::Widget,
+                            ContentSource::ProjectBrowser {
+                                browser: Box::new(browser),
+                            },
+                        ),
+                        None => (
+                            ContentKind::Markdown,
+                            ContentSource::Markdown {
+                                path: PathBuf::new(),
+                                items: markdown::parse(&format!(
+                                    "Project source `{resource_id}` is idle. Start its owner and refresh Canvas."
+                                ))
+                                .collect(),
+                            },
+                        ),
+                    }
+                }
                 SurfaceContent::Scene { scene } => (
                     ContentKind::Scene,
                     ContentSource::Scene {
@@ -7444,7 +7532,7 @@ impl App {
     }
 
     fn surface_widget<'a>(
-        &self,
+        &'a self,
         surface: &'a RuntimeSurface,
         width: Length,
         height: Length,
@@ -7740,6 +7828,19 @@ impl App {
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into()
+            }
+            ContentSource::ProjectBrowser { browser } => {
+                let surface_id = surface.snapshot.id.clone();
+                canvas_widgets::live::project_browser::view(
+                    &browser.model,
+                    &browser.state,
+                    &self.engineering_thumbnails,
+                    self.presented_visual_theme(),
+                    move |action| Message::ProjectBrowserAction {
+                        surface_id: surface_id.clone(),
+                        action,
+                    },
+                )
             }
             ContentSource::Widget { spec } => {
                 // An authored widget draws its retained scene. The static library
