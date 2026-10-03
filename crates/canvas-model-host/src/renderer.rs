@@ -237,6 +237,19 @@ impl Renderer {
         })
     }
 
+    /// Device used by this retained renderer. External-target callers allocate
+    /// their texture and command encoder from this exact device; wgpu resources
+    /// are intentionally never smuggled across devices.
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// Queue paired with [`Renderer::device`] for submitting command buffers
+    /// after [`Renderer::render_into`] has encoded its pass.
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
     pub fn upload(&mut self, mesh: &PreparedMesh) {
         self.mesh = Some(GpuMesh {
             vertices: self
@@ -265,18 +278,19 @@ impl Renderer {
         });
     }
 
-    /// Submit one frame and return the frame that completed three submissions
-    /// earlier. This overlaps render, GPU->CPU transfer, and VideoToolbox input
-    /// instead of forcing a Metal map round-trip into every render frame.
-    /// `eye_direction` is where the camera sits, already decided.
+    /// Encode the retained engineering scene directly into a caller-owned GPU
+    /// target. The target must belong to this renderer's device, use
+    /// `Rgba8UnormSrgb`, and match the dimensions passed to [`Renderer::new`].
     ///
-    /// The renderer used to sample the flight and apply the orbit itself,
-    /// which left no room for a third source of camera motion. A viewer
-    /// dragging one is exactly that, and it has to blend with the other two
-    /// rather than race them, so the host now settles on a direction and this
-    /// draws it.
-    pub fn render(
+    /// This is the zero-readback path used when a compositor or stream
+    /// producer already owns the destination texture. [`Renderer::render`]
+    /// remains the compatibility path for Surf-style H.264 streaming and adds
+    /// only the GPU-to-CPU copy needed by its current encoder boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_into(
         &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
         eye_direction: Vec3,
         distance_scale: f32,
         model_rotation_degrees: [f32; 3],
@@ -284,13 +298,8 @@ impl Renderer {
         field: Option<&crate::Field>,
         theme: &VisualTheme,
         elapsed: f32,
-    ) -> Result<Option<Vec<u8>>> {
-        let slot_index = self.next_readback;
-        let completed = self.collect_slot(slot_index)?;
+    ) -> Result<()> {
         let mesh = self.mesh.as_ref().context("no model uploaded")?;
-        // A zero or non-finite direction would put the eye on the model and
-        // produce a degenerate view matrix; fall back to the front rather than
-        // render a frame nobody can interpret.
         let direction = eye_direction.normalize_or_zero();
         let direction = if direction.length_squared() < 0.5 {
             Vec3::Z
@@ -326,64 +335,100 @@ impl Renderer {
                 material.opacity,
                 material.wireframe as u8 as f32,
             ],
-            // The mesh carries a value per vertex whether or not a field is
-            // declared; this is what decides whether it is shown, so the
-            // scene can drop the ramp without rebaking.
             field_params: [
                 field.is_some() as u8 as f32,
-                field.map(|f| f.colormap.shader_index()).unwrap_or(0.0),
+                field
+                    .map(|value| value.colormap.shader_index())
+                    .unwrap_or(0.0),
                 0.0,
                 0.0,
             ],
         };
         self.queue
             .write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniform));
+        let background = theme
+            .palette
+            .background
+            .map(|value| f64::from(value) / 255.0);
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("model-external-target-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: background[0],
+                        g: background[1],
+                        b: background[2],
+                        a: 1.0,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+        pass.set_pipeline(&self.fill_pipeline);
+        pass.set_index_buffer(mesh.triangles.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..mesh.triangle_count, 0, 0..1);
+        if material.wireframe {
+            pass.set_pipeline(&self.line_pipeline);
+            pass.set_index_buffer(mesh.edges.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..mesh.edge_count, 0, 0..1);
+        }
+        Ok(())
+    }
+
+    /// Submit one frame and return the frame that completed three submissions
+    /// earlier. This overlaps render, GPU->CPU transfer, and VideoToolbox input
+    /// instead of forcing a Metal map round-trip into every render frame.
+    /// `eye_direction` is where the camera sits, already decided.
+    ///
+    /// The renderer used to sample the flight and apply the orbit itself,
+    /// which left no room for a third source of camera motion. A viewer
+    /// dragging one is exactly that, and it has to blend with the other two
+    /// rather than race them, so the host now settles on a direction and this
+    /// draws it.
+    pub fn render(
+        &mut self,
+        eye_direction: Vec3,
+        distance_scale: f32,
+        model_rotation_degrees: [f32; 3],
+        material: &Material,
+        field: Option<&crate::Field>,
+        theme: &VisualTheme,
+        elapsed: f32,
+    ) -> Result<Option<Vec<u8>>> {
+        let slot_index = self.next_readback;
+        let completed = self.collect_slot(slot_index)?;
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("model-frame"),
             });
-        {
-            let color_view = self.color.create_view(&Default::default());
-            let background = theme.palette.background.map(|v| f64::from(v) / 255.0);
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("model-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &color_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: background[0],
-                            g: background[1],
-                            b: background[2],
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-            pass.set_pipeline(&self.fill_pipeline);
-            pass.set_index_buffer(mesh.triangles.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..mesh.triangle_count, 0, 0..1);
-            if material.wireframe {
-                pass.set_pipeline(&self.line_pipeline);
-                pass.set_index_buffer(mesh.edges.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..mesh.edge_count, 0, 0..1);
-            }
-        }
+        let color_view = self.color.create_view(&Default::default());
+        self.render_into(
+            &mut encoder,
+            &color_view,
+            eye_direction,
+            distance_scale,
+            model_rotation_degrees,
+            material,
+            field,
+            theme,
+            elapsed,
+        )?;
         encoder.copy_texture_to_buffer(
             self.color.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
@@ -442,5 +487,86 @@ impl Renderer {
         drop(mapped);
         self.readbacks[slot_index].buffer.unmap();
         Ok(Some(rgba))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use canvas_core::{Accent, ThemeMode, ThemeSelection};
+    use std::path::PathBuf;
+
+    fn triangle() -> PreparedMesh {
+        PreparedMesh {
+            asset: PathBuf::from("fixture.stl"),
+            vertices: vec![
+                Vertex {
+                    position: [-0.8, -0.8, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    field: 0.0,
+                },
+                Vertex {
+                    position: [0.8, -0.8, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    field: 0.5,
+                },
+                Vertex {
+                    position: [0.0, 0.8, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    field: 1.0,
+                },
+            ],
+            triangle_indices: vec![0, 1, 2],
+            edge_indices: vec![0, 1, 1, 2, 2, 0],
+            source_center: [0.0; 3],
+            source_extent: 1.6,
+        }
+    }
+
+    #[test]
+    fn encodes_model_into_caller_owned_gpu_target() {
+        let mut renderer = Renderer::new(64, 64).expect("WGPU renderer");
+        renderer.upload(&triangle());
+        let device = renderer.device().clone();
+        let queue = renderer.queue().clone();
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("caller-owned engineering target"),
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 64,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("caller-owned engineering encoder"),
+        });
+        let theme = ThemeSelection::coherence(ThemeMode::Dark, Accent::Info).visual_theme();
+        renderer
+            .render_into(
+                &mut encoder,
+                &target_view,
+                Vec3::Z,
+                1.0,
+                [0.0; 3],
+                &Material::default(),
+                None,
+                &theme,
+                0.0,
+            )
+            .expect("encode external target pass");
+        queue.submit([encoder.finish()]);
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll GPU");
+        let error = pollster::block_on(device.pop_error_scope());
+        assert!(error.is_none(), "WGPU validation failed: {error:?}");
     }
 }
