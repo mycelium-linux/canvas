@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read};
 use std::process::id;
@@ -656,6 +657,8 @@ struct DocumentState {
     focused: Option<String>,
     workspace_id: String,
     chrome: SurfaceChrome,
+    frame: canvas_core::layout::Rect,
+    surface_aspects: BTreeMap<String, f32>,
 }
 
 fn handle_open_terminal(tokens: &[String]) -> Result<(), String> {
@@ -793,7 +796,20 @@ fn handle_surface(tokens: &[String]) -> Result<(), String> {
             if !state.surfaces.contains(&tokens[2]) {
                 return Err(format!("unknown surface: {}", tokens[2]));
             }
-            let inset = (1.0 - scale) / 2.0;
+            let height = scale;
+            let width = state
+                .surface_aspects
+                .get(&tokens[2])
+                .map_or(scale, |aspect| {
+                    let padding = f32::from(state.chrome.canvas_padding);
+                    let gap = f32::from(state.chrome.surface_gap);
+                    let inner_width = state.frame.width as f32 - padding * 2.0;
+                    let inner_height = state.frame.height as f32 - padding * 2.0;
+                    let visible_height = (height * inner_height - gap).max(1.0);
+                    ((visible_height * aspect + gap) / inner_width).clamp(0.1, 1.0)
+                });
+            let x = (1.0 - width) / 2.0;
+            let y = (1.0 - height) / 2.0;
             let patch = WorkspacePatch {
                 schema_version: SCHEMA_VERSION,
                 workspace_id: state.workspace_id,
@@ -804,10 +820,10 @@ fn handle_surface(tokens: &[String]) -> Result<(), String> {
                         placements: vec![Placement {
                             surface_id: tokens[2].clone(),
                             bounds: NormalizedRect {
-                                x: inset,
-                                y: inset,
-                                width: scale,
-                                height: scale,
+                                x,
+                                y,
+                                width,
+                                height,
                             },
                             layer: 0,
                         }],
@@ -845,6 +861,16 @@ fn read_document_state() -> Result<DocumentState, String> {
             receipt: Receipt::DocumentSnapshot { document, snapshot },
         } => {
             let surfaces: Vec<String> = document.surfaces.iter().map(|s| s.id.clone()).collect();
+            let surface_aspects = document
+                .surfaces
+                .iter()
+                .filter_map(|surface| match surface.content {
+                    SurfaceContent::LiveVideo { width, height, .. } if height > 0 => {
+                        Some((surface.id.clone(), width as f32 / height as f32))
+                    }
+                    _ => None,
+                })
+                .collect();
             Ok(DocumentState {
                 doc_revision: document.revision,
                 runtime_revision: snapshot.revision,
@@ -852,6 +878,8 @@ fn read_document_state() -> Result<DocumentState, String> {
                 focused: document.focused_surface_id.clone(),
                 workspace_id: document.id.clone(),
                 chrome: document.chrome,
+                frame: snapshot.frame,
+                surface_aspects,
             })
         }
         _ => Err(format_reply_error(&reply)),
