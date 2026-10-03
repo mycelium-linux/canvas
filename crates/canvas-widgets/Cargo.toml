@@ -7,6 +7,7 @@ edition.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 canvas-core.workspace = true
+fpl-gfx.workspace = true
 iced = { version = "0.14", default-features = false, features = ["wgpu", "canvas", "image-without-codecs", "tokio"], optional = true }
 # Only for callers that publish these types over a schema-carrying protocol (MCP).
 schemars = { version = "1", optional = true }

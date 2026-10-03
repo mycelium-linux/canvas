@@ -29,6 +29,7 @@ use iced::{Color, ContentFit, Element, Length, Point, Rectangle, Renderer, Size,
 
 pub mod app_chrome;
 mod clock;
+mod gfx_clock;
 mod primitives;
 mod quality;
 mod quant;
@@ -526,18 +527,25 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                 .height(Length::Fill)
                 .center(Length::Fill)
                 .into(),
-                ClockMode::Analog => Canvas::new(AnalogClockProgram {
-                    hour: now.hour,
-                    minute: now.minute,
-                    second: now.second as f32 + now.millisecond as f32 / 1_000.0,
-                    face: color(palette.surface),
-                    marks: color(palette.text_muted),
-                    hands: color(palette.text),
-                    accent: color(palette.primary),
-                })
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into(),
+                ClockMode::Analog => {
+                    let second = now.second as f32 + now.millisecond as f32 / 1_000.0;
+                    if gfx_clock::legacy_requested() {
+                        Canvas::new(AnalogClockProgram {
+                            hour: now.hour,
+                            minute: now.minute,
+                            second,
+                            face: color(palette.surface),
+                            marks: color(palette.text_muted),
+                            hands: color(palette.text),
+                            accent: color(palette.primary),
+                        })
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .into()
+                    } else {
+                        gfx_clock::view(now.hour as u8, now.minute as u8, second, visual)
+                    }
+                }
             };
             panel(spec, content, visual)
         }

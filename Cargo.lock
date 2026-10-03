@@ -620,6 +620,7 @@ name = "canvas-widgets"
 version = "0.1.0"
 dependencies = [
  "canvas-core",
+ "fpl-gfx",
  "iced",
  "libc",
  "schemars",
@@ -1233,6 +1234,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fpl-gfx"
+version = "0.1.0"
+source = "git+https://github.com/ajmwagar/gfx.git?rev=a37cc03#a37cc03b38cf4a2b2f5ff1301d4c48ec5699a117"
+dependencies = [
+ "bytemuck",
+ "serde",
+ "thiserror 2.0.20",
+ "wgpu",
 ]
 
 [[package]]
