@@ -306,6 +306,19 @@ fn advance_ring(head: u32, filled: u32, history: u32) -> (u32, u32) {
     ((head + history - 1) % history, (filled + 1).min(history))
 }
 
+fn uniform_words(bounds: Rectangle, width: u32, history: u32, head: u32, filled: u32) -> [u32; 8] {
+    [
+        bounds.width.to_bits(),
+        bounds.height.to_bits(),
+        width,
+        history,
+        head,
+        filled,
+        0.39_f32.to_bits(),
+        0,
+    ]
+}
+
 #[cfg(test)]
 fn physical_row(head: u32, logical_row: u32, history: u32) -> u32 {
     (head + logical_row) % history
@@ -354,16 +367,17 @@ impl shader::Primitive for Primitive {
             );
             state.stamp = self.stamp;
         }
-        let uniforms = [
-            bounds.width,
-            bounds.height,
-            state.width as f32,
-            state.history as f32,
-            f32::from_bits(state.head),
-            f32::from_bits(state.filled),
-            0.39,
-            0.0,
-        ];
+        // WGSL mixes f32 and u32 fields. Packing this as `[f32; 8]` made the
+        // texture dimensions arrive as the IEEE-754 bit pattern for `128.0`
+        // instead of integer 128, so every textureLoad addressed outside the
+        // allocation and the waterfall was blank while the Canvas overlay drew.
+        let uniforms = uniform_words(
+            *bounds,
+            state.width,
+            state.history,
+            state.head,
+            state.filled,
+        );
         queue.write_buffer(&state.uniform, 0, unsafe {
             std::slice::from_raw_parts(uniforms.as_ptr().cast::<u8>(), UNIFORM_BYTES as usize)
         });
@@ -382,7 +396,8 @@ impl shader::Primitive for Primitive {
 
 #[cfg(test)]
 mod tests {
-    use super::{advance_ring, physical_row};
+    use super::{advance_ring, physical_row, uniform_words};
+    use iced::{Rectangle, Size};
 
     #[test]
     fn ring_moves_newest_to_the_top_and_saturates() {
@@ -403,5 +418,20 @@ mod tests {
                 .map(|row| row < filled)
                 .eq([true, true, false, false])
         );
+    }
+
+    #[test]
+    fn mixed_wgsl_uniforms_keep_integer_texture_fields_as_integers() {
+        let words = uniform_words(
+            Rectangle::with_size(Size::new(1920.0, 1080.0)),
+            128,
+            360,
+            7,
+            42,
+        );
+        assert_eq!(f32::from_bits(words[0]), 1920.0);
+        assert_eq!(f32::from_bits(words[1]), 1080.0);
+        assert_eq!(&words[2..6], &[128, 360, 7, 42]);
+        assert_eq!(f32::from_bits(words[6]), 0.39);
     }
 }
