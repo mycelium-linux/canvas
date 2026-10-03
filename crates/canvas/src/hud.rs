@@ -288,7 +288,7 @@ pub fn format_local(parts: &LocalParts) -> (String, String) {
 }
 
 pub fn now_local() -> (String, String) {
-    format_local(&local_parts(crate::stream_binding::now_ms()))
+    format_local(&local_parts(canvas_core::unibus::envelope::now_ms()))
 }
 
 fn node_row<'a, Message: 'a>(
