@@ -183,6 +183,19 @@
    ]
   },
   {
+   "producer_id": "macbook-neo-ghidra",
+   "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "canvas.media"
+   ],
+   "screen_anchors": [
+    "screen-neo"
+   ]
+  },
+  {
    "producer_id": "mac-studio-media",
    "token_file": "/home/ajm/.config/unibus/tokens/mac-studio-media.token",
    "zones": [

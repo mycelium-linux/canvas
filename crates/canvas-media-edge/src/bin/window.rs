@@ -49,6 +49,8 @@ mod macos {
         advertised_endpoint: String,
         #[serde(default = "default_max_height")]
         max_height: u32,
+        #[serde(default = "default_capture_scale")]
+        capture_scale: f64,
         #[serde(default = "default_fps")]
         fps: u32,
         #[serde(default = "default_ttl_ms")]
@@ -82,6 +84,9 @@ mod macos {
     const fn default_fps() -> u32 {
         30
     }
+    const fn default_capture_scale() -> f64 {
+        1.0
+    }
     const fn default_ttl_ms() -> u64 {
         30_000
     }
@@ -97,6 +102,10 @@ mod macos {
             ensure!(
                 (240..=2160).contains(&config.max_height),
                 "max_height must be 240..=2160"
+            );
+            ensure!(
+                config.capture_scale.is_finite() && (0.25..=2.0).contains(&config.capture_scale),
+                "capture_scale must be 0.25..=2.0"
             );
             ensure!((1..=60).contains(&config.fps), "fps must be 1..=60");
             ensure!((5_000..=300_000).contains(&config.ttl_ms), "invalid ttl_ms");
@@ -273,13 +282,12 @@ mod macos {
         let content =
             SCShareableContent::get().context("read ScreenCaptureKit shareable content")?;
         let (candidate, window) = select_window(&content, &config.selector)?;
-        let height = config
-            .max_height
-            .min(candidate.height.round() as u32)
-            .max(2)
-            & !1;
-        let width =
-            (((height as f64 * candidate.width / candidate.height).round() as u32).max(2)) & !1;
+        let (width, height) = capture_dimensions(
+            candidate.width,
+            candidate.height,
+            config.capture_scale,
+            config.max_height,
+        );
         let encoder = Arc::new(Encoder::new(&config, width, height)?);
         let filter = SCContentFilter::create().with_window(&window).build()?;
         let interval = CMTime::new(1, i32::try_from(config.fps)?);
@@ -334,6 +342,20 @@ mod macos {
                 .join(", ")
         );
         Ok(candidates.into_iter().next().expect("checked non-empty"))
+    }
+
+    fn capture_dimensions(
+        width_points: f64,
+        height_points: f64,
+        capture_scale: f64,
+        max_height: u32,
+    ) -> (u32, u32) {
+        let height = max_height
+            .min((height_points * capture_scale).round() as u32)
+            .max(2)
+            & !1;
+        let width = (((height as f64 * width_points / height_points).round() as u32).max(2)) & !1;
+        (width, height)
     }
 
     fn matching_candidates(
@@ -485,6 +507,13 @@ mod macos {
             assert!(error.contains("ambiguous"));
             assert!(error.contains("7:A"));
             assert!(error.contains("9:B"));
+        }
+
+        #[test]
+        fn capture_scale_retains_retina_detail_with_a_pixel_height_cap() {
+            assert_eq!(capture_dimensions(800.0, 600.0, 1.5, 900), (1200, 900));
+            assert_eq!(capture_dimensions(800.0, 600.0, 2.0, 900), (1200, 900));
+            assert_eq!(capture_dimensions(800.0, 600.0, 1.0, 900), (800, 600));
         }
     }
 }

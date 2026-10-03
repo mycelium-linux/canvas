@@ -38,11 +38,16 @@ Copy the Simulator profile, then change only these producer-owned values:
 - `selector`
 - `stream_id` and `display_name`
 - `stream_endpoint` and `advertised_endpoint`
-- optionally `max_height` and `fps`
+- optionally `capture_scale`, `max_height`, and `fps`
 
 Give each simultaneous producer its own UDP port and Unibus producer ID. Open
 the advertised `stream_id` as a Canvas `live_video` surface; do not bake Canvas
 layout or chrome into the producer profile.
+
+`capture_scale` converts macOS logical window points into captured pixels. It
+defaults to `1.0`; use up to `2.0` to retain Retina detail. `max_height` is the
+final pixel-height ceiling, so a 600-point window with `capture_scale: 1.5`
+and `max_height: 900` is encoded at 1200x900 instead of 800x600.
 
 ## macOS permission and startup
 
