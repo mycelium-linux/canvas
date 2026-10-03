@@ -8,6 +8,7 @@ use crate::backend::{BackendError, SurfaceMetrics, VisualBackend};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, error, f64::consts::PI, fmt};
 
+pub mod globe;
 pub mod spatial;
 
 const MAX_ZOOM: f64 = 22.0;
