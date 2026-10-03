@@ -1788,6 +1788,12 @@ impl App {
                 Task::none()
             }
             Message::ProjectBrowserAction { surface_id, action } => {
+                let opened_folder = match &action {
+                    BrowserAction::OpenFolder(folder) if !folder.is_empty() => {
+                        Some(folder.clone())
+                    }
+                    _ => None,
+                };
                 let opened = self.decoded.get_mut(&surface_id).and_then(|surface| {
                     let ContentSource::ProjectBrowser { browser } = &mut surface.source else {
                         return None;
@@ -1797,7 +1803,13 @@ impl App {
                             if let Ok(model) = browser.project.manifest.browse(&browser.state, 512) {
                                 browser.model = model;
                             }
-                            entry.map(|entry| (browser.project.clone(), entry))
+                            entry
+                                .or_else(|| {
+                                    opened_folder.as_deref().and_then(|folder| {
+                                        preferred_model_in_folder(&browser.project.manifest, folder)
+                                    })
+                                })
+                                .map(|entry| (browser.project.clone(), entry))
                         }
                         Err(error) => {
                             self.status = error.to_string();
@@ -4265,6 +4277,14 @@ impl App {
                 self.start_transition();
                 self.document = document;
                 self.workspaces = next;
+                self.snapped_view = inferred_snapped_view(&self.document);
+                self.free_layout = None;
+                self.layout_policy = self
+                    .snapped_view
+                    .as_deref()
+                    .and_then(|view_id| ::canvas::operational_views::load(view_id).ok())
+                    .map(|view| view.layout_policy)
+                    .unwrap_or_default();
                 if self.document.surfaces.iter().any(|surface| {
                     matches!(surface.content, SurfaceContent::ProjectBrowser { .. })
                 }) {
@@ -10088,6 +10108,23 @@ fn engineering_project_id(owner: &str, identity: &str) -> String {
     format!("owner-{owner}-{}", &digest[..12])
 }
 
+/// A part folder represents a selectable engineering object, not just a
+/// directory. Prefer its directly contained native model while leaving nested
+/// assembly folders and ordinary document folders as navigation-only.
+fn preferred_model_in_folder(
+    manifest: &ProjectManifest,
+    folder: &str,
+) -> Option<ManifestEntry> {
+    manifest
+        .entries
+        .iter()
+        .find(|entry| {
+            entry.media_type.starts_with("model/")
+                && entry.path.rsplit_once('/').map(|(parent, _)| parent) == Some(folder)
+        })
+        .cloned()
+}
+
 fn merge_transmog_body(
     catalog: &mut Catalog,
     targets: &mut BTreeMap<String, EngineeringProject>,
@@ -15555,6 +15592,56 @@ mod tests {
             r#"{"root":"/not/real"}"#,
         ));
         assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn engineering_part_folder_prefers_its_direct_model() {
+        let manifest = ProjectManifest {
+            schema_version: ProjectManifest::SCHEMA_VERSION,
+            project_id: "fixture".into(),
+            revision: "live".into(),
+            entries: vec![
+                ManifestEntry {
+                    id: "report".into(),
+                    path: "chainstay/report.json".into(),
+                    display_name: "Chainstay report".into(),
+                    cid: "report".into(),
+                    media_type: "application/json".into(),
+                    bytes: 42,
+                    modified_at_ms: None,
+                },
+                ManifestEntry {
+                    id: "model".into(),
+                    path: "chainstay/model.glb".into(),
+                    display_name: "Chainstay model".into(),
+                    cid: "model".into(),
+                    media_type: "model/gltf-binary".into(),
+                    bytes: 84,
+                    modified_at_ms: None,
+                },
+                ManifestEntry {
+                    id: "nested-model".into(),
+                    path: "chainstay/hardware/model.glb".into(),
+                    display_name: "Hardware model".into(),
+                    cid: "nested".into(),
+                    media_type: "model/gltf-binary".into(),
+                    bytes: 84,
+                    modified_at_ms: None,
+                },
+            ],
+        };
+
+        assert_eq!(
+            preferred_model_in_folder(&manifest, "chainstay")
+                .map(|entry| entry.id),
+            Some("model".into())
+        );
+        assert_eq!(
+            preferred_model_in_folder(&manifest, "chainstay/hardware")
+                .map(|entry| entry.id),
+            Some("nested-model".into())
+        );
+        assert_eq!(preferred_model_in_folder(&manifest, ""), None);
     }
 
     #[test]
