@@ -838,7 +838,7 @@ pub fn execute(name: &str, args: &Value) -> Result<Value, String> {
             let entries = super::resources::project_entries(project)?;
             let entry = entries
                 .iter()
-                .find(|entry| entry.id == resource && entry.id != "@home")
+                .find(|entry| entry.id == resource)
                 .ok_or("Alfalfa resource does not exist in the requested project")?;
             let (destination, viewer) = if let Some(uri) = safe_web_uri(entry) {
                 super::remote::rpc(project, "desktop-recall", &[], None)?;
@@ -1128,6 +1128,10 @@ mod tests {
         let mut http = entries[0].clone();
         http.uri = "http://example.test/public".into();
         assert_eq!(public_resources(&[http]).unwrap()[0]["destination"], "mac");
+        let mut home = entries[0].clone();
+        home.id = "@home".into();
+        home.uri = "alfalfa://projects/dock".into();
+        assert_eq!(safe_web_uri(&home), None);
         assert!(public_resources(&[entries[0].clone(), entries[0].clone()]).is_err());
     }
 
