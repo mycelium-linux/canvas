@@ -1853,6 +1853,45 @@ mod tests {
     }
 
     #[test]
+    fn transmog_workspace_unifies_project_model_and_eval_views() {
+        let json = include_str!("../../../config/workspaces/tv/transmog.json");
+        let doc: WorkspaceDocument = serde_json::from_str(json)
+            .expect("transmog.json must deserialize as a WorkspaceDocument");
+        doc.validate(&Catalog::bundled().expect("bundled catalog"))
+            .expect("transmog.json must pass validation");
+
+        let Layout::Canvas { placements } = &doc.layout else {
+            panic!("the unified workspace must use bounded native placements")
+        };
+        assert_eq!(placements.len(), 7);
+        for id in [
+            "transmog-files",
+            "transmog-part",
+            "transmog-run",
+            "transmog-decisions",
+            "transmog-events",
+            "transmog-checks",
+        ] {
+            assert!(
+                doc.surfaces.iter().any(|surface| surface.id == id),
+                "unified project workspace is missing {id}"
+            );
+        }
+        assert_eq!(
+            doc.bindings
+                .iter()
+                .filter(|binding| binding.source.contract == "canvas.run.watch.v1")
+                .count(),
+            4,
+            "RLCD owns one shared run contract projected into four native views"
+        );
+        assert!(doc.bindings.iter().any(|binding| {
+            binding.source.contract == "canvas.artifact.search.v1"
+                && binding.target.surface_id == "transmog-files"
+        }));
+    }
+
+    #[test]
     fn wall_workspace_mixes_text_feeds_image_frames_and_fleet_widgets() {
         // The live demo the user watches: two headline tables, three
         // live_image frames (xkcd mosaic + two NVR cameras), and the dock's
