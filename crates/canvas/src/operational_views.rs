@@ -234,6 +234,9 @@ fn appetite(kind: &WidgetKind) -> f32 {
         | WidgetKind::CommandPalette { .. }
         | WidgetKind::MediaTransport { .. }
         | WidgetKind::DawDeck { .. }
+        | WidgetKind::MixField { .. }
+        | WidgetKind::WikiRaceHud { .. }
+        | WidgetKind::WikiRaceTrace { .. }
         | WidgetKind::ModelTelemetry { .. }
         | WidgetKind::SpanTimeline { .. }
         | WidgetKind::StateTimeline { .. }

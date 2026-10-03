@@ -29,8 +29,8 @@ use iced::{Color, ContentFit, Element, Length, Point, Rectangle, Renderer, Size,
 
 pub mod app_chrome;
 mod clock;
-pub mod project_browser;
 mod primitives;
+pub mod project_browser;
 mod quality;
 mod quant;
 mod signal_scene;
@@ -703,6 +703,58 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
             .into(),
             visual,
         ),
+        WidgetKind::MixField {
+            title,
+            surface,
+            strips,
+        } => {
+            let mut body = iced::widget::Column::<Message>::new()
+                .spacing(metrics.space_2)
+                .push(row![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    space::horizontal(),
+                    text(surface)
+                        .size(metrics.micro)
+                        .color(color(palette.text_muted)),
+                ]);
+            for strip in strips.iter().take(12) {
+                let level = strip
+                    .peak
+                    .max(strip.left_peak)
+                    .max(strip.right_peak)
+                    .clamp(0.0, 1.0);
+                let rail_color = if strip.active {
+                    color(palette.primary)
+                } else {
+                    color(palette.text_muted)
+                };
+                let rail_background = color(palette.surface_muted);
+                body = body.push(
+                    column![
+                        row![
+                            text(&strip.label)
+                                .size(metrics.small)
+                                .color(color(palette.text)),
+                            space::horizontal(),
+                            text(format!(
+                                "{:+.0}% · pan {:+.0}%",
+                                strip.gain * 100.0,
+                                strip.stereo_position * 100.0
+                            ))
+                            .size(metrics.micro)
+                            .color(color(palette.text_muted)),
+                        ],
+                        progress_bar(0.0..=1.0, level).style(move |_| progress_bar::Style {
+                            background: rail_background.into(),
+                            bar: rail_color.into(),
+                            border: iced::Border::default(),
+                        }),
+                    ]
+                    .spacing(metrics.space_1),
+                );
+            }
+            panel(spec, body.into(), visual)
+        }
         WidgetKind::Gauge { value, label } => {
             let pct = format!("{:.0}%", value);
             let label = label.clone().unwrap_or_default();
