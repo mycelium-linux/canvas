@@ -3908,28 +3908,21 @@ impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
             }
             let layout = PlotFrame::bottom_axis(bounds.size(), self.label_size);
             let spectrum_height = (layout.plot.height * 0.34).max(46.0);
-            let gap = 5.0;
             let spectrum = Rectangle {
                 x: layout.plot.x,
                 y: layout.plot.y,
                 width: layout.plot.width,
                 height: spectrum_height.min(layout.plot.height * 0.48),
             };
-            let waterfall = Rectangle {
-                x: layout.plot.x,
-                y: spectrum.y + spectrum.height + gap,
-                width: layout.plot.width,
-                height: (layout.plot.height - spectrum.height - gap).max(1.0),
-            };
 
-            // A shared frequency grid makes the FFT and time history read as a
-            // single instrument rather than two unrelated charts.
+            // Keep the frequency guides inside the instantaneous FFT. Carrying
+            // them through the history reads as permanent narrow-band signals.
             for fraction in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
                 let x = layout.plot.x + layout.plot.width * fraction;
                 frame.stroke(
                     &Path::line(
                         Point::new(x, spectrum.y),
-                        Point::new(x, waterfall.y + waterfall.height),
+                        Point::new(x, spectrum.y + spectrum.height),
                     ),
                     canvas::Stroke::default()
                         .with_width(if fraction == 0.5 { 1.2 } else { 0.6 })
