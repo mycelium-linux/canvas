@@ -10210,16 +10210,7 @@ fn insert_unavailable_lob(targets: &mut BTreeMap<String, EngineeringProject>, ba
 }
 
 fn owner_get(base: &str, path: &str, timeout: Duration) -> Option<String> {
-    let authority = base.strip_prefix("http://")?.trim_end_matches('/');
-    if authority.contains('/') || authority.contains('@') {
-        return None;
-    }
-    let socket = if let Some(port) = authority.strip_prefix("localhost:") {
-        format!("127.0.0.1:{port}")
-    } else {
-        authority.to_owned()
-    };
-    alfalfa_get(&socket, path, timeout)
+    String::from_utf8(owner_get_bytes(base, path, timeout)?).ok()
 }
 
 fn owner_get_bytes(base: &str, path: &str, timeout: Duration) -> Option<Vec<u8>> {
@@ -16093,6 +16084,34 @@ mod tests {
             lob_owner_candidates(Some("http://home-pi.local:8080")),
             ["http://home-pi.local:8080"]
         );
+    }
+
+    #[test]
+    fn owner_catalog_reads_reject_non_success_http_responses() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 512];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                )
+                .unwrap();
+        });
+
+        assert!(
+            owner_get(
+                &format!("http://{address}"),
+                "/api/circuits",
+                Duration::from_secs(1)
+            )
+            .is_none()
+        );
+        server.join().unwrap();
     }
 
     #[test]
