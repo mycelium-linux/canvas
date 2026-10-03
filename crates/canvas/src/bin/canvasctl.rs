@@ -3,11 +3,12 @@ use std::io::{self, Read};
 use std::process::id;
 
 use canvas::control::{
-    self, CONTROL_VERSION, Command, ControlReply, ControlRequest, ErrorCode, Outcome, Receipt, text,
+    self, CONTROL_VERSION, Command, ControlReply, ControlRequest, ErrorCode, Outcome,
+    ProjectWorkspaceSpec, Receipt, text,
 };
 use canvas::{
-    Background, Layout, SCHEMA_VERSION, Surface, SurfaceChrome, SurfaceContent, SurfaceTitleMode,
-    ThemeRef, WorkspaceDocument, WorkspacePatch,
+    Background, Layout, NormalizedRect, Placement, SCHEMA_VERSION, Surface, SurfaceChrome,
+    SurfaceContent, SurfaceTitleMode, ThemeRef, WorkspaceDocument, WorkspacePatch,
     compose::{self, LayoutMode},
 };
 
@@ -19,6 +20,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if input.is_empty() {
         eprintln!("usage: echo 'inspect' | canvasctl");
         eprintln!("       echo 'surfaces' | canvasctl");
+        eprintln!("       echo 'workspace create wikiracing' | canvasctl");
+        eprintln!("       echo 'surface add-live-video surf-browser surf-tv 1280 720' | canvasctl");
+        eprintln!("       echo 'surface center surf-browser 0.70' | canvasctl");
         eprintln!("       echo 'focus\\nbg dock' | canvasctl");
         eprintln!("       echo 'move 0 25 1920 1150' | canvasctl");
         eprintln!("       echo 'indicator status speaking \"Socket live\"' | canvasctl");
@@ -101,6 +105,9 @@ fn handle_line(line: &str) -> Result<(), String> {
     }
     if tokens[0] == "workspace" {
         return handle_workspace(&tokens);
+    }
+    if tokens[0] == "surface" {
+        return handle_surface(&tokens);
     }
     if tokens[0] == "catalog" {
         return handle_catalog(&tokens);
@@ -667,10 +674,49 @@ fn handle_open_terminal(tokens: &[String]) -> Result<(), String> {
 fn handle_workspace(tokens: &[String]) -> Result<(), String> {
     if tokens.len() < 2 {
         return Err(
-            "usage: workspace save <name> | workspace switch <name> | workspace list".into(),
+            "usage: workspace create <name> | workspace save <name> | workspace switch <name> | workspace list".into(),
         );
     }
     match tokens[1].as_str() {
+        "create" => {
+            if tokens.len() != 3 {
+                return Err("usage: workspace create <project-id>".into());
+            }
+            let project_id = tokens[2].clone();
+            let inspect = send_read(Command::Inspect)?;
+            let Outcome::Ok {
+                receipt: Receipt::Snapshot { snapshot },
+            } = inspect.outcome
+            else {
+                return Err(format_reply_error(&inspect));
+            };
+            let mut projects = snapshot
+                .workspace_summaries
+                .into_iter()
+                .map(|workspace| ProjectWorkspaceSpec {
+                    project_id: workspace.project_id,
+                    name: workspace.name,
+                    status: workspace.status,
+                    theme: workspace.theme,
+                })
+                .collect::<Vec<_>>();
+            if !projects
+                .iter()
+                .any(|project| project.project_id == project_id)
+            {
+                projects.push(ProjectWorkspaceSpec {
+                    name: project_id.replace('-', " "),
+                    project_id: project_id.clone(),
+                    status: "active".into(),
+                    theme: canvas_core::ThemeSelection::Coherence {
+                        mode: canvas_core::ThemeMode::Dark,
+                        accent: canvas_core::Accent::Info,
+                    },
+                });
+            }
+            send_mutation(Command::WorkspaceSync { projects })?;
+            send_mutation(Command::WorkspaceSwitch { name: project_id })?;
+        }
         "save" => {
             if tokens.len() < 3 {
                 return Err("usage: workspace save <name>".into());
@@ -715,6 +761,74 @@ fn handle_workspace(tokens: &[String]) -> Result<(), String> {
         other => return Err(format!("unknown workspace subcommand: {other}")),
     }
     Ok(())
+}
+
+fn handle_surface(tokens: &[String]) -> Result<(), String> {
+    if tokens.len() < 2 {
+        return Err("usage: surface add-live-video <id> <source> <width> <height> | surface center <id> <scale>".into());
+    }
+    match tokens[1].as_str() {
+        "add-live-video" => {
+            if tokens.len() != 6 {
+                return Err("usage: surface add-live-video <id> <source> <width> <height>".into());
+            }
+            send_mutation(Command::OpenLiveVideo {
+                surface_id: tokens[2].clone(),
+                source_id: tokens[3].clone(),
+                width: tokens[4].parse().map_err(|_| "width must be an integer")?,
+                height: tokens[5].parse().map_err(|_| "height must be an integer")?,
+            })?;
+        }
+        "center" => {
+            if tokens.len() != 4 {
+                return Err("usage: surface center <id> <scale>".into());
+            }
+            let scale: f32 = tokens[3]
+                .parse()
+                .map_err(|_| "scale must be a number between 0.1 and 1.0")?;
+            if !(0.1..=1.0).contains(&scale) {
+                return Err("scale must be between 0.1 and 1.0".into());
+            }
+            let state = read_document_state()?;
+            if !state.surfaces.contains(&tokens[2]) {
+                return Err(format!("unknown surface: {}", tokens[2]));
+            }
+            let inset = (1.0 - scale) / 2.0;
+            let patch = WorkspacePatch {
+                schema_version: SCHEMA_VERSION,
+                workspace_id: state.workspace_id,
+                base_revision: state.doc_revision,
+                revision: state.doc_revision + 1,
+                operations: vec![canvas::PatchOperation::SetLayout {
+                    layout: Layout::Canvas {
+                        placements: vec![Placement {
+                            surface_id: tokens[2].clone(),
+                            bounds: NormalizedRect {
+                                x: inset,
+                                y: inset,
+                                width: scale,
+                                height: scale,
+                            },
+                            layer: 0,
+                        }],
+                    },
+                }],
+            };
+            send_mutation(Command::ApplyPatch { patch })?;
+        }
+        other => return Err(format!("unknown surface subcommand: {other}")),
+    }
+    Ok(())
+}
+
+fn send_read(command: Command) -> Result<ControlReply, String> {
+    control::send(&ControlRequest {
+        schema_version: CONTROL_VERSION,
+        request_id: format!("canvasctl-{}", id()),
+        expected_revision: None,
+        actor: None,
+        command,
+    })
 }
 
 fn read_document_state() -> Result<DocumentState, String> {
