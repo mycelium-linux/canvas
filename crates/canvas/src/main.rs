@@ -671,9 +671,23 @@ fn surface_title_visible(mode: SurfaceTitleMode, focused: bool) -> bool {
 enum EngineeringArtifact {
     Local(PathBuf),
     LocalModel(PathBuf),
-    RemoteText { base: String, path: String },
-    RemoteModel { base: String, path: String },
-    RemoteModelScene { base: String, report_path: String },
+    RemoteText {
+        base: String,
+        path: String,
+    },
+    RemoteMedia {
+        base: String,
+        path: String,
+        extension: String,
+    },
+    RemoteModel {
+        base: String,
+        path: String,
+    },
+    RemoteModelScene {
+        base: String,
+        report_path: String,
+    },
     Unavailable(String),
 }
 
@@ -1735,6 +1749,30 @@ impl App {
                             surface_id,
                             base,
                             path,
+                            title,
+                            viewport,
+                            scale_factor,
+                        )
+                    },
+                    |result| Message::EngineeringArtifactLoaded(Box::new(result)),
+                )
+            }
+            EngineeringArtifact::RemoteMedia {
+                base,
+                path,
+                extension,
+            } => {
+                let viewport = self.media_viewport();
+                let scale_factor = self.scale_factor;
+                let surface_id = format!("artifact-{}", entry.id);
+                let title = Some(entry.display_name);
+                Task::perform(
+                    async move {
+                        load_remote_media_content(
+                            surface_id,
+                            base,
+                            path,
+                            extension,
                             title,
                             viewport,
                             scale_factor,
@@ -10102,7 +10140,7 @@ fn merge_engineering_projects(
     }
     match (reads.1, reads.2) {
         (Ok(Some(body)), Ok(Some(repo))) => {
-            if !merge_lob_body(catalog, &mut targets, &body, &repo) {
+            if !merge_lob_body(catalog, &mut targets, &lob, &body, &repo) {
                 warnings.push("legion-of-bom returned an unsupported catalog".into());
             }
         }
@@ -10278,7 +10316,7 @@ fn merge_transmog_body(
                 entry_id,
                 EngineeringArtifact::RemoteText {
                     base: base.to_owned(),
-                    path: report_path,
+                    path: report_path.clone(),
                 },
             );
             let model_path = format!("/{bundle}/parts/0.glb");
@@ -10363,6 +10401,7 @@ fn merge_transmog_body(
 fn merge_lob_body(
     catalog: &mut Catalog,
     targets: &mut BTreeMap<String, EngineeringProject>,
+    base: &str,
     body: &str,
     repo_body: &str,
 ) -> bool {
@@ -10411,6 +10450,65 @@ fn merge_lob_body(
                     &mut revision,
                 );
             }
+        }
+        for (view, file_name, label, media_type, extension) in [
+            ("board-top", "pcb-top.png", "PCB top", "image/png", "png"),
+            (
+                "board-bottom",
+                "pcb-bottom.png",
+                "PCB bottom",
+                "image/png",
+                "png",
+            ),
+            (
+                "board-layout",
+                "pcb-layout.svg",
+                "PCB layout",
+                "image/svg+xml",
+                "svg",
+            ),
+            (
+                "schematic",
+                "schematic.svg",
+                "Schematic",
+                "image/svg+xml",
+                "svg",
+            ),
+            (
+                "gerber",
+                "gerber.svg",
+                "Gerber layers",
+                "image/svg+xml",
+                "svg",
+            ),
+            ("panel", "panel.svg", "Panel", "image/svg+xml", "svg"),
+            (
+                "gerber-panel",
+                "panel-gerber.svg",
+                "Panel Gerber layers",
+                "image/svg+xml",
+                "svg",
+            ),
+        ] {
+            let entry_id = format!("{identity}-view-{view}");
+            let path = format!("/api/circuits/{identity}/render?view={view}");
+            entries.push(ManifestEntry {
+                id: entry_id.clone(),
+                path: format!("views/{file_name}"),
+                display_name: label.into(),
+                cid: format!("lob:{identity}:view:{view}:{revision}"),
+                media_type: media_type.into(),
+                bytes: 0,
+                modified_at_ms: None,
+            });
+            artifacts.insert(
+                entry_id,
+                EngineeringArtifact::RemoteMedia {
+                    base: base.to_owned(),
+                    path,
+                    extension: extension.into(),
+                },
+            );
         }
         for artifact in circuit["artifacts"].as_array().into_iter().flatten() {
             if artifact["status"] == "missing" {
@@ -11262,6 +11360,37 @@ fn load_remote_text_content(
     load_content(surface_id, cached, title, viewport, scale_factor)
 }
 
+fn load_remote_media_content(
+    surface_id: String,
+    base: String,
+    path: String,
+    extension: String,
+    title: Option<String>,
+    viewport: LogicalSize,
+    scale_factor: f64,
+) -> Result<LoadedContent, Failure> {
+    if !matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "webp" | "svg") {
+        return Err(Failure::unsupported("Unsupported owner media type"));
+    }
+    let bytes = owner_get_bytes(&base, &path, Duration::from_secs(30))
+        .ok_or_else(|| Failure::invalid(format!("Could not render {path} from its owner")))?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(Failure::resource(format!(
+            "Owner artifact must contain 1–{MAX_FILE_BYTES} bytes"
+        )));
+    }
+    let cache = std::env::temp_dir().join("canvas-owner-artifacts");
+    fs::create_dir_all(&cache).map_err(|error| Failure::invalid(error.to_string()))?;
+    #[cfg(unix)]
+    fs::set_permissions(&cache, fs::Permissions::from_mode(0o700))
+        .map_err(|error| Failure::invalid(error.to_string()))?;
+    let digest = format!("{:x}", Sha256::digest(format!("{base}{path}").as_bytes()));
+    let cached = cache.join(format!("{digest}.{extension}"));
+    canvas_core::write_atomic(&cached, &bytes)
+        .map_err(|error| Failure::invalid(format!("Could not cache owner render: {error}")))?;
+    load_content(surface_id, cached, title, viewport, scale_factor)
+}
+
 fn prepare_remote_model(
     surface_id: String,
     title: String,
@@ -11283,12 +11412,12 @@ fn prepare_model_set(
     if models.is_empty() {
         return Err(Failure::invalid("No model artifacts were selected"));
     }
-    #[derive(Serialize)]
+    #[derive(serde::Serialize)]
     struct NativeScene<'a> {
         schema: &'a str,
         parts: Vec<NativeScenePart>,
     }
-    #[derive(Serialize)]
+    #[derive(serde::Serialize)]
     struct NativeScenePart {
         file: String,
         translation_mm: [f32; 3],
@@ -11605,6 +11734,37 @@ fn load_content(
             },
         });
     }
+    if extension == "svg" {
+        let (handle, source_pixels, media_plan) =
+            prepare_svg_raster(&path, sha256.clone(), viewport, scale_factor)?;
+        let upload_pixels = [media_plan.target_px.width, media_plan.target_px.height];
+        let mut snapshot = SurfaceSnapshot {
+            id: surface_id,
+            title: display_title,
+            content: ContentKind::Image,
+            asset_sha256: Some(sha256.clone()),
+            page_index: None,
+            page_count: None,
+            source_pixels: Some(source_pixels),
+            rendered_pixels: None,
+            display_logical: None,
+            scale_factor: None,
+        };
+        apply_plan_diagnostics(&mut snapshot, &media_plan, upload_pixels);
+        return Ok(LoadedContent {
+            snapshot,
+            source: ContentSource::Image { _path: path },
+            handle,
+            asset: AssetRef {
+                sha256,
+                media_type: "image/svg+xml".into(),
+                byte_length: metadata.len(),
+            },
+            source_pixels,
+            media_plan,
+            upload_pixels,
+        });
+    }
     if metadata.len() > MAX_IMAGE_BYTES {
         return Err(Failure::resource(format!(
             "image file exceeds {MAX_IMAGE_BYTES} bytes"
@@ -11757,6 +11917,52 @@ fn decode_rgba(path: &Path) -> Result<(image::RgbaImage, String), Failure> {
         .map_err(|error| Failure::unsupported(format!("image decode failed: {error}")))?
         .into_rgba8();
     Ok((decoded, media_type.into()))
+}
+
+fn prepare_svg_raster(
+    path: &Path,
+    sha256: String,
+    viewport: LogicalSize,
+    scale_factor: f64,
+) -> Result<(iced::widget::image::Handle, [u32; 2], MediaPlan), Failure> {
+    let bytes = fs::read(path).map_err(|error| Failure::invalid(error.to_string()))?;
+    let tree = resvg::usvg::Tree::from_data(&bytes, &resvg::usvg::Options::default())
+        .map_err(|error| Failure::unsupported(format!("SVG parse failed: {error}")))?;
+    let source_size = tree.size().to_int_size();
+    let source_pixels = [source_size.width(), source_size.height()];
+    if source_pixels.contains(&0)
+        || source_pixels[0] > MAX_IMAGE_DIMENSION
+        || source_pixels[1] > MAX_IMAGE_DIMENSION
+    {
+        return Err(Failure::resource(
+            "SVG dimensions are outside Canvas limits",
+        ));
+    }
+    let media_plan = plan_raster(
+        sha256,
+        PixelSize {
+            width: source_pixels[0],
+            height: source_pixels[1],
+        },
+        viewport,
+        scale_factor,
+        MediaLimits::default(),
+    )
+    .map_err(|error| Failure::resource(error.to_string()))?;
+    let width = media_plan.target_px.width;
+    let height = media_plan.target_px.height;
+    let mut pixmap = tiny_skia::Pixmap::new(width, height)
+        .ok_or_else(|| Failure::resource("SVG raster allocation failed"))?;
+    let transform = tiny_skia::Transform::from_scale(
+        width as f32 / source_pixels[0] as f32,
+        height as f32 / source_pixels[1] as f32,
+    );
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    Ok((
+        iced::widget::image::Handle::from_rgba(width, height, pixmap.take()),
+        source_pixels,
+        media_plan,
+    ))
 }
 
 fn decode_presence_preview(preview: PresencePreview) -> Result<PresencePreviewVisual, Failure> {
@@ -15707,6 +15913,7 @@ mod tests {
         assert!(merge_lob_body(
             &mut catalog,
             &mut targets,
+            "http://127.0.0.1:8080",
             r#"[{"name":"slew_limiter","source":"slew_limiter.py","artifacts":[{"label":"guide-pdf","path":"out/slew_limiter/slew_limiter-guide.pdf","status":"fresh","mtime_ms":42}]},{"name":"bad/name"}]"#,
             &format!(r#"{{"root":{}}}"#, serde_json::to_string(&root).unwrap()),
         ));
@@ -15737,7 +15944,43 @@ mod tests {
                 .iter()
                 .any(|entry| entry.media_type == "text/x-python")
         }));
+        let lob = targets
+            .values()
+            .find(|project| project.manifest.project_id == "slew_limiter")
+            .unwrap();
+        assert!(lob.manifest.entries.iter().any(|entry| {
+            entry.path == "views/gerber.svg" && entry.media_type == "image/svg+xml"
+        }));
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn native_svg_rasterizer_preserves_vector_dimensions() {
+        let dir = std::env::temp_dir().join(format!(
+            "canvas-svg-test-{}-{}",
+            std::process::id(),
+            now_unix_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gerber.svg");
+        std::fs::write(
+            &path,
+            br##"<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="#123456"/></svg>"##,
+        )
+        .unwrap();
+        let (_, source, plan) = prepare_svg_raster(
+            &path,
+            "fixture".into(),
+            LogicalSize {
+                width: 640.0,
+                height: 360.0,
+            },
+            1.0,
+        )
+        .unwrap();
+        assert_eq!(source, [320, 180]);
+        assert!(plan.target_px.width > 0 && plan.target_px.height > 0);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -15753,6 +15996,7 @@ mod tests {
         assert!(!merge_lob_body(
             &mut catalog,
             &mut targets,
+            "http://127.0.0.1:8080",
             r#"{"circuits":[]}"#,
             r#"{"root":"/not/real"}"#,
         ));

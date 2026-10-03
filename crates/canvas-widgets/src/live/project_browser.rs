@@ -479,7 +479,9 @@ fn format_bytes(bytes: u64) -> String {
     const KIB: u64 = 1024;
     const MIB: u64 = KIB * 1024;
     const GIB: u64 = MIB * 1024;
-    if bytes >= GIB {
+    if bytes == 0 {
+        "On demand".into()
+    } else if bytes >= GIB {
         format!("{:.1} GiB", bytes as f64 / GIB as f64)
     } else if bytes >= MIB {
         format!("{:.1} MiB", bytes as f64 / MIB as f64)
@@ -534,6 +536,7 @@ mod tests {
 
     #[test]
     fn sizes_are_compact_and_human_readable() {
+        assert_eq!(format_bytes(0), "On demand");
         assert_eq!(format_bytes(512), "512 B");
         assert_eq!(format_bytes(1536), "1.5 KiB");
         assert_eq!(format_bytes(2 * 1024 * 1024), "2.0 MiB");
