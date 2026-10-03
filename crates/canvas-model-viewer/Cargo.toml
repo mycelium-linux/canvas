@@ -10,8 +10,12 @@ canvas-widgets = { path = "../canvas-widgets", features = ["live"] }
 iced = { version = "0.14", default-features = false, features = ["wgpu", "canvas"] }
 wgpu = "27"
 serde.workspace = true
+memmap2 = "0.9"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 metal = "0.32"
 objc = "0.2"
 wgpu-hal = "27"
+
+[dev-dependencies]
+tempfile.workspace = true

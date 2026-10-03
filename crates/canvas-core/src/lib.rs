@@ -261,6 +261,25 @@ pub fn stream_socket_path() -> Option<PathBuf> {
     }
 }
 
+/// Filesystem location of the owner-local external-surface socket.
+///
+/// Pixel handles and synchronization primitives never cross the network or
+/// enter a workspace document. Producers register them with the compositor on
+/// this socket and documents retain only the stable source id.
+#[cfg(unix)]
+pub fn external_surface_socket_path() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME").map(PathBuf::from)?;
+        Some(home.join("Library/Application Support/Dock/canvas/external-surfaces.sock"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")?;
+        Some(PathBuf::from(runtime).join("dock/canvas/external-surfaces.sock"))
+    }
+}
+
 /// Filesystem location of the local workspace-mirror publisher socket.
 ///
 /// Canvas only emits renderer-independent workspace documents here. The

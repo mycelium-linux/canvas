@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use canvas_core::external_surface::ExternalSurfaceDescriptor;
+use canvas_core::external_surface::SurfaceTransport;
 
 const REDRAW_INTERVAL: std::time::Duration = std::time::Duration::from_millis(42);
 
@@ -180,10 +180,7 @@ enum FrameSource {
         width: u32,
         height: u32,
     },
-    External {
-        descriptor: ExternalSurfaceDescriptor,
-        presented_at_unix_ns: u64,
-    },
+    External(crate::external_surface::ExternalSurfaceFrame),
 }
 
 struct TextureState {
@@ -193,6 +190,7 @@ struct TextureState {
     width: u32,
     height: u32,
     stamp: Option<(SystemTime, u64)>,
+    external_stamp: Option<u64>,
     generation: u64,
     /// Last (expected, actual) byte count reported, so a persistent mismatch
     /// is one line rather than one per frame.
@@ -215,6 +213,7 @@ impl Pipeline {
         width: u32,
         height: u32,
         source_generation: u64,
+        format: wgpu::TextureFormat,
         texture: Option<wgpu::Texture>,
     ) -> TextureState {
         let texture = texture.unwrap_or_else(|| {
@@ -228,7 +227,7 @@ impl Pipeline {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                format,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             })
@@ -265,6 +264,7 @@ impl Pipeline {
             width,
             height,
             stamp: None,
+            external_stamp: None,
             generation: self.generation,
             reported_mismatch: None,
             source_generation,
@@ -463,14 +463,14 @@ impl Primitive {
                 .and_then(|path| std::fs::read_to_string(path).ok())
                 .and_then(|text| canvas_core::parse_frame_size(&text))
                 .unwrap_or((*width, *height)),
-            FrameSource::External { descriptor, .. } => (descriptor.width, descriptor.height),
+            FrameSource::External(frame) => (frame.descriptor.width, frame.descriptor.height),
         }
     }
 
     fn source_generation(&self) -> u64 {
         match &self.source {
             FrameSource::File { .. } => 0,
-            FrameSource::External { descriptor, .. } => descriptor.generation,
+            FrameSource::External(frame) => frame.descriptor.generation,
         }
     }
 }
@@ -497,11 +497,15 @@ impl shader::Primitive for Primitive {
         // therefore stable across a source-size change; recreate the texture
         // before uploading instead of asking wgpu to overrun the old extent.
         if needs_texture {
-            let imported = match &self.source {
-                FrameSource::File { .. } => None,
-                FrameSource::External { descriptor, .. } => {
-                    match crate::external_surface::import_iosurface(device, descriptor) {
-                        Ok(texture) => Some(texture),
+            let (format, imported) = match &self.source {
+                FrameSource::File { .. } => (wgpu::TextureFormat::Rgba8UnormSrgb, None),
+                FrameSource::External(frame) => {
+                    let descriptor = &frame.descriptor;
+                    let format = match crate::external_surface::wgpu_format(
+                        descriptor.format,
+                        descriptor.color_space,
+                    ) {
+                        Ok(format) => format,
                         Err(error) => {
                             eprintln!(
                                 "Canvas external surface {} generation {}: {error}",
@@ -509,7 +513,30 @@ impl shader::Primitive for Primitive {
                             );
                             return;
                         }
-                    }
+                    };
+                    let imported = match &descriptor.transport {
+                        SurfaceTransport::SharedMemory { .. } => None,
+                        SurfaceTransport::IoSurface { .. } => {
+                            match crate::external_surface::import_iosurface(device, descriptor) {
+                                Ok(texture) => Some(texture),
+                                Err(error) => {
+                                    eprintln!(
+                                        "Canvas external surface {} generation {}: {error}",
+                                        descriptor.source_id, descriptor.generation
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                        SurfaceTransport::DmaBuf { .. } => {
+                            eprintln!(
+                                "Canvas external surface {} generation {}: DMA-BUF import is not available on this renderer",
+                                descriptor.source_id, descriptor.generation
+                            );
+                            return;
+                        }
+                    };
+                    (format, imported)
                 }
             };
             let state = pipeline.texture_state(
@@ -517,6 +544,7 @@ impl shader::Primitive for Primitive {
                 source_width,
                 source_height,
                 self.source_generation(),
+                format,
                 imported,
             );
             pipeline.textures.insert(self.ticket, state);
@@ -528,7 +556,7 @@ impl shader::Primitive for Primitive {
         state.generation = pipeline.generation;
         let metadata = match &self.source {
             FrameSource::File { path, .. } => std::fs::metadata(path).ok(),
-            FrameSource::External { .. } => None,
+            FrameSource::External(_) => None,
         };
         // Age the picture by how long the producer has been silent, not by how
         // long this surface has been open: a feed that died an hour ago must
@@ -539,15 +567,12 @@ impl shader::Primitive for Primitive {
                 .and_then(|metadata| metadata.modified().ok())
                 .and_then(|modified| SystemTime::now().duration_since(modified).ok())
                 .map_or(1.0, staleness_of),
-            FrameSource::External {
-                presented_at_unix_ns,
-                ..
-            } => SystemTime::now()
+            FrameSource::External(frame) => SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .ok()
                 .and_then(|now| {
                     now.as_nanos()
-                        .checked_sub(u128::from(*presented_at_unix_ns))
+                        .checked_sub(u128::from(frame.presented_at_unix_ns))
                 })
                 .and_then(|age| u64::try_from(age).ok())
                 .map(std::time::Duration::from_nanos)
@@ -566,6 +591,49 @@ impl shader::Primitive for Primitive {
         queue.write_buffer(&state.uniform, 0, unsafe {
             std::slice::from_raw_parts(uniforms.as_ptr().cast::<u8>(), UNIFORM_BYTES as usize)
         });
+
+        if let FrameSource::External(frame) = &self.source {
+            if state.external_stamp == Some(frame.presented_at_unix_ns) {
+                return;
+            }
+            match frame.shared_pixels() {
+                Ok(Some(bytes)) => {
+                    let SurfaceTransport::SharedMemory { stride, .. } = &frame.descriptor.transport
+                    else {
+                        unreachable!("shared pixels require shared-memory transport")
+                    };
+                    queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &state.texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        bytes,
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(*stride),
+                            rows_per_image: Some(frame.descriptor.height),
+                        },
+                        wgpu::Extent3d {
+                            width: frame.descriptor.width,
+                            height: frame.descriptor.height,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!(
+                        "Canvas external surface {} generation {}: {error}",
+                        frame.descriptor.source_id, frame.descriptor.generation
+                    );
+                    return;
+                }
+            }
+            state.external_stamp = Some(frame.presented_at_unix_ns);
+            return;
+        }
 
         let FrameSource::File { path, .. } = &self.source else {
             return;
@@ -651,18 +719,14 @@ pub fn view<'a, Message: 'a>(
     .into()
 }
 
-/// Compose a producer-owned IOSurface through the same retained shader used by
-/// decoded video. The caller owns registry freshness and rebuilds the widget
-/// when a newer presentation timestamp or generation is accepted.
+/// Compose a producer-owned external frame through the same retained shader
+/// used by decoded video. The caller owns registry freshness and rebuilds the
+/// widget when a newer presentation timestamp or generation is accepted.
 pub fn external_view<'a, Message: 'a>(
-    descriptor: ExternalSurfaceDescriptor,
-    presented_at_unix_ns: u64,
+    frame: crate::external_surface::ExternalSurfaceFrame,
 ) -> Element<'a, Message> {
     Shader::new(Program {
-        source: FrameSource::External {
-            descriptor,
-            presented_at_unix_ns,
-        },
+        source: FrameSource::External(frame),
         on_orbit: None,
     })
     .width(Length::Fill)

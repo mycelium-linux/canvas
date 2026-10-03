@@ -289,6 +289,9 @@ enum ContentSource {
         timeline: bool,
         seen: Option<(std::time::SystemTime, u64)>,
     },
+    ExternalSurface {
+        source_id: String,
+    },
     Widget {
         spec: canvas_widgets::WidgetSpec,
     },
@@ -706,6 +709,9 @@ struct App {
     scale_factor: f64,
     receiver: PendingReceiver,
     _socket: SocketGuard,
+    external_surfaces: ::canvas::external_surface_binding::ExternalSurfaceFeed,
+    _external_surface_socket:
+        Option<::canvas::external_surface_binding::ExternalSurfaceSocketGuard>,
     #[cfg(feature = "lua-scenes")]
     stream_inbox: ::canvas::stream_binding::StreamInbox,
     #[cfg(feature = "lua-scenes")]
@@ -925,6 +931,15 @@ impl App {
                 ::canvas::stream_binding::start_server().map_err(|error| error.to_string())?;
             (inbox, Some(guard))
         };
+        let (external_surfaces, external_surface_socket) = if cfg!(test) {
+            (
+                ::canvas::external_surface_binding::ExternalSurfaceFeed::default(),
+                None,
+            )
+        } else {
+            let (feed, guard) = ::canvas::external_surface_binding::start_server()?;
+            (feed, Some(guard))
+        };
         let visibility_hotkey = match GlobalHotkey::register(HotkeySpec {
             signature: *b"Cnvs",
             id: 1,
@@ -1102,6 +1117,8 @@ impl App {
             scale_factor: 1.0,
             receiver,
             _socket: socket,
+            external_surfaces,
+            _external_surface_socket: external_surface_socket,
             #[cfg(feature = "lua-scenes")]
             stream_inbox,
             #[cfg(feature = "lua-scenes")]
@@ -4903,6 +4920,48 @@ impl App {
                 );
                 Task::none()
             }
+            Command::OpenExternalSurface {
+                surface_id,
+                source_id,
+            } => {
+                let surface = Surface {
+                    id: surface_id.clone(),
+                    title: source_id.clone(),
+                    content: SurfaceContent::ExternalSurface {
+                        source_id: source_id.clone(),
+                    },
+                    inputs: Vec::new(),
+                };
+                if let Some(existing) = self
+                    .document
+                    .surfaces
+                    .iter_mut()
+                    .find(|candidate| candidate.id == surface_id)
+                {
+                    *existing = surface;
+                } else {
+                    self.document.surfaces.push(surface);
+                }
+                self.rebuild_stack();
+                self.decoded.remove(&surface_id);
+                self.ensure_scene_decoded();
+                self.start_transition();
+                self.bump();
+                self.emit_event(format!("external_surface_opened {surface_id} {source_id}"));
+                self.status = format!("Opened external surface {source_id} on {surface_id}.");
+                let snapshot = self
+                    .decoded
+                    .get(&surface_id)
+                    .map(|surface| surface.snapshot.clone())
+                    .expect("external surface runtime was inserted");
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::SurfaceOpened { surface: snapshot },
+                    },
+                );
+                Task::none()
+            }
             Command::OpenWidget {
                 surface_id,
                 spec_path,
@@ -5825,7 +5884,9 @@ impl App {
             // Native video is already a complete visual frame. Treating it as
             // an application window wastes pixels and makes a letterboxed
             // 16:9 stream look like content inside a differently-shaped card.
-            ContentSource::LiveVideo { .. } => Some(canvas_widgets::WidgetChrome::Frameless),
+            ContentSource::LiveVideo { .. } | ContentSource::ExternalSurface { .. } => {
+                Some(canvas_widgets::WidgetChrome::Frameless)
+            }
             _ => None,
         }
     }
@@ -6799,6 +6860,12 @@ impl App {
                         },
                     )
                 }
+                SurfaceContent::ExternalSurface { source_id } => (
+                    ContentKind::Image,
+                    ContentSource::ExternalSurface {
+                        source_id: source_id.clone(),
+                    },
+                ),
                 // Content this build cannot draw still gets a tile. Rendering it
                 // as markdown reuses a renderer that already exists rather than
                 // adding a path solely to say "no": the surface keeps its place
@@ -7496,7 +7563,8 @@ impl App {
             ContentSource::Image { .. }
             | ContentSource::Pdf { .. }
             | ContentSource::LiveImage { .. }
-            | ContentSource::LiveVideo { .. } => {
+            | ContentSource::LiveVideo { .. }
+            | ContentSource::ExternalSurface { .. } => {
                 let view = self.shared_views.get(&surface.snapshot.id);
                 let picture: Element<'_, Message> = match &surface.source {
                     ContentSource::LiveVideo {
@@ -7519,6 +7587,28 @@ impl App {
                                 }) as _
                             }),
                         )
+                    }
+                    ContentSource::ExternalSurface { source_id } => {
+                        match self.external_surfaces.frame(source_id) {
+                            Some(frame) => canvas_model_viewer::video::external_view(frame),
+                            None => {
+                                let visual = self.presented_visual_theme();
+                                container(
+                                    column![
+                                        text("Waiting for external surface")
+                                            .size(visual.metrics.body)
+                                            .color(color(visual.palette.text)),
+                                        text(source_id.clone())
+                                            .size(visual.metrics.small)
+                                            .color(color(visual.palette.text_muted)),
+                                    ]
+                                    .spacing(visual.metrics.space_2),
+                                )
+                                .center_x(Length::Fill)
+                                .center_y(Length::Fill)
+                                .into()
+                            }
+                        }
                     }
                     _ => {
                         let mut image = image_widget(surface.handle.clone())
@@ -8035,7 +8125,9 @@ impl App {
         self.decoded.values().any(|surface| {
             matches!(
                 surface.source,
-                ContentSource::LiveImage { .. } | ContentSource::LiveVideo { .. }
+                ContentSource::LiveImage { .. }
+                    | ContentSource::LiveVideo { .. }
+                    | ContentSource::ExternalSurface { .. }
             )
         })
     }

@@ -23,6 +23,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("       echo 'surfaces' | canvasctl");
         eprintln!("       echo 'workspace create wikiracing' | canvasctl");
         eprintln!("       echo 'surface add-live-video surf-browser surf-tv 1280 720' | canvasctl");
+        eprintln!(
+            "       echo 'surface add-external studio-mix synesthesia/mix-overview' | canvasctl"
+        );
         eprintln!("       echo 'surface center surf-browser 0.70' | canvasctl");
         eprintln!("       echo 'focus\\nbg dock' | canvasctl");
         eprintln!("       echo 'move 0 25 1920 1150' | canvasctl");
@@ -250,9 +253,9 @@ fn surface_source(content: &SurfaceContent) -> String {
     match content {
         SurfaceContent::ProjectResource { resource_id }
         | SurfaceContent::Terminal { resource_id } => resource_id.clone(),
-        SurfaceContent::LiveImage { source_id } | SurfaceContent::LiveVideo { source_id, .. } => {
-            source_id.clone()
-        }
+        SurfaceContent::LiveImage { source_id }
+        | SurfaceContent::LiveVideo { source_id, .. }
+        | SurfaceContent::ExternalSurface { source_id } => source_id.clone(),
         SurfaceContent::Stream { url } => url.clone(),
         SurfaceContent::Widget { spec } => spec.id.clone(),
         SurfaceContent::Prompt { target, .. } => target.clone(),
@@ -768,7 +771,7 @@ fn handle_workspace(tokens: &[String]) -> Result<(), String> {
 
 fn handle_surface(tokens: &[String]) -> Result<(), String> {
     if tokens.len() < 2 {
-        return Err("usage: surface add-live-video <id> <source> <width> <height> | surface center <id> <scale>".into());
+        return Err("usage: surface add-live-video <id> <source> <width> <height> | surface add-external <id> <source> | surface center <id> <scale>".into());
     }
     match tokens[1].as_str() {
         "add-live-video" => {
@@ -780,6 +783,15 @@ fn handle_surface(tokens: &[String]) -> Result<(), String> {
                 source_id: tokens[3].clone(),
                 width: tokens[4].parse().map_err(|_| "width must be an integer")?,
                 height: tokens[5].parse().map_err(|_| "height must be an integer")?,
+            })?;
+        }
+        "add-external" => {
+            if tokens.len() != 4 {
+                return Err("usage: surface add-external <id> <source>".into());
+            }
+            send_mutation(Command::OpenExternalSurface {
+                surface_id: tokens[2].clone(),
+                source_id: tokens[3].clone(),
             })?;
         }
         "center" => {

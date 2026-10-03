@@ -5,13 +5,63 @@
 //! handle into a texture owned by the same wgpu device iced is rendering with.
 
 use canvas_core::external_surface::{
-    ExternalSurfaceDescriptor, ExternalSurfaceMessage, ExternalSurfaceRegistry, PixelFormat,
-    PresentedSurface, RegistryChange, SurfaceTransport,
+    ColorSpace, ExternalSurfaceDescriptor, ExternalSurfaceMessage, ExternalSurfaceRegistry,
+    PixelFormat, PresentedSurface, RegistryChange, SurfaceTransport,
 };
+use memmap2::{Mmap, MmapOptions};
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::io;
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixDatagram;
+use std::sync::Arc;
+
+/// One accepted frame with its registration resource kept alive.
+///
+/// Cloning this value is cheap and lets an iced primitive outlive the registry
+/// lock. Shared-memory pixels are mapped once per generation, not once per
+/// frame; IOSurface and future DMA-BUF imports retain their native handles in
+/// the inbox.
+#[derive(Debug, Clone)]
+pub struct ExternalSurfaceFrame {
+    pub descriptor: ExternalSurfaceDescriptor,
+    pub slot: u8,
+    pub presented_at_unix_ns: u64,
+    shared_memory: Option<Arc<Mmap>>,
+}
+
+impl ExternalSurfaceFrame {
+    pub fn shared_pixels(&self) -> Result<Option<&[u8]>, String> {
+        let SurfaceTransport::SharedMemory {
+            byte_len,
+            stride,
+            slots,
+            ..
+        } = &self.descriptor.transport
+        else {
+            return Ok(None);
+        };
+        if self.slot >= *slots {
+            return Err("external surface slot is out of range".into());
+        }
+        let frame_len = usize::try_from(u64::from(*stride) * u64::from(self.descriptor.height))
+            .map_err(|_| "external surface frame is too large")?;
+        let offset = frame_len
+            .checked_mul(usize::from(self.slot))
+            .ok_or("external surface slot offset overflow")?;
+        let end = offset
+            .checked_add(frame_len)
+            .ok_or("external surface slot end overflow")?;
+        let mapping = self
+            .shared_memory
+            .as_ref()
+            .ok_or("external surface shared mapping is unavailable")?;
+        if end > mapping.len() || end as u64 > *byte_len {
+            return Err("external surface slot exceeds its registration".into());
+        }
+        Ok(Some(&mapping[offset..end]))
+    }
+}
 
 /// Accepted local registrations and the native resources that keep them alive.
 ///
@@ -22,6 +72,7 @@ use std::os::unix::net::UnixDatagram;
 pub struct ExternalSurfaceInbox {
     registry: ExternalSurfaceRegistry,
     registration_handles: BTreeMap<(String, u64), Vec<OwnedFd>>,
+    shared_memory: BTreeMap<(String, u64), Arc<Mmap>>,
 }
 
 impl ExternalSurfaceInbox {
@@ -40,6 +91,7 @@ impl ExternalSurfaceInbox {
         message: ExternalSurfaceMessage,
         handles: Vec<OwnedFd>,
     ) -> Result<RegistryChange, String> {
+        message.validate(handles.len())?;
         let registration = match &message {
             ExternalSurfaceMessage::Register { surface } => {
                 Some((surface.source_id.clone(), surface.generation))
@@ -53,15 +105,46 @@ impl ExternalSurfaceInbox {
             } => Some((source_id.clone(), *generation)),
             _ => None,
         };
+        let shared_mapping = match &message {
+            ExternalSurfaceMessage::Register { surface } => match &surface.transport {
+                SurfaceTransport::SharedMemory {
+                    handle_index,
+                    byte_len,
+                    ..
+                } => {
+                    let handle = handles
+                        .get(usize::from(*handle_index))
+                        .ok_or("external surface shared-memory handle is missing")?;
+                    let length = usize::try_from(*byte_len)
+                        .map_err(|_| "external surface shared-memory mapping is too large")?;
+                    let file = File::from(
+                        handle
+                            .try_clone()
+                            .map_err(|error| format!("clone external surface handle: {error}"))?,
+                    );
+                    let mapping = unsafe { MmapOptions::new().len(length).map(&file) }
+                        .map_err(|error| format!("map external surface pixels: {error}"))?;
+                    Some(Arc::new(mapping))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
         let change = self.registry.apply(message, handles.len())?;
         if let Some((source_id, generation)) = registration {
             self.registration_handles
                 .retain(|(id, _), _| id != &source_id);
+            self.shared_memory.retain(|(id, _), _| id != &source_id);
+            if let Some(mapping) = shared_mapping {
+                self.shared_memory
+                    .insert((source_id.clone(), generation), mapping);
+            }
             self.registration_handles
                 .insert((source_id, generation), handles);
         }
         if let Some(key) = withdrawal {
             self.registration_handles.remove(&key);
+            self.shared_memory.remove(&key);
         }
         Ok(change)
     }
@@ -72,6 +155,20 @@ impl ExternalSurfaceInbox {
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, &PresentedSurface)> {
         self.registry.iter()
+    }
+
+    pub fn frame(&self, source_id: &str) -> Option<ExternalSurfaceFrame> {
+        let presented = self.registry.get(source_id)?;
+        let slot = presented.slot?;
+        let presented_at_unix_ns = presented.presented_at_unix_ns?;
+        let key = (source_id.to_owned(), presented.descriptor.generation);
+        let shared_memory = self.shared_memory.get(&key).cloned();
+        Some(ExternalSurfaceFrame {
+            descriptor: presented.descriptor.clone(),
+            slot,
+            presented_at_unix_ns,
+            shared_memory,
+        })
     }
 }
 
@@ -126,13 +223,22 @@ pub fn import_iosurface(
     Err(ImportError::UnsupportedBackend)
 }
 
-fn wgpu_format(format: PixelFormat) -> Result<wgpu::TextureFormat, ImportError> {
-    match format {
-        PixelFormat::Rgba8Unorm => Ok(wgpu::TextureFormat::Rgba8Unorm),
-        PixelFormat::Bgra8Unorm => Ok(wgpu::TextureFormat::Bgra8Unorm),
-        PixelFormat::Rgba16Float => Ok(wgpu::TextureFormat::Rgba16Float),
-        PixelFormat::R32Float => Ok(wgpu::TextureFormat::R32Float),
-        PixelFormat::Nv12 => Err(ImportError::UnsupportedFormat(format)),
+pub(crate) fn wgpu_format(
+    format: PixelFormat,
+    color_space: ColorSpace,
+) -> Result<wgpu::TextureFormat, ImportError> {
+    match (format, color_space) {
+        (PixelFormat::Rgba8Unorm, ColorSpace::Srgb) => Ok(wgpu::TextureFormat::Rgba8UnormSrgb),
+        (PixelFormat::Bgra8Unorm, ColorSpace::Srgb) => Ok(wgpu::TextureFormat::Bgra8UnormSrgb),
+        (PixelFormat::Rgba8Unorm, _) => Ok(wgpu::TextureFormat::Rgba8Unorm),
+        (PixelFormat::Bgra8Unorm, _) => Ok(wgpu::TextureFormat::Bgra8Unorm),
+        (PixelFormat::Rgba16Float, _) => Ok(wgpu::TextureFormat::Rgba16Float),
+        // This retained-video pipeline owns a filtering sampler. R32Float and
+        // NV12 need their own explicit sampling/conversion pipelines rather
+        // than an import that succeeds and later fails WGPU validation.
+        (PixelFormat::R32Float | PixelFormat::Nv12, _) => {
+            Err(ImportError::UnsupportedFormat(format))
+        }
     }
 }
 
@@ -183,7 +289,7 @@ mod macos {
         let SurfaceTransport::IoSurface { surface_id } = surface.transport else {
             return Err(ImportError::WrongTransport);
         };
-        let format = wgpu_format(surface.format)?;
+        let format = wgpu_format(surface.format, surface.color_space)?;
         let metal_format = metal_format(surface.format)?;
         let io_surface = NonNull::new(unsafe { IOSurfaceLookup(surface_id) })
             .map(SurfaceRef)
@@ -260,13 +366,64 @@ mod tests {
     #[test]
     fn sampled_formats_are_explicit() {
         assert_eq!(
-            wgpu_format(PixelFormat::Bgra8Unorm).unwrap(),
-            wgpu::TextureFormat::Bgra8Unorm
+            wgpu_format(PixelFormat::Bgra8Unorm, ColorSpace::Srgb).unwrap(),
+            wgpu::TextureFormat::Bgra8UnormSrgb
         );
         assert!(matches!(
-            wgpu_format(PixelFormat::Nv12),
+            wgpu_format(PixelFormat::Nv12, ColorSpace::Rec709),
             Err(ImportError::UnsupportedFormat(PixelFormat::Nv12))
         ));
+    }
+
+    #[test]
+    fn shared_memory_is_mapped_once_and_sliced_by_presented_slot() {
+        use std::io::{Seek, SeekFrom, Write};
+        use std::os::fd::AsFd;
+
+        let mut file = tempfile::tempfile().unwrap();
+        file.set_len(32).unwrap();
+        file.seek(SeekFrom::Start(16)).unwrap();
+        file.write_all(&[9; 16]).unwrap();
+        let descriptor = ExternalSurfaceDescriptor {
+            schema_version: EXTERNAL_SURFACE_VERSION,
+            source_id: "surf/shared".into(),
+            generation: 8,
+            width: 2,
+            height: 2,
+            format: PixelFormat::Rgba8Unorm,
+            color_space: ColorSpace::Srgb,
+            alpha_mode: AlphaMode::Opaque,
+            transport: SurfaceTransport::SharedMemory {
+                handle_index: 0,
+                byte_len: 32,
+                stride: 8,
+                slots: 2,
+            },
+        };
+        let mut inbox = ExternalSurfaceInbox::default();
+        inbox
+            .apply(
+                ExternalSurfaceMessage::Register {
+                    surface: descriptor,
+                },
+                vec![file.as_fd().try_clone_to_owned().unwrap()],
+            )
+            .unwrap();
+        inbox
+            .apply(
+                ExternalSurfaceMessage::Present {
+                    source_id: "surf/shared".into(),
+                    generation: 8,
+                    slot: 1,
+                    sync: FrameSync::Implicit,
+                    presented_at_unix_ns: 456,
+                },
+                vec![],
+            )
+            .unwrap();
+        let frame = inbox.frame("surf/shared").unwrap();
+        assert_eq!(frame.slot, 1);
+        assert_eq!(frame.shared_pixels().unwrap().unwrap(), &[9; 16]);
     }
 
     #[test]

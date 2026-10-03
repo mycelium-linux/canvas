@@ -349,15 +349,21 @@ impl ExternalSurfaceMessage {
     }
 }
 
-fn validate_source_id(value: &str) -> Result<(), String> {
-    if value.is_empty()
-        || value.len() > 128
-        || !value.bytes().all(|byte| {
+pub fn valid_source_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| {
             byte.is_ascii_lowercase()
                 || byte.is_ascii_digit()
                 || matches!(byte, b'-' | b'_' | b'.' | b'/')
         })
-    {
+        && value
+            .split('/')
+            .all(|segment| !segment.is_empty() && !matches!(segment, "." | ".."))
+}
+
+fn validate_source_id(value: &str) -> Result<(), String> {
+    if !valid_source_id(value) {
         return Err("external surface source id is invalid".into());
     }
     Ok(())
@@ -407,6 +413,14 @@ mod tests {
     #[test]
     fn validates_a_bounded_double_buffer() {
         assert_eq!(shared().validate(1), Ok(()));
+    }
+
+    #[test]
+    fn source_ids_are_stable_names_not_paths_or_addresses() {
+        assert!(valid_source_id("synesthesia/mix-overview"));
+        assert!(!valid_source_id("../mix-overview"));
+        assert!(!valid_source_id("https://studio.invalid/view"));
+        assert!(!valid_source_id("Mix Overview"));
     }
 
     #[test]

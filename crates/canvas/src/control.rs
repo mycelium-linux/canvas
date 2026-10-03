@@ -191,6 +191,10 @@ pub enum Command {
         width: u32,
         height: u32,
     },
+    OpenExternalSurface {
+        surface_id: String,
+        source_id: String,
+    },
     OpenWidget {
         surface_id: String,
         spec_path: PathBuf,
@@ -1149,6 +1153,16 @@ impl ControlRequest {
                     return Err("live video frame exceeds 64 MiB".into());
                 }
             }
+            Command::OpenExternalSurface {
+                surface_id,
+                source_id,
+            } => {
+                if !identifier(surface_id)
+                    || !canvas_core::external_surface::valid_source_id(source_id)
+                {
+                    return Err("invalid external surface or source id".into());
+                }
+            }
             Command::ApplyDocument { .. }
             | Command::ApplyPatch { .. }
             | Command::Inspect
@@ -1480,6 +1494,13 @@ pub mod text {
                     width: tokens[2].parse().map_err(|_| "width must be an integer")?,
                     height: tokens[3].parse().map_err(|_| "height must be an integer")?,
                     surface_id: tokens[4].clone(),
+                })
+            }
+            "open_external_surface" | "external_surface" => {
+                req(tokens, 3, "external_surface <source_id> <surface_id>")?;
+                Ok(Command::OpenExternalSurface {
+                    source_id: tokens[1].clone(),
+                    surface_id: tokens[2].clone(),
                 })
             }
             "open_widget" | "widget" => {
@@ -2623,6 +2644,20 @@ mod tests {
             },
         };
         assert_eq!(format_reply(&err), "ERR conflict stale");
+    }
+
+    #[test]
+    fn text_command_opens_a_named_external_surface() {
+        let request =
+            text::parse_line("external_surface synesthesia/mix-overview studio-mix").unwrap();
+        assert!(matches!(
+            request.command,
+            Command::OpenExternalSurface {
+                ref source_id,
+                ref surface_id,
+            } if source_id == "synesthesia/mix-overview" && surface_id == "studio-mix"
+        ));
+        request.validate().unwrap();
     }
 
     #[test]

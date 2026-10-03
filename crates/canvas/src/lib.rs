@@ -19,6 +19,8 @@ pub mod chart;
 pub mod compose;
 pub mod control;
 pub mod display;
+#[cfg(unix)]
+pub mod external_surface_binding;
 pub mod hud;
 pub mod interaction;
 #[cfg(unix)]
@@ -518,6 +520,13 @@ pub enum SurfaceContent {
         #[serde(default, skip_serializing_if = "is_false")]
         timeline: bool,
     },
+    /// Producer-owned pixels registered over Canvas's owner-local external
+    /// surface socket. Dimensions, format, synchronization, and native handles
+    /// belong to the volatile registration; the document persists only this
+    /// stable source id.
+    ExternalSurface {
+        source_id: String,
+    },
     /// A line of text the wall can send somewhere.
     ///
     /// Canvas does not interpret it and does not know what `target` can do: the
@@ -562,7 +571,7 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// The `kind` tags this build can render. Anything else is a newer Canvas.
-const KNOWN_SURFACE_KINDS: [&str; 10] = [
+const KNOWN_SURFACE_KINDS: [&str; 11] = [
     "project_resource",
     "asset",
     "chart",
@@ -572,6 +581,7 @@ const KNOWN_SURFACE_KINDS: [&str; 10] = [
     "stream",
     "live_image",
     "live_video",
+    "external_surface",
     "prompt",
 ];
 
@@ -588,6 +598,7 @@ impl SurfaceContent {
             Self::Stream { .. } => "stream",
             Self::LiveImage { .. } => "live_image",
             Self::LiveVideo { .. } => "live_video",
+            Self::ExternalSurface { .. } => "external_surface",
             Self::Prompt { .. } => "prompt",
             Self::Unsupported(raw) => raw
                 .get("kind")
@@ -683,6 +694,9 @@ enum Known {
         #[serde(default)]
         timeline: bool,
     },
+    ExternalSurface {
+        source_id: String,
+    },
     Prompt {
         target: String,
         #[serde(default)]
@@ -722,6 +736,7 @@ impl Known {
                 orbitable,
                 timeline,
             },
+            Self::ExternalSurface { source_id } => SurfaceContent::ExternalSurface { source_id },
             Self::Prompt {
                 target,
                 placeholder,
@@ -1393,6 +1408,12 @@ impl WorkspaceDocument {
                     check(
                         frame_bytes.is_some_and(|bytes| bytes <= 64 * 1024 * 1024),
                         format!("Live video frame is too large: {width}x{height}"),
+                    )?;
+                }
+                SurfaceContent::ExternalSurface { source_id } => {
+                    check(
+                        canvas_core::external_surface::valid_source_id(source_id),
+                        format!("Invalid external surface source id: {source_id}"),
                     )?;
                 }
                 // Retained verbatim from a newer Canvas. There is nothing this
@@ -2521,6 +2542,18 @@ mod surface_kind_parity_tests {
 
         let parsed: SurfaceContent = serde_json::from_value(json).expect("parses back");
         assert_eq!(parsed, content, "a prompt must not degrade to Unsupported");
+    }
+
+    #[test]
+    fn an_external_surface_persists_only_its_stable_source_id() {
+        let content = SurfaceContent::ExternalSurface {
+            source_id: "synesthesia/mix-overview".into(),
+        };
+        let json = serde_json::to_value(&content).expect("serializes");
+        assert_eq!(json["kind"], "external_surface");
+        assert_eq!(json["source_id"], "synesthesia/mix-overview");
+        let parsed: SurfaceContent = serde_json::from_value(json).expect("parses back");
+        assert_eq!(parsed, content);
     }
 
     /// The placeholder is optional, so a prompt without one still parses.
