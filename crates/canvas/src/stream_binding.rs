@@ -340,6 +340,7 @@ pub fn start_server() -> Result<(StreamInbox, StreamSocketGuard)> {
 fn receive(socket: UnixDatagram, inbox: StreamInbox) {
     let mut bytes = vec![0; MAX_STREAM_MESSAGE + 1];
     let mut consecutive_failures: u32 = 0;
+    let mut chunks = canvas_core::chunk::Reassembler::default();
     loop {
         let size = match socket.recv(&mut bytes) {
             Ok(size) => {
@@ -373,6 +374,39 @@ fn receive(socket: UnixDatagram, inbox: StreamInbox) {
                 event.validate()?;
                 Ok(event)
             }) {
+            Ok(event) if event.contract == canvas_core::chunk::CONTRACT => {
+                let owner = event.owner.clone();
+                let stream = event.stream.clone();
+                let chunk =
+                    serde_json::from_value::<canvas_core::chunk::StreamChunk>(event.payload)
+                        .map_err(|error| Error(format!("invalid stream chunk: {error}")));
+                match chunk.and_then(|chunk| chunks.push(chunk, now_ms()).map_err(Error)) {
+                    Ok(Some(payload)) => {
+                        let logical = serde_json::from_slice::<StreamEnvelope>(&payload)
+                            .map_err(|error| {
+                                Error(format!("invalid reassembled stream event: {error}"))
+                            })
+                            .and_then(|event| {
+                                event.validate()?;
+                                if event.contract == canvas_core::chunk::CONTRACT
+                                    || event.owner != owner
+                                    || event.stream != stream
+                                {
+                                    return Err(Error(
+                                        "reassembled stream identity mismatch".into(),
+                                    ));
+                                }
+                                Ok(event)
+                            });
+                        match logical {
+                            Ok(event) => inbox.push(event),
+                            Err(error) => eprintln!("Canvas rejected chunk generation: {error}"),
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => eprintln!("Canvas rejected stream chunk: {error}"),
+                }
+            }
             Ok(event) => inbox.push(event),
             Err(error) => eprintln!("Canvas rejected stream event: {error}"),
         }
@@ -498,6 +532,22 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
     (
         "mycelium-topology-v1",
         include_str!("../../../config/binders/mycelium-topology-v1.lua"),
+    ),
+    (
+        "mycelium-mesh-v1",
+        include_str!("../../../config/binders/mycelium-mesh-v1.lua"),
+    ),
+    (
+        "synesthesia-daw-v1",
+        include_str!("../../../config/binders/synesthesia-daw-v1.lua"),
+    ),
+    (
+        "synesthesia-routing-v1",
+        include_str!("../../../config/binders/synesthesia-routing-v1.lua"),
+    ),
+    (
+        "synesthesia-quality-v1",
+        include_str!("../../../config/binders/synesthesia-quality-v1.lua"),
     ),
     (
         "span-timeline-v1",
@@ -696,6 +746,14 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
     (
         "jarvis-notifications-v1",
         include_str!("../../../config/binders/jarvis-notifications-v1.lua"),
+    ),
+    (
+        "home-systems-v1",
+        include_str!("../../../config/binders/home-systems-v1.lua"),
+    ),
+    (
+        "x-trends-v1",
+        include_str!("../../../config/binders/x-trends-v1.lua"),
     ),
 ];
 
@@ -1651,6 +1709,165 @@ mod tests {
     }
 
     #[test]
+    fn mycelium_mesh_binder_surfaces_sites_vlans_links_and_pressure() {
+        let mut target = test_spec(WidgetKind::NeuralGraph {
+            title: "Waiting".into(),
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        });
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "mycelium".into(),
+            stream: "mesh".into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            project_id: Some("home".into()),
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "peers": [{
+                    "id":"node-home-pi",
+                    "hostname":"Living room speaker","site":"home","platform":"linux","architecture":"aarch64",
+                    "version":"0.1.0","age_seconds":4,"load_1":9.0,"logical_cpus":4,
+                    "memory_available_bytes":10,"memory_total_bytes":100,"root_available_bytes":10737418240_u64,"established_ssh_sessions":2,
+                    "root_total_bytes":1000,"ssh_listening":true
+                }],
+                "segments": [{"id":"home/vlan:35","label":"Audio","kind":"vlan","site":"home",
+                    "vlan":35,"subnet":"10.35.0.0/24","gateway":"10.35.0.1"}],
+                "nodes": [{"id":"speaker","label":"Living room speaker","site":"home","kind":"audio","device":true,
+                    "segments":["home/vlan:35"],"ips":["10.35.0.20"],"ports":2,"links_up":2,"links_down":0,"capacity_mbps":1000,
+                    "services":3,"overlays":1,"overlays_online":1,"origins":2}],
+                "advertisements": [{"id":"raop","label":"Living Room","site":"home","service_type":"_raop._tcp","target":"speaker.local","port":7000}],
+                "wireguard": [{"hostname":"home-pi","site":"home","endpoint":"203.0.113.8:51820","advertised_prefixes":["10.35.0.0/24"],"generation":42}],
+                "conflicts": 0,
+                "releases": [{"component":"canvas","version":"0.1.0","channel":"canary","target":"aarch64-unknown-linux-gnu"}],
+                "degraded": false
+            }),
+        };
+        apply_named_adapter("mycelium-mesh-v1", &event, &mut target).expect("mesh renders");
+        let WidgetKind::NeuralGraph {
+            title,
+            nodes,
+            edges,
+        } = target.kind
+        else {
+            panic!("mesh binder changed widget family")
+        };
+        assert!(title.contains("1 peers · 1 nodes · 1 sites · 1 LAN"));
+        assert_eq!(
+            nodes.len(),
+            5,
+            "site, observed device, service, VLAN, and WireGuard binding are graph vertices; peers are evidence, not duplicate nodes"
+        );
+        assert!(nodes.iter().any(|node| node.label == "wagar-house"));
+        assert!(nodes.iter().any(|node| node.label == "Living room speaker"
+            && node.detail.as_deref().is_some_and(|detail| {
+                detail.contains("1000M capacity")
+                    && detail.contains("3 services")
+                    && detail.contains("mesh 1/1")
+            })));
+        assert!(nodes.iter().any(|node| node.label.contains("VLAN 35")));
+        assert!(nodes.iter().any(|node| {
+            node.label == "WG · home-pi"
+                && node.detail.as_deref().is_some_and(|detail| {
+                    detail.contains("203.0.113.8:51820") && detail.contains("10.35.0.0/24")
+                })
+        }));
+        assert_eq!(
+            edges.len(),
+            4,
+            "every discovered fact is attached to its site"
+        );
+        assert!(edges.iter().any(|edge| edge.activity == 2.0));
+        assert_eq!(target.data.state, canvas_widgets::WidgetDataState::Partial);
+    }
+
+    #[test]
+    fn synesthesia_daw_binder_preserves_transport_notes_and_meters() {
+        let mut target = test_spec(WidgetKind::DawDeck {
+            title: "Waiting".into(),
+            playing: false,
+            paused: false,
+            recording: false,
+            bpm: None,
+            position_ticks: 0,
+            cycle_ticks: 1,
+            tracks: vec![canvas_widgets::DawTrack {
+                label: "API".into(),
+                level: 0.0,
+                clipping: false,
+            }],
+            notes: Vec::new(),
+        });
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "synesthesia".into(),
+            stream: "daw".into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            project_id: Some("home".into()),
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({"title":"Studio","playing":true,"paused":false,"recording":true,"bpm":104.0,
+                "position_ticks":12,"cycle_ticks":96,"tracks":[{"label":"IN4","level":0.75,"clipping":false}],
+                "notes":[{"track":"piano","tick":0,"length_ticks":6,"note":60,"velocity":100}]}),
+        };
+        apply_named_adapter("synesthesia-daw-v1", &event, &mut target)
+            .expect("DAW snapshot renders");
+        let WidgetKind::DawDeck {
+            playing,
+            recording,
+            bpm,
+            tracks,
+            notes,
+            ..
+        } = target.kind
+        else {
+            panic!("DAW binder changed widget family")
+        };
+        assert!(playing && recording);
+        assert_eq!(bpm, Some(104.0));
+        assert_eq!(tracks[0].level, 0.75);
+        assert_eq!(notes[0].note, 60);
+    }
+
+    #[test]
+    fn synesthesia_routing_and_quality_use_generic_quality_widgets() {
+        let mut routing = test_spec(WidgetKind::StatusList {
+            title: "Waiting".into(),
+            nodes: vec![],
+        });
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "synesthesia".into(),
+            stream: "studio-routing".into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            project_id: Some("home".into()),
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({"routes":[{"label":"launchkey → piano","state":"good","detail":"MIDI"}],"inventory":{"controllers":2,"instruments":4,"sources":10,"inserts":4}}),
+        };
+        apply_named_adapter("synesthesia-routing-v1", &event, &mut routing)
+            .expect("routing renders");
+        assert!(
+            matches!(routing.kind, WidgetKind::StatusList { ref nodes, .. } if nodes.len() == 1)
+        );
+
+        let mut quality = test_spec(WidgetKind::MetricBoard {
+            title: "Waiting".into(),
+            style: canvas_widgets::MetricBoardStyle::Bullet,
+            metrics: vec![],
+            unit: Some("dB".into()),
+        });
+        let mut quality_event = event;
+        quality_event.stream = "studio-quality".into();
+        quality_event.payload = serde_json::json!({"metrics":[{"label":"Output headroom","value":8.0,"max":60.0,"target":6.0,"state":"good"}],"detail":"0 output clips"});
+        apply_named_adapter("synesthesia-quality-v1", &quality_event, &mut quality)
+            .expect("quality renders");
+        assert!(
+            matches!(quality.kind, WidgetKind::MetricBoard { ref metrics, .. } if metrics.len() == 1)
+        );
+    }
+
+    #[test]
     fn span_timeline_binder_selects_semantics_without_owning_frames() {
         let mut target = test_spec(WidgetKind::SpanTimeline {
             title: "Waiting".into(),
@@ -1704,6 +1921,7 @@ mod tests {
             max_frequency: 108.0,
             unit: Some("MHz".into()),
             history: 8,
+            radio: None,
         });
         let event = StreamEnvelope {
             schema_version: STREAM_SCHEMA_VERSION,
@@ -1713,15 +1931,31 @@ mod tests {
             project_id: Some("dock".into()),
             sequence: 1,
             emitted_at_ms: now_ms(),
-            payload: serde_json::json!({"bins":[0.0,0.1,0.2,0.9,0.4,0.2,0.1,0.0]}),
+            payload: serde_json::json!({
+                "schema_version": 1,
+                "session_id": "rtl-sdr/adsb/window-test",
+                "generation": 4,
+                "sequence": 91,
+                "observed_at_ms": 1770000000000_i64,
+                "bins_dbfs": vec![-31.0; 64],
+                "center_frequency_hz": 1090000000.0,
+                "span_hz": 2400000.0,
+                "floor_dbfs": -110.0,
+                "ceiling_dbfs": -20.0
+            }),
         };
         apply_named_adapter("spectral-frame-v1", &event, &mut target)
             .expect("spectrum frame appends");
-        let WidgetKind::SpectralWaterfall { rows, .. } = target.kind else {
+        let WidgetKind::SpectralWaterfall { rows, radio, .. } = target.kind else {
             panic!("spectral binder changed widget family")
         };
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0][3], 0.9);
+        assert_eq!(rows[0].len(), 64);
+        assert!((rows[0][3] - 79.0 / 90.0).abs() < 0.001);
+        let radio = radio.expect("Radioman metadata retained");
+        assert_eq!(radio.center_frequency_hz, 1_090_000_000.0);
+        assert_eq!(radio.session_id, "rtl-sdr/adsb/window-test");
+        assert_eq!(radio.span_hz, 2_400_000.0);
     }
 
     #[test]
@@ -2447,6 +2681,98 @@ mod tests {
         assert_eq!(rows[0][2], "42");
         assert_eq!(rows[0][3], "alice");
         assert!(rows[0][1].ends_with('…'), "clipped with ellipsis");
+    }
+
+    #[test]
+    fn social_feed_binder_renders_post_cards_with_metadata() {
+        let mut target = WidgetSpec {
+            schema_version: WIDGET_SCHEMA_VERSION,
+            id: "social-war-room-feed".into(),
+            kind: WidgetKind::SocialFeed {
+                title: "Bluesky / War Room".into(),
+                status: "degraded".into(),
+                detail: None,
+                posts: Vec::new(),
+                rotate_seconds: 8,
+            },
+            theme: None,
+            refresh_ms: None,
+            chrome: WidgetChrome::DragOnly,
+            data: canvas_widgets::WidgetData::default(),
+        };
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "feeds".into(),
+            stream: "bsky-war-room".into(),
+            contract: "canvas.social.trends.v1".into(),
+            project_id: None,
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "title": "Bluesky / War Room",
+                "status": {"health":"healthy","mode":"polling","detail":"2 saved feeds live"},
+                "items": [{
+                    "id":"at://did:plc:a/app.bsky.feed.post/one", "author":"alice.test",
+                    "text":"A full social post", "age_secs":120, "engagement_score":17,
+                    "matches":["audio-tech"], "url":"https://bsky.app/profile/did:plc:a/post/one"
+                }]
+            }),
+        };
+        apply_named_adapter("x-trends-v1", &event, &mut target).expect("social feed renders");
+        let WidgetKind::SocialFeed { status, posts, .. } = &target.kind else {
+            panic!("social feed")
+        };
+        assert_eq!(status, "healthy");
+        assert_eq!(posts[0].author, "alice.test");
+        assert_eq!(posts[0].engagement, 17);
+        assert_eq!(posts[0].matches, vec!["audio-tech"]);
+    }
+
+    #[test]
+    fn social_feed_binder_accepts_empty_degraded_feed() {
+        let mut target = WidgetSpec {
+            schema_version: WIDGET_SCHEMA_VERSION,
+            id: "reddit-war-room-feed".into(),
+            kind: WidgetKind::SocialFeed {
+                title: "Reddit / War Room".into(),
+                status: "healthy".into(),
+                detail: None,
+                posts: Vec::new(),
+                rotate_seconds: 8,
+            },
+            theme: None,
+            refresh_ms: None,
+            chrome: WidgetChrome::DragOnly,
+            data: canvas_widgets::WidgetData::default(),
+        };
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "feeds".into(),
+            stream: "reddit-war-room".into(),
+            contract: "canvas.social.trends.v1".into(),
+            project_id: None,
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({
+                "title": "Reddit / War Room",
+                "status": {"health":"degraded","mode":"polling","detail":"x".repeat(300)},
+                "items": []
+            }),
+        };
+        apply_named_adapter("x-trends-v1", &event, &mut target)
+            .expect("empty degraded feeds remain typed arrays");
+        let WidgetKind::SocialFeed {
+            status,
+            detail,
+            posts,
+            ..
+        } = &target.kind
+        else {
+            panic!("social feed")
+        };
+        assert_eq!(status, "degraded");
+        assert!(posts.is_empty());
+        assert_eq!(detail.as_deref().map(str::len), Some(128));
     }
 
     #[test]

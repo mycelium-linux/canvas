@@ -10,9 +10,13 @@ use std::{
 pub use coherence_tokens;
 pub mod appearance;
 pub mod boot_budget;
+pub mod chunk;
 pub mod desktop;
 pub mod desktop_theme;
 pub mod display_watch;
+pub mod external_surface;
+#[cfg(unix)]
+pub mod external_surface_ipc;
 pub mod global_hotkey;
 pub mod layout;
 pub mod manifest_query;
@@ -39,6 +43,7 @@ pub const DECLARED_CONTRACTS: &[&str] = &[
     "canvas.agent.activity.v1",
     "canvas.agent.attention.v1",
     "canvas.briefing.beat.v1",
+    "canvas.stream.chunk.v1",
     "canvas.image.rgba.v1",
     "canvas.music.nowplaying.v1",
     "canvas.prometheus.v1",
@@ -49,6 +54,7 @@ pub const DECLARED_CONTRACTS: &[&str] = &[
     "fpl.trader.backtest-visualization/v1",
     "fpl.trader.backtest-visualization/v2",
     "canvas.run.watch.v1",
+    "canvas.social.trends.v1",
     "jarvis.presence.v1",
     "lob.pipeline.status.v1",
     "map.v1",
@@ -57,6 +63,7 @@ pub const DECLARED_CONTRACTS: &[&str] = &[
     "market.trade.v1",
     "mev.opportunity.v1",
     "panopticon.map.v1",
+    "radioman.spectrum.v1",
     "transmog.build.status.v1",
 ];
 

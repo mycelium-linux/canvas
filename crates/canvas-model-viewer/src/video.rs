@@ -13,6 +13,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use canvas_core::external_surface::ExternalSurfaceDescriptor;
+
 const REDRAW_INTERVAL: std::time::Duration = std::time::Duration::from_millis(42);
 
 /// Size of the shader's `Uniforms`: two vec2s, staleness, and scalar padding.
@@ -124,9 +126,7 @@ pub enum OrbitEvent {
 type OrbitHook<Message> = std::sync::Arc<dyn Fn(OrbitEvent) -> Message + Send + Sync>;
 
 struct Program<Message> {
-    path: PathBuf,
-    width: u32,
-    height: u32,
+    source: FrameSource,
     /// `None` for a surface that is only being watched, such as a camera.
     on_orbit: Option<OrbitHook<Message>>,
 }
@@ -135,9 +135,7 @@ impl<Message> std::fmt::Debug for Program<Message> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Program")
-            .field("path", &self.path)
-            .field("width", &self.width)
-            .field("height", &self.height)
+            .field("source", &self.source)
             .field("orbitable", &self.on_orbit.is_some())
             .finish()
     }
@@ -146,9 +144,7 @@ impl<Message> std::fmt::Debug for Program<Message> {
 impl<Message> Clone for Program<Message> {
     fn clone(&self) -> Self {
         Self {
-            path: self.path.clone(),
-            width: self.width,
-            height: self.height,
+            source: self.source.clone(),
             on_orbit: self.on_orbit.clone(),
         }
     }
@@ -174,9 +170,20 @@ impl Default for State {
 #[derive(Debug, Clone)]
 struct Primitive {
     ticket: u64,
-    path: PathBuf,
-    width: u32,
-    height: u32,
+    source: FrameSource,
+}
+
+#[derive(Debug, Clone)]
+enum FrameSource {
+    File {
+        path: PathBuf,
+        width: u32,
+        height: u32,
+    },
+    External {
+        descriptor: ExternalSurfaceDescriptor,
+        presented_at_unix_ns: u64,
+    },
 }
 
 struct TextureState {
@@ -190,6 +197,7 @@ struct TextureState {
     /// Last (expected, actual) byte count reported, so a persistent mismatch
     /// is one line rather than one per frame.
     reported_mismatch: Option<(usize, usize)>,
+    source_generation: u64,
 }
 
 struct Pipeline {
@@ -201,20 +209,29 @@ struct Pipeline {
 }
 
 impl Pipeline {
-    fn texture_state(&self, device: &wgpu::Device, width: u32, height: u32) -> TextureState {
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Canvas retained video frame"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
+    fn texture_state(
+        &self,
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        source_generation: u64,
+        texture: Option<wgpu::Texture>,
+    ) -> TextureState {
+        let texture = texture.unwrap_or_else(|| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Canvas retained video frame"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
@@ -250,6 +267,7 @@ impl Pipeline {
             stamp: None,
             generation: self.generation,
             reported_mismatch: None,
+            source_generation,
         }
     }
 }
@@ -329,9 +347,7 @@ impl<Message> shader::Program<Message> for Program<Message> {
     ) -> Self::Primitive {
         Primitive {
             ticket: state.ticket,
-            path: self.path.clone(),
-            width: self.width,
-            height: self.height,
+            source: self.source.clone(),
         }
     }
 }
@@ -438,10 +454,24 @@ impl Primitive {
     /// the old behaviour was to keep believing the document and discard every
     /// frame — a surface frozen on its last good picture with nothing logged.
     fn resolved_size(&self) -> (u32, u32) {
-        canvas_core::video_frame_size_file_for(&self.path)
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .and_then(|text| canvas_core::parse_frame_size(&text))
-            .unwrap_or((self.width, self.height))
+        match &self.source {
+            FrameSource::File {
+                path,
+                width,
+                height,
+            } => canvas_core::video_frame_size_file_for(path)
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .and_then(|text| canvas_core::parse_frame_size(&text))
+                .unwrap_or((*width, *height)),
+            FrameSource::External { descriptor, .. } => (descriptor.width, descriptor.height),
+        }
+    }
+
+    fn source_generation(&self) -> u64 {
+        match &self.source {
+            FrameSource::File { .. } => 0,
+            FrameSource::External { descriptor, .. } => descriptor.generation,
+        }
     }
 }
 
@@ -457,16 +487,38 @@ impl shader::Primitive for Primitive {
         _viewport: &shader::Viewport,
     ) {
         let (source_width, source_height) = self.resolved_size();
-        let needs_texture = pipeline
-            .textures
-            .get(&self.ticket)
-            .is_none_or(|state| state.width != source_width || state.height != source_height);
+        let needs_texture = pipeline.textures.get(&self.ticket).is_none_or(|state| {
+            state.width != source_width
+                || state.height != source_height
+                || state.source_generation != self.source_generation()
+        });
         // iced may preserve shader widget state when a workspace inserts or
         // replaces a surface at the same tree position. The retained ticket is
         // therefore stable across a source-size change; recreate the texture
         // before uploading instead of asking wgpu to overrun the old extent.
         if needs_texture {
-            let state = pipeline.texture_state(device, source_width, source_height);
+            let imported = match &self.source {
+                FrameSource::File { .. } => None,
+                FrameSource::External { descriptor, .. } => {
+                    match crate::external_surface::import_iosurface(device, descriptor) {
+                        Ok(texture) => Some(texture),
+                        Err(error) => {
+                            eprintln!(
+                                "Canvas external surface {} generation {}: {error}",
+                                descriptor.source_id, descriptor.generation
+                            );
+                            return;
+                        }
+                    }
+                }
+            };
+            let state = pipeline.texture_state(
+                device,
+                source_width,
+                source_height,
+                self.source_generation(),
+                imported,
+            );
             pipeline.textures.insert(self.ticket, state);
         }
         let state = pipeline
@@ -474,15 +526,33 @@ impl shader::Primitive for Primitive {
             .get_mut(&self.ticket)
             .expect("retained video texture was inserted");
         state.generation = pipeline.generation;
-        let metadata = std::fs::metadata(&self.path).ok();
+        let metadata = match &self.source {
+            FrameSource::File { path, .. } => std::fs::metadata(path).ok(),
+            FrameSource::External { .. } => None,
+        };
         // Age the picture by how long the producer has been silent, not by how
         // long this surface has been open: a feed that died an hour ago must
         // not look the same as one delivering frames right now.
-        let staleness = metadata
-            .as_ref()
-            .and_then(|metadata| metadata.modified().ok())
-            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
-            .map_or(1.0, staleness_of);
+        let staleness = match &self.source {
+            FrameSource::File { .. } => metadata
+                .as_ref()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+                .map_or(1.0, staleness_of),
+            FrameSource::External {
+                presented_at_unix_ns,
+                ..
+            } => SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .and_then(|now| {
+                    now.as_nanos()
+                        .checked_sub(u128::from(*presented_at_unix_ns))
+                })
+                .and_then(|age| u64::try_from(age).ok())
+                .map(std::time::Duration::from_nanos)
+                .map_or(1.0, staleness_of),
+        };
         let uniforms = [
             bounds.width,
             bounds.height,
@@ -497,6 +567,10 @@ impl shader::Primitive for Primitive {
             std::slice::from_raw_parts(uniforms.as_ptr().cast::<u8>(), UNIFORM_BYTES as usize)
         });
 
+        let FrameSource::File { path, .. } = &self.source else {
+            return;
+        };
+
         let Some(metadata) = metadata else {
             return;
         };
@@ -505,7 +579,7 @@ impl shader::Primitive for Primitive {
             return;
         }
         let expected = source_width as usize * source_height as usize * 4;
-        let Ok(bytes) = std::fs::read(&self.path) else {
+        let Ok(bytes) = std::fs::read(path) else {
             return;
         };
         if bytes.len() != expected {
@@ -517,7 +591,7 @@ impl shader::Primitive for Primitive {
                 state.reported_mismatch = Some((expected, bytes.len()));
                 eprintln!(
                     "Canvas retained video {}: frame is {} bytes, expected {} for {source_width}x{source_height} — dropping frames until the sizes agree",
-                    self.path.display(),
+                    path.display(),
                     bytes.len(),
                     expected
                 );
@@ -565,10 +639,31 @@ pub fn view<'a, Message: 'a>(
     on_orbit: Option<OrbitHook<Message>>,
 ) -> Element<'a, Message> {
     Shader::new(Program {
-        path,
-        width,
-        height,
+        source: FrameSource::File {
+            path,
+            width,
+            height,
+        },
         on_orbit,
+    })
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
+/// Compose a producer-owned IOSurface through the same retained shader used by
+/// decoded video. The caller owns registry freshness and rebuilds the widget
+/// when a newer presentation timestamp or generation is accepted.
+pub fn external_view<'a, Message: 'a>(
+    descriptor: ExternalSurfaceDescriptor,
+    presented_at_unix_ns: u64,
+) -> Element<'a, Message> {
+    Shader::new(Program {
+        source: FrameSource::External {
+            descriptor,
+            presented_at_unix_ns,
+        },
+        on_orbit: None,
     })
     .width(Length::Fill)
     .height(Length::Fill)

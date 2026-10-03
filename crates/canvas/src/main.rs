@@ -33,6 +33,7 @@ use ::canvas::{
 use base64::Engine as _;
 use canvas_core::display_watch::{DisplayWatch, WatchStatus};
 use canvas_core::global_hotkey::{GlobalHotkey, HotkeySpec};
+use canvas_core::notification::Notification;
 use canvas_core::project_browser::{
     BrowserAction, BrowserModel, BrowserState, ManifestEntry, ProjectManifest,
 };
@@ -65,6 +66,7 @@ use unibus_media::CameraDetections;
 
 mod indicator;
 mod keyboard_input;
+mod notification;
 mod presence;
 use ::canvas::screensaver;
 use keyboard_input::*;
@@ -87,6 +89,14 @@ const MAX_PDF_PAGES: u32 = 10_000;
 /// Largest single-frame gap accepted by the screensaver delta-time clock.
 const MAX_SCREENSAVER_FRAME_DELTA: Duration = Duration::from_millis(250);
 const METRICS_REFRESH: Duration = Duration::from_secs(2);
+const NOTIFICATION_LIFETIME: Duration = Duration::from_secs(9);
+const MAX_VISIBLE_NOTIFICATIONS: usize = 4;
+
+#[derive(Debug, Clone)]
+struct TransientNotification {
+    notification: Notification,
+    shown_at: Instant,
+}
 #[cfg(feature = "lua-scenes")]
 const STREAM_FIRST_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(feature = "lua-scenes")]
@@ -212,15 +222,14 @@ enum ModuleSurface {
     Rendered {
         key: u64,
         scene: Scene,
+        /// A rejected reload never replaces the last valid scene.
+        last_error: Option<String>,
     },
     /// Why nothing is drawn, said on the surface.
     ///
     /// A module that failed to load and a widget with nothing in it are the same
     /// shape from across a room, and only one of them is a bug worth chasing.
-    Failed {
-        key: u64,
-        reason: String,
-    },
+    Failed { key: u64, reason: String },
 }
 
 #[cfg(feature = "lua-scenes")]
@@ -592,6 +601,22 @@ fn placement_surface_ids(layout: &Layout) -> Vec<String> {
     }
 }
 
+/// Resolve the one surface represented by a non-canvas layout.
+///
+/// Layout identity is authoritative. Focus is interaction state and can point
+/// at a surface parked on another page, so it must never decide what a
+/// `Surface` or `Stack` page renders.
+fn single_surface_id<'a>(layout: &'a Layout, focused: Option<&'a str>) -> Option<&'a str> {
+    match layout {
+        Layout::Surface { surface_id } => Some(surface_id),
+        Layout::Stack {
+            active_surface_id, ..
+        } => Some(active_surface_id),
+        Layout::Split { .. } => focused,
+        Layout::Empty | Layout::Canvas { .. } => None,
+    }
+}
+
 /// Recover the operational-view identity already encoded in materialized
 /// surface ids. This keeps restart state inferred from the document instead of
 /// persisting a second view-name field that could drift from its layout.
@@ -760,6 +785,7 @@ struct App {
     module_day: u32,
     shared_views: BTreeMap<String, SharedViewDocument>,
     indicators: BTreeMap<String, StatusIndicator>,
+    notifications: Vec<TransientNotification>,
     mesh: Option<MeshSnapshot>,
     presence: Option<PresenceSnapshot>,
     presence_received: Option<Instant>,
@@ -1200,6 +1226,7 @@ impl App {
             module_day: ::canvas::hud::local_parts(now_unix_ms()).day,
             shared_views: BTreeMap::new(),
             indicators: BTreeMap::new(),
+            notifications: Vec::new(),
             mesh: None,
             presence: None,
             presence_received: None,
@@ -1829,6 +1856,12 @@ impl App {
                 self.navigate_pdf(surface_id, target, None)
             }
             Message::Tick => {
+                let previous_notification_count = self.notifications.len();
+                self.notifications
+                    .retain(|item| item.shown_at.elapsed() < NOTIFICATION_LIFETIME);
+                if self.notifications.len() != previous_notification_count {
+                    self.bump();
+                }
                 if self
                     .focus_emphasis_started
                     .is_some_and(|started| started.elapsed() >= FOCUS_EMPHASIS_DURATION)
@@ -1852,8 +1885,9 @@ impl App {
                     }
                 }
                 let clock_second = now_unix_ms() / 1_000;
-                if clock_second != self.last_clock_second
-                    && self.document.surfaces.iter().any(|surface| {
+                if clock_second != self.last_clock_second {
+                    self.last_clock_second = clock_second;
+                    let has_clock = self.document.surfaces.iter().any(|surface| {
                         matches!(
                             surface.content,
                             SurfaceContent::Widget {
@@ -1863,9 +1897,15 @@ impl App {
                                 }
                             }
                         )
-                    })
-                {
-                    self.last_clock_second = clock_second;
+                    });
+                    #[cfg(feature = "lua-scenes")]
+                    if !self.modules.is_empty() {
+                        // One cheap digest poll per second makes authored UI
+                        // iterative without putting file I/O or a Lua VM on the
+                        // frame path.
+                        self.refresh_modules();
+                    }
+                    let _ = has_clock;
                 }
                 let clock_millis = now_unix_ms();
                 #[cfg(feature = "lua-scenes")]
@@ -2726,6 +2766,27 @@ impl App {
                 Err(error) => {
                     eprintln!("Canvas rejected task status: {error}");
                     self.emit_event(format!("task_status_rejected error={error}"));
+                }
+            }
+        }
+        let notification_events = events
+            .extract_if(.., |event| {
+                event.contract == canvas_core::notification::CONTRACT
+            })
+            .collect::<Vec<_>>();
+        for event in notification_events {
+            match serde_json::from_value::<Notification>(event.payload) {
+                Ok(notification) => {
+                    if let Err(error) = notification.validate() {
+                        eprintln!("Canvas rejected notification: {error}");
+                        self.emit_event(format!("notification_rejected error={error}"));
+                    } else {
+                        self.present_notification(notification);
+                    }
+                }
+                Err(error) => {
+                    eprintln!("Canvas rejected notification: {error}");
+                    self.emit_event(format!("notification_rejected error={error}"));
                 }
             }
         }
@@ -4578,6 +4639,18 @@ impl App {
                 );
                 Task::none()
             }
+            Command::ShowNotification { notification } => {
+                let notification_id = notification.id.clone();
+                self.present_notification(notification);
+                self.status = format!("Showing notification {notification_id}.");
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::NotificationShown { notification_id },
+                    },
+                );
+                Task::none()
+            }
             Command::SetMesh { mesh } => {
                 let node_count = mesh.nodes.len();
                 if self.mesh.as_ref() != Some(&mesh) {
@@ -5571,6 +5644,19 @@ impl App {
                 })
             }
         }
+    }
+
+    fn present_notification(&mut self, notification: Notification) {
+        self.notifications
+            .retain(|item| item.notification.id != notification.id);
+        self.notifications.push(TransientNotification {
+            notification,
+            shown_at: Instant::now(),
+        });
+        if self.notifications.len() > MAX_VISIBLE_NOTIFICATIONS {
+            self.notifications.remove(0);
+        }
+        self.bump();
     }
 
     fn refresh_terminal(&mut self) {
@@ -7226,7 +7312,16 @@ impl App {
             if let ContentSource::Widget { spec } = &surface.source
                 && let canvas_widgets::WidgetKind::Module { module, inputs } = &spec.kind
             {
-                let key = module_key(module, inputs, &visual, today.year, today.month, today.day);
+                let artifact_revision = module_artifact_revision(module);
+                let key = module_key(
+                    module,
+                    inputs,
+                    &visual,
+                    today.year,
+                    today.month,
+                    today.day,
+                    artifact_revision,
+                );
                 targets.push((id.clone(), module.clone(), inputs.clone(), key));
             }
         }
@@ -7236,13 +7331,24 @@ impl App {
                 continue;
             }
             let resolved = match resolve_module(&name, &inputs, theme, now_ms) {
-                Ok(scene) => ModuleSurface::Rendered { key, scene },
+                Ok(scene) => ModuleSurface::Rendered {
+                    key,
+                    scene,
+                    last_error: None,
+                },
                 Err(reason) => {
                     // Loud on the console as well as on the wall: this is the one
                     // failure mode where a silent fallback would look like a
                     // working widget.
                     eprintln!("Canvas module {name} on surface {id}: {reason}");
-                    ModuleSurface::Failed { key, reason }
+                    match self.modules.get(&id) {
+                        Some(ModuleSurface::Rendered { scene, .. }) => ModuleSurface::Rendered {
+                            key,
+                            scene: scene.clone(),
+                            last_error: Some(reason),
+                        },
+                        _ => ModuleSurface::Failed { key, reason },
+                    }
                 }
             };
             self.modules.insert(id, resolved);
@@ -7258,13 +7364,18 @@ impl App {
         let visual = self.presented_visual_theme();
         let palette = visual.palette;
         let metrics = visual.metrics;
-        // Only text nodes are renderable in 2D. Group/Mesh/Camera/Light nodes
-        // contribute transforms and still influence child text through the graph.
+        // Flat primitives are retained scene nodes. Group/Mesh/Camera/Light
+        // nodes contribute transforms without inventing a second layout owner.
         let mut sorted: Vec<usize> = scene
             .nodes
             .iter()
             .enumerate()
-            .filter(|(_, node)| matches!(node.content, NodeContent::Text { .. }))
+            .filter(|(_, node)| {
+                matches!(
+                    node.content,
+                    NodeContent::Text { .. } | NodeContent::Rect { .. }
+                )
+            })
             .map(|(index, _)| index)
             .collect();
         // Farther nodes draw first so closer ones appear on top.
@@ -7276,33 +7387,57 @@ impl App {
             .iter()
             .map(|&index| {
                 let node = &scene.nodes[index];
-                let NodeContent::Text { text: label, ink } = &node.content else {
-                    return container(text("")).into();
-                };
                 let parents = scene_parent_chain(index, &scene.nodes);
                 let (translation, _rotation, scale) =
                     scene_node_effective(index, &scene.nodes, &parents);
                 let [pos_x, pos_y] = scene_node_position(translation, viewport);
                 let z_scale = scene_node_scale(translation[2]);
-                // `scale` is the font-size dial, and it multiplies `body` rather
-                // than a literal: an authored grid at scale 1 must be exactly as
-                // large as every other body text on the wall, and it must move
-                // when the theme's type scale does. This replaced `* 24.0`.
-                let font_size = (scale[0] * scale[1] * metrics.body * z_scale).max(metrics.micro);
-                container(
-                    text(label.clone())
-                        .size(font_size)
-                        .color(color(scene_ink(*ink, &palette))),
-                )
-                .width(Length::Shrink)
-                .height(Length::Shrink)
-                .padding(iced::Padding {
-                    top: pos_y,
-                    right: 0.0,
-                    bottom: 0.0,
-                    left: pos_x,
-                })
-                .into()
+                let content: Element<'static, Message> = match &node.content {
+                    NodeContent::Text { text: label, ink } => {
+                        let font_size =
+                            (scale[0] * scale[1] * metrics.body * z_scale).max(metrics.micro);
+                        container(
+                            text(label.clone())
+                                .size(font_size)
+                                .color(color(scene_ink(*ink, &palette))),
+                        )
+                        .into()
+                    }
+                    NodeContent::Rect {
+                        ink,
+                        opacity,
+                        radius,
+                    } => {
+                        let width = (scale[0].abs() * viewport.width as f32 / 8.0).max(1.0);
+                        let height = (scale[1].abs() * viewport.height as f32 / 8.0).max(1.0);
+                        let mut fill = color(scene_ink(*ink, &palette));
+                        fill.a = *opacity;
+                        let radius = *radius;
+                        container(space::horizontal())
+                            .width(width)
+                            .height(height)
+                            .style(move |_| container::Style {
+                                background: Some(fill.into()),
+                                border: iced::Border {
+                                    radius: radius.into(),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            })
+                            .into()
+                    }
+                    _ => container(text("")).into(),
+                };
+                container(content)
+                    .width(Length::Shrink)
+                    .height(Length::Shrink)
+                    .padding(iced::Padding {
+                        top: pos_y,
+                        right: 0.0,
+                        bottom: 0.0,
+                        left: pos_x,
+                    })
+                    .into()
             })
             .collect();
         container(stack(children)).into()
@@ -7615,11 +7750,30 @@ impl App {
                 #[cfg(feature = "lua-scenes")]
                 if let canvas_widgets::WidgetKind::Module { .. } = &spec.kind {
                     return match self.modules.get(&surface.snapshot.id) {
-                        Some(ModuleSurface::Rendered { scene, .. }) => {
-                            container(self.scene_layer(scene, viewport))
+                        Some(ModuleSurface::Rendered {
+                            scene, last_error, ..
+                        }) => {
+                            let scene = container(self.scene_layer(scene, viewport))
+                                .width(Length::Fill)
+                                .height(Length::Fill);
+                            if let Some(error) = last_error {
+                                let visual = self.presented_visual_theme();
+                                let palette = visual.palette;
+                                stack![
+                                    scene,
+                                    container(
+                                        text(format!("RELOAD REJECTED · {error}"))
+                                            .size(visual.metrics.micro)
+                                            .color(color(palette.danger)),
+                                    )
+                                    .padding(visual.metrics.space_2),
+                                ]
                                 .width(width)
                                 .height(height)
                                 .into()
+                            } else {
+                                scene.width(width).height(height).into()
+                            }
                         }
                         Some(ModuleSurface::Failed { reason, .. }) => {
                             let metrics = self.presented_visual_theme().metrics;
@@ -8820,10 +8974,7 @@ impl App {
                     stack(surfaces).into()
                 }
             }
-            _ => self
-                .document
-                .focused_surface_id
-                .as_ref()
+            layout => single_surface_id(layout, self.document.focused_surface_id.as_deref())
                 .and_then(|id| self.decoded.get(id))
                 .map_or_else(
                     || {
@@ -9240,6 +9391,19 @@ impl App {
                         a: 0.94,
                         ..surface_color
                     },
+                    border: border_color,
+                    text: text_color,
+                    muted,
+                },
+            ));
+        }
+
+        if !self.notifications.is_empty() {
+            layers.push(notification::view(
+                &self.notifications,
+                NOTIFICATION_LIFETIME,
+                notification::NotificationPalette {
+                    panel: surface_color,
                     border: border_color,
                     text: text_color,
                     muted,
@@ -10543,10 +10707,12 @@ fn module_key(
     year: i32,
     month: u32,
     day: u32,
+    artifact_revision: u64,
 ) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     module.hash(&mut hasher);
+    artifact_revision.hash(&mut hasher);
     // Serialized rather than structurally hashed: a spec is the artifact an agent
     // authors and a person inspects, so byte equality is the honest key.
     serde_json::to_string(inputs)
@@ -10581,6 +10747,27 @@ fn module_key(
     hasher.finish()
 }
 
+/// Digest the two authored files that define a module. Missing/error states are
+/// hashed too, so installing or repairing a file changes the retained key and
+/// triggers a fresh candidate render on the next one-second poll.
+#[cfg(feature = "lua-scenes")]
+fn module_artifact_revision(name: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for extension in ["json", "lua"] {
+        let relative = PathBuf::from("modules").join(format!("{name}.{extension}"));
+        match ::canvas::runtime_config::read(
+            &relative,
+            ::canvas::stream_binding::MAX_ADAPTER_BYTES as u64,
+        ) {
+            Ok(Some(bytes)) => bytes.hash(&mut hasher),
+            Ok(None) => "missing".hash(&mut hasher),
+            Err(error) => error.to_string().hash(&mut hasher),
+        }
+    }
+    hasher.finish()
+}
+
 /// Run an authored module against its declared inputs and return its scene.
 ///
 /// Source and manifest are read from the Canvas runtime directory, disk-first,
@@ -10595,7 +10782,7 @@ fn resolve_module(
     theme: ::canvas::lua_module::ModuleThemeTokens,
     now_ms: u64,
 ) -> std::result::Result<Scene, String> {
-    use ::canvas::lua_module::{LuaModule, ModuleInputSnapshot, ModuleInputValue, ModuleManifest};
+    use ::canvas::lua_module::{LuaModule, ModuleInputSnapshot, ModuleManifest};
     use ::canvas::lua_scene::{LuaSceneCapabilities, LuaSceneLimits};
 
     let limit = ::canvas::stream_binding::MAX_ADAPTER_BYTES as u64;
@@ -11867,6 +12054,13 @@ fn background_redraw_interval() -> Duration {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if matches!(
+        std::env::args().nth(1).as_deref(),
+        Some("--version" | "_self-check")
+    ) {
+        println!("canvas {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if std::env::args_os().len() != 1 {
         return Err("canvas takes no commands; control it through its owner-local socket".into());
     }
@@ -11931,6 +12125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .subscription(|app| {
         let animated = app.visible_indicator_id.is_some()
+            || !app.notifications.is_empty()
             || app.presence_preview.is_some()
             || app.transition.is_some()
             || app.focus_emphasis_started.is_some();
@@ -15685,6 +15880,24 @@ mod tests {
         if let Some(parent) = app.workspace_store_path.parent() {
             let _ = std::fs::remove_dir_all(parent);
         }
+    }
+
+    #[test]
+    fn surface_page_identity_wins_over_stale_focus() {
+        let layout = Layout::Surface {
+            surface_id: "mesh".into(),
+        };
+        assert_eq!(single_surface_id(&layout, Some("daw")), Some("mesh"));
+        assert_eq!(single_surface_id(&layout, None), Some("mesh"));
+    }
+
+    #[test]
+    fn stack_page_uses_its_active_surface_without_focus() {
+        let layout = Layout::Stack {
+            surface_ids: vec!["daw".into(), "mesh".into()],
+            active_surface_id: "mesh".into(),
+        };
+        assert_eq!(single_surface_id(&layout, None), Some("mesh"));
     }
 
     #[test]

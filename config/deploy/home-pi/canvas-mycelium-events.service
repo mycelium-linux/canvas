@@ -1,0 +1,21 @@
+[Unit]
+Description=Present Mycelium MQTT events in Canvas
+After=network-online.target canvas-surface.service
+Wants=network-online.target canvas-surface.service
+
+[Service]
+Type=simple
+User=ajm
+Environment=HOME=/home/ajm
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+EnvironmentFile=-/etc/canvas/mycelium-mqtt.env
+ExecStart=/usr/local/bin/canvas-mycelium-events
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

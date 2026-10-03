@@ -15,6 +15,7 @@ pub mod quant;
 pub mod roster;
 
 pub const WIDGET_SCHEMA_VERSION: u32 = 2;
+pub const MAX_SPECTRAL_HISTORY_ROWS: usize = 1_024;
 const MAX_SPEC_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -187,6 +188,8 @@ pub const KNOWN_WIDGET_KINDS: &[&str] = &[
     "ticker",
     "gauge",
     "meter",
+    "daw_deck",
+    "mix_field",
     "histogram",
     "spectral_waterfall",
     "heatmap",
@@ -207,6 +210,9 @@ pub const KNOWN_WIDGET_KINDS: &[&str] = &[
     "rate_bars",
     "table",
     "event_log",
+    "social_feed",
+    "wiki_race_hud",
+    "wiki_race_trace",
     "status_list",
     "neural_graph",
     "network_topology",
@@ -217,6 +223,7 @@ pub const KNOWN_WIDGET_KINDS: &[&str] = &[
     "text",
     "module",
     "launcher",
+    "hyperspace_shader",
     "lyrics_display",
     "cdg_viewer",
 ];
@@ -302,6 +309,27 @@ pub enum WidgetKind {
         #[serde(default = "default_meter_style")]
         style: MeterStyle,
     },
+    /// Live studio transport with reel motion, piano-roll notes, and channel meters.
+    DawDeck {
+        title: String,
+        playing: bool,
+        paused: bool,
+        #[serde(default)]
+        recording: bool,
+        #[serde(default)]
+        bpm: Option<f64>,
+        position_ticks: u64,
+        cycle_ticks: u64,
+        tracks: Vec<DawTrack>,
+        notes: Vec<DawNote>,
+    },
+    /// Source energy positioned across the stereo field. Synesthesia owns the
+    /// measurements; Canvas only renders this bounded projection.
+    MixField {
+        title: String,
+        surface: String,
+        strips: Vec<MixFieldStrip>,
+    },
     /// Prometheus histogram buckets rendered as an operational distribution.
     Histogram {
         title: String,
@@ -320,6 +348,10 @@ pub enum WidgetKind {
         unit: Option<String>,
         #[serde(default = "default_waterfall_history")]
         history: usize,
+        /// Latest radio-domain frame metadata. Radioman owns these facts;
+        /// Canvas retains only the bounded projection needed to draw them.
+        #[serde(default)]
+        radio: Option<RadioSpectrumState>,
     },
     /// Dense row/column intensity matrix for latency, load, and correlation.
     Heatmap {
@@ -482,6 +514,47 @@ pub enum WidgetKind {
         #[serde(default = "default_true")]
         follow: bool,
     },
+    /// Rotating social posts rendered as readable cards rather than tabular rows.
+    SocialFeed {
+        title: String,
+        status: String,
+        #[serde(default)]
+        detail: Option<String>,
+        posts: Vec<SocialFeedPost>,
+        #[serde(default = "default_social_feed_rotate_seconds")]
+        rotate_seconds: u64,
+    },
+    /// Presentation projection for a deterministic wiki race.
+    ///
+    /// The race runner owns navigation and publishes snapshots. Canvas only
+    /// derives the two visible clocks and advertises opaque start/stop action
+    /// ids for the host to route; it never reaches into a browser session.
+    WikiRaceHud {
+        start_page: String,
+        target_page: String,
+        #[serde(default)]
+        clicks: u32,
+        status: WikiRaceStatus,
+        #[serde(default)]
+        started_at_ms: Option<i64>,
+        #[serde(default)]
+        finished_at_ms: Option<i64>,
+        /// Time already spent on presentation-only focus/hesitation holds.
+        #[serde(default)]
+        presentation_hold_ms: u64,
+        /// Beginning of a currently active presentation hold, when any.
+        #[serde(default)]
+        hold_started_at_ms: Option<i64>,
+        start_action: String,
+        stop_action: String,
+    },
+    /// Read-only structured execution trace from a wiki-race runner.
+    WikiRaceTrace {
+        title: String,
+        entries: Vec<WikiRaceTraceEntry>,
+        #[serde(default = "default_true")]
+        follow: bool,
+    },
     /// Compact health summary for nodes, agents, or DAG stages.
     ///
     /// Renamed from `node_summary` in schema version 2; old specs are
@@ -631,6 +704,156 @@ pub enum ClockMode {
     Analog,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum WikiRaceStatus {
+    #[default]
+    Ready,
+    Racing,
+    Holding,
+    Finished,
+    Stopped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WikiRaceTiming {
+    pub wall_ms: u64,
+    pub race_ms: u64,
+    pub final_time: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WikiRaceTraceEntry {
+    pub sequence: u64,
+    pub observed_at: String,
+    #[serde(default)]
+    pub selected_choice: Option<String>,
+    #[serde(default)]
+    pub destination_url: Option<String>,
+    #[serde(default)]
+    pub decision_ms: Option<u64>,
+    #[serde(default)]
+    pub navigation_ms: Option<u64>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+impl WikiRaceStatus {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Finished | Self::Stopped)
+    }
+}
+
+/// Derive display clocks from one race snapshot and the host's current time.
+/// Saturating arithmetic keeps a clock monotonic across skewed observations.
+pub fn wiki_race_timing(
+    status: WikiRaceStatus,
+    started_at_ms: Option<i64>,
+    finished_at_ms: Option<i64>,
+    presentation_hold_ms: u64,
+    hold_started_at_ms: Option<i64>,
+    now_ms: i64,
+) -> WikiRaceTiming {
+    let Some(started_at_ms) = started_at_ms else {
+        return WikiRaceTiming {
+            wall_ms: 0,
+            race_ms: 0,
+            final_time: false,
+        };
+    };
+    let final_time = status.is_terminal();
+    let end_ms = if final_time {
+        finished_at_ms.unwrap_or(now_ms)
+    } else {
+        now_ms
+    };
+    let wall_ms = end_ms.saturating_sub(started_at_ms) as u64;
+    let active_hold_ms = if matches!(status, WikiRaceStatus::Holding) {
+        hold_started_at_ms
+            .map(|hold| end_ms.saturating_sub(hold) as u64)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    WikiRaceTiming {
+        wall_ms,
+        race_ms: wall_ms.saturating_sub(presentation_hold_ms.saturating_add(active_hold_ms)),
+        final_time,
+    }
+}
+
+#[cfg(test)]
+mod wiki_race_timing_tests {
+    use super::*;
+
+    #[test]
+    fn live_race_clock_excludes_completed_and_active_presentation_holds() {
+        let timing = wiki_race_timing(
+            WikiRaceStatus::Holding,
+            Some(1_000),
+            None,
+            3_000,
+            Some(8_000),
+            11_000,
+        );
+        assert_eq!(timing.wall_ms, 10_000);
+        assert_eq!(timing.race_ms, 4_000);
+        assert!(!timing.final_time);
+    }
+
+    #[test]
+    fn completed_race_freezes_both_clocks() {
+        let timing = wiki_race_timing(
+            WikiRaceStatus::Finished,
+            Some(1_000),
+            Some(9_500),
+            1_500,
+            None,
+            30_000,
+        );
+        assert_eq!(timing.wall_ms, 8_500);
+        assert_eq!(timing.race_ms, 7_000);
+        assert!(timing.final_time);
+    }
+
+    #[test]
+    fn trace_contract_rejects_empty_and_out_of_order_entries() {
+        let spec = |entries| WidgetSpec {
+            schema_version: WIDGET_SCHEMA_VERSION,
+            id: "race-trace".into(),
+            kind: WidgetKind::WikiRaceTrace {
+                title: "Surf race trace".into(),
+                entries,
+                follow: true,
+            },
+            theme: None,
+            refresh_ms: None,
+            chrome: WidgetChrome::Integrated,
+            data: WidgetData::default(),
+        };
+        let entry = |sequence, choice: Option<&str>| WikiRaceTraceEntry {
+            sequence,
+            observed_at: "2026-10-02T21:42:00Z".into(),
+            selected_choice: choice.map(str::to_owned),
+            destination_url: None,
+            decision_ms: Some(24),
+            navigation_ms: None,
+            error: None,
+        };
+
+        assert!(spec(vec![entry(1, Some("The Matrix"))]).validate().is_ok());
+        assert!(spec(vec![entry(1, None)]).validate().is_err());
+        assert!(
+            spec(vec![entry(2, Some("first")), entry(1, Some("second"))])
+                .validate()
+                .is_err()
+        );
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -664,6 +887,8 @@ pub enum WidgetMutation {
     },
     SpectralFrame {
         bins: Vec<f32>,
+        #[serde(default)]
+        radio: Option<RadioSpectrumState>,
     },
     /// Replace only a widget's bounded, typed data payload. Layout, identity,
     /// theme and chrome remain owned by the saved Canvas view.
@@ -672,6 +897,33 @@ pub enum WidgetMutation {
         #[serde(default)]
         data: WidgetData,
     },
+}
+
+/// Narrow presentation projection of a radio spectrum frame.
+///
+/// This deliberately contains no device, tuning, or session commands. Those
+/// belong to Radioman; Canvas only needs enough state to render the instrument.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RadioSpectrumState {
+    pub schema_version: u32,
+    pub session_id: String,
+    pub generation: u64,
+    pub sequence: u64,
+    pub observed_at_ms: i64,
+    pub center_frequency_hz: f64,
+    pub span_hz: f64,
+    pub floor_dbfs: f32,
+    pub ceiling_dbfs: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gain_db: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ends_at_ms: Option<i64>,
 }
 
 /// A paced step in a Canvas briefing presentation.
@@ -853,7 +1105,11 @@ impl WidgetSpec {
             // Incoming FFT rows move independently of clocks and other widgets.
             // A modest cadence keeps the waterfall flowing without asking the
             // host for display-rate frames.
-            WidgetKind::SpectralWaterfall { .. } => Some(80),
+            WidgetKind::SpectralWaterfall { .. } => Some(40),
+            WidgetKind::WikiRaceHud {
+                status: WikiRaceStatus::Racing | WikiRaceStatus::Holding,
+                ..
+            } => Some(40),
             _ => None,
         }
     }
@@ -864,15 +1120,21 @@ impl WidgetSpec {
                 widget.apply(mutation)?;
             }
             (
-                WidgetKind::SpectralWaterfall { rows, history, .. },
-                WidgetMutation::SpectralFrame { bins },
+                WidgetKind::SpectralWaterfall {
+                    rows,
+                    history,
+                    radio: current_radio,
+                    ..
+                },
+                WidgetMutation::SpectralFrame { bins, radio },
             ) => {
+                let valid_width = if radio.is_some() { 64..=4096 } else { 8..=1024 };
                 check(
-                    (8..=1024).contains(&bins.len())
+                    valid_width.contains(&bins.len())
                         && bins
                             .iter()
                             .all(|value| value.is_finite() && (0.0..=1.0).contains(value)),
-                    "spectral frame requires 8-1024 normalized bins",
+                    "spectral frame requires 64-4096 Radioman bins or 8-1024 legacy bins",
                 )?;
                 check(
                     rows.first().is_none_or(|row| row.len() == bins.len()),
@@ -882,6 +1144,14 @@ impl WidgetSpec {
                 if rows.len() > *history {
                     rows.drain(..rows.len() - *history);
                 }
+                if radio.is_some() {
+                    *current_radio = radio;
+                }
+                // A validated frame is the authoritative readiness signal.
+                // Leaving the initial loading state intact hides real rows
+                // behind the host's loading presentation forever.
+                self.data.state = WidgetDataState::Ready;
+                self.data.detail = None;
             }
             (current, WidgetMutation::Snapshot { widget, data })
                 if same_widget_kind(current, &widget) =>
@@ -953,7 +1223,11 @@ mod mutation_tests {
             theme: Some("project".into()),
             refresh_ms: Some(1_000),
             chrome: WidgetChrome::DragOnly,
-            data: WidgetData::default(),
+            data: WidgetData {
+                state: WidgetDataState::Loading,
+                detail: Some("Awaiting RF frames".into()),
+                ..Default::default()
+            },
         }
     }
 
@@ -1009,6 +1283,7 @@ mod mutation_tests {
                 max_frequency: 108.0,
                 unit: Some("MHz".into()),
                 history: 8,
+                radio: None,
             },
             theme: None,
             refresh_ms: None,
@@ -1018,6 +1293,7 @@ mod mutation_tests {
         for frame in 0..10 {
             spec.apply_mutation(WidgetMutation::SpectralFrame {
                 bins: vec![frame as f32 / 10.0; 8],
+                radio: None,
             })
             .unwrap();
         }
@@ -1027,6 +1303,8 @@ mod mutation_tests {
         assert_eq!(rows.len(), 8);
         assert_eq!(rows[0][0], 0.2);
         assert_eq!(rows[7][0], 0.9);
+        assert_eq!(spec.data.state, WidgetDataState::Ready);
+        assert_eq!(spec.data.detail, None);
     }
 
     #[test]
@@ -1447,6 +1725,65 @@ pub struct EventEntry {
     pub level: StatusLevel,
 }
 
+fn default_social_feed_rotate_seconds() -> u64 {
+    8
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SocialFeedPost {
+    pub id: String,
+    pub author: String,
+    pub text: String,
+    pub age: String,
+    pub engagement: u64,
+    #[serde(default)]
+    pub matches: Vec<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DawTrack {
+    pub label: String,
+    pub level: f32,
+    #[serde(default)]
+    pub clipping: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MixFieldStrip {
+    pub index: usize,
+    pub cc: u8,
+    pub label: String,
+    pub gain: f32,
+    pub active: bool,
+    pub peak: f32,
+    pub stereo_position: f32,
+    pub left_peak: f32,
+    pub right_peak: f32,
+    /// Optional normalized low-to-high frequency energy, populated by a
+    /// separate analyzer rather than the real-time mixer.
+    #[serde(default)]
+    pub bands: Vec<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DawNote {
+    pub track: String,
+    pub tick: u64,
+    pub length_ticks: u64,
+    pub note: u8,
+    pub velocity: u8,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1463,6 +1800,10 @@ pub struct NodeSummaryItem {
 pub struct NeuralNode {
     pub id: String,
     pub label: String,
+    /// Secondary facts shown on focus/hover instead of permanently painted
+    /// over dense graphs.
+    #[serde(default)]
+    pub detail: Option<String>,
     #[serde(default)]
     pub group: Option<String>,
     /// Host-computed recency, from idle (0) to just fired (1).
@@ -1479,6 +1820,9 @@ pub struct NeuralEdge {
     pub to: String,
     /// Host-computed recency, from idle (0) to just traversed (1).
     pub heat: f32,
+    /// Measured live activity on this edge. Zero means no animated traffic.
+    #[serde(default)]
+    pub activity: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1642,7 +1986,8 @@ fn validate_graph(
                 && ids.insert(node.id.as_str()),
             &format!("{label} graph nodes require unique, bounded IDs"),
         )?;
-        bounded_label(&node.label, &format!("{label} graph node label"))?;
+        bounded_graph_label(&node.label, &format!("{label} graph node label"))?;
+        optional_bounded_text(&node.detail, &format!("{label} graph node detail"), 512)?;
         optional_label(&node.group, &format!("{label} graph node group"))?;
         check(
             node.heat.is_finite() && (0.0..=1.0).contains(&node.heat),
@@ -1657,9 +2002,11 @@ fn validate_graph(
                 && edge.from != edge.to
                 && pairs.insert((edge.from.as_str(), edge.to.as_str()))
                 && edge.heat.is_finite()
-                && (0.0..=1.0).contains(&edge.heat),
+                && (0.0..=1.0).contains(&edge.heat)
+                && edge.activity.is_finite()
+                && (0.0..=1024.0).contains(&edge.activity),
             &format!(
-                "{label} graph edges require distinct known nodes, unique pairs, and heat within 0..1"
+                "{label} graph edges require distinct known nodes, unique pairs, heat within 0..1, and bounded activity"
             ),
         )?;
     }
@@ -1915,6 +2262,82 @@ impl WidgetSpec {
                 value.is_finite() && (0.0..=1.0).contains(value),
                 "meter value must be finite within 0..1",
             )?,
+            WidgetKind::DawDeck {
+                title,
+                bpm,
+                position_ticks,
+                cycle_ticks,
+                tracks,
+                notes,
+                ..
+            } => {
+                bounded_label(title, "DAW deck title")?;
+                check(
+                    bpm.is_none_or(|value| value.is_finite() && (20.0..=300.0).contains(&value)),
+                    "DAW deck BPM must be 20..300",
+                )?;
+                check(*cycle_ticks > 0, "DAW deck cycle must be non-zero")?;
+                check(
+                    *position_ticks < *cycle_ticks,
+                    "DAW deck position exceeds cycle",
+                )?;
+                check(
+                    !tracks.is_empty() && tracks.len() <= 32,
+                    "DAW deck requires 1-32 tracks",
+                )?;
+                check(notes.len() <= 256, "DAW deck exceeds 256 notes")?;
+                for track in tracks {
+                    bounded_label(&track.label, "DAW track label")?;
+                    check(
+                        track.level.is_finite() && (0.0..=1.0).contains(&track.level),
+                        "DAW track level must be within 0..1",
+                    )?;
+                }
+                for note in notes {
+                    bounded_label(&note.track, "DAW note track")?;
+                    check(
+                        note.note <= 127 && note.velocity <= 127 && note.length_ticks > 0,
+                        "DAW note is invalid",
+                    )?;
+                    check(note.tick < *cycle_ticks, "DAW note starts outside cycle")?;
+                }
+            }
+            WidgetKind::MixField {
+                title,
+                surface,
+                strips,
+            } => {
+                bounded_label(title, "mix field title")?;
+                bounded_label(surface, "mix field surface")?;
+                check(
+                    !strips.is_empty() && strips.len() <= 8,
+                    "mix field requires 1-8 strips",
+                )?;
+                for strip in strips {
+                    bounded_label(&strip.label, "mix field strip label")?;
+                    check(
+                        strip.index > 0 && strip.index <= 8,
+                        "mix field strip index must be 1-8",
+                    )?;
+                    check(strip.cc <= 127, "mix field CC must be MIDI-safe")?;
+                    check(
+                        [strip.gain, strip.peak, strip.left_peak, strip.right_peak]
+                            .into_iter()
+                            .all(|value| value.is_finite() && (0.0..=2.0).contains(&value))
+                            && strip.stereo_position.is_finite()
+                            && (-1.0..=1.0).contains(&strip.stereo_position),
+                        "mix field levels and stereo position must be finite and bounded",
+                    )?;
+                    check(
+                        strip.bands.len() <= 64
+                            && strip
+                                .bands
+                                .iter()
+                                .all(|value| value.is_finite() && (0.0..=1.0).contains(value)),
+                        "mix field exceeds 64 normalized bands",
+                    )?;
+                }
+            }
             WidgetKind::Histogram {
                 title,
                 buckets,
@@ -1942,6 +2365,7 @@ impl WidgetSpec {
                 max_frequency,
                 unit,
                 history,
+                radio,
             } => {
                 bounded_label(title, "spectral waterfall title")?;
                 optional_label(unit, "spectral waterfall unit")?;
@@ -1952,8 +2376,8 @@ impl WidgetSpec {
                     "spectral waterfall requires finite increasing frequency bounds",
                 )?;
                 check(
-                    (8..=256).contains(history),
-                    "spectral waterfall history must be within 8-256 rows",
+                    (8..=MAX_SPECTRAL_HISTORY_ROWS).contains(history),
+                    "spectral waterfall history must be within 8-1024 rows",
                 )?;
                 check(
                     rows.len() <= *history,
@@ -1961,7 +2385,7 @@ impl WidgetSpec {
                 )?;
                 if let Some(width) = rows.first().map(Vec::len) {
                     check(
-                        (8..=1024).contains(&width)
+                        (8..=4096).contains(&width)
                             && rows.iter().all(|row| {
                                 row.len() == width
                                     && row.iter().all(|value| {
@@ -1969,6 +2393,21 @@ impl WidgetSpec {
                                     })
                             }),
                         "spectral waterfall rows require 8-1024 equal normalized bins",
+                    )?;
+                }
+                if let Some(radio) = radio {
+                    check(
+                        radio.schema_version == 1
+                            && !radio.session_id.is_empty()
+                            && radio.session_id.len() <= 128
+                            && radio.center_frequency_hz.is_finite()
+                            && radio.center_frequency_hz > 0.0
+                            && radio.span_hz.is_finite()
+                            && radio.span_hz > 0.0
+                            && radio.floor_dbfs.is_finite()
+                            && radio.ceiling_dbfs.is_finite()
+                            && radio.floor_dbfs < radio.ceiling_dbfs,
+                        "radio spectrum metadata is invalid",
                     )?;
                 }
             }
@@ -2472,6 +2911,106 @@ impl WidgetSpec {
                     "event log entry is too large",
                 )?;
             }
+            WidgetKind::SocialFeed {
+                title,
+                status,
+                detail,
+                posts,
+                rotate_seconds,
+            } => {
+                bounded_label(title, "social feed title")?;
+                bounded_label(status, "social feed status")?;
+                optional_label(detail, "social feed detail")?;
+                check(
+                    (3..=300).contains(rotate_seconds),
+                    "social feed rotation must be 3-300 seconds",
+                )?;
+                check(posts.len() <= 64, "social feed exceeds 64 posts")?;
+                for post in posts {
+                    check(
+                        !post.id.is_empty() && post.id.len() <= 512,
+                        "social post id is invalid",
+                    )?;
+                    bounded_label(&post.author, "social post author")?;
+                    check(
+                        post.text.len() <= MAX_INPUT_TEXT_BYTES,
+                        "social post text is too large",
+                    )?;
+                    bounded_label(&post.age, "social post age")?;
+                    check(post.matches.len() <= 16, "social post has too many matches")?;
+                }
+            }
+            WidgetKind::WikiRaceHud {
+                start_page,
+                target_page,
+                status,
+                started_at_ms,
+                finished_at_ms,
+                presentation_hold_ms,
+                hold_started_at_ms,
+                start_action,
+                stop_action,
+                ..
+            } => {
+                bounded_label(start_page, "wiki race start page")?;
+                bounded_label(target_page, "wiki race target page")?;
+                bounded_label(start_action, "wiki race start action")?;
+                bounded_label(stop_action, "wiki race stop action")?;
+                check(start_page != target_page, "wiki race pages must differ")?;
+                check(
+                    matches!(status, WikiRaceStatus::Ready) == started_at_ms.is_none(),
+                    "only a ready wiki race may omit started_at_ms",
+                )?;
+                check(
+                    status.is_terminal() == finished_at_ms.is_some(),
+                    "terminal wiki race status and finished_at_ms must agree",
+                )?;
+                check(
+                    matches!(status, WikiRaceStatus::Holding) == hold_started_at_ms.is_some(),
+                    "wiki race hold status and hold_started_at_ms must agree",
+                )?;
+                if let (Some(start), Some(finish)) = (started_at_ms, finished_at_ms) {
+                    check(finish >= start, "wiki race cannot finish before it starts")?;
+                    check(
+                        *presentation_hold_ms <= finish.saturating_sub(*start) as u64,
+                        "wiki race holds cannot exceed elapsed time",
+                    )?;
+                }
+            }
+            WidgetKind::WikiRaceTrace { title, entries, .. } => {
+                bounded_label(title, "wiki race trace title")?;
+                check(entries.len() <= 256, "wiki race trace exceeds 256 entries")?;
+                let mut previous_sequence = None;
+                for entry in entries {
+                    bounded_label(&entry.observed_at, "wiki race trace observed time")?;
+                    optional_bounded_text(
+                        &entry.selected_choice,
+                        "wiki race selected choice",
+                        MAX_INPUT_TEXT_BYTES,
+                    )?;
+                    optional_bounded_text(
+                        &entry.destination_url,
+                        "wiki race destination URL",
+                        MAX_INPUT_TEXT_BYTES,
+                    )?;
+                    optional_bounded_text(
+                        &entry.error,
+                        "wiki race trace error",
+                        MAX_INPUT_TEXT_BYTES,
+                    )?;
+                    check(
+                        entry.selected_choice.is_some()
+                            || entry.destination_url.is_some()
+                            || entry.error.is_some(),
+                        "wiki race trace entry must carry a choice, destination, or error",
+                    )?;
+                    check(
+                        previous_sequence.is_none_or(|previous| entry.sequence > previous),
+                        "wiki race trace sequences must increase",
+                    )?;
+                    previous_sequence = Some(entry.sequence);
+                }
+            }
             WidgetKind::StatusList { title, nodes } => {
                 bounded_label(title, "node summary title")?;
                 check(nodes.len() <= 256, "node summary exceeds 256 nodes")?;
@@ -2500,7 +3039,8 @@ impl WidgetSpec {
                             && ids.insert(node.id.as_str()),
                         "neural graph nodes require unique, bounded IDs",
                     )?;
-                    bounded_label(&node.label, "neural graph node label")?;
+                    bounded_graph_label(&node.label, "neural graph node label")?;
+                    optional_bounded_text(&node.detail, "neural graph node detail", 512)?;
                     optional_label(&node.group, "neural graph node group")?;
                     check(
                         node.heat.is_finite() && (0.0..=1.0).contains(&node.heat),
@@ -2515,8 +3055,10 @@ impl WidgetSpec {
                             && edge.from != edge.to
                             && pairs.insert((edge.from.as_str(), edge.to.as_str()))
                             && edge.heat.is_finite()
-                            && (0.0..=1.0).contains(&edge.heat),
-                        "neural graph edges require distinct known nodes, unique pairs, and heat within 0..1",
+                            && (0.0..=1.0).contains(&edge.heat)
+                            && edge.activity.is_finite()
+                            && (0.0..=1024.0).contains(&edge.activity),
+                        "neural graph edges require distinct known nodes, unique pairs, heat within 0..1, and bounded activity",
                     )?;
                 }
             }
@@ -2817,6 +3359,13 @@ fn bounded_label(value: &str, name: &str) -> Result<()> {
     )
 }
 
+fn bounded_graph_label(value: &str, name: &str) -> Result<()> {
+    check(
+        value.len() <= 128,
+        &format!("{name} must contain at most 128 bytes"),
+    )
+}
+
 fn optional_label(value: &Option<String>, name: &str) -> Result<()> {
     if let Some(value) = value {
         bounded_label(value, name)
@@ -2992,8 +3541,12 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
         WidgetKind::RichCard { .. }
         | WidgetKind::ApprovalCard { .. }
         | WidgetKind::CommandPalette { .. } => SizeHint::new(280.0, 180.0, 520.0, 360.0, 1.5),
-        WidgetKind::MediaTransport { .. } | WidgetKind::ModelTelemetry { .. } => {
-            SizeHint::new(280.0, 180.0, 540.0, 340.0, 1.8)
+        WidgetKind::MediaTransport { .. }
+        | WidgetKind::ModelTelemetry { .. }
+        | WidgetKind::WikiRaceHud { .. } => SizeHint::new(280.0, 180.0, 540.0, 340.0, 1.8),
+        WidgetKind::WikiRaceTrace { .. } => SizeHint::new(300.0, 140.0, 600.0, 260.0, 2.4),
+        WidgetKind::DawDeck { .. } | WidgetKind::MixField { .. } => {
+            SizeHint::new(420.0, 260.0, 760.0, 520.0, 1.2)
         }
         WidgetKind::SpanTimeline { .. } => SizeHint::new(300.0, 160.0, 600.0, 320.0, 2.4),
         // A cell smaller than this is a colour with no shape; four rows is the
@@ -3017,6 +3570,9 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
         WidgetKind::Table { .. } | WidgetKind::EventLog { .. } | WidgetKind::StatusList { .. } => {
             let row = metrics.small * 1.6;
             SizeHint::new(240.0, row * 4.0 + chrome, 420.0, row * 8.0 + chrome, 1.8)
+        }
+        WidgetKind::SocialFeed { .. } => {
+            SizeHint::new(320.0, 260.0 + chrome, 720.0, 620.0 + chrome, 1.4)
         }
         WidgetKind::NeuralGraph { .. }
         | WidgetKind::NetworkTopology { .. }
@@ -3107,6 +3663,7 @@ mod tests {
                 max_frequency: 108.0,
                 unit: Some("MHz".into()),
                 history: 96,
+                radio: None,
             },
             WidgetKind::RankedBar {
                 title: "t".into(),
@@ -3267,11 +3824,27 @@ mod tests {
                 paused: false,
                 follow: true,
             },
+            WidgetKind::SocialFeed {
+                title: "Social".into(),
+                status: "healthy".into(),
+                detail: None,
+                posts: vec![SocialFeedPost {
+                    id: "at://did:plc:test/app.bsky.feed.post/one".into(),
+                    author: "test.example".into(),
+                    text: "A real post".into(),
+                    age: "now".into(),
+                    engagement: 3,
+                    matches: vec!["topic".into()],
+                    url: None,
+                }],
+                rotate_seconds: 8,
+            },
             WidgetKind::NeuralGraph {
                 title: "Neural activity".into(),
                 nodes: vec![NeuralNode {
                     id: "gateway".into(),
                     label: "Gateway".into(),
+                    detail: None,
                     group: Some("control".into()),
                     heat: 1.0,
                     state: StatusLevel::Good,

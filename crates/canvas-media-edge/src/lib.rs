@@ -77,6 +77,10 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
             argv.extend([
                 "udpsrc".into(),
                 format!("port={port}"),
+                // Absorb short scheduler bursts without permitting an
+                // application-level backlog. The sink below remains the
+                // latency boundary and drops frames that miss it.
+                "buffer-size=2097152".into(),
                 "caps=video/mpegts,systemstream=(boolean)true,packetsize=(int)188".into(),
                 "!".into(),
                 "tsdemux".into(),
@@ -169,7 +173,12 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
         "!".into(),
         "fdsink".into(),
         "fd=1".into(),
-        "sync=false".into(),
+        // Pace variable-arrival live streams against their PTS. A frame more
+        // than 100 ms late is less useful to an interactive surface than the
+        // newest frame, so let BaseSink drop it instead of growing jitter.
+        "sync=true".into(),
+        "qos=true".into(),
+        "max-lateness=100000000".into(),
     ]);
     Ok(RawVideoPlan {
         width,
@@ -644,6 +653,10 @@ mod tests {
         assert_eq!(visible.len(), 852 * 480 * 4);
         assert!(visible.iter().all(|byte| *byte == 7));
         assert!(plan.argv.iter().any(|arg| arg == "v4l2h264dec"));
+        assert!(plan.argv.iter().any(|arg| arg == "buffer-size=2097152"));
+        assert!(plan.argv.iter().any(|arg| arg == "sync=true"));
+        assert!(plan.argv.iter().any(|arg| arg == "qos=true"));
+        assert!(plan.argv.iter().any(|arg| arg == "max-lateness=100000000"));
         // Colour conversion belongs in hardware alongside the decode. It was
         // measured at 29.8% of a Pi core in videoconvert against 7.1% in
         // v4l2convert for one 704x480 RGBA stream, and the Pi runs eleven.

@@ -1166,6 +1166,70 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn wiki_race_module_composes_hud_and_trace_from_shared_primitives() {
+        let manifest =
+            ModuleManifest::parse(include_str!("../../../config/modules/wiki-race-v1.json"))
+                .unwrap();
+        let snapshot = ModuleInputSnapshot {
+            revision: 1,
+            now_ms: TEST_NOW_MS,
+            values: BTreeMap::from([
+                (
+                    "start".into(),
+                    ModuleInputValue::Text("Kevin Costner".into()),
+                ),
+                (
+                    "target".into(),
+                    ModuleInputValue::Text("Nebuchadnezzar".into()),
+                ),
+                (
+                    "status".into(),
+                    ModuleInputValue::Status {
+                        level: StatusLevel::Good,
+                        label: "RACING".into(),
+                    },
+                ),
+                ("clicks".into(), ModuleInputValue::Number(4.0)),
+                (
+                    "raceclock".into(),
+                    ModuleInputValue::Text("00:12.34".into()),
+                ),
+                (
+                    "wallclock".into(),
+                    ModuleInputValue::Text("00:13.02".into()),
+                ),
+                (
+                    "trace".into(),
+                    ModuleInputValue::Text("The Matrix|Science fiction".into()),
+                ),
+            ]),
+        };
+        let module = LuaModule::load(
+            manifest,
+            include_str!("../../../config/modules/wiki-race-v1.lua"),
+            snapshot,
+            theme(),
+            BTreeMap::new(),
+            LuaSceneCapabilities::default(),
+            LuaSceneLimits::default(),
+        )
+        .unwrap();
+
+        assert!(
+            module
+                .retained()
+                .scene
+                .nodes
+                .iter()
+                .any(|node| matches!(node.content, super::super::NodeContent::Rect { .. }))
+        );
+        assert!(module.retained().scene.nodes.iter().any(|node| matches!(
+            &node.content,
+            super::super::NodeContent::Text { text, .. } if text == "Nebuchadnezzar"
+        )));
+    }
+
     fn activity_graph() -> GraphSnapshot {
         GraphSnapshot {
             nodes: vec![

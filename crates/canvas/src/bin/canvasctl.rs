@@ -1,13 +1,15 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read};
 use std::process::id;
 
 use canvas::control::{
-    self, CONTROL_VERSION, Command, ControlReply, ControlRequest, ErrorCode, Outcome, Receipt, text,
+    self, CONTROL_VERSION, Command, ControlReply, ControlRequest, ErrorCode, Outcome,
+    ProjectWorkspaceSpec, Receipt, text,
 };
 use canvas::{
-    Background, Layout, SCHEMA_VERSION, Surface, SurfaceChrome, SurfaceContent, SurfaceTitleMode,
-    ThemeRef, WorkspaceDocument, WorkspacePatch,
+    Background, Layout, NormalizedRect, Placement, SCHEMA_VERSION, Surface, SurfaceChrome,
+    SurfaceContent, SurfaceTitleMode, ThemeRef, WorkspaceDocument, WorkspacePatch,
     compose::{self, LayoutMode},
 };
 
@@ -18,6 +20,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if input.is_empty() {
         eprintln!("usage: echo 'inspect' | canvasctl");
+        eprintln!("       echo 'surfaces' | canvasctl");
+        eprintln!("       echo 'workspace create wikiracing' | canvasctl");
+        eprintln!("       echo 'surface add-live-video surf-browser surf-tv 1280 720' | canvasctl");
+        eprintln!("       echo 'surface center surf-browser 0.70' | canvasctl");
         eprintln!("       echo 'focus\\nbg dock' | canvasctl");
         eprintln!("       echo 'move 0 25 1920 1150' | canvasctl");
         eprintln!("       echo 'indicator status speaking \"Socket live\"' | canvasctl");
@@ -71,6 +77,9 @@ fn handle_line(line: &str) -> Result<(), String> {
     if tokens[0] == "patch" {
         return handle_patch(&tokens);
     }
+    if tokens[0] == "surfaces" {
+        return handle_surfaces(&tokens);
+    }
     if tokens[0] == "doc" {
         return handle_doc(&tokens);
     }
@@ -97,6 +106,9 @@ fn handle_line(line: &str) -> Result<(), String> {
     }
     if tokens[0] == "workspace" {
         return handle_workspace(&tokens);
+    }
+    if tokens[0] == "surface" {
+        return handle_surface(&tokens);
     }
     if tokens[0] == "catalog" {
         return handle_catalog(&tokens);
@@ -165,6 +177,87 @@ fn handle_line(line: &str) -> Result<(), String> {
         Err(e) => println!("ERR {e}"),
     }
     Ok(())
+}
+
+fn handle_surfaces(tokens: &[String]) -> Result<(), String> {
+    if tokens.len() != 1 {
+        return Err("usage: surfaces".into());
+    }
+    let request = ControlRequest {
+        schema_version: CONTROL_VERSION,
+        request_id: format!("surfaces-{}", id()),
+        expected_revision: None,
+        actor: None,
+        command: Command::ReadDocument,
+    };
+    let reply = control::send(&request)?;
+    let Outcome::Ok {
+        receipt: Receipt::DocumentSnapshot { document, snapshot },
+    } = &reply.outcome
+    else {
+        return Err(format_reply_error(&reply));
+    };
+
+    println!(
+        "Canvas {}x{} at {},{} · {} surfaces · document rev {} · runtime rev {}",
+        snapshot.frame.width,
+        snapshot.frame.height,
+        snapshot.frame.x,
+        snapshot.frame.y,
+        document.surfaces.len(),
+        document.revision,
+        snapshot.revision
+    );
+    for surface in &document.surfaces {
+        let bounds = snapshot.surface_bounds.get(&surface.id);
+        let frame = bounds.map_or_else(
+            || "not placed".to_owned(),
+            |value| {
+                format!(
+                    "{}x{} at {},{}",
+                    value.width, value.height, value.x, value.y
+                )
+            },
+        );
+        let mut state = Vec::new();
+        if document.focused_surface_id.as_deref() == Some(surface.id.as_str()) {
+            state.push("focused");
+        }
+        if snapshot.minimized_surface_ids.contains(&surface.id) {
+            state.push("minimized");
+        }
+        if snapshot.maximized_surface_ids.contains(&surface.id) {
+            state.push("maximized");
+        }
+        let state = if state.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", state.join(","))
+        };
+        println!(
+            "{:<24} {:<12} {:<24} {}{}",
+            surface.id,
+            surface.content.kind_tag(),
+            surface_source(&surface.content),
+            frame,
+            state
+        );
+    }
+    Ok(())
+}
+
+fn surface_source(content: &SurfaceContent) -> String {
+    match content {
+        SurfaceContent::ProjectResource { resource_id }
+        | SurfaceContent::Terminal { resource_id } => resource_id.clone(),
+        SurfaceContent::LiveImage { source_id } | SurfaceContent::LiveVideo { source_id, .. } => {
+            source_id.clone()
+        }
+        SurfaceContent::Stream { url } => url.clone(),
+        SurfaceContent::Widget { spec } => spec.id.clone(),
+        SurfaceContent::Prompt { target, .. } => target.clone(),
+        _ => "-".into(),
+    }
 }
 
 fn handle_manifest(tokens: &[String]) -> Result<(), String> {
@@ -250,9 +343,10 @@ fn handle_catalog(tokens: &[String]) -> Result<(), String> {
     send_mutation(Command::ApplyDocument { document })
 }
 
-/// Six widgets remain legible on the smallest supported 1280x720 Canvas.
-/// A catalog is a visual inspection surface, not an index thumbnail sheet.
-const CATALOG_PAGE_SIZE: usize = 6;
+/// The TV catalog is an index wall: 24 specimens fill a 6x4 grid at 1280x720.
+/// Individual widgets can still be focused when they need close inspection.
+const CATALOG_PAGE_SIZE: usize = 24;
+const CATALOG_COLUMNS: u32 = 6;
 
 fn catalog_document(directory: &str, page: usize) -> Result<WorkspaceDocument, String> {
     if page == 0 {
@@ -299,7 +393,7 @@ fn catalog_document(directory: &str, page: usize) -> Result<WorkspaceDocument, S
     let first = (page - 1) * CATALOG_PAGE_SIZE;
     let last = (first + CATALOG_PAGE_SIZE).min(all_ids.len());
     let ids = &all_ids[first..last];
-    let columns = if ids.len() <= 2 { ids.len() as u32 } else { 3 };
+    let columns = (ids.len() as u32).min(CATALOG_COLUMNS);
     let rows = (ids.len() as u32).div_ceil(columns.max(1));
     Ok(WorkspaceDocument {
         pages: Vec::new(),
@@ -563,6 +657,8 @@ struct DocumentState {
     focused: Option<String>,
     workspace_id: String,
     chrome: SurfaceChrome,
+    frame: canvas_core::layout::Rect,
+    surface_aspects: BTreeMap<String, f32>,
 }
 
 fn handle_open_terminal(tokens: &[String]) -> Result<(), String> {
@@ -581,10 +677,49 @@ fn handle_open_terminal(tokens: &[String]) -> Result<(), String> {
 fn handle_workspace(tokens: &[String]) -> Result<(), String> {
     if tokens.len() < 2 {
         return Err(
-            "usage: workspace save <name> | workspace switch <name> | workspace list".into(),
+            "usage: workspace create <name> | workspace save <name> | workspace switch <name> | workspace list".into(),
         );
     }
     match tokens[1].as_str() {
+        "create" => {
+            if tokens.len() != 3 {
+                return Err("usage: workspace create <project-id>".into());
+            }
+            let project_id = tokens[2].clone();
+            let inspect = send_read(Command::Inspect)?;
+            let Outcome::Ok {
+                receipt: Receipt::Snapshot { snapshot },
+            } = inspect.outcome
+            else {
+                return Err(format_reply_error(&inspect));
+            };
+            let mut projects = snapshot
+                .workspace_summaries
+                .into_iter()
+                .map(|workspace| ProjectWorkspaceSpec {
+                    project_id: workspace.project_id,
+                    name: workspace.name,
+                    status: workspace.status,
+                    theme: workspace.theme,
+                })
+                .collect::<Vec<_>>();
+            if !projects
+                .iter()
+                .any(|project| project.project_id == project_id)
+            {
+                projects.push(ProjectWorkspaceSpec {
+                    name: project_id.replace('-', " "),
+                    project_id: project_id.clone(),
+                    status: "active".into(),
+                    theme: canvas_core::ThemeSelection::Coherence {
+                        mode: canvas_core::ThemeMode::Dark,
+                        accent: canvas_core::Accent::Info,
+                    },
+                });
+            }
+            send_mutation(Command::WorkspaceSync { projects })?;
+            send_mutation(Command::WorkspaceSwitch { name: project_id })?;
+        }
         "save" => {
             if tokens.len() < 3 {
                 return Err("usage: workspace save <name>".into());
@@ -631,6 +766,87 @@ fn handle_workspace(tokens: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn handle_surface(tokens: &[String]) -> Result<(), String> {
+    if tokens.len() < 2 {
+        return Err("usage: surface add-live-video <id> <source> <width> <height> | surface center <id> <scale>".into());
+    }
+    match tokens[1].as_str() {
+        "add-live-video" => {
+            if tokens.len() != 6 {
+                return Err("usage: surface add-live-video <id> <source> <width> <height>".into());
+            }
+            send_mutation(Command::OpenLiveVideo {
+                surface_id: tokens[2].clone(),
+                source_id: tokens[3].clone(),
+                width: tokens[4].parse().map_err(|_| "width must be an integer")?,
+                height: tokens[5].parse().map_err(|_| "height must be an integer")?,
+            })?;
+        }
+        "center" => {
+            if tokens.len() != 4 {
+                return Err("usage: surface center <id> <scale>".into());
+            }
+            let scale: f32 = tokens[3]
+                .parse()
+                .map_err(|_| "scale must be a number between 0.1 and 1.0")?;
+            if !(0.1..=1.0).contains(&scale) {
+                return Err("scale must be between 0.1 and 1.0".into());
+            }
+            let state = read_document_state()?;
+            if !state.surfaces.contains(&tokens[2]) {
+                return Err(format!("unknown surface: {}", tokens[2]));
+            }
+            let height = scale;
+            let width = state
+                .surface_aspects
+                .get(&tokens[2])
+                .map_or(scale, |aspect| {
+                    let padding = f32::from(state.chrome.canvas_padding);
+                    let gap = f32::from(state.chrome.surface_gap);
+                    let inner_width = state.frame.width as f32 - padding * 2.0;
+                    let inner_height = state.frame.height as f32 - padding * 2.0;
+                    let visible_height = (height * inner_height - gap).max(1.0);
+                    ((visible_height * aspect + gap) / inner_width).clamp(0.1, 1.0)
+                });
+            let x = (1.0 - width) / 2.0;
+            let y = (1.0 - height) / 2.0;
+            let patch = WorkspacePatch {
+                schema_version: SCHEMA_VERSION,
+                workspace_id: state.workspace_id,
+                base_revision: state.doc_revision,
+                revision: state.doc_revision + 1,
+                operations: vec![canvas::PatchOperation::SetLayout {
+                    layout: Layout::Canvas {
+                        placements: vec![Placement {
+                            surface_id: tokens[2].clone(),
+                            bounds: NormalizedRect {
+                                x,
+                                y,
+                                width,
+                                height,
+                            },
+                            layer: 0,
+                        }],
+                    },
+                }],
+            };
+            send_mutation(Command::ApplyPatch { patch })?;
+        }
+        other => return Err(format!("unknown surface subcommand: {other}")),
+    }
+    Ok(())
+}
+
+fn send_read(command: Command) -> Result<ControlReply, String> {
+    control::send(&ControlRequest {
+        schema_version: CONTROL_VERSION,
+        request_id: format!("canvasctl-{}", id()),
+        expected_revision: None,
+        actor: None,
+        command,
+    })
+}
+
 fn read_document_state() -> Result<DocumentState, String> {
     let req = ControlRequest {
         schema_version: control::CONTROL_VERSION,
@@ -645,6 +861,16 @@ fn read_document_state() -> Result<DocumentState, String> {
             receipt: Receipt::DocumentSnapshot { document, snapshot },
         } => {
             let surfaces: Vec<String> = document.surfaces.iter().map(|s| s.id.clone()).collect();
+            let surface_aspects = document
+                .surfaces
+                .iter()
+                .filter_map(|surface| match surface.content {
+                    SurfaceContent::LiveVideo { width, height, .. } if height > 0 => {
+                        Some((surface.id.clone(), width as f32 / height as f32))
+                    }
+                    _ => None,
+                })
+                .collect();
             Ok(DocumentState {
                 doc_revision: document.revision,
                 runtime_revision: snapshot.revision,
@@ -652,6 +878,8 @@ fn read_document_state() -> Result<DocumentState, String> {
                 focused: document.focused_surface_id.clone(),
                 workspace_id: document.id.clone(),
                 chrome: document.chrome,
+                frame: snapshot.frame,
+                surface_aspects,
             })
         }
         _ => Err(format_reply_error(&reply)),
@@ -812,6 +1040,19 @@ mod catalog_tests {
             .count();
         let page_count = fixture_count.div_ceil(CATALOG_PAGE_SIZE);
         let mut ids = std::collections::BTreeSet::new();
+        let mut kinds = std::collections::BTreeSet::new();
+        for entry in fs::read_dir(&directory).unwrap().filter_map(Result::ok) {
+            if !entry
+                .path()
+                .extension()
+                .is_some_and(|value| value == "json")
+            {
+                continue;
+            }
+            let value: serde_json::Value =
+                serde_json::from_slice(&fs::read(entry.path()).unwrap()).unwrap();
+            kinds.insert(value["kind"].as_str().unwrap().to_owned());
+        }
         for page in 1..=page_count {
             let document = catalog_document(&directory, page).expect("catalog page builds");
             assert_eq!(document.surfaces.len(), fixture_count);
@@ -820,12 +1061,20 @@ mod catalog_tests {
             };
             assert!(placements.len() <= CATALOG_PAGE_SIZE);
             for placement in &placements {
-                assert!(placement.bounds.width >= 1.0 / 3.0);
-                assert!(placement.bounds.height >= 0.5);
+                assert!(placement.bounds.width >= 1.0 / CATALOG_COLUMNS as f32);
+                assert!(placement.bounds.height >= 0.25);
             }
             ids.extend(placements.into_iter().map(|placement| placement.surface_id));
         }
         assert_eq!(ids.len(), fixture_count);
+        assert_eq!(
+            kinds,
+            canvas_widgets::KNOWN_WIDGET_KINDS
+                .iter()
+                .map(|kind| (*kind).to_owned())
+                .collect(),
+            "config/widgets must contain at least one specimen of every widget kind"
+        );
         assert!(catalog_document(&directory, 0).is_err());
         assert!(catalog_document(&directory, page_count + 1).is_err());
     }

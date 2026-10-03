@@ -6,35 +6,42 @@
 //! all render through one library.
 
 use crate::{
-    ApprovalStatus, BurnRateWindow, ChartType, ClockMode, DistributionGroup, DistributionStyle,
-    EventEntry, HeatmapStyle, HierarchyNode, HierarchyStyle, MeterStyle, MetricBoardStyle,
-    ModelAnnotation, ModelView, NetworkLink, NetworkLinkKind, NetworkNode, NetworkNodeKind,
-    NetworkSegment, NetworkSegmentKind, NeuralEdge, NeuralNode, RichCardFormat, SpanTimelineStyle,
-    SpatialBounds, SpatialTrack, StateLane, StatusLevel, StatusState, TargetMetric, TimedSpan,
-    WidgetChrome, WidgetDataState, WidgetKind, WidgetSpec,
+    ApprovalStatus, BurnRateWindow, ChartType, ClockMode, DawNote, DawTrack, DistributionGroup,
+    DistributionStyle, EventEntry, HeatmapStyle, HierarchyNode, HierarchyStyle, MeterStyle,
+    MetricBoardStyle, ModelAnnotation, ModelView, NetworkLink, NetworkLinkKind, NetworkNode,
+    NetworkNodeKind, NetworkSegment, NetworkSegmentKind, NeuralEdge, NeuralNode,
+    RadioSpectrumState, RichCardFormat, SpanTimelineStyle, SpatialBounds, SpatialTrack, StateLane,
+    StatusLevel, StatusState, TargetMetric, TimedSpan, WidgetChrome, WidgetDataState, WidgetKind,
+    WidgetSpec,
 };
 use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use canvas_core::{ThemeMetrics, ThemePalette, VisualTheme};
 use iced::mouse;
 use iced::widget::canvas::{Cache, Geometry, Path};
 use iced::widget::{
     Canvas, canvas, column, container, image, progress_bar, responsive, row, scrollable, space,
-    text,
+    stack, text,
 };
 use iced::{Color, ContentFit, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
 pub mod app_chrome;
 mod clock;
 pub mod project_browser;
+mod primitives;
 mod quality;
 mod quant;
 mod signal_scene;
+mod spectral_waterfall;
 mod wasm_cdg;
 mod wasm_hyperspace;
+mod wiki_race;
 use clock::AnalogClockProgram;
+use primitives::{
+    header as primitive_header, list_row as primitive_list_row, metric as primitive_metric,
+};
 
 pub fn loading_rails<Message: 'static>(visual: VisualTheme) -> Element<'static, Message> {
     let palette = visual.palette;
@@ -198,37 +205,14 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
             } else {
                 color(palette.text)
             };
-            let mut value_line = row![
-                text(format_quantity(*value, unit.as_deref()))
-                    .size(metrics.hero)
-                    .color(value_color),
-                text(if unit.as_deref() == Some("$") {
-                    String::new()
-                } else {
-                    unit.clone().unwrap_or_default()
-                })
-                .size(metrics.small)
-                .color(color(palette.text_muted)),
-            ]
-            .spacing(metrics.space_1)
-            .align_y(iced::alignment::Vertical::Bottom);
-            if let Some(change) = change {
-                value_line =
-                    value_line.push(text(format!("{change:+.1}%")).size(metrics.small).color(
-                        if *change >= 0.0 {
-                            color(palette.success)
-                        } else {
-                            color(palette.danger)
-                        },
-                    ));
-            }
-            // Label above the value, as the gauge also does: the label names the
-            // metric, and a name reads as a caption rather than a footnote.
             let body = column![
-                text(label)
-                    .size(metrics.small)
-                    .color(color(palette.text_muted)),
-                value_line,
+                primitive_metric(
+                    label.clone(),
+                    format_quantity(*value, unit.as_deref()),
+                    change.map(|value| format!("{value:+.1}%")),
+                    value_color,
+                    visual,
+                ),
                 Canvas::new(SparklineProgram {
                     values: history.clone(),
                     color: accent,
@@ -346,13 +330,7 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                 color(palette.text_muted),
             );
             let body = column![
-                row![
-                    text(title).size(metrics.body).color(color(palette.text)),
-                    space::horizontal(),
-                    text(unit.clone().unwrap_or_default())
-                        .size(metrics.small)
-                        .color(color(palette.text_muted)),
-                ],
+                primitive_header(title.clone(), unit.clone(), visual),
                 legend,
                 Canvas::new(TimeSeriesProgram {
                     series: series
@@ -394,36 +372,24 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
             orientation: _,
         } => {
             let tile_color = color(palette.surface);
-            let label_color = color(palette.text);
             let alert_color = color(palette.danger);
             let tiles: Vec<Element<'_, Message>> = if items.is_empty() {
                 vec![
                     text("No projects")
                         .size(metrics.body)
-                        .color(label_color)
+                        .color(color(palette.text))
                         .into(),
                 ]
             } else {
                 items
                     .iter()
                     .map(|item| {
-                        let dot = if item.unread {
-                            container(space::horizontal())
-                                .width(Length::Fixed(8.0))
-                                .height(Length::Fixed(8.0))
-                                .style(move |_| container::Style {
-                                    background: Some(alert_color.into()),
-                                    ..Default::default()
-                                })
-                        } else {
-                            container(space::horizontal())
-                                .width(Length::Fixed(8.0))
-                                .height(Length::Fixed(8.0))
-                        };
-                        container(
-                            row![dot, text(&item.label).size(metrics.body).color(label_color),]
-                                .spacing(metrics.space_1),
-                        )
+                        container(primitive_list_row(
+                            item.label.clone(),
+                            None,
+                            item.unread.then_some(alert_color),
+                            visual,
+                        ))
                         .padding(4)
                         .style(move |_| container::Style {
                             background: Some(tile_color.into()),
@@ -679,21 +645,77 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                 visual,
             )
         }
+        WidgetKind::DawDeck {
+            title,
+            playing,
+            paused,
+            recording,
+            bpm,
+            position_ticks,
+            cycle_ticks,
+            tracks,
+            notes,
+        } => panel(
+            spec,
+            column![
+                row![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    space::horizontal(),
+                    text(format!(
+                        "{} · {} · {}",
+                        if *recording {
+                            "● REC"
+                        } else if *playing {
+                            "▶ PLAY"
+                        } else if *paused {
+                            "Ⅱ PAUSE"
+                        } else {
+                            "■ STOP"
+                        },
+                        bpm.map_or_else(|| "-- BPM".into(), |value| format!("{value:.1} BPM")),
+                        format!(
+                            "{:02}:{:02}",
+                            position_ticks / 24 / 4,
+                            (position_ticks / 24) % 4 + 1
+                        ),
+                    ))
+                    .size(metrics.small)
+                    .color(color(if *recording {
+                        palette.danger
+                    } else {
+                        palette.text_muted
+                    })),
+                ],
+                Canvas::new(DawDeckProgram {
+                    playing: *playing,
+                    recording: *recording,
+                    position_ticks: *position_ticks,
+                    cycle_ticks: *cycle_ticks,
+                    tracks: tracks.clone(),
+                    notes: notes.clone(),
+                    palette: *palette,
+                    label_size: metrics.micro,
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .spacing(metrics.space_2)
+            .into(),
+            visual,
+        ),
         WidgetKind::Gauge { value, label } => {
             let pct = format!("{:.0}%", value);
             let label = label.clone().unwrap_or_default();
             panel(
                 spec,
                 iced::widget::Column::<Message>::new()
-                    // Same order as Stat — label, value, then the track the
-                    // value fills. The two disagreeing was the tell that
-                    // neither had been placed on purpose.
-                    .push(
-                        text(label)
-                            .size(metrics.small)
-                            .color(color(palette.text_muted)),
-                    )
-                    .push(text(pct).size(metrics.hero).color(color(palette.text)))
+                    .push(primitive_metric(
+                        label,
+                        pct,
+                        None,
+                        color(palette.text),
+                        visual,
+                    ))
                     .push(
                         Canvas::new(GaugeProgram {
                             value: *value,
@@ -717,13 +739,7 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
         } => panel(
             spec,
             column![
-                row![
-                    text(title).size(metrics.body).color(color(palette.text)),
-                    space::horizontal(),
-                    text(unit.clone().unwrap_or_default())
-                        .size(metrics.small)
-                        .color(color(palette.text_muted))
-                ],
+                primitive_header(title.clone(), unit.clone(), visual),
                 Canvas::new(HistogramProgram {
                     values: buckets.iter().map(|bucket| bucket.count as f32).collect(),
                     color: color(palette.info),
@@ -745,7 +761,8 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
             min_frequency,
             max_frequency,
             unit,
-            ..
+            history,
+            radio,
         } => panel(
             spec,
             column![
@@ -761,24 +778,34 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                     .size(metrics.small)
                     .color(color(palette.text_muted)),
                 ],
-                Canvas::new(SpectralWaterfallProgram {
-                    rows: rows.clone(),
-                    ramp: vec![
-                        color(palette.background_strong),
-                        color(palette.info),
-                        color(palette.primary),
-                        color(palette.warning),
-                        color(palette.danger),
-                    ],
-                    label: color(palette.text_muted),
-                    scan: color(palette.text),
-                    label_size: metrics.micro,
-                    min_frequency: *min_frequency,
-                    max_frequency: *max_frequency,
-                    unit: unit.clone().unwrap_or_else(|| "Hz".into()),
-                })
-                .width(Length::Fill)
-                .height(Length::Fill),
+                stack![
+                    spectral_waterfall::view(
+                        rows.clone(),
+                        *history,
+                        radio.as_ref().map_or_else(
+                            || {
+                                rows.last().map_or(rows.len() as u64, |row| {
+                                    row.iter().fold(rows.len() as u64, |stamp, value| {
+                                        stamp.rotate_left(7) ^ u64::from(value.to_bits())
+                                    })
+                                })
+                            },
+                            |frame| frame.generation.rotate_left(32) ^ frame.sequence,
+                        ),
+                    ),
+                    Canvas::new(SpectralWaterfallProgram {
+                        rows: rows.clone(),
+                        label: Color::from_rgb8(170, 205, 232),
+                        scan: Color::from_rgb8(225, 250, 255),
+                        label_size: metrics.micro,
+                        min_frequency: *min_frequency,
+                        max_frequency: *max_frequency,
+                        unit: unit.clone().unwrap_or_else(|| "Hz".into()),
+                        radio: radio.clone(),
+                    })
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+                ],
             ]
             .spacing(metrics.space_2)
             .into(),
@@ -1488,6 +1515,142 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                 visual,
             )
         }
+        WidgetKind::SocialFeed {
+            title,
+            status,
+            detail,
+            posts,
+            rotate_seconds,
+        } => {
+            let status_color = if status == "healthy" {
+                color(palette.success)
+            } else {
+                color(palette.danger)
+            };
+            let page_size = 3usize;
+            let start = if posts.is_empty() {
+                0
+            } else {
+                (((now.minute * 60 + now.second) / (*rotate_seconds).max(1)) as usize * page_size)
+                    % posts.len()
+            };
+            let mut cards = column![].spacing(metrics.space_3);
+            for offset in 0..posts.len().min(page_size) {
+                let post = &posts[(start + offset) % posts.len()];
+                let accent = color(palette.primary);
+                let surface = color(palette.surface_muted);
+                let matches = if post.matches.is_empty() {
+                    String::new()
+                } else {
+                    format!("#{}", post.matches.join("  #"))
+                };
+                cards = cards.push(
+                    container(
+                        column![
+                            row![
+                                text(format!("@{}", post.author))
+                                    .size(metrics.body)
+                                    .color(accent),
+                                space::horizontal(),
+                                text(&post.age)
+                                    .size(metrics.small)
+                                    .color(color(palette.text_muted)),
+                            ],
+                            text(&post.text)
+                                .size(metrics.body)
+                                .color(color(palette.text))
+                                .width(Length::Fill),
+                            row![
+                                text(format!("{} interactions", post.engagement))
+                                    .size(metrics.small)
+                                    .color(color(palette.text_muted)),
+                                space::horizontal(),
+                                text(matches).size(metrics.small).color(accent),
+                            ],
+                        ]
+                        .spacing(metrics.space_2),
+                    )
+                    .padding(metrics.space_3)
+                    .width(Length::Fill)
+                    .style(move |_| container::Style {
+                        background: Some(surface.into()),
+                        border: iced::Border {
+                            color: accent,
+                            width: 1.0,
+                            radius: metrics.radius_md.into(),
+                        },
+                        ..Default::default()
+                    }),
+                );
+            }
+            if posts.is_empty() {
+                cards = cards.push(
+                    text(detail.as_deref().unwrap_or("Waiting for posts"))
+                        .size(metrics.body)
+                        .color(color(palette.text_muted)),
+                );
+            }
+            panel(
+                spec,
+                column![
+                    row![
+                        status_dot(status_color, 9.0),
+                        text(title).size(metrics.large).color(color(palette.text)),
+                        space::horizontal(),
+                        text(format!(
+                            "{} / {} · auto {}s",
+                            if posts.is_empty() { 0 } else { start + 1 },
+                            posts.len(),
+                            rotate_seconds
+                        ))
+                        .size(metrics.small)
+                        .color(color(palette.text_muted)),
+                    ]
+                    .spacing(metrics.space_2),
+                    cards,
+                ]
+                .spacing(metrics.space_3)
+                .into(),
+                visual,
+            )
+        }
+        WidgetKind::WikiRaceHud {
+            start_page,
+            target_page,
+            clicks,
+            status,
+            started_at_ms,
+            finished_at_ms,
+            presentation_hold_ms,
+            hold_started_at_ms,
+            ..
+        } => panel(
+            spec,
+            wiki_race::body(
+                wiki_race::WikiRaceView {
+                    start_page,
+                    target_page,
+                    clicks: *clicks,
+                    status: *status,
+                    started_at_ms: *started_at_ms,
+                    finished_at_ms: *finished_at_ms,
+                    presentation_hold_ms: *presentation_hold_ms,
+                    hold_started_at_ms: *hold_started_at_ms,
+                    now_ms: now.epoch_millis,
+                },
+                visual,
+            ),
+            visual,
+        ),
+        WidgetKind::WikiRaceTrace {
+            title,
+            entries,
+            follow,
+        } => panel(
+            spec,
+            wiki_race::trace(title, entries, *follow, visual),
+            visual,
+        ),
         WidgetKind::MediaTransport {
             title,
             source,
@@ -1611,43 +1774,76 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
             visual,
         ),
         WidgetKind::StatusList { title, nodes } => {
-            let lines =
-                nodes
-                    .iter()
-                    .take(8)
-                    .fold(column![].spacing(metrics.space_2), |column, node| {
-                        column.push(
-                            row![
-                                status_dot(status_color(node.state, palette), 8.0),
-                                text(&node.label)
-                                    .size(metrics.small)
-                                    .color(color(palette.text)),
-                                space::horizontal(),
-                                text(node.detail.clone().unwrap_or_default())
-                                    .size(metrics.small)
-                                    .color(color(palette.text_muted))
-                            ]
-                            .spacing(metrics.space_2),
-                        )
-                    });
-            let lines = if let Some(overflow) = overflow_label(nodes.len(), 8, "nodes") {
-                lines.push(
-                    text(overflow)
-                        .size(metrics.small)
-                        .color(color(palette.warning)),
-                )
-            } else {
-                lines
-            };
+            let title = title.clone();
+            let nodes = nodes.clone();
+            let visual = *visual;
             panel(
                 spec,
-                column![
-                    text(title).size(metrics.body).color(color(palette.text)),
-                    lines
-                ]
-                .spacing(metrics.space_2)
+                responsive(move |bounds| {
+                    let metrics = visual.metrics;
+                    let palette = visual.palette;
+                    let available = (bounds.height - metrics.large - metrics.space_4).max(1.0);
+                    let columns = usize::from(bounds.width >= 840.0 && nodes.len() >= 4) + 1;
+                    let minimum_card_height = metrics.body + metrics.small + metrics.space_4 * 2.0;
+                    let row_capacity = ((available / minimum_card_height).floor() as usize).max(1);
+                    let shown = nodes.len().min(row_capacity * columns);
+                    let mut cards = column![].spacing(metrics.space_2).height(Length::Fill);
+                    for (row_index, chunk) in nodes[..shown].chunks(columns).enumerate() {
+                        let mut card_row = row![]
+                            .spacing(metrics.space_2)
+                            .height(Length::FillPortion(1));
+                        for (column_index, node) in chunk.iter().enumerate() {
+                            let index = row_index * columns + column_index;
+                            let fill = with_alpha(
+                                color(if index % 2 == 0 {
+                                    palette.surface_muted
+                                } else {
+                                    palette.surface
+                                }),
+                                if index % 2 == 0 { 0.52 } else { 0.28 },
+                            );
+                            card_row = card_row.push(
+                                container(primitive_list_row(
+                                    node.label.clone(),
+                                    node.detail.clone(),
+                                    Some(status_color(node.state, &palette)),
+                                    &visual,
+                                ))
+                                .padding([metrics.space_3, metrics.space_4])
+                                .width(Length::FillPortion(1))
+                                .height(Length::Fill)
+                                .align_y(iced::alignment::Vertical::Center)
+                                .style(move |_| {
+                                    container::Style {
+                                        background: Some(fill.into()),
+                                        border: iced::Border {
+                                            color: with_alpha(color(palette.border), 0.42),
+                                            width: 1.0,
+                                            radius: metrics.radius_sm.into(),
+                                        },
+                                        ..Default::default()
+                                    }
+                                }),
+                            );
+                        }
+                        if chunk.len() < columns {
+                            card_row = card_row.push(space().width(Length::FillPortion(1)));
+                        }
+                        cards = cards.push(card_row);
+                    }
+                    if let Some(overflow) = overflow_label(nodes.len(), shown, "systems") {
+                        cards = cards.push(
+                            text(overflow)
+                                .size(metrics.small)
+                                .color(color(palette.warning)),
+                        );
+                    }
+                    column![primitive_header(title.clone(), None, &visual), cards]
+                        .spacing(metrics.space_3)
+                        .into()
+                })
                 .into(),
-                visual,
+                &visual,
             )
         }
         WidgetKind::NeuralGraph {
@@ -2229,15 +2425,18 @@ impl<Message> canvas::Program<Message> for NetworkTopologyProgram {
     }
 }
 
-struct NeuralGraphProgram {
-    nodes: Vec<NeuralNode>,
-    edges: Vec<NeuralEdge>,
+struct DawDeckProgram {
+    playing: bool,
+    recording: bool,
+    position_ticks: u64,
+    cycle_ticks: u64,
+    tracks: Vec<DawTrack>,
+    notes: Vec<DawNote>,
     palette: ThemePalette,
     label_size: f32,
-    dag: bool,
 }
 
-impl<Message> canvas::Program<Message> for NeuralGraphProgram {
+impl<Message> canvas::Program<Message> for DawDeckProgram {
     type State = CacheState;
 
     fn draw(
@@ -2248,124 +2447,165 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
-        let key = self
-            .nodes
-            .iter()
-            .fold(Key::new().add_usize(self.edges.len()), |key, node| {
-                key.add_str(&node.id)
-                    .add_str(&node.label)
-                    .add_f32(node.heat)
-                    .add_u64(node.state as u64)
-            });
-        let key = self.edges.iter().fold(key, |key, edge| {
-            key.add_str(&edge.from).add_str(&edge.to).add_f32(edge.heat)
-        });
+        let key = self.tracks.iter().fold(
+            Key::new()
+                .add_u64(self.position_ticks)
+                .add_u64(self.cycle_ticks)
+                .add_usize(self.notes.len()),
+            |key, track| key.add_str(&track.label).add_f32(track.level),
+        );
         state.draw_cached(renderer, bounds.size(), key.build(), |frame| {
-            if self.nodes.is_empty() {
-                frame.fill_text(canvas::Text {
-                    content: "Waiting for neural activity".into(),
-                    position: Point::new(12.0, bounds.height * 0.5),
-                    color: color(self.palette.text_muted),
-                    size: iced::Pixels(self.label_size),
-                    ..Default::default()
-                });
-                return;
-            }
-
-            let positions = if self.dag {
-                dag_layout(&self.nodes, &self.edges, bounds.size())
+            let ink = color(self.palette.text);
+            let muted = color(self.palette.text_muted);
+            let accent = color(self.palette.primary);
+            let playhead = if self.recording {
+                color(self.palette.danger)
             } else {
-                neural_layout(&self.nodes, bounds.size())
+                accent
             };
-            let idle_edge = with_alpha(color(self.palette.border), 0.42);
-            for edge in &self.edges {
-                let (Some(from), Some(to)) = (positions.get(&edge.from), positions.get(&edge.to))
-                else {
-                    continue;
-                };
-                let active = lerp_oklch(
-                    idle_edge,
-                    color(self.palette.primary),
-                    edge.heat.clamp(0.0, 1.0),
-                );
-                let path = if self.dag {
-                    Path::new(|path| {
-                        let mid = (from.y + to.y) * 0.5;
-                        path.move_to(*from);
-                        path.line_to(Point::new(from.x, mid));
-                        path.line_to(Point::new(to.x, mid));
-                        path.line_to(*to);
-                    })
-                } else {
-                    Path::line(*from, *to)
-                };
+            let phase = self.position_ticks as f32 / self.cycle_ticks.max(1) as f32;
+
+            let reel_y = bounds.height * 0.23;
+            let reel_r = (bounds.height * 0.13).clamp(26.0, 58.0);
+            for center_x in [bounds.width * 0.18, bounds.width * 0.38] {
+                let center = Point::new(center_x, reel_y);
                 frame.stroke(
-                    &path,
-                    canvas::Stroke::default()
-                        .with_width(1.0 + edge.heat * 3.0)
-                        .with_color(active),
+                    &Path::circle(center, reel_r),
+                    canvas::Stroke::default().with_width(2.0).with_color(muted),
                 );
-                if edge.heat > 0.02 {
-                    let pulse = Point::new(
-                        from.x + (to.x - from.x) * edge.heat,
-                        from.y + (to.y - from.y) * edge.heat,
+                frame.stroke(
+                    &Path::circle(center, reel_r * 0.32),
+                    canvas::Stroke::default().with_width(2.0).with_color(accent),
+                );
+                for spoke in 0..3 {
+                    let angle =
+                        phase * std::f32::consts::TAU + spoke as f32 * std::f32::consts::TAU / 3.0;
+                    let end = Point::new(
+                        center.x + angle.cos() * reel_r * 0.82,
+                        center.y + angle.sin() * reel_r * 0.82,
+                    );
+                    frame.stroke(
+                        &Path::line(center, end),
+                        canvas::Stroke::default()
+                            .with_width(3.0)
+                            .with_color(with_alpha(accent, if self.playing { 0.9 } else { 0.5 })),
+                    );
+                }
+                frame.fill(&Path::circle(center, 4.0), accent);
+            }
+            frame.stroke(
+                &Path::line(
+                    Point::new(bounds.width * 0.18 + reel_r, reel_y),
+                    Point::new(bounds.width * 0.38 - reel_r, reel_y),
+                ),
+                canvas::Stroke::default().with_width(1.0).with_color(muted),
+            );
+
+            let roll = Rectangle::new(
+                Point::new(14.0, bounds.height * 0.48),
+                Size::new(bounds.width * 0.65, bounds.height * 0.47),
+            );
+            for step in 0..=16 {
+                let x = roll.x + roll.width * step as f32 / 16.0;
+                frame.stroke(
+                    &Path::line(Point::new(x, roll.y), Point::new(x, roll.y + roll.height)),
+                    canvas::Stroke::default()
+                        .with_width(if step % 4 == 0 { 1.0 } else { 0.5 })
+                        .with_color(with_alpha(muted, if step % 4 == 0 { 0.38 } else { 0.16 })),
+                );
+            }
+            for lane in 0..=12 {
+                let y = roll.y + roll.height * lane as f32 / 12.0;
+                frame.stroke(
+                    &Path::line(Point::new(roll.x, y), Point::new(roll.x + roll.width, y)),
+                    canvas::Stroke::default()
+                        .with_width(0.5)
+                        .with_color(with_alpha(muted, 0.14)),
+                );
+            }
+            let min_note = self.notes.iter().map(|note| note.note).min().unwrap_or(36);
+            let max_note = self
+                .notes
+                .iter()
+                .map(|note| note.note)
+                .max()
+                .unwrap_or(84)
+                .max(min_note + 1);
+            for note in &self.notes {
+                let cycle = self.cycle_ticks.max(1);
+                let tick = note.tick % cycle;
+                let x = roll.x + roll.width * tick as f32 / cycle as f32;
+                let width =
+                    (roll.width * note.length_ticks.min(cycle) as f32 / cycle as f32).max(3.0);
+                let pitch = (note.note - min_note) as f32 / (max_note - min_note) as f32;
+                let y = roll.y + roll.height * (1.0 - pitch);
+                let rect = Path::rounded_rectangle(
+                    Point::new(x, y - 4.0),
+                    Size::new(width, 7.0),
+                    2.0.into(),
+                );
+                let note_color = match note.track.parse::<usize>().unwrap_or(0) % 4 {
+                    0 => accent,
+                    1 => color(self.palette.info),
+                    2 => color(self.palette.success),
+                    _ => color(self.palette.warning),
+                };
+                frame.fill(
+                    &rect,
+                    with_alpha(note_color, 0.35 + note.velocity as f32 / 127.0 * 0.65),
+                );
+                let overflow = x + width - (roll.x + roll.width);
+                if overflow > 0.0 {
+                    let wrapped = Path::rounded_rectangle(
+                        Point::new(roll.x, y - 4.0),
+                        Size::new(overflow, 7.0),
+                        2.0.into(),
                     );
                     frame.fill(
-                        &Path::circle(pulse, 2.5 + edge.heat * 3.5),
-                        with_alpha(color(self.palette.primary), 0.7 + edge.heat * 0.3),
+                        &wrapped,
+                        with_alpha(note_color, 0.35 + note.velocity as f32 / 127.0 * 0.65),
                     );
                 }
             }
+            let head_x = roll.x + roll.width * phase;
+            frame.stroke(
+                &Path::line(
+                    Point::new(head_x, roll.y),
+                    Point::new(head_x, roll.y + roll.height),
+                ),
+                canvas::Stroke::default()
+                    .with_width(2.0)
+                    .with_color(playhead),
+            );
 
-            for node in &self.nodes {
-                let Some(position) = positions.get(&node.id) else {
-                    continue;
-                };
-                let semantic = status_color(node.state, &self.palette);
-                let heat = node.heat.clamp(0.0, 1.0);
-                let radius = 5.0 + heat * 7.0;
-                if self.dag {
-                    let node_size = Size::new(108.0, 32.0);
-                    let origin = Point::new(
-                        position.x - node_size.width * 0.5,
-                        position.y - node_size.height * 0.5,
-                    );
-                    let shape = Path::rounded_rectangle(origin, node_size, 3.0.into());
-                    frame.fill(&shape, color(self.palette.surface_muted));
-                    frame.stroke(
-                        &shape,
-                        canvas::Stroke::default()
-                            .with_width(1.0 + heat * 2.0)
-                            .with_color(semantic),
-                    );
-                    frame.fill_text(canvas::Text {
-                        content: node.label.clone(),
-                        position: Point::new(origin.x + 8.0, position.y + 4.0),
-                        color: color(self.palette.text),
-                        size: iced::Pixels(self.label_size),
-                        ..Default::default()
-                    });
-                    continue;
-                }
-                if heat > 0.02 {
-                    frame.fill(
-                        &Path::circle(*position, radius + 7.0 * heat),
-                        with_alpha(semantic, 0.08 + heat * 0.16),
-                    );
-                }
+            let meter_x = bounds.width * 0.72;
+            let meter_top = 24.0;
+            let meter_height = bounds.height * 0.68;
+            let shown = self.tracks.len().min(10);
+            let slot = ((bounds.width - meter_x - 12.0) / shown.max(1) as f32).max(16.0);
+            for (index, track) in self.tracks.iter().take(shown).enumerate() {
+                let x = meter_x + index as f32 * slot;
+                let h = meter_height * track.level.clamp(0.0, 1.0);
+                let bar = Path::rounded_rectangle(
+                    Point::new(x, meter_top + meter_height - h),
+                    Size::new((slot - 6.0).max(4.0), h),
+                    2.0.into(),
+                );
                 frame.fill(
-                    &Path::circle(*position, radius),
-                    lerp_oklch(
-                        color(self.palette.surface_muted),
-                        semantic,
-                        0.3 + heat * 0.7,
-                    ),
+                    &bar,
+                    if track.clipping {
+                        color(self.palette.danger)
+                    } else if track.level > 0.82 {
+                        color(self.palette.warning)
+                    } else {
+                        color(self.palette.success)
+                    },
                 );
                 frame.fill_text(canvas::Text {
-                    content: node.label.clone(),
-                    position: Point::new(position.x + radius + 5.0, position.y + 4.0),
-                    color: color(self.palette.text),
-                    size: iced::Pixels(self.label_size),
+                    content: track.label.clone(),
+                    position: Point::new(x, meter_top + meter_height + 15.0),
+                    color: ink,
+                    size: iced::Pixels((self.label_size - 1.0).max(8.0)),
                     ..Default::default()
                 });
             }
@@ -2373,9 +2613,421 @@ impl<Message> canvas::Program<Message> for NeuralGraphProgram {
     }
 }
 
+struct NeuralGraphProgram {
+    nodes: Vec<NeuralNode>,
+    edges: Vec<NeuralEdge>,
+    palette: ThemePalette,
+    label_size: f32,
+    dag: bool,
+}
+
+#[derive(Default)]
+struct NeuralGraphState {
+    cache: CacheState,
+    started: RefCell<Option<Instant>>,
+}
+
+const GRAPH_SETTLE: Duration = Duration::from_millis(620);
+
+impl<Message> canvas::Program<Message> for NeuralGraphProgram {
+    type State = NeuralGraphState;
+
+    fn update(
+        &self,
+        state: &mut Self::State,
+        event: &canvas::Event,
+        _bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Option<iced::widget::Action<Message>> {
+        if self.dag
+            || !matches!(
+                event,
+                canvas::Event::Window(iced::window::Event::RedrawRequested(_))
+            )
+        {
+            return None;
+        }
+        let mut started = state.started.borrow_mut();
+        let start = *started.get_or_insert_with(Instant::now);
+        let live_activity = self.edges.iter().any(|edge| edge.activity > 0.0);
+        (live_activity || start.elapsed() < GRAPH_SETTLE).then(iced::widget::Action::request_redraw)
+    }
+
+    fn draw(
+        &self,
+        state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut started = state.started.borrow_mut();
+        let start = *started.get_or_insert_with(Instant::now);
+        let settle = if self.dag {
+            1.0
+        } else {
+            (start.elapsed().as_secs_f32() / GRAPH_SETTLE.as_secs_f32()).min(1.0)
+        };
+        drop(started);
+        let topology = self.nodes.iter().any(|node| node.id.starts_with("site:"));
+        let dense = topology && self.nodes.len() > 48;
+        let key = self.nodes.iter().fold(
+            Key::new()
+                .add_usize(self.edges.len())
+                .add_u64(if settle < 1.0 {
+                    (settle * 30.0) as u64
+                } else {
+                    31
+                }),
+            |key, node| {
+                let key = key
+                    .add_str(&node.id)
+                    .add_str(&node.label)
+                    .add_u64(node.state as u64);
+                if topology {
+                    key
+                } else {
+                    key.add_f32(node.heat)
+                }
+            },
+        );
+        let key = self.edges.iter().fold(key, |key, edge| {
+            let key = key.add_str(&edge.from).add_str(&edge.to);
+            if topology {
+                key
+            } else {
+                key.add_f32(edge.heat)
+            }
+        });
+        let graph = state
+            .cache
+            .draw_cached(renderer, bounds.size(), key.build(), |frame| {
+                if self.nodes.is_empty() {
+                    frame.fill_text(canvas::Text {
+                        content: "Waiting for neural activity".into(),
+                        position: Point::new(12.0, bounds.height * 0.5),
+                        color: color(self.palette.text_muted),
+                        size: iced::Pixels(self.label_size),
+                        ..Default::default()
+                    });
+                    return;
+                }
+
+                let positions = if self.dag {
+                    dag_layout(&self.nodes, &self.edges, bounds.size())
+                } else {
+                    animated_neural_layout(&self.nodes, bounds.size(), settle)
+                };
+                if topology {
+                    let nexus = Path::circle(
+                        Point::new(bounds.width * 0.5, bounds.height * 0.5),
+                        (bounds.height * 0.115).clamp(52.0, 118.0),
+                    );
+                    frame.fill(&nexus, with_alpha(color(self.palette.primary), 0.025));
+                    frame.stroke(
+                        &nexus,
+                        canvas::Stroke::default()
+                            .with_width(1.0)
+                            .with_color(with_alpha(color(self.palette.primary), 0.14)),
+                    );
+                    for site in self
+                        .nodes
+                        .iter()
+                        .filter(|node| node.id.starts_with("site:"))
+                    {
+                        let Some(hub) = positions.get(&site.id) else {
+                            continue;
+                        };
+                        let mut min_x = hub.x;
+                        let mut max_x = hub.x;
+                        let mut min_y = hub.y;
+                        let mut max_y = hub.y;
+                        for member in self
+                            .nodes
+                            .iter()
+                            .filter(|node| node.group.as_deref() == Some(site.label.as_str()))
+                        {
+                            if let Some(point) = positions.get(&member.id) {
+                                min_x = min_x.min(point.x);
+                                max_x = max_x.max(point.x);
+                                min_y = min_y.min(point.y);
+                                max_y = max_y.max(point.y);
+                            }
+                        }
+                        let origin = Point::new((min_x - 22.0).max(2.0), (min_y - 22.0).max(2.0));
+                        let size = Size::new(
+                            (max_x - min_x + 44.0).min(bounds.width - origin.x - 2.0),
+                            (max_y - min_y + 44.0).min(bounds.height - origin.y - 2.0),
+                        );
+                        let zone = Path::rounded_rectangle(origin, size, 18.0.into());
+                        frame.fill(&zone, with_alpha(color(self.palette.surface_muted), 0.13));
+                        frame.stroke(
+                            &zone,
+                            canvas::Stroke::default()
+                                .with_width(1.2)
+                                .with_color(with_alpha(color(self.palette.primary), 0.2)),
+                        );
+                    }
+                }
+                let idle_edge = with_alpha(color(self.palette.border), 0.42);
+                for edge in &self.edges {
+                    let (Some(from), Some(to)) =
+                        (positions.get(&edge.from), positions.get(&edge.to))
+                    else {
+                        continue;
+                    };
+                    let active = lerp_oklch(
+                        idle_edge,
+                        color(self.palette.primary),
+                        edge.heat.clamp(0.0, 1.0),
+                    );
+                    let path = if self.dag {
+                        Path::new(|path| {
+                            let mid = (from.y + to.y) * 0.5;
+                            path.move_to(*from);
+                            path.line_to(Point::new(from.x, mid));
+                            path.line_to(Point::new(to.x, mid));
+                            path.line_to(*to);
+                        })
+                    } else if topology && edge.heat >= 0.75 {
+                        Path::new(|path| {
+                            let midpoint = Point::new((from.x + to.x) * 0.5, (from.y + to.y) * 0.5);
+                            let dx = to.x - from.x;
+                            let dy = to.y - from.y;
+                            let length = (dx * dx + dy * dy).sqrt().max(1.0);
+                            let bend = (length * 0.075).clamp(12.0, 54.0);
+                            let control = Point::new(
+                                midpoint.x - dy / length * bend,
+                                midpoint.y + dx / length * bend,
+                            );
+                            path.move_to(*from);
+                            path.quadratic_curve_to(control, *to);
+                        })
+                    } else {
+                        Path::line(*from, *to)
+                    };
+                    frame.stroke(
+                        &path,
+                        canvas::Stroke::default()
+                            .with_width(if topology && edge.heat >= 0.75 {
+                                1.4 + edge.heat * 1.8
+                            } else {
+                                0.7 + edge.heat * 1.5
+                            })
+                            .with_color(active),
+                    );
+                }
+
+                for node in &self.nodes {
+                    let Some(position) = positions.get(&node.id) else {
+                        continue;
+                    };
+                    let semantic = status_color(node.state, &self.palette);
+                    let heat = node.heat.clamp(0.0, 1.0);
+                    let bounce = (settle * std::f32::consts::PI).sin().max(0.0);
+                    let radius = 5.0 + heat * 7.0 + bounce * (1.0 + heat * 2.5);
+                    if self.dag {
+                        let node_size = Size::new(108.0, 32.0);
+                        let origin = Point::new(
+                            position.x - node_size.width * 0.5,
+                            position.y - node_size.height * 0.5,
+                        );
+                        let shape = Path::rounded_rectangle(origin, node_size, 3.0.into());
+                        frame.fill(&shape, color(self.palette.surface_muted));
+                        frame.stroke(
+                            &shape,
+                            canvas::Stroke::default()
+                                .with_width(1.0 + heat * 2.0)
+                                .with_color(semantic),
+                        );
+                        frame.fill_text(canvas::Text {
+                            content: node.label.clone(),
+                            position: Point::new(origin.x + 8.0, position.y + 4.0),
+                            color: color(self.palette.text),
+                            size: iced::Pixels(self.label_size),
+                            ..Default::default()
+                        });
+                        continue;
+                    }
+                    if heat > 0.02 {
+                        frame.fill(
+                            &Path::circle(*position, radius + 7.0 * heat),
+                            with_alpha(semantic, 0.08 + heat * 0.16),
+                        );
+                    }
+                    if node.id.starts_with("site:") {
+                        frame.stroke(
+                            &Path::circle(*position, radius + 11.0),
+                            canvas::Stroke::default()
+                                .with_width(1.0)
+                                .with_color(with_alpha(semantic, 0.38)),
+                        );
+                    }
+                    if topology && heat >= 0.75 {
+                        frame.stroke(
+                            &Path::circle(*position, radius + 8.0),
+                            canvas::Stroke::default()
+                                .with_width(1.4)
+                                .with_color(with_alpha(color(self.palette.primary), 0.62)),
+                        );
+                    }
+                    let fill = lerp_oklch(
+                        color(self.palette.surface_muted),
+                        semantic,
+                        0.3 + heat * 0.7,
+                    );
+                    if node.id.starts_with("segment:") {
+                        let diamond = Path::new(|path| {
+                            path.move_to(Point::new(position.x, position.y - radius));
+                            path.line_to(Point::new(position.x + radius, position.y));
+                            path.line_to(Point::new(position.x, position.y + radius));
+                            path.line_to(Point::new(position.x - radius, position.y));
+                            path.close();
+                        });
+                        frame.fill(&diamond, fill);
+                        frame.stroke(
+                            &diamond,
+                            canvas::Stroke::default()
+                                .with_width(1.0)
+                                .with_color(with_alpha(semantic, 0.72)),
+                        );
+                    } else {
+                        frame.fill(&Path::circle(*position, radius), fill);
+                    }
+                    if !dense
+                        || node.id.starts_with("site:")
+                        || heat >= 0.75
+                        || matches!(node.state, StatusLevel::Warning | StatusLevel::Critical)
+                    {
+                        frame.fill_text(canvas::Text {
+                            content: node.label.clone(),
+                            position: Point::new(
+                                (position.x + radius + 5.0).min((bounds.width - 112.0).max(4.0)),
+                                (position.y + 4.0).min(bounds.height - 4.0),
+                            ),
+                            color: color(self.palette.text),
+                            size: iced::Pixels(self.label_size),
+                            ..Default::default()
+                        });
+                    }
+                }
+            });
+
+        let mut output = graph;
+        let positions = if self.dag {
+            dag_layout(&self.nodes, &self.edges, bounds.size())
+        } else {
+            animated_neural_layout(&self.nodes, bounds.size(), settle)
+        };
+        if topology && settle >= 1.0 {
+            let mut activity = canvas::Frame::new(renderer, bounds.size());
+            let phase = (start.elapsed().as_secs_f32() * 0.12).fract();
+            for edge in self.edges.iter().filter(|edge| edge.activity > 0.0) {
+                let (Some(from), Some(to)) = (positions.get(&edge.from), positions.get(&edge.to))
+                else {
+                    continue;
+                };
+                let rate = edge.activity.clamp(1.0, 8.0).sqrt();
+                let travel =
+                    (phase * rate + stable_phase(&edge.from) + stable_phase(&edge.to) * 0.37)
+                        .fract();
+                let pulse = Point::new(
+                    from.x + (to.x - from.x) * travel,
+                    from.y + (to.y - from.y) * travel,
+                );
+                activity.fill(
+                    &Path::circle(pulse, 2.2 + rate * 0.7),
+                    with_alpha(color(self.palette.primary), 0.62 + rate * 0.04),
+                );
+            }
+            output.push(activity.into_geometry());
+        }
+        let Some(pointer) = cursor.position_in(bounds) else {
+            return output;
+        };
+        let hovered = self
+            .nodes
+            .iter()
+            .filter_map(|node| {
+                let position = positions.get(&node.id)?;
+                let distance =
+                    ((position.x - pointer.x).powi(2) + (position.y - pointer.y).powi(2)).sqrt();
+                (distance <= 18.0).then_some((distance, node))
+            })
+            .min_by(|left, right| left.0.total_cmp(&right.0));
+        let Some((_, node)) = hovered else {
+            return output;
+        };
+        let detail = node.detail.as_deref().unwrap_or(&node.label);
+        let mut overlay = canvas::Frame::new(renderer, bounds.size());
+        let width = (bounds.width * 0.42).clamp(320.0, 760.0);
+        let height = 58.0;
+        let origin = Point::new(18.0, (bounds.height - height - 18.0).max(0.0));
+        let panel = Path::rounded_rectangle(origin, Size::new(width, height), 7.0.into());
+        overlay.fill(&panel, with_alpha(color(self.palette.surface), 0.96));
+        overlay.stroke(
+            &panel,
+            canvas::Stroke::default()
+                .with_width(1.0)
+                .with_color(status_color(node.state, &self.palette)),
+        );
+        overlay.fill_text(canvas::Text {
+            content: node.label.clone(),
+            position: Point::new(origin.x + 12.0, origin.y + 21.0),
+            color: color(self.palette.text),
+            size: iced::Pixels(self.label_size * 1.05),
+            ..Default::default()
+        });
+        overlay.fill_text(canvas::Text {
+            content: detail.to_owned(),
+            position: Point::new(origin.x + 12.0, origin.y + 43.0),
+            color: color(self.palette.text_muted),
+            size: iced::Pixels(self.label_size * 0.9),
+            ..Default::default()
+        });
+        output.push(overlay.into_geometry());
+        output
+    }
+}
+
 /// Deterministic grouped columns: stable input order within each first-seen
 /// group, with ungrouped nodes sharing the final/default column.
 fn neural_layout(nodes: &[NeuralNode], size: Size) -> std::collections::BTreeMap<String, Point> {
+    if nodes.iter().any(|node| node.id.starts_with("site:")) {
+        return topology_web_layout(nodes, size);
+    }
+    grouped_column_layout(nodes, size)
+}
+
+fn stable_phase(value: &str) -> f32 {
+    let hash = value.bytes().fold(2_166_136_261_u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(16_777_619)
+    });
+    hash as f32 / u32::MAX as f32
+}
+
+fn ease_out_back(progress: f32) -> f32 {
+    let c1 = 1.70158;
+    let c3 = c1 + 1.0;
+    let x = progress.clamp(0.0, 1.0) - 1.0;
+    1.0 + c3 * x.powi(3) + c1 * x.powi(2)
+}
+
+fn animated_neural_layout(
+    nodes: &[NeuralNode],
+    size: Size,
+    settle: f32,
+) -> std::collections::BTreeMap<String, Point> {
+    if !nodes.iter().any(|node| node.id.starts_with("site:")) {
+        return neural_layout(nodes, size);
+    }
+    topology_web_layout_at_phase(nodes, size, settle)
+}
+
+fn grouped_column_layout(
+    nodes: &[NeuralNode],
+    size: Size,
+) -> std::collections::BTreeMap<String, Point> {
     let mut groups: Vec<(String, Vec<&NeuralNode>)> = Vec::new();
     for node in nodes {
         let group = node.group.as_deref().unwrap_or("nodes");
@@ -2400,6 +3052,101 @@ fn neural_layout(nodes: &[NeuralNode], size: Size) -> std::collections::BTreeMap
             let y = margin_y + usable_h * (row + 1) as f32 / (members.len() + 1) as f32;
             positions.insert(node.id.clone(), Point::new(x, y));
         }
+    }
+    positions
+}
+
+/// Deterministic hub-and-orbit layout for topology snapshots. A wide, shallow
+/// wall surface needs real radial separation; grouped columns collapse into a
+/// card row and make site-to-peer edges unreadable.
+fn topology_web_layout(
+    nodes: &[NeuralNode],
+    size: Size,
+) -> std::collections::BTreeMap<String, Point> {
+    topology_web_layout_at_phase(nodes, size, 1.0)
+}
+
+fn topology_web_layout_at_phase(
+    nodes: &[NeuralNode],
+    size: Size,
+    settle: f32,
+) -> std::collections::BTreeMap<String, Point> {
+    let sites = nodes
+        .iter()
+        .filter(|node| node.id.starts_with("site:"))
+        .collect::<Vec<_>>();
+    let mut positions = std::collections::BTreeMap::new();
+    let center = Point::new(size.width * 0.5, size.height * 0.5);
+    let hub_radius_x = (size.width * 0.34).max(80.0);
+    let hub_radius_y = (size.height * 0.28).max(64.0);
+    for (site_index, site) in sites.iter().enumerate() {
+        let hub_angle = -std::f32::consts::FRAC_PI_2
+            + std::f32::consts::TAU * site_index as f32 / sites.len().max(1) as f32;
+        let hub = Point::new(
+            center.x + hub_angle.cos() * hub_radius_x * settle,
+            center.y + hub_angle.sin() * hub_radius_y * settle,
+        );
+        positions.insert(site.id.clone(), hub);
+        let site_name = site.label.as_str();
+        let members = nodes
+            .iter()
+            .filter(|node| {
+                !node.id.starts_with("site:") && node.group.as_deref() == Some(site_name)
+            })
+            .collect::<Vec<_>>();
+        let radius_x = (size.width / sites.len().max(3) as f32 * 0.36).clamp(52.0, 150.0);
+        let radius_y = (size.height * 0.17).clamp(46.0, 150.0);
+        for (index, node) in members.iter().enumerate() {
+            let angle = -std::f32::consts::FRAC_PI_2
+                + std::f32::consts::TAU * index as f32 / members.len().max(1) as f32;
+            let spring = ease_out_back(settle);
+            positions.insert(
+                node.id.clone(),
+                Point::new(
+                    hub.x + angle.cos() * radius_x * spring,
+                    hub.y + angle.sin() * radius_y * spring,
+                ),
+            );
+        }
+    }
+    let unplaced = nodes
+        .iter()
+        .filter(|node| !positions.contains_key(&node.id))
+        .collect::<Vec<_>>();
+    let transit = unplaced
+        .iter()
+        .copied()
+        .filter(|node| node.heat >= 0.75 || node.id.starts_with("wireguard:"))
+        .collect::<Vec<_>>();
+    for (index, node) in transit.iter().enumerate() {
+        let angle = -std::f32::consts::FRAC_PI_2
+            + std::f32::consts::TAU * index as f32 / transit.len().max(1) as f32;
+        let ring_x = (size.width * 0.105).clamp(70.0, 185.0);
+        let ring_y = (size.height * 0.095).clamp(54.0, 105.0);
+        positions.insert(
+            node.id.clone(),
+            Point::new(
+                center.x + angle.cos() * ring_x * settle,
+                center.y + angle.sin() * ring_y * settle,
+            ),
+        );
+    }
+    let peripheral = unplaced
+        .iter()
+        .copied()
+        .filter(|node| !positions.contains_key(&node.id))
+        .collect::<Vec<_>>();
+    for (index, node) in peripheral.iter().enumerate() {
+        let angle = -std::f32::consts::FRAC_PI_2
+            + std::f32::consts::TAU * index as f32 / peripheral.len().max(1) as f32;
+        let band = if index % 2 == 0 { 0.44 } else { 0.405 };
+        positions.insert(
+            node.id.clone(),
+            Point::new(
+                center.x + angle.cos() * size.width * band * settle,
+                center.y + angle.sin() * size.height * band * settle,
+            ),
+        );
     }
     positions
 }
@@ -2458,12 +3205,18 @@ pub(crate) fn panel<'a, Message: 'a>(
     body: Element<'a, Message>,
     visual: &VisualTheme,
 ) -> Element<'a, Message> {
-    let surface = color(visual.surface_raised);
+    let spectral = matches!(&spec.kind, WidgetKind::SpectralWaterfall { .. });
+    let surface = if spectral {
+        Color::from_rgb8(0, 2, 12)
+    } else {
+        color(visual.surface_raised)
+    };
     let metrics = visual.metrics;
-    let panel_opacity = visual.panel_opacity;
+    let panel_opacity = if spectral { 1.0 } else { visual.panel_opacity };
     // Resolved before the closure below: capturing `visual` would tie the style
     // to the theme's lifetime, and Color is Copy.
     let border = freshness(spec.data.state, visual).border;
+    let accent = data_state_color(spec.data.state, &visual.palette);
     let compact = spec.effective_chrome() == WidgetChrome::Frameless;
     let content: Element<'a, Message> = match spec.data.state {
         WidgetDataState::Loading
@@ -2494,27 +3247,52 @@ pub(crate) fn panel<'a, Message: 'a>(
             layout = layout.push(footer);
         }
     }
-    container(layout)
-        .padding(if compact {
-            metrics.space_2
-        } else {
-            metrics.space_4
-        })
+    let rail = container(space())
         .width(Length::Fill)
-        .height(Length::Fill)
+        .height(Length::Fixed(3.0))
         .style(move |_| container::Style {
-            background: Some(with_alpha(surface, panel_opacity).into()),
+            background: Some(
+                Color {
+                    a: if spec.data.state == WidgetDataState::Ready {
+                        0.78
+                    } else {
+                        1.0
+                    },
+                    ..accent
+                }
+                .into(),
+            ),
             border: iced::Border {
-                color: border,
-                width: 1.0,
-                radius: metrics.radius_lg.into(),
+                radius: metrics.radius_sm.into(),
+                ..Default::default()
             },
-            // No shadow. The host draws a plane with its own shadow behind every
-            // widget surface, and a second concentric one at a near-identical
-            // radius is the single clearest signal that this is unfinished.
             ..Default::default()
-        })
-        .into()
+        });
+    container(column![rail, layout].spacing(if compact {
+        metrics.space_1
+    } else {
+        metrics.space_3
+    }))
+    .padding(if compact {
+        metrics.space_2
+    } else {
+        metrics.space_4
+    })
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(move |_| container::Style {
+        background: Some(with_alpha(surface, panel_opacity).into()),
+        border: iced::Border {
+            color: border,
+            width: 1.0,
+            radius: metrics.radius_lg.into(),
+        },
+        // No shadow. The host draws a plane with its own shadow behind every
+        // widget surface, and a second concentric one at a near-identical
+        // radius is the single clearest signal that this is unfinished.
+        ..Default::default()
+    })
+    .into()
 }
 
 /// How a data state marks the widget it belongs to.
@@ -3125,32 +3903,13 @@ fn format_metric(value: f64) -> String {
 
 struct SpectralWaterfallProgram {
     rows: Vec<Vec<f32>>,
-    ramp: Vec<Color>,
     label: Color,
     scan: Color,
     label_size: f32,
     min_frequency: f64,
     max_frequency: f64,
     unit: String,
-}
-
-fn sample_spectrum(rows: &[Vec<f32>], x: f32, y: f32) -> f32 {
-    let source_y = y.clamp(0.0, 1.0) * (rows.len().saturating_sub(1)) as f32;
-    let y0 = source_y.floor() as usize;
-    let y1 = (y0 + 1).min(rows.len().saturating_sub(1));
-    let fy = source_y.fract();
-    let sample_row = |row: &[f32]| {
-        if row.is_empty() {
-            return 0.0;
-        }
-        let source_x = x.clamp(0.0, 1.0) * (row.len().saturating_sub(1)) as f32;
-        let x0 = source_x.floor() as usize;
-        let x1 = (x0 + 1).min(row.len().saturating_sub(1));
-        row[x0] + (row[x1] - row[x0]) * source_x.fract()
-    };
-    let top = sample_row(&rows[y0]);
-    let bottom = sample_row(&rows[y1]);
-    top + (bottom - top) * fy
+    radio: Option<RadioSpectrumState>,
 }
 
 impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
@@ -3174,13 +3933,9 @@ impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
                 .add_f32(self.label_size),
             |key, value| key.add_f32(*value),
         );
-        let key = self
-            .ramp
-            .iter()
-            .fold(key, |key, color| key.add_color(*color))
-            .build();
-        let mut output = state.draw_cached(renderer, bounds.size(), key, |frame| {
-            if self.rows.is_empty() || self.ramp.len() < 2 {
+        let key = key.add_str(&format!("{:?}", self.radio)).build();
+        state.draw_cached(renderer, bounds.size(), key, |frame| {
+            if self.rows.is_empty() {
                 frame.fill_text(canvas::Text {
                     content: "Waiting for spectrum frames".into(),
                     position: Point::new(8.0, bounds.height * 0.5),
@@ -3191,40 +3946,122 @@ impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
                 return;
             }
             let layout = PlotFrame::bottom_axis(bounds.size(), self.label_size);
-            // Source frames are intentionally bounded and may be sparse. The
-            // retained renderer resamples them into a dense field so a dozen
-            // bins do not become a dozen giant boxes on a large wall.
-            let columns = ((layout.plot.width / 3.0).ceil() as usize).clamp(24, 384);
-            let display_rows = ((layout.plot.height / 2.5).ceil() as usize).clamp(16, 192);
-            let cell_w = layout.plot.width / columns as f32;
-            let cell_h = layout.plot.height / display_rows as f32;
-            for row_index in 0..display_rows {
-                let y = layout.plot.y + row_index as f32 * cell_h;
-                for column in 0..columns {
-                    let value = sample_spectrum(
-                        &self.rows,
-                        (column as f32 + 0.5) / columns as f32,
-                        (row_index as f32 + 0.5) / display_rows as f32,
-                    );
-                    let scaled = value.clamp(0.0, 1.0) * (self.ramp.len() - 1) as f32;
-                    let index = scaled.floor() as usize;
-                    let next = (index + 1).min(self.ramp.len() - 1);
-                    let fill = lerp_oklch(self.ramp[index], self.ramp[next], scaled.fract());
-                    frame.fill(
-                        &Path::rectangle(
-                            Point::new(layout.plot.x + column as f32 * cell_w, y),
-                            Size::new(cell_w + 0.35, cell_h + 0.35),
-                        ),
-                        fill,
-                    );
+            let spectrum_height = (layout.plot.height * 0.34).max(46.0);
+            let spectrum = Rectangle {
+                x: layout.plot.x,
+                y: layout.plot.y,
+                width: layout.plot.width,
+                height: spectrum_height.min(layout.plot.height * 0.48),
+            };
+
+            // Keep the frequency guides inside the instantaneous FFT. Carrying
+            // them through the history reads as permanent narrow-band signals.
+            for fraction in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+                let x = layout.plot.x + layout.plot.width * fraction;
+                frame.stroke(
+                    &Path::line(
+                        Point::new(x, spectrum.y),
+                        Point::new(x, spectrum.y + spectrum.height),
+                    ),
+                    canvas::Stroke::default()
+                        .with_width(if fraction == 0.5 { 1.2 } else { 0.6 })
+                        .with_color(with_alpha(
+                            self.label,
+                            if fraction == 0.5 { 0.28 } else { 0.13 },
+                        )),
+                );
+            }
+
+            // Latest FFT is rendered as a continuous luminous trace above its
+            // retained history. This is real frame data, never an idle animation.
+            let latest = self.rows.last().expect("non-empty spectrum history");
+            let previous = self.rows.iter().rev().nth(1).unwrap_or(latest);
+            let mut trace = canvas::path::Builder::new();
+            for index in 0..latest.len() {
+                let x = spectrum.x
+                    + spectrum.width * index as f32 / latest.len().saturating_sub(1).max(1) as f32;
+                // Light temporal interpolation calms single-frame FFT jitter
+                // without modifying the raw waterfall history.
+                let value = previous[index] + (latest[index] - previous[index]) * 0.72;
+                let y = spectrum.y + spectrum.height * (1.0 - value.clamp(0.0, 1.0));
+                if index == 0 {
+                    trace.move_to(Point::new(x, y));
+                } else {
+                    trace.line_to(Point::new(x, y));
                 }
             }
+            let trace = trace.build();
+            frame.stroke(
+                &trace,
+                canvas::Stroke::default()
+                    .with_width(4.0)
+                    .with_color(with_alpha(self.scan, 0.16)),
+            );
+            frame.stroke(
+                &trace,
+                canvas::Stroke::default()
+                    .with_width(1.35)
+                    .with_color(self.scan),
+            );
+
+            if let Some(radio) = &self.radio {
+                let tuned_x = spectrum.x + spectrum.width * 0.5;
+                frame.stroke(
+                    &Path::line(
+                        Point::new(tuned_x, spectrum.y),
+                        Point::new(tuned_x, spectrum.y + 8.0),
+                    ),
+                    canvas::Stroke::default()
+                        .with_width(2.0)
+                        .with_color(self.scan),
+                );
+                frame.fill_text(canvas::Text {
+                    content: format!(
+                        "{}{}  {:.3} MHz · {:.3} MS/s{}{}   G{} · {}",
+                        radio
+                            .owner
+                            .as_deref()
+                            .map(|owner| format!("{owner} / "))
+                            .unwrap_or_default(),
+                        radio.session_id,
+                        radio.center_frequency_hz / 1_000_000.0,
+                        radio.span_hz / 1_000_000.0,
+                        radio
+                            .gain_db
+                            .map(|gain| format!(" · {gain:.1} dB"))
+                            .unwrap_or_default(),
+                        radio
+                            .ends_at_ms
+                            .map(|end| format!(
+                                " · {}m left",
+                                end.saturating_sub(radio.observed_at_ms) / 60_000
+                            ))
+                            .unwrap_or_default(),
+                        radio.generation,
+                        radio.sequence,
+                    ),
+                    position: Point::new(spectrum.x + 5.0, spectrum.y + 4.0),
+                    color: with_alpha(self.label, 0.82),
+                    size: iced::Pixels(self.label_size),
+                    ..Default::default()
+                });
+            }
+            let (min_frequency, max_frequency, unit) = self.radio.as_ref().map_or(
+                (self.min_frequency, self.max_frequency, self.unit.as_str()),
+                |radio| {
+                    (
+                        (radio.center_frequency_hz - radio.span_hz * 0.5) / 1_000_000.0,
+                        (radio.center_frequency_hz + radio.span_hz * 0.5) / 1_000_000.0,
+                        "MHz",
+                    )
+                },
+            );
             for (fraction, frequency) in [
-                (0.0, self.min_frequency),
-                (0.5, (self.min_frequency + self.max_frequency) * 0.5),
-                (1.0, self.max_frequency),
+                (0.0, min_frequency),
+                (0.5, (min_frequency + max_frequency) * 0.5),
+                (1.0, max_frequency),
             ] {
-                let label = format!("{} {}", short_value(frequency), self.unit);
+                let label = format!("{} {}", short_value(frequency), unit);
                 let width = label.chars().count() as f32 * self.label_size * 0.52;
                 frame.fill_text(canvas::Text {
                     content: label,
@@ -3237,29 +4074,7 @@ impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
                     ..Default::default()
                 });
             }
-        });
-        if !self.rows.is_empty() {
-            let phase = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs_f32()
-                .rem_euclid(3.0)
-                / 3.0;
-            let mut overlay = canvas::Frame::new(renderer, bounds.size());
-            let layout = PlotFrame::bottom_axis(bounds.size(), self.label_size);
-            let y = layout.plot.y + phase * layout.plot.height;
-            overlay.stroke(
-                &Path::line(
-                    Point::new(layout.plot.x, y),
-                    Point::new(layout.plot.x + layout.plot.width, y),
-                ),
-                canvas::Stroke::default()
-                    .with_width(1.0)
-                    .with_color(with_alpha(self.scan, 0.28)),
-            );
-            output.push(overlay.into_geometry());
-        }
-        output
+        })
     }
 }
 
@@ -5758,14 +6573,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn spectral_sampling_interpolates_between_bins_and_frames() {
-        let rows = vec![vec![0.0, 1.0], vec![1.0, 0.0]];
-        assert!((sample_spectrum(&rows, 0.5, 0.0) - 0.5).abs() < 0.001);
-        assert!((sample_spectrum(&rows, 0.0, 0.5) - 0.5).abs() < 0.001);
-        assert!((sample_spectrum(&rows, 0.5, 0.5) - 0.5).abs() < 0.001);
-    }
-
-    #[test]
     fn plot_frame_reserves_typography_outside_the_data_marks() {
         let layout = PlotFrame::cartesian(Size::new(420.0, 220.0), 11.0, 0.0, 10_000.0, Some("ms"));
         assert!(layout.plot.x > 40.0, "wide labels need a real gutter");
@@ -5791,6 +6598,7 @@ mod tests {
             NeuralNode {
                 id: "a".into(),
                 label: "A".into(),
+                detail: None,
                 group: Some("client".into()),
                 heat: 0.0,
                 state: StatusLevel::Neutral,
@@ -5798,6 +6606,7 @@ mod tests {
             NeuralNode {
                 id: "b".into(),
                 label: "B".into(),
+                detail: None,
                 group: Some("gateway".into()),
                 heat: 1.0,
                 state: StatusLevel::Good,
@@ -5805,6 +6614,7 @@ mod tests {
             NeuralNode {
                 id: "c".into(),
                 label: "C".into(),
+                detail: None,
                 group: Some("gateway".into()),
                 heat: 0.5,
                 state: StatusLevel::Warning,
@@ -5819,10 +6629,44 @@ mod tests {
     }
 
     #[test]
+    fn topology_web_orbits_site_members_in_a_wide_band() {
+        let node = |id: &str, group: &str| NeuralNode {
+            id: id.into(),
+            label: id.into(),
+            detail: None,
+            group: Some(group.into()),
+            heat: 0.5,
+            state: StatusLevel::Good,
+        };
+        let mut site = node("site:1", "sites");
+        site.label = "home".into();
+        let nodes = vec![
+            site,
+            node("home-pi", "home"),
+            node("agora-one", "home"),
+            node("segment:lan", "home"),
+        ];
+        let layout = neural_layout(&nodes, Size::new(1200.0, 280.0));
+        let hub = layout["site:1"];
+        assert_eq!(hub.x, 600.0);
+        assert_ne!(layout["home-pi"].x, layout["agora-one"].x);
+        assert!(
+            layout
+                .values()
+                .all(|point| point.y >= 24.0 && point.y <= 256.0)
+        );
+
+        let later = animated_neural_layout(&nodes, Size::new(1200.0, 280.0), 0.5);
+        assert_ne!(later["home-pi"], layout["home-pi"]);
+        assert_ne!(later["site:1"], hub);
+    }
+
+    #[test]
     fn dag_layout_is_stable_and_places_parents_before_children() {
         let node = |id: &str| NeuralNode {
             id: id.into(),
             label: id.into(),
+            detail: None,
             group: None,
             heat: 0.0,
             state: StatusLevel::Neutral,
@@ -5832,6 +6676,7 @@ mod tests {
             from: from.into(),
             to: to.into(),
             heat: 0.0,
+            activity: 0.0,
         };
         let edges = vec![
             edge("root", "child-a"),

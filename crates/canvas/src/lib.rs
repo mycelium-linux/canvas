@@ -931,6 +931,15 @@ pub enum SemanticInk {
 #[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
 pub enum NodeContent {
     Group,
+    /// Theme-resolved flat panel primitive for Lua-authored 2D composition.
+    Rect {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ink: Option<SemanticInk>,
+        #[serde(default = "default_scene_opacity")]
+        opacity: f32,
+        #[serde(default)]
+        radius: f32,
+    },
     Text {
         text: String,
         /// Absent in scenes written before ink existed, which draw as `Text`.
@@ -949,6 +958,10 @@ pub enum NodeContent {
     Light {
         light: Light,
     },
+}
+
+fn default_scene_opacity() -> f32 {
+    1.0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -1104,6 +1117,18 @@ impl Scene {
             node.transform.validate()?;
             match &node.content {
                 NodeContent::Group => {}
+                NodeContent::Rect {
+                    opacity, radius, ..
+                } => {
+                    check(
+                        opacity.is_finite() && (0.0..=1.0).contains(opacity),
+                        "Scene rectangle opacity must be between zero and one",
+                    )?;
+                    check(
+                        radius.is_finite() && *radius >= 0.0,
+                        "Scene rectangle radius must be finite and nonnegative",
+                    )?;
+                }
                 NodeContent::Text { text, .. } => {
                     check(visible(text), "Scene text must be printable")?;
                 }
@@ -1863,11 +1888,16 @@ mod tests {
             .expect("widget-catalog.json must deserialize as a WorkspaceDocument");
         doc.validate(&catalog())
             .expect("widget-catalog.json must pass validation");
-        assert_eq!(doc.surfaces.len(), 9);
+        assert_eq!(doc.surfaces.len(), 49);
         let Layout::Canvas { placements } = &doc.layout else {
             panic!("widget catalog must use a tiled canvas layout")
         };
-        assert_eq!(placements.len(), doc.surfaces.len());
+        assert_eq!(placements.len(), 9);
+        assert_eq!(doc.pages.len(), 5);
+        assert!(doc.pages.iter().all(|page| match &page.layout {
+            Layout::Canvas { placements } => placements.len() <= 9,
+            _ => false,
+        }));
     }
 
     #[test]

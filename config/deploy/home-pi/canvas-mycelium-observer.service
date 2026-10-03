@@ -1,0 +1,18 @@
+[Unit]
+Description=Publish the live Mycelium mesh into Canvas
+After=canvas-surface.service
+Wants=canvas-surface.service
+
+[Service]
+Type=simple
+User=ajm
+Environment=HOME=/home/ajm
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=MYCELIUM_BIN=/home/ajm/.mycelium/bin/mycelium
+ExecStart=/usr/local/bin/canvas-mycelium-observer
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

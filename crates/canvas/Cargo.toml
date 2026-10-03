@@ -61,6 +61,11 @@ path = "src/bin/canvas-edge.rs"
 required-features = ["lua-scenes"]
 
 [[bin]]
+name = "canvas-radioman-observer"
+path = "src/bin/canvas-radioman-observer.rs"
+required-features = ["lua-scenes"]
+
+[[bin]]
 name = "canvasctl"
 path = "src/bin/canvasctl.rs"
 

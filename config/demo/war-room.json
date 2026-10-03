@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "id": "war-room",
+  "project_id": "dock",
+  "revision": 1,
+  "theme": { "source": "project" },
+  "surfaces": [{
+    "id": "x-trends",
+    "title": "Bluesky / War Room",
+    "content": { "kind": "widget", "spec": {
+      "schema_version": 2, "id": "social-war-room-feed", "kind": "social_feed", "title": "Bluesky / War Room",
+      "status": "degraded", "detail": "waiting for canvas-bsky-trends", "posts": [], "rotate_seconds": 8,
+      "data": { "state": "loading", "source": "bsky:appview", "detail": "waiting for canvas-bsky-trends", "provenance": "live" }
+    }},
+    "inputs": [{ "id": "feed", "contract": "canvas.social.trends.v1" }]
+  }, {
+    "id": "reddit-trends", "title": "Reddit / War Room",
+    "content": { "kind": "widget", "spec": {
+      "schema_version": 2, "id": "reddit-war-room-feed", "kind": "social_feed", "title": "Reddit / War Room",
+      "status": "degraded", "detail": "waiting for canvas-reddit-trends", "posts": [], "rotate_seconds": 10,
+      "data": { "state": "loading", "source": "reddit:rss", "detail": "waiting for canvas-reddit-trends", "provenance": "live" }
+    }},
+    "inputs": [{ "id": "feed", "contract": "canvas.social.trends.v1" }]
+  }],
+  "layout": { "kind": "canvas", "placements": [
+    { "surface_id": "x-trends", "bounds": { "x": 0.0, "y": 0.0, "width": 0.62, "height": 1.0 }, "layer": 0 },
+    { "surface_id": "reddit-trends", "bounds": { "x": 0.62, "y": 0.0, "width": 0.38, "height": 1.0 }, "layer": 0 }
+  ] },
+  "bindings": [{
+    "id": "x-trends-bind",
+    "source": { "owner": "feeds", "stream": "bsky-war-room", "contract": "canvas.social.trends.v1" },
+    "target": { "surface_id": "x-trends", "input_id": "feed" },
+    "adapter": "x-trends-v1", "delivery": { "mode": "latest" }
+  }, {
+    "id": "reddit-trends-bind",
+    "source": { "owner": "feeds", "stream": "reddit-war-room", "contract": "canvas.social.trends.v1" },
+    "target": { "surface_id": "reddit-trends", "input_id": "feed" },
+    "adapter": "x-trends-v1", "delivery": { "mode": "latest" }
+  }]
+}

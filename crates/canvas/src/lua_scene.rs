@@ -219,6 +219,38 @@ fn install_canvas_api(
         )
         .map_err(lua_error)?;
 
+    let rect_nodes = Rc::clone(&nodes);
+    canvas
+        .set(
+            "rect",
+            lua.create_function(move |_, spec: Table| {
+                let ink = optional_ink(&spec)?;
+                let opacity = spec.get::<Option<f32>>("opacity")?.unwrap_or(1.0);
+                let radius = spec.get::<Option<f32>>("radius")?.unwrap_or(0.0);
+                let node = parse_node(
+                    &spec,
+                    &[
+                        "id",
+                        "parent",
+                        "ink",
+                        "opacity",
+                        "radius",
+                        "translation",
+                        "rotation",
+                        "scale",
+                    ],
+                    NodeContent::Rect {
+                        ink,
+                        opacity,
+                        radius,
+                    },
+                )?;
+                append_node(&rect_nodes, max_nodes, node)
+            })
+            .map_err(lua_error)?,
+        )
+        .map_err(lua_error)?;
+
     install_asset_node(
         lua,
         &canvas,
@@ -423,6 +455,32 @@ mod tests {
             Some(SemanticInk::Muted)
         );
         assert_eq!(ink_of(r#"canvas.text { id = "a", text = "hi" }"#), None);
+    }
+
+    #[test]
+    fn rectangle_is_a_bounded_theme_resolved_primitive() {
+        let scene = generate_scene(
+            r#"canvas.rect { id = "panel", ink = "primary", opacity = 0.25, radius = 12, scale = { 4, 2, 1 } }"#,
+            &LuaSceneCapabilities::default(),
+            LuaSceneLimits::default(),
+        )
+        .expect("rectangle scene");
+        assert!(matches!(
+            scene.nodes[0].content,
+            NodeContent::Rect {
+                ink: Some(SemanticInk::Primary),
+                opacity,
+                radius,
+            } if opacity == 0.25 && radius == 12.0
+        ));
+
+        let error = generate_scene(
+            r#"canvas.rect { id = "panel", opacity = 2 }"#,
+            &LuaSceneCapabilities::default(),
+            LuaSceneLimits::default(),
+        )
+        .expect_err("opacity outside the contract");
+        assert!(error.0.contains("opacity"), "{error}");
     }
 
     #[test]

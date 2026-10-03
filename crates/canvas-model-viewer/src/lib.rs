@@ -4,6 +4,7 @@
 //! This crate owns viewer-side interaction and presentation. Transport remains
 //! a narrow adapter supplied by the embedding application.
 
+pub mod external_surface;
 pub mod orbit;
 pub mod state;
 pub mod video;

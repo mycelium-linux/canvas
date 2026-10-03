@@ -1,0 +1,19 @@
+[Unit]
+Description=Publish Radioman spectrum into Canvas
+After=canvas-surface.service network-online.target
+Requires=canvas-surface.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ajm
+Environment=HOME=/home/ajm
+Environment=XDG_CONFIG_HOME=/home/ajm/.config
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStart=/usr/local/bin/canvas-radioman-observer 0.0.0.0:50070
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

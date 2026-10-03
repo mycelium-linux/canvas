@@ -1,5 +1,5 @@
 [Unit]
-Description=Announce the Panopticon globe stream to Canvas
+Description=Announce remote video streams to Canvas
 After=network-online.target unibus-router.service canvas-media-edge.service
 Wants=network-online.target
 Requires=unibus-router.service canvas-media-edge.service
@@ -8,7 +8,7 @@ Requires=unibus-router.service canvas-media-edge.service
 Type=simple
 User=ajm
 Environment=HOME=/home/ajm
-ExecStart=/usr/local/bin/canvas-media-announce /home/ajm/.config/canvas/media-panopticon-globe.json
+ExecStart=/usr/local/bin/canvas-media-announce /home/ajm/.config/canvas/media-remote-video.json
 Restart=always
 RestartSec=2
 NoNewPrivileges=true
