@@ -13,6 +13,9 @@ serde.workspace = true
 serde_json.workspace = true
 unibus-media = { path = "../../../unibus/crates/unibus-media" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit = { version = "11", features = ["macos_15_0"] }
+
 [dev-dependencies]
 tempfile.workspace = true
 
@@ -31,3 +34,7 @@ path = "src/bin/announce.rs"
 [[bin]]
 name = "canvas-simulator-stream"
 path = "src/bin/simulator.rs"
+
+[[bin]]
+name = "canvas-window-stream"
+path = "src/bin/window.rs"

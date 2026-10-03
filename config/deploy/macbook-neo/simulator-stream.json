@@ -10,12 +10,16 @@
     "schema_version": 1
   },
   "destination": "living-room",
-  "xcrun": "/usr/bin/xcrun",
   "ffmpeg": "/opt/homebrew/bin/ffmpeg",
+  "selector": {
+    "bundle_id": "com.apple.iphonesimulator",
+    "title_contains": "iPhone 17 Pro"
+  },
+  "stream_id": "simulator-ios",
+  "display_name": "iOS Simulator",
   "stream_endpoint": "udp://192.168.2.74:55208?pkt_size=1316",
   "advertised_endpoint": "udp://0.0.0.0:55208",
-  "width": 720,
-  "height": 1280,
-  "fps": 12,
-  "ttl_ms": 120000
+  "max_height": 960,
+  "fps": 30,
+  "ttl_ms": 30000
 }
