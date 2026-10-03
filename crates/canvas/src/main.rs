@@ -10146,7 +10146,45 @@ fn merge_engineering_projects(
         }
         _ => warnings.push("legion-of-bom is unavailable".into()),
     }
+    if !targets.contains_key("lob") {
+        insert_unavailable_lob(&mut targets, &lob);
+    }
     (targets, warnings)
+}
+
+/// Keep the LOB project inspectable when its owner process is absent.
+///
+/// The project picker already has a stable `lob` entry. Giving that entry an
+/// engineering manifest avoids silently opening an empty workspace and makes
+/// the owner boundary—and the action required to restore it—visible in the
+/// same native browser used for live circuits.
+fn insert_unavailable_lob(targets: &mut BTreeMap<String, EngineeringProject>, base: &str) {
+    let entry_id = "lob-connection-status".to_string();
+    let reason = format!(
+        "Legion of BOM is not serving its owner API at {base}. Start `lob serve` from a circuit repository containing lob.toml, then reopen this project. Set CANVAS_LOB_VIEWER_URL when the owner uses a different address."
+    );
+    let project = EngineeringProject {
+        id: "lob".into(),
+        name: "Legion of BOM".into(),
+        owner: "legion-of-bom".into(),
+        manifest: ProjectManifest {
+            schema_version: ProjectManifest::SCHEMA_VERSION,
+            project_id: "lob".into(),
+            revision: "owner-unavailable".into(),
+            entries: vec![ManifestEntry {
+                id: entry_id.clone(),
+                path: "connection/owner-unavailable.txt".into(),
+                display_name: "LOB owner unavailable".into(),
+                cid: format!("lob:unavailable:{base}"),
+                media_type: "text/plain".into(),
+                bytes: 0,
+                modified_at_ms: None,
+            }],
+        },
+        artifacts: BTreeMap::from([(entry_id, EngineeringArtifact::Unavailable(reason))]),
+    };
+    targets.insert("legion-of-bom".into(), project.clone());
+    targets.insert("lob".into(), project);
 }
 
 fn owner_get(base: &str, path: &str, timeout: Duration) -> Option<String> {
@@ -16001,6 +16039,26 @@ mod tests {
             r#"{"root":"/not/real"}"#,
         ));
         assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn unavailable_lob_still_opens_as_a_native_project_browser() {
+        let mut targets = BTreeMap::new();
+        insert_unavailable_lob(&mut targets, "http://127.0.0.1:8086");
+
+        let project = targets.get("lob").unwrap().clone();
+        let browser = App::engineering_browser_for(project.clone()).unwrap();
+        assert_eq!(browser.model.items.len(), 1);
+        assert!(matches!(
+            &browser.model.items[0],
+            canvas_core::project_browser::BrowserItem::Folder { path, descendants: 1, .. }
+                if path == "connection"
+        ));
+        assert!(matches!(
+            project.artifacts.get("lob-connection-status"),
+            Some(EngineeringArtifact::Unavailable(reason)) if reason.contains("127.0.0.1:8086")
+        ));
+        assert!(targets.contains_key("legion-of-bom"));
     }
 
     #[test]
