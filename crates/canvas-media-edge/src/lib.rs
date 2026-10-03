@@ -193,14 +193,19 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
         "!".into(),
         format!("video/x-raw,format=RGBA,width={width},height={height}"),
         "!".into(),
+        // Canvas consumes an atomically published latest frame, not a timed
+        // playback queue. Producer PTS can be bursty (ScreenCaptureKit emits
+        // on damage), so scheduling the file sink against those timestamps
+        // accumulates seconds of latency after an initially responsive start.
+        "queue".into(),
+        "max-size-buffers=1".into(),
+        "max-size-bytes=0".into(),
+        "max-size-time=0".into(),
+        "leaky=downstream".into(),
+        "!".into(),
         "fdsink".into(),
         "fd=1".into(),
-        // Pace variable-arrival live streams against their PTS. A frame more
-        // than 100 ms late is less useful to an interactive surface than the
-        // newest frame, so let BaseSink drop it instead of growing jitter.
-        "sync=true".into(),
-        "qos=true".into(),
-        "max-lateness=100000000".into(),
+        "sync=false".into(),
     ]);
     // Raspberry Pi's V4L2 converter allocates as though RGBA rows were on a
     // 128-byte boundary, but fdsink serializes the visible rows tightly and
@@ -686,9 +691,9 @@ mod tests {
         assert!(visible.iter().all(|byte| *byte == 7));
         assert!(plan.argv.iter().any(|arg| arg == "v4l2h264dec"));
         assert!(plan.argv.iter().any(|arg| arg == "buffer-size=2097152"));
-        assert!(plan.argv.iter().any(|arg| arg == "sync=true"));
-        assert!(plan.argv.iter().any(|arg| arg == "qos=true"));
-        assert!(plan.argv.iter().any(|arg| arg == "max-lateness=100000000"));
+        assert!(plan.argv.iter().any(|arg| arg == "sync=false"));
+        assert!(plan.argv.iter().any(|arg| arg == "max-size-buffers=1"));
+        assert!(plan.argv.iter().any(|arg| arg == "leaky=downstream"));
         // Colour conversion belongs in hardware alongside the decode. It was
         // measured at 29.8% of a Pi core in videoconvert against 7.1% in
         // v4l2convert for one 704x480 RGBA stream, and the Pi runs eleven.
