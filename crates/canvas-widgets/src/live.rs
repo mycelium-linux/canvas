@@ -758,8 +758,8 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
             min_frequency,
             max_frequency,
             unit,
+            history,
             radio,
-            ..
         } => panel(
             spec,
             column![
@@ -777,6 +777,7 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                 ],
                 Canvas::new(SpectralWaterfallProgram {
                     rows: rows.clone(),
+                    history: *history,
                     ramp: vec![
                         Color::from_rgb8(0, 2, 12),
                         Color::from_rgb8(0, 20, 92),
@@ -3856,6 +3857,7 @@ fn format_metric(value: f64) -> String {
 
 struct SpectralWaterfallProgram {
     rows: Vec<Vec<f32>>,
+    history: usize,
     ramp: Vec<Color>,
     label: Color,
     scan: Color,
@@ -3866,23 +3868,14 @@ struct SpectralWaterfallProgram {
     radio: Option<RadioSpectrumState>,
 }
 
-fn sample_spectrum(rows: &[Vec<f32>], x: f32, y: f32) -> f32 {
-    let source_y = y.clamp(0.0, 1.0) * (rows.len().saturating_sub(1)) as f32;
-    let y0 = source_y.floor() as usize;
-    let y1 = (y0 + 1).min(rows.len().saturating_sub(1));
-    let fy = source_y.fract();
-    let sample_row = |row: &[f32]| {
-        if row.is_empty() {
-            return 0.0;
-        }
-        let source_x = x.clamp(0.0, 1.0) * (row.len().saturating_sub(1)) as f32;
-        let x0 = source_x.floor() as usize;
-        let x1 = (x0 + 1).min(row.len().saturating_sub(1));
-        row[x0] + (row[x1] - row[x0]) * source_x.fract()
-    };
-    let top = sample_row(&rows[y0]);
-    let bottom = sample_row(&rows[y1]);
-    top + (bottom - top) * fy
+fn sample_spectrum_row(row: &[f32], x: f32) -> f32 {
+    if row.is_empty() {
+        return 0.0;
+    }
+    let source_x = x.clamp(0.0, 1.0) * (row.len().saturating_sub(1)) as f32;
+    let x0 = source_x.floor() as usize;
+    let x1 = (x0 + 1).min(row.len().saturating_sub(1));
+    row[x0] + (row[x1] - row[x0]) * source_x.fract()
 }
 
 impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
@@ -3899,6 +3892,7 @@ impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
         let key = self.rows.iter().flatten().fold(
             Key::new()
                 .add_usize(self.rows.len())
+                .add_usize(self.history)
                 .add_f64(self.min_frequency)
                 .add_f64(self.max_frequency)
                 .add_str(&self.unit)
@@ -3962,17 +3956,24 @@ impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
             // paths per RF frame at 1080p while the receiver only supplies
             // 128 bins × at most 180 retained rows.
             let columns = self.rows.last().map_or(32, |row| row.len().clamp(32, 512));
-            let display_rows = self.rows.len().clamp(1, 256);
+            let display_rows = self.history.clamp(1, 256);
             let cell_w = waterfall.width / columns as f32;
             let cell_h = waterfall.height / display_rows as f32;
             for row_index in 0..display_rows {
                 let y = waterfall.y + row_index as f32 * cell_h;
                 for column in 0..columns {
-                    let value = sample_spectrum(
-                        &self.rows,
-                        (column as f32 + 0.5) / columns as f32,
-                        (row_index as f32 + 0.5) / display_rows as f32,
-                    );
+                    // New RF frames enter at the top and push older frames
+                    // downward. Unfilled history remains truly blank instead
+                    // of stretching a handful of rows across the viewport.
+                    let value = if row_index < self.rows.len() {
+                        let source = self.rows.len() - 1 - row_index;
+                        sample_spectrum_row(
+                            &self.rows[source],
+                            (column as f32 + 0.5) / columns as f32,
+                        )
+                    } else {
+                        0.0
+                    };
                     let scaled = value.clamp(0.0, 1.0) * (self.ramp.len() - 1) as f32;
                     let index = scaled.floor() as usize;
                     let next = (index + 1).min(self.ramp.len() - 1);
@@ -6588,11 +6589,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn spectral_sampling_interpolates_between_bins_and_frames() {
-        let rows = vec![vec![0.0, 1.0], vec![1.0, 0.0]];
-        assert!((sample_spectrum(&rows, 0.5, 0.0) - 0.5).abs() < 0.001);
-        assert!((sample_spectrum(&rows, 0.0, 0.5) - 0.5).abs() < 0.001);
-        assert!((sample_spectrum(&rows, 0.5, 0.5) - 0.5).abs() < 0.001);
+    fn spectral_sampling_interpolates_between_bins() {
+        assert!((sample_spectrum_row(&[0.0, 1.0], 0.5) - 0.5).abs() < 0.001);
+        assert_eq!(sample_spectrum_row(&[], 0.5), 0.0);
     }
 
     #[test]
