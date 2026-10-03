@@ -18,6 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if input.is_empty() {
         eprintln!("usage: echo 'inspect' | canvasctl");
+        eprintln!("       echo 'surfaces' | canvasctl");
         eprintln!("       echo 'focus\\nbg dock' | canvasctl");
         eprintln!("       echo 'move 0 25 1920 1150' | canvasctl");
         eprintln!("       echo 'indicator status speaking \"Socket live\"' | canvasctl");
@@ -70,6 +71,9 @@ fn handle_line(line: &str) -> Result<(), String> {
 
     if tokens[0] == "patch" {
         return handle_patch(&tokens);
+    }
+    if tokens[0] == "surfaces" {
+        return handle_surfaces(&tokens);
     }
     if tokens[0] == "doc" {
         return handle_doc(&tokens);
@@ -165,6 +169,87 @@ fn handle_line(line: &str) -> Result<(), String> {
         Err(e) => println!("ERR {e}"),
     }
     Ok(())
+}
+
+fn handle_surfaces(tokens: &[String]) -> Result<(), String> {
+    if tokens.len() != 1 {
+        return Err("usage: surfaces".into());
+    }
+    let request = ControlRequest {
+        schema_version: CONTROL_VERSION,
+        request_id: format!("surfaces-{}", id()),
+        expected_revision: None,
+        actor: None,
+        command: Command::ReadDocument,
+    };
+    let reply = control::send(&request)?;
+    let Outcome::Ok {
+        receipt: Receipt::DocumentSnapshot { document, snapshot },
+    } = &reply.outcome
+    else {
+        return Err(format_reply_error(&reply));
+    };
+
+    println!(
+        "Canvas {}x{} at {},{} · {} surfaces · document rev {} · runtime rev {}",
+        snapshot.frame.width,
+        snapshot.frame.height,
+        snapshot.frame.x,
+        snapshot.frame.y,
+        document.surfaces.len(),
+        document.revision,
+        snapshot.revision
+    );
+    for surface in &document.surfaces {
+        let bounds = snapshot.surface_bounds.get(&surface.id);
+        let frame = bounds.map_or_else(
+            || "not placed".to_owned(),
+            |value| {
+                format!(
+                    "{}x{} at {},{}",
+                    value.width, value.height, value.x, value.y
+                )
+            },
+        );
+        let mut state = Vec::new();
+        if document.focused_surface_id.as_deref() == Some(surface.id.as_str()) {
+            state.push("focused");
+        }
+        if snapshot.minimized_surface_ids.contains(&surface.id) {
+            state.push("minimized");
+        }
+        if snapshot.maximized_surface_ids.contains(&surface.id) {
+            state.push("maximized");
+        }
+        let state = if state.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", state.join(","))
+        };
+        println!(
+            "{:<24} {:<12} {:<24} {}{}",
+            surface.id,
+            surface.content.kind_tag(),
+            surface_source(&surface.content),
+            frame,
+            state
+        );
+    }
+    Ok(())
+}
+
+fn surface_source(content: &SurfaceContent) -> String {
+    match content {
+        SurfaceContent::ProjectResource { resource_id }
+        | SurfaceContent::Terminal { resource_id } => resource_id.clone(),
+        SurfaceContent::LiveImage { source_id } | SurfaceContent::LiveVideo { source_id, .. } => {
+            source_id.clone()
+        }
+        SurfaceContent::Stream { url } => url.clone(),
+        SurfaceContent::Widget { spec } => spec.id.clone(),
+        SurfaceContent::Prompt { target, .. } => target.clone(),
+        _ => "-".into(),
+    }
 }
 
 fn handle_manifest(tokens: &[String]) -> Result<(), String> {
