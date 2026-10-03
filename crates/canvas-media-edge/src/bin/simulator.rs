@@ -135,20 +135,34 @@ fn ensure_booted(xcrun: &Path) -> Result<()> {
 }
 
 fn screenshot(xcrun: &Path) -> Result<Vec<u8>> {
+    // Current simctl releases treat `-` as a literal path instead of stdout.
+    // Reuse one process-scoped file so capture remains bounded and cleanup is
+    // deterministic even at the configured frame rate.
+    let frame_path = std::env::temp_dir().join(format!(
+        "canvas-simulator-stream-{}.png",
+        std::process::id()
+    ));
     let output = Command::new(xcrun)
-        .args(["simctl", "io", "booted", "screenshot", "--type=png", "-"])
+        .args(["simctl", "io", "booted", "screenshot", "--type=png"])
+        .arg(&frame_path)
         .output()
         .context("capture Simulator")?;
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&frame_path);
+        bail!(
+            "Simulator screenshot failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let png = std::fs::read(&frame_path)
+        .with_context(|| format!("read Simulator frame {}", frame_path.display()));
+    let _ = std::fs::remove_file(&frame_path);
+    let png = png?;
     ensure!(
-        output.status.success(),
-        "Simulator screenshot failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-    ensure!(
-        output.stdout.starts_with(b"\x89PNG\r\n\x1a\n"),
+        png.starts_with(b"\x89PNG\r\n\x1a\n"),
         "Simulator returned a non-PNG frame"
     );
-    Ok(output.stdout)
+    Ok(png)
 }
 
 fn spawn_encoder(config: &Config) -> Result<Child> {
