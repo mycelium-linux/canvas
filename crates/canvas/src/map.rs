@@ -8,6 +8,8 @@ use crate::backend::{BackendError, SurfaceMetrics, VisualBackend};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, error, f64::consts::PI, fmt};
 
+pub mod spatial;
+
 const MAX_ZOOM: f64 = 22.0;
 const MAX_PITCH: f64 = 85.0;
 const MAX_LAYERS: usize = 64;
