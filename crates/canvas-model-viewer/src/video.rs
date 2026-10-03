@@ -85,16 +85,30 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let viewport_aspect = u.viewport.x / max(u.viewport.y, 1.0);
     let source_aspect = u.source.x / max(u.source.y, 1.0);
     var uv = in.uv;
+    var content_size = u.viewport;
     if viewport_aspect > source_aspect {
         let width = source_aspect / viewport_aspect;
         if abs(uv.x - 0.5) > width * 0.5 { return vec4<f32>(0.0); }
         uv.x = (uv.x - 0.5) / width + 0.5;
+        content_size.x = u.viewport.y * source_aspect;
     } else {
         let height = viewport_aspect / source_aspect;
         if abs(uv.y - 0.5) > height * 0.5 { return vec4<f32>(0.0); }
         uv.y = (uv.y - 0.5) / height + 0.5;
+        content_size.y = u.viewport.x / source_aspect;
     }
     let frame_color = textureSample(frame, frame_sampler, uv);
+    // H.264 has no alpha channel. A macOS window's transparent outer corners
+    // therefore arrive as black pixels unless the compositor restores the
+    // window silhouette. Clip at the fitted content boundary (not the widget
+    // boundary) with a resolution-independent, softly antialiased radius.
+    // The same restrained treatment makes camera/video surfaces sit cleanly
+    // in Canvas without baking chrome into any producer.
+    let radius = clamp(min(content_size.x, content_size.y) * 0.06, 8.0, 30.0);
+    let point = uv * content_size;
+    let q = abs(point - content_size * 0.5) - (content_size * 0.5 - vec2<f32>(radius));
+    let distance = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+    let mask = 1.0 - smoothstep(-1.25, 1.25, distance);
     // A camera that has stopped keeps its last frame on the texture forever, so
     // a dead feed has to be marked. NOT by draining colour: these cameras
     // switch to infrared at night and produce legitimately black-and-white
@@ -105,7 +119,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let band = step(0.5, fract((in.position.x + in.position.y) / 24.0));
     let dimmed = frame_color.rgb * (1.0 - 0.45 * u.staleness);
     let barred = dimmed * (1.0 - 0.35 * u.staleness * band);
-    return vec4<f32>(barred, frame_color.a);
+    return vec4<f32>(barred, frame_color.a * mask);
 }
 "#;
 
