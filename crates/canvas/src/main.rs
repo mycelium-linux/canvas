@@ -677,6 +677,12 @@ enum EngineeringArtifact {
 }
 
 #[derive(Debug, Clone)]
+enum EngineeringModelSource {
+    Local(PathBuf),
+    Remote { base: String, path: String },
+}
+
+#[derive(Debug, Clone)]
 struct EngineeringProject {
     id: String,
     name: String,
@@ -1300,12 +1306,15 @@ impl App {
             #[cfg(unix)]
             workspace_mirror: ::canvas::workspace_mirror::Publisher::new(),
         };
-        if !app.document.surfaces.iter().any(|surface| {
-            matches!(surface.content, SurfaceContent::ProjectBrowser { .. })
-        }) && let Some(project) = app
-            .engineering_projects
-            .get(&app.document.project_id)
-            .cloned()
+        if !app
+            .document
+            .surfaces
+            .iter()
+            .any(|surface| matches!(surface.content, SurfaceContent::ProjectBrowser { .. }))
+            && let Some(project) = app
+                .engineering_projects
+                .get(&app.document.project_id)
+                .cloned()
         {
             match Self::engineering_browser_for(project) {
                 Ok(browser) => app.engineering_browser = Some(browser),
@@ -1752,6 +1761,49 @@ impl App {
         }
     }
 
+    fn open_engineering_models(
+        &mut self,
+        project: &EngineeringProject,
+        entries: Vec<ManifestEntry>,
+        surface_id: &str,
+    ) -> Task<Message> {
+        if entries.len() == 1 {
+            return self.open_engineering_entry(
+                project,
+                entries.into_iter().next().unwrap(),
+                Some(surface_id),
+            );
+        }
+        let models = entries
+            .iter()
+            .filter_map(|entry| match project.artifacts.get(&entry.id) {
+                Some(EngineeringArtifact::LocalModel(path)) => {
+                    Some(EngineeringModelSource::Local(path.clone()))
+                }
+                Some(EngineeringArtifact::RemoteModel { base, path }) => {
+                    Some(EngineeringModelSource::Remote {
+                        base: base.clone(),
+                        path: path.clone(),
+                    })
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if models.is_empty() {
+            self.status = "This selection has no models to display.".into();
+            self.bump();
+            return Task::none();
+        }
+        let title = format!("{} · {} models", project.name, models.len());
+        let surface_id = surface_id.to_owned();
+        self.status = format!("Loading {title}…");
+        self.bump();
+        Task::perform(
+            async move { prepare_model_set(surface_id, title, models) },
+            |result| Message::EngineeringModelPrepared(Box::new(result)),
+        )
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::ShellBack => {
@@ -1789,9 +1841,7 @@ impl App {
             }
             Message::ProjectBrowserAction { surface_id, action } => {
                 let opened_folder = match &action {
-                    BrowserAction::OpenFolder(folder) if !folder.is_empty() => {
-                        Some(folder.clone())
-                    }
+                    BrowserAction::OpenFolder(folder) if !folder.is_empty() => Some(folder.clone()),
                     _ => None,
                 };
                 let opened = self.decoded.get_mut(&surface_id).and_then(|surface| {
@@ -1800,16 +1850,20 @@ impl App {
                     };
                     match browser.project.manifest.apply(&mut browser.state, action) {
                         Ok(entry) => {
-                            if let Ok(model) = browser.project.manifest.browse(&browser.state, 512) {
+                            if let Ok(model) = browser.project.manifest.browse(&browser.state, 512)
+                            {
                                 browser.model = model;
                             }
-                            entry
-                                .or_else(|| {
-                                    opened_folder.as_deref().and_then(|folder| {
-                                        preferred_model_in_folder(&browser.project.manifest, folder)
-                                    })
+                            let entries = entry.map(|entry| vec![entry]).or_else(|| {
+                                opened_folder.as_deref().and_then(|folder| {
+                                    let models = preferred_models_in_folder(
+                                        &browser.project.manifest,
+                                        folder,
+                                    );
+                                    (!models.is_empty()).then_some(models)
                                 })
-                                .map(|entry| (browser.project.clone(), entry))
+                            });
+                            entries.map(|entries| (browser.project.clone(), entries))
                         }
                         Err(error) => {
                             self.status = error.to_string();
@@ -1817,8 +1871,8 @@ impl App {
                         }
                     }
                 });
-                if let Some((project, entry)) = opened {
-                    return self.open_engineering_entry(&project, entry, Some("transmog-part"));
+                if let Some((project, entries)) = opened {
+                    return self.open_engineering_models(&project, entries, "transmog-part");
                 }
                 self.bump();
                 Task::none()
@@ -4285,9 +4339,12 @@ impl App {
                     .and_then(|view_id| ::canvas::operational_views::load(view_id).ok())
                     .map(|view| view.layout_policy)
                     .unwrap_or_default();
-                if self.document.surfaces.iter().any(|surface| {
-                    matches!(surface.content, SurfaceContent::ProjectBrowser { .. })
-                }) {
+                if self
+                    .document
+                    .surfaces
+                    .iter()
+                    .any(|surface| matches!(surface.content, SurfaceContent::ProjectBrowser { .. }))
+                {
                     self.engineering_browser = None;
                 }
                 if self.document.focused_surface_id.is_some()
@@ -10111,18 +10168,34 @@ fn engineering_project_id(owner: &str, identity: &str) -> String {
 /// A part folder represents a selectable engineering object, not just a
 /// directory. Prefer its directly contained native model while leaving nested
 /// assembly folders and ordinary document folders as navigation-only.
-fn preferred_model_in_folder(
-    manifest: &ProjectManifest,
-    folder: &str,
-) -> Option<ManifestEntry> {
-    manifest
+fn preferred_models_in_folder(manifest: &ProjectManifest, folder: &str) -> Vec<ManifestEntry> {
+    if folder.is_empty() {
+        return Vec::new();
+    }
+    let direct = manifest
         .entries
         .iter()
         .find(|entry| {
             entry.media_type.starts_with("model/")
                 && entry.path.rsplit_once('/').map(|(parent, _)| parent) == Some(folder)
         })
+        .cloned();
+    if let Some(model) = direct {
+        return vec![model];
+    }
+    let prefix = format!("{folder}/");
+    let descendants = manifest
+        .entries
+        .iter()
+        .filter(|entry| entry.media_type.starts_with("model/") && entry.path.starts_with(&prefix))
         .cloned()
+        .collect::<Vec<_>>();
+    descendants
+        .iter()
+        .find(|entry| entry.path == format!("{folder}/assembly/model.glb"))
+        .cloned()
+        .map(|assembly| vec![assembly])
+        .unwrap_or(descendants)
 }
 
 fn merge_transmog_body(
@@ -11158,44 +11231,82 @@ fn prepare_remote_model(
     base: String,
     path: String,
 ) -> Result<(String, String), Failure> {
-    let bytes = owner_get_bytes(&base, &path, Duration::from_secs(15))
-        .ok_or_else(|| Failure::invalid(format!("Could not load {path} from Transmog")))?;
-    if bytes.is_empty() || bytes.len() as u64 > MAX_FILE_BYTES {
-        return Err(Failure::resource(format!(
-            "Model must contain 1–{MAX_FILE_BYTES} bytes"
-        )));
+    prepare_model_set(
+        surface_id,
+        title,
+        vec![EngineeringModelSource::Remote { base, path }],
+    )
+}
+
+fn prepare_model_set(
+    surface_id: String,
+    title: String,
+    models: Vec<EngineeringModelSource>,
+) -> Result<(String, String), Failure> {
+    if models.is_empty() {
+        return Err(Failure::invalid("No model artifacts were selected"));
     }
     let scratch = std::env::temp_dir().join(format!("canvas-transmog-{}", unix_ms()));
     fs::create_dir_all(&scratch).map_err(|error| Failure::invalid(error.to_string()))?;
-    let input = scratch.join("model.glb");
-    fs::write(&input, bytes).map_err(|error| Failure::invalid(error.to_string()))?;
-    let split = scratch.join("split");
     let binary = transmog_binary().ok_or_else(|| {
         Failure::invalid(
             "Transmog is serving models, but its CLI is unavailable. Set CANVAS_TRANSMOG_BIN.",
         )
     })?;
-    let output = Process::new(binary)
-        .arg("split-mesh")
-        .arg(&input)
-        .arg("--out")
-        .arg(&split)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|error| Failure::invalid(format!("Could not start Transmog: {error}")))?;
-    if !output.status.success() {
-        return Err(Failure::invalid(format!(
-            "Transmog could not prepare the model: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
+    let mut components = Vec::new();
+    for (index, model) in models.into_iter().enumerate() {
+        match model {
+            EngineeringModelSource::Local(path) => {
+                let path = canonical_regular_file(&path)?;
+                if path.extension().and_then(|value| value.to_str()) != Some("stl") {
+                    return Err(Failure::invalid(
+                        "Only STL is currently supported for local native models",
+                    ));
+                }
+                components.push(path);
+            }
+            EngineeringModelSource::Remote { base, path } => {
+                let bytes =
+                    owner_get_bytes(&base, &path, Duration::from_secs(15)).ok_or_else(|| {
+                        Failure::invalid(format!("Could not load {path} from its model owner"))
+                    })?;
+                if bytes.is_empty() || bytes.len() as u64 > MAX_FILE_BYTES {
+                    return Err(Failure::resource(format!(
+                        "Model must contain 1–{MAX_FILE_BYTES} bytes"
+                    )));
+                }
+                let input = scratch.join(format!("model-{index}.glb"));
+                fs::write(&input, bytes).map_err(|error| Failure::invalid(error.to_string()))?;
+                let split = scratch.join(format!("split-{index}"));
+                let output = Process::new(&binary)
+                    .arg("split-mesh")
+                    .arg(&input)
+                    .arg("--out")
+                    .arg(&split)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::piped())
+                    .output()
+                    .map_err(|error| {
+                        Failure::invalid(format!("Could not start Transmog: {error}"))
+                    })?;
+                if !output.status.success() {
+                    return Err(Failure::invalid(format!(
+                        "Transmog could not prepare {path}: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    )));
+                }
+                components.extend(
+                    fs::read_dir(&split)
+                        .map_err(|error| Failure::invalid(error.to_string()))?
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.path())
+                        .filter(|path| {
+                            path.extension().and_then(|value| value.to_str()) == Some("stl")
+                        }),
+                );
+            }
+        }
     }
-    let mut components = fs::read_dir(&split)
-        .map_err(|error| Failure::invalid(error.to_string()))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("stl"))
-        .collect::<Vec<_>>();
     components.sort();
     let stl = merge_binary_stls(&components)?;
     let steps = transmog_steps_dir()?;
@@ -11212,22 +11323,7 @@ fn prepare_local_model(
     title: String,
     path: PathBuf,
 ) -> Result<(String, String), Failure> {
-    let path = canonical_regular_file(&path)?;
-    if path.extension().and_then(|value| value.to_str()) != Some("stl") {
-        return Err(Failure::invalid(
-            "Only STL is currently supported for local native models",
-        ));
-    }
-    let bytes = fs::read(&path).map_err(|error| Failure::invalid(error.to_string()))?;
-    if bytes.len() < 84 || bytes.len() as u64 > MAX_FILE_BYTES {
-        return Err(Failure::resource("STL model is empty or invalid"));
-    }
-    let steps = transmog_steps_dir()?;
-    fs::create_dir_all(&steps).map_err(|error| Failure::invalid(error.to_string()))?;
-    let destination = steps.join(format!("step-{}.stl", unix_ms()));
-    canvas_core::write_atomic(&destination, &bytes)
-        .map_err(|error| Failure::invalid(format!("Could not publish model: {error}")))?;
-    Ok((surface_id, title))
+    prepare_model_set(surface_id, title, vec![EngineeringModelSource::Local(path)])
 }
 
 fn transmog_binary() -> Option<PathBuf> {
@@ -15595,7 +15691,7 @@ mod tests {
     }
 
     #[test]
-    fn engineering_part_folder_prefers_its_direct_model() {
+    fn engineering_folders_resolve_parts_and_project_assemblies() {
         let manifest = ProjectManifest {
             schema_version: ProjectManifest::SCHEMA_VERSION,
             project_id: "fixture".into(),
@@ -15628,20 +15724,67 @@ mod tests {
                     bytes: 84,
                     modified_at_ms: None,
                 },
+                ManifestEntry {
+                    id: "assembly".into(),
+                    path: "bike/assembly/model.glb".into(),
+                    display_name: "Bike assembly".into(),
+                    cid: "assembly".into(),
+                    media_type: "model/gltf-binary".into(),
+                    bytes: 84,
+                    modified_at_ms: None,
+                },
+                ManifestEntry {
+                    id: "wheel".into(),
+                    path: "bike/wheel/model.glb".into(),
+                    display_name: "Wheel".into(),
+                    cid: "wheel".into(),
+                    media_type: "model/gltf-binary".into(),
+                    bytes: 84,
+                    modified_at_ms: None,
+                },
+                ManifestEntry {
+                    id: "enclosure-base".into(),
+                    path: "enclosure/base/model.glb".into(),
+                    display_name: "Enclosure base".into(),
+                    cid: "enclosure-base".into(),
+                    media_type: "model/gltf-binary".into(),
+                    bytes: 84,
+                    modified_at_ms: None,
+                },
+                ManifestEntry {
+                    id: "enclosure-lid".into(),
+                    path: "enclosure/lid/model.glb".into(),
+                    display_name: "Enclosure lid".into(),
+                    cid: "enclosure-lid".into(),
+                    media_type: "model/gltf-binary".into(),
+                    bytes: 84,
+                    modified_at_ms: None,
+                },
             ],
         };
 
         assert_eq!(
-            preferred_model_in_folder(&manifest, "chainstay")
-                .map(|entry| entry.id),
-            Some("model".into())
+            preferred_models_in_folder(&manifest, "chainstay")
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec!["model"]
         );
         assert_eq!(
-            preferred_model_in_folder(&manifest, "chainstay/hardware")
-                .map(|entry| entry.id),
-            Some("nested-model".into())
+            preferred_models_in_folder(&manifest, "bike")
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec!["assembly"]
         );
-        assert_eq!(preferred_model_in_folder(&manifest, ""), None);
+        assert_eq!(
+            preferred_models_in_folder(&manifest, "enclosure")
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec!["enclosure-base", "enclosure-lid"]
+        );
+        assert!(preferred_models_in_folder(&manifest, "").is_empty());
     }
 
     #[test]
