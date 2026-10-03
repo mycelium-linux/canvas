@@ -4,7 +4,76 @@
 //! is deliberately only the renderer adapter: it turns a validated local
 //! handle into a texture owned by the same wgpu device iced is rendering with.
 
-use canvas_core::external_surface::{ExternalSurfaceDescriptor, PixelFormat, SurfaceTransport};
+use canvas_core::external_surface::{
+    ExternalSurfaceDescriptor, ExternalSurfaceMessage, ExternalSurfaceRegistry, PixelFormat,
+    PresentedSurface, RegistryChange, SurfaceTransport,
+};
+use std::collections::BTreeMap;
+use std::io;
+use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixDatagram;
+
+/// Accepted local registrations and the native resources that keep them alive.
+///
+/// Socket ownership and scheduling stay with the embedding application. This
+/// type provides the deterministic receive/apply boundary without starting an
+/// immortal background thread or reaching into Canvas application state.
+#[derive(Debug, Default)]
+pub struct ExternalSurfaceInbox {
+    registry: ExternalSurfaceRegistry,
+    registration_handles: BTreeMap<(String, u64), Vec<OwnedFd>>,
+}
+
+impl ExternalSurfaceInbox {
+    pub fn receive(&mut self, socket: &UnixDatagram) -> io::Result<RegistryChange> {
+        let (message, handles) = canvas_core::external_surface_ipc::receive(socket)?;
+        self.apply(message, handles).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("external surface: {error}"),
+            )
+        })
+    }
+
+    pub fn apply(
+        &mut self,
+        message: ExternalSurfaceMessage,
+        handles: Vec<OwnedFd>,
+    ) -> Result<RegistryChange, String> {
+        let registration = match &message {
+            ExternalSurfaceMessage::Register { surface } => {
+                Some((surface.source_id.clone(), surface.generation))
+            }
+            _ => None,
+        };
+        let withdrawal = match &message {
+            ExternalSurfaceMessage::Withdraw {
+                source_id,
+                generation,
+            } => Some((source_id.clone(), *generation)),
+            _ => None,
+        };
+        let change = self.registry.apply(message, handles.len())?;
+        if let Some((source_id, generation)) = registration {
+            self.registration_handles
+                .retain(|(id, _), _| id != &source_id);
+            self.registration_handles
+                .insert((source_id, generation), handles);
+        }
+        if let Some(key) = withdrawal {
+            self.registration_handles.remove(&key);
+        }
+        Ok(change)
+    }
+
+    pub fn presented(&self, source_id: &str) -> Option<&PresentedSurface> {
+        self.registry.get(source_id)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &PresentedSurface)> {
+        self.registry.iter()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImportError {
@@ -184,6 +253,9 @@ mod macos {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use canvas_core::external_surface::{
+        AlphaMode, ColorSpace, EXTERNAL_SURFACE_VERSION, FrameSync,
+    };
 
     #[test]
     fn sampled_formats_are_explicit() {
@@ -195,5 +267,55 @@ mod tests {
             wgpu_format(PixelFormat::Nv12),
             Err(ImportError::UnsupportedFormat(PixelFormat::Nv12))
         ));
+    }
+
+    #[test]
+    fn inbox_publishes_only_presented_registered_generations() {
+        let (sender, receiver) = UnixDatagram::pair().unwrap();
+        let descriptor = ExternalSurfaceDescriptor {
+            schema_version: EXTERNAL_SURFACE_VERSION,
+            source_id: "surf/local".into(),
+            generation: 7,
+            width: 1280,
+            height: 720,
+            format: PixelFormat::Bgra8Unorm,
+            color_space: ColorSpace::DisplayP3,
+            alpha_mode: AlphaMode::Opaque,
+            transport: SurfaceTransport::IoSurface { surface_id: 42 },
+        };
+        canvas_core::external_surface_ipc::send(
+            &sender,
+            &ExternalSurfaceMessage::Register {
+                surface: descriptor,
+            },
+            &[],
+        )
+        .unwrap();
+        canvas_core::external_surface_ipc::send(
+            &sender,
+            &ExternalSurfaceMessage::Present {
+                source_id: "surf/local".into(),
+                generation: 7,
+                slot: 0,
+                sync: FrameSync::Implicit,
+                presented_at_unix_ns: 123,
+            },
+            &[],
+        )
+        .unwrap();
+
+        let mut inbox = ExternalSurfaceInbox::default();
+        assert!(matches!(
+            inbox.receive(&receiver).unwrap(),
+            RegistryChange::Registered { generation: 7, .. }
+        ));
+        assert_eq!(inbox.presented("surf/local").unwrap().slot, None);
+        assert!(matches!(
+            inbox.receive(&receiver).unwrap(),
+            RegistryChange::Presented { generation: 7, .. }
+        ));
+        let presented = inbox.presented("surf/local").unwrap();
+        assert_eq!(presented.slot, Some(0));
+        assert_eq!(presented.presented_at_unix_ns, Some(123));
     }
 }
