@@ -8,6 +8,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
+    borrow::Cow,
     fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -23,6 +24,8 @@ pub struct RawVideoPlan {
     pub argv: Vec<String>,
     pub width: u32,
     pub height: u32,
+    /// Bytes between adjacent visible rows in the serialized frame.
+    pub stride_bytes: usize,
     pub allocation_bytes: usize,
 }
 
@@ -35,12 +38,31 @@ impl RawVideoPlan {
             .context("RGBA frame dimensions overflow")
     }
 
-    pub fn visible_frame<'a>(&self, allocation: &'a [u8]) -> Result<&'a [u8]> {
+    pub fn visible_frame<'a>(&self, allocation: &'a [u8]) -> Result<Cow<'a, [u8]>> {
         ensure!(
             allocation.len() == self.allocation_bytes,
             "invalid decoder allocation size"
         );
-        Ok(&allocation[..self.frame_bytes()?])
+        let row_bytes = usize::try_from(self.width)? * 4;
+        ensure!(
+            self.stride_bytes >= row_bytes,
+            "decoder stride is narrower than the visible row"
+        );
+        if self.stride_bytes == row_bytes {
+            return Ok(Cow::Borrowed(&allocation[..self.frame_bytes()?]));
+        }
+        let mut packed = Vec::with_capacity(self.frame_bytes()?);
+        for row in allocation
+            .chunks_exact(self.stride_bytes)
+            .take(self.height as usize)
+        {
+            packed.extend_from_slice(&row[..row_bytes]);
+        }
+        ensure!(
+            packed.len() == self.frame_bytes()?,
+            "incomplete padded RGBA frame"
+        );
+        Ok(Cow::Owned(packed))
     }
 }
 
@@ -180,14 +202,22 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
         "qos=true".into(),
         "max-lateness=100000000".into(),
     ]);
+    // Raspberry Pi's V4L2 converter allocates as though RGBA rows were on a
+    // 128-byte boundary, but fdsink serializes the visible rows tightly and
+    // leaves the surplus as one tail at the end of each GstBuffer. Consume the
+    // complete allocation to preserve frame boundaries, then publish only the
+    // tightly packed visible prefix. This was measured directly: 340x764 is
+    // 1,039,040 visible bytes inside a 1,075,712-byte hardware buffer.
+    let row_bytes = width as usize * 4;
+    let allocation_bytes = match policy.decoder {
+        HardwareDecoder::V4l2M2m => row_bytes.div_ceil(128) * 128 * height as usize,
+        HardwareDecoder::VideoToolbox => row_bytes * height as usize,
+    };
     Ok(RawVideoPlan {
         width,
         height,
-        // fdsink serializes the negotiated visible RGBA plane. V4L2 may use
-        // an aligned allocation internally, but that padding is not part of
-        // the byte stream; reading it here would consume the next frame and
-        // permanently destroy frame boundaries.
-        allocation_bytes: width as usize * height as usize * 4,
+        stride_bytes: row_bytes,
+        allocation_bytes,
         argv,
     })
 }
@@ -254,6 +284,7 @@ pub fn ffmpeg_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result<Ra
         argv,
         width,
         height,
+        stride_bytes: width as usize * 4,
         allocation_bytes: frame_bytes,
     })
 }
@@ -646,7 +677,8 @@ mod tests {
         .unwrap();
         assert_eq!((plan.width, plan.height), (852, 480));
         assert_eq!(plan.frame_bytes().unwrap(), 852 * 480 * 4);
-        assert_eq!(plan.allocation_bytes, plan.frame_bytes().unwrap());
+        assert_eq!(plan.stride_bytes, 852 * 4);
+        assert_eq!(plan.allocation_bytes, 3_456 * 480);
         let mut allocation = vec![7_u8; plan.allocation_bytes];
         allocation[plan.frame_bytes().unwrap()..].fill(99);
         let visible = plan.visible_frame(&allocation).unwrap();

@@ -11,7 +11,7 @@
   },
   "gst_launch": "/usr/bin/gst-launch-1.0",
   "decode_only_displayed": true,
-  "max_height": 480,
-  "max_fps": 24.0,
+  "max_height": 960,
+  "max_fps": 30.0,
   "hardware_decoder": "v4l2m2m"
 }

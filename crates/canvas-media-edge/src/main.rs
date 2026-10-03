@@ -476,7 +476,7 @@ impl DecoderWorker {
                     match reader.read_exact(&mut allocation) {
                         Ok(()) => {
                             let result = plan.visible_frame(&allocation).and_then(|frame| {
-                                write_raw_frame(&id, frame_bytes, frame).map(|_| ())
+                                write_raw_frame(&id, frame_bytes, frame.as_ref()).map(|_| ())
                             });
                             if let Err(error) = result {
                                 eprintln!("canvas-media-edge: {id} frame rejected: {error:#}");
