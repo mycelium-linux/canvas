@@ -77,8 +77,17 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
         stream.codec == VideoCodec::H264,
         "raw edge currently requires H.264"
     );
-    let height = stream.height.min(policy.max_height).max(16) & !1;
-    let width = ((u64::from(stream.width) * u64::from(height) / u64::from(stream.height)) as u32)
+    let height_limit = stream.height.min(policy.max_height).max(16) & !1;
+    let scaled_width =
+        (u64::from(stream.width) * u64::from(height_limit) / u64::from(stream.height)) as u32;
+    // v4l2convert may serialize either a tight GstBuffer or its 128-byte
+    // allocation depending on the negotiated geometry. A width divisible by
+    // 32 makes an RGBA row exactly 128-byte aligned, so both layouts have the
+    // same frame boundary. Preserve aspect ratio by deriving height again
+    // after alignment instead of stretching the image.
+    let width = (scaled_width & !31).max(32);
+    let height = ((u64::from(stream.height) * u64::from(width) / u64::from(stream.width)) as u32)
+        .min(height_limit)
         .max(16)
         & !1;
     let mut argv = vec!["-q".into()];
@@ -207,17 +216,13 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
         "fd=1".into(),
         "sync=false".into(),
     ]);
-    // Raspberry Pi's V4L2 converter allocates as though RGBA rows were on a
-    // 128-byte boundary, but fdsink serializes the visible rows tightly and
-    // leaves the surplus as one tail at the end of each GstBuffer. Consume the
-    // complete allocation to preserve frame boundaries, then publish only the
-    // tightly packed visible prefix. This was measured directly: 340x764 is
-    // 1,039,040 visible bytes inside a 1,075,712-byte hardware buffer.
+    // Width alignment above makes the hardware allocation and serialized
+    // visible frame identical. Never infer a larger allocation here: some
+    // converter geometries strip V4L2 padding before fdsink while others keep
+    // it, and reading the inferred tail consumes the beginning of the next
+    // frame, producing a progressively scrolling/diagonal image.
     let row_bytes = width as usize * 4;
-    let allocation_bytes = match policy.decoder {
-        HardwareDecoder::V4l2M2m => row_bytes.div_ceil(128) * 128 * height as usize,
-        HardwareDecoder::VideoToolbox => row_bytes * height as usize,
-    };
+    let allocation_bytes = row_bytes * height as usize;
     Ok(RawVideoPlan {
         width,
         height,
@@ -680,14 +685,15 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!((plan.width, plan.height), (852, 480));
-        assert_eq!(plan.frame_bytes().unwrap(), 852 * 480 * 4);
-        assert_eq!(plan.stride_bytes, 852 * 4);
-        assert_eq!(plan.allocation_bytes, 3_456 * 480);
+        assert_eq!((plan.width, plan.height), (832, 468));
+        assert_eq!(plan.frame_bytes().unwrap(), 832 * 468 * 4);
+        assert_eq!(plan.stride_bytes, 832 * 4);
+        assert_eq!(plan.allocation_bytes, 832 * 468 * 4);
+        assert_eq!((plan.width * 4) % 128, 0);
         let mut allocation = vec![7_u8; plan.allocation_bytes];
         allocation[plan.frame_bytes().unwrap()..].fill(99);
         let visible = plan.visible_frame(&allocation).unwrap();
-        assert_eq!(visible.len(), 852 * 480 * 4);
+        assert_eq!(visible.len(), 832 * 468 * 4);
         assert!(visible.iter().all(|byte| *byte == 7));
         assert!(plan.argv.iter().any(|arg| arg == "v4l2h264dec"));
         assert!(plan.argv.iter().any(|arg| arg == "buffer-size=2097152"));

@@ -19,7 +19,7 @@
   "display_name": "Ghidra · tr6s",
   "stream_endpoint": "udp://192.168.2.74:55212?pkt_size=1316",
   "advertised_endpoint": "udp://0.0.0.0:55212",
-  "max_height": 900,
+  "max_height": 888,
   "capture_scale": 1.5,
   "fps": 30,
   "ttl_ms": 30000
