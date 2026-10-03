@@ -15,6 +15,7 @@ pub mod quant;
 pub mod roster;
 
 pub const WIDGET_SCHEMA_VERSION: u32 = 2;
+pub const MAX_SPECTRAL_HISTORY_ROWS: usize = 1_024;
 const MAX_SPEC_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2188,8 +2189,8 @@ impl WidgetSpec {
                     "spectral waterfall requires finite increasing frequency bounds",
                 )?;
                 check(
-                    (8..=256).contains(history),
-                    "spectral waterfall history must be within 8-256 rows",
+                    (8..=MAX_SPECTRAL_HISTORY_ROWS).contains(history),
+                    "spectral waterfall history must be within 8-1024 rows",
                 )?;
                 check(
                     rows.len() <= *history,

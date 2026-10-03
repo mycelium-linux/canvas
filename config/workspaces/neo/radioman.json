@@ -11,7 +11,7 @@
     "content": { "kind": "widget", "spec": {
       "schema_version": 2, "id": "ism-915-spectrum", "kind": "spectral_waterfall",
       "title": "915 MHz · ISM / LoRa", "rows": [], "min_frequency": 913.976,
-      "max_frequency": 916.024, "unit": "MHz", "history": 180,
+      "max_frequency": 916.024, "unit": "MHz", "history": 360,
       "theme": null, "refresh_ms": 50, "chrome": "frameless",
       "data": { "state": "loading", "source": "radioman/spectrum", "observed_at": null, "window": "live", "detail": "Awaiting Radioman RF frames", "provenance": "live" }
     }},

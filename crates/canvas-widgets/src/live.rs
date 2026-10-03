@@ -23,7 +23,7 @@ use iced::mouse;
 use iced::widget::canvas::{Cache, Geometry, Path};
 use iced::widget::{
     Canvas, canvas, column, container, image, progress_bar, responsive, row, scrollable, space,
-    text,
+    stack, text,
 };
 use iced::{Color, ContentFit, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
@@ -33,6 +33,7 @@ mod primitives;
 mod quality;
 mod quant;
 mod signal_scene;
+mod spectral_waterfall;
 mod wasm_cdg;
 mod wasm_hyperspace;
 use clock::AnalogClockProgram;
@@ -775,28 +776,34 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                     .size(metrics.small)
                     .color(color(palette.text_muted)),
                 ],
-                Canvas::new(SpectralWaterfallProgram {
-                    rows: rows.clone(),
-                    history: *history,
-                    ramp: vec![
-                        Color::from_rgb8(0, 2, 12),
-                        Color::from_rgb8(0, 20, 92),
-                        Color::from_rgb8(0, 83, 214),
-                        Color::from_rgb8(0, 222, 255),
-                        Color::from_rgb8(255, 230, 0),
-                        Color::from_rgb8(242, 38, 19),
-                        Color::WHITE,
-                    ],
-                    label: Color::from_rgb8(170, 205, 232),
-                    scan: Color::from_rgb8(225, 250, 255),
-                    label_size: metrics.micro,
-                    min_frequency: *min_frequency,
-                    max_frequency: *max_frequency,
-                    unit: unit.clone().unwrap_or_else(|| "Hz".into()),
-                    radio: radio.clone(),
-                })
-                .width(Length::Fill)
-                .height(Length::Fill),
+                stack![
+                    spectral_waterfall::view(
+                        rows.clone(),
+                        *history,
+                        radio.as_ref().map_or_else(
+                            || {
+                                rows.last().map_or(rows.len() as u64, |row| {
+                                    row.iter().fold(rows.len() as u64, |stamp, value| {
+                                        stamp.rotate_left(7) ^ u64::from(value.to_bits())
+                                    })
+                                })
+                            },
+                            |frame| frame.generation.rotate_left(32) ^ frame.sequence,
+                        ),
+                    ),
+                    Canvas::new(SpectralWaterfallProgram {
+                        rows: rows.clone(),
+                        label: Color::from_rgb8(170, 205, 232),
+                        scan: Color::from_rgb8(225, 250, 255),
+                        label_size: metrics.micro,
+                        min_frequency: *min_frequency,
+                        max_frequency: *max_frequency,
+                        unit: unit.clone().unwrap_or_else(|| "Hz".into()),
+                        radio: radio.clone(),
+                    })
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+                ],
             ]
             .spacing(metrics.space_2)
             .into(),
@@ -3857,8 +3864,6 @@ fn format_metric(value: f64) -> String {
 
 struct SpectralWaterfallProgram {
     rows: Vec<Vec<f32>>,
-    history: usize,
-    ramp: Vec<Color>,
     label: Color,
     scan: Color,
     label_size: f32,
@@ -3866,16 +3871,6 @@ struct SpectralWaterfallProgram {
     max_frequency: f64,
     unit: String,
     radio: Option<RadioSpectrumState>,
-}
-
-fn sample_spectrum_row(row: &[f32], x: f32) -> f32 {
-    if row.is_empty() {
-        return 0.0;
-    }
-    let source_x = x.clamp(0.0, 1.0) * (row.len().saturating_sub(1)) as f32;
-    let x0 = source_x.floor() as usize;
-    let x1 = (x0 + 1).min(row.len().saturating_sub(1));
-    row[x0] + (row[x1] - row[x0]) * source_x.fract()
 }
 
 impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
@@ -3892,7 +3887,6 @@ impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
         let key = self.rows.iter().flatten().fold(
             Key::new()
                 .add_usize(self.rows.len())
-                .add_usize(self.history)
                 .add_f64(self.min_frequency)
                 .add_f64(self.max_frequency)
                 .add_str(&self.unit)
@@ -3900,14 +3894,9 @@ impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
                 .add_f32(self.label_size),
             |key, value| key.add_f32(*value),
         );
-        let key = self
-            .ramp
-            .iter()
-            .fold(key, |key, color| key.add_color(*color))
-            .add_str(&format!("{:?}", self.radio))
-            .build();
+        let key = key.add_str(&format!("{:?}", self.radio)).build();
         state.draw_cached(renderer, bounds.size(), key, |frame| {
-            if self.rows.is_empty() || self.ramp.len() < 2 {
+            if self.rows.is_empty() {
                 frame.fill_text(canvas::Text {
                     content: "Waiting for spectrum frames".into(),
                     position: Point::new(8.0, bounds.height * 0.5),
@@ -3949,43 +3938,6 @@ impl<Message> canvas::Program<Message> for SpectralWaterfallProgram {
                             if fraction == 0.5 { 0.28 } else { 0.13 },
                         )),
                 );
-            }
-
-            // Draw at the information density of the source rather than at
-            // display-pixel density. The former 2 px grid generated ~130k
-            // paths per RF frame at 1080p while the receiver only supplies
-            // 128 bins × at most 180 retained rows.
-            let columns = self.rows.last().map_or(32, |row| row.len().clamp(32, 512));
-            let display_rows = self.history.clamp(1, 256);
-            let cell_w = waterfall.width / columns as f32;
-            let cell_h = waterfall.height / display_rows as f32;
-            for row_index in 0..display_rows {
-                let y = waterfall.y + row_index as f32 * cell_h;
-                for column in 0..columns {
-                    // New RF frames enter at the top and push older frames
-                    // downward. Unfilled history remains truly blank instead
-                    // of stretching a handful of rows across the viewport.
-                    let value = if row_index < self.rows.len() {
-                        let source = self.rows.len() - 1 - row_index;
-                        sample_spectrum_row(
-                            &self.rows[source],
-                            (column as f32 + 0.5) / columns as f32,
-                        )
-                    } else {
-                        0.0
-                    };
-                    let scaled = value.clamp(0.0, 1.0) * (self.ramp.len() - 1) as f32;
-                    let index = scaled.floor() as usize;
-                    let next = (index + 1).min(self.ramp.len() - 1);
-                    let fill = lerp_oklch(self.ramp[index], self.ramp[next], scaled.fract());
-                    frame.fill(
-                        &Path::rectangle(
-                            Point::new(waterfall.x + column as f32 * cell_w, y),
-                            Size::new(cell_w + 0.35, cell_h + 0.35),
-                        ),
-                        fill,
-                    );
-                }
             }
 
             // Latest FFT is rendered as a continuous luminous trace above its
@@ -6587,12 +6539,6 @@ impl<Message> canvas::Program<Message> for ChartProgram {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn spectral_sampling_interpolates_between_bins() {
-        assert!((sample_spectrum_row(&[0.0, 1.0], 0.5) - 0.5).abs() < 0.001);
-        assert_eq!(sample_spectrum_row(&[], 0.5), 0.0);
-    }
 
     #[test]
     fn plot_frame_reserves_typography_outside_the_data_marks() {
