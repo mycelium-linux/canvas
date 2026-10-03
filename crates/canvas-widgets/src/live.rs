@@ -8,8 +8,8 @@
 use crate::{
     ApprovalStatus, BurnRateWindow, ChartType, ClockMode, DawNote, DawTrack, DistributionGroup,
     DistributionStyle, EventEntry, HeatmapStyle, HierarchyNode, HierarchyStyle, MeterStyle,
-    MetricBoardStyle, ModelAnnotation, ModelView, NetworkLink, NetworkLinkKind, NetworkNode,
-    NetworkNodeKind, NetworkSegment, NetworkSegmentKind, NeuralEdge, NeuralNode,
+    MetricBoardStyle, MixFieldStrip, ModelAnnotation, ModelView, NetworkLink, NetworkLinkKind,
+    NetworkNode, NetworkNodeKind, NetworkSegment, NetworkSegmentKind, NeuralEdge, NeuralNode,
     RadioSpectrumState, RichCardFormat, SpanTimelineStyle, SpatialBounds, SpatialTrack, StateLane,
     StatusLevel, StatusState, TargetMetric, TimedSpan, WidgetChrome, WidgetDataState, WidgetKind,
     WidgetSpec,
@@ -692,6 +692,32 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
                     cycle_ticks: *cycle_ticks,
                     tracks: tracks.clone(),
                     notes: notes.clone(),
+                    palette: *palette,
+                    label_size: metrics.micro,
+                })
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .spacing(metrics.space_2)
+            .into(),
+            visual,
+        ),
+        WidgetKind::MixField {
+            title,
+            surface,
+            strips,
+        } => panel(
+            spec,
+            column![
+                row![
+                    text(title).size(metrics.body).color(color(palette.text)),
+                    space::horizontal(),
+                    text(format!("{} · {} strips", surface, strips.len()))
+                        .size(metrics.small)
+                        .color(color(palette.text_muted)),
+                ],
+                Canvas::new(MixFieldProgram {
+                    strips: strips.clone(),
                     palette: *palette,
                     label_size: metrics.micro,
                 })
@@ -2433,6 +2459,112 @@ struct DawDeckProgram {
     notes: Vec<DawNote>,
     palette: ThemePalette,
     label_size: f32,
+}
+
+struct MixFieldProgram {
+    strips: Vec<MixFieldStrip>,
+    palette: ThemePalette,
+    label_size: f32,
+}
+
+impl<Message> canvas::Program<Message> for MixFieldProgram {
+    type State = CacheState;
+
+    fn draw(
+        &self,
+        state: &Self::State,
+        renderer: &Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let key = self.strips.iter().fold(Key::new(), |key, strip| {
+            strip.bands.iter().fold(
+                key.add_str(&strip.label)
+                    .add_f32(strip.gain)
+                    .add_f32(strip.peak)
+                    .add_f32(strip.stereo_position),
+                |key, band| key.add_f32(*band),
+            )
+        });
+        state.draw_cached(renderer, bounds.size(), key.build(), |frame| {
+            let text_color = color(self.palette.text);
+            let muted = color(self.palette.text_muted);
+            let accent = color(self.palette.primary);
+            let left = 72.0;
+            let right = (bounds.width - 20.0).max(left + 1.0);
+            let top = 24.0;
+            let bottom = (bounds.height - 28.0).max(top + 1.0);
+            let center = (left + right) * 0.5;
+            for position in [-1.0_f32, -0.5, 0.0, 0.5, 1.0] {
+                let x = left + (position + 1.0) * 0.5 * (right - left);
+                frame.stroke(
+                    &Path::line(Point::new(x, top), Point::new(x, bottom)),
+                    canvas::Stroke::default()
+                        .with_width(if position == 0.0 { 1.5 } else { 0.5 })
+                        .with_color(with_alpha(muted, if position == 0.0 { 0.5 } else { 0.2 })),
+                );
+            }
+            for (index, strip) in self.strips.iter().enumerate() {
+                let y =
+                    top + (index as f32 + 0.5) * (bottom - top) / self.strips.len().max(1) as f32;
+                frame.fill_text(canvas::Text {
+                    content: format!("{}  {}", strip.index, strip.label),
+                    position: Point::new(4.0, y + 4.0),
+                    color: if strip.active { text_color } else { muted },
+                    size: iced::Pixels(self.label_size.max(8.0)),
+                    ..Default::default()
+                });
+                let x = center + strip.stereo_position.clamp(-1.0, 1.0) * (right - left) * 0.5;
+                let energy = strip.peak.clamp(0.0, 1.0).sqrt();
+                let radius = 4.0 + energy * 13.0;
+                let fill = if !strip.active {
+                    muted
+                } else if strip.peak >= 0.999 {
+                    color(self.palette.danger)
+                } else if strip.peak > 0.82 {
+                    color(self.palette.warning)
+                } else {
+                    accent
+                };
+                for (band_index, band) in strip.bands.iter().enumerate() {
+                    let band_radius = radius + 3.0 + band_index as f32 * 2.0;
+                    frame.stroke(
+                        &Path::circle(Point::new(x, y), band_radius),
+                        canvas::Stroke::default()
+                            .with_width(1.5)
+                            .with_color(with_alpha(fill, band.clamp(0.0, 1.0) * 0.55)),
+                    );
+                }
+                frame.fill(
+                    &Path::circle(Point::new(x, y), radius),
+                    with_alpha(fill, 0.25 + energy * 0.75),
+                );
+                frame.stroke(
+                    &Path::line(Point::new(x - radius, y), Point::new(x + radius, y)),
+                    canvas::Stroke::default()
+                        .with_width(2.0)
+                        .with_color(with_alpha(text_color, strip.gain.clamp(0.0, 1.0))),
+                );
+                frame.fill_text(canvas::Text {
+                    content: format!("CC{}", strip.cc),
+                    position: Point::new(right - 28.0, y + 4.0),
+                    color: muted,
+                    size: iced::Pixels((self.label_size - 1.0).max(8.0)),
+                    ..Default::default()
+                });
+            }
+            for (label, x) in [("L", left), ("C", center), ("R", right)] {
+                frame.fill_text(canvas::Text {
+                    content: label.into(),
+                    position: Point::new(x - 3.0, bounds.height - 8.0),
+                    color: muted,
+                    size: iced::Pixels(self.label_size.max(8.0)),
+                    ..Default::default()
+                });
+            }
+        })
+    }
 }
 
 impl<Message> canvas::Program<Message> for DawDeckProgram {
