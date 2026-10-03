@@ -14,6 +14,7 @@ pub mod chunk;
 pub mod desktop;
 pub mod desktop_theme;
 pub mod display_watch;
+pub mod external_surface;
 pub mod global_hotkey;
 pub mod layout;
 pub mod manifest_query;
