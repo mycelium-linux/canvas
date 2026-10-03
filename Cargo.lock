@@ -608,10 +608,12 @@ dependencies = [
 name = "canvas-map-wgpu"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bytemuck",
  "canvas",
  "canvas-core",
  "pollster",
+ "serde",
  "serde_json",
  "wgpu",
 ]

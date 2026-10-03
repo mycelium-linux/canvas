@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "panopticon-workspace",
+  "project_id": "panopticon",
+  "revision": 1,
+  "theme": { "source": "project" },
+  "background": { "kind": "solid", "color": "#08090c" },
+  "chrome": { "title": "hidden", "canvas_padding": 0, "surface_gap": 0 },
+  "surfaces": [
+    {
+      "id": "panopticon-globe",
+      "title": "Panopticon",
+      "content": {
+        "kind": "live_video",
+        "source_id": "panopticon-globe",
+        "width": 1280,
+        "height": 720
+      },
+      "inputs": []
+    }
+  ]
+}
