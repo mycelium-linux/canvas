@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "id": "wiki-race-v1",
+  "title": "Wiki race",
+  "inputs": [
+    { "id": "start", "kind": "text", "required": true },
+    { "id": "target", "kind": "text", "required": true },
+    { "id": "status", "kind": "status", "required": true },
+    { "id": "clicks", "kind": "number", "required": true },
+    { "id": "raceclock", "kind": "text", "required": true },
+    { "id": "wallclock", "kind": "text", "required": true },
+    { "id": "trace", "kind": "text", "required": false }
+  ],
+  "capabilities": {
+    "write_scene": true,
+    "read_inputs": ["start", "target", "status", "clicks", "raceclock", "wallclock", "trace"],
+    "read_theme": true
+  }
+}
