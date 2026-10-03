@@ -25,6 +25,86 @@ const MAX_DECLARATIONS: usize = 64;
 const MAX_SERIES_POINTS: usize = 4_096;
 const MAX_RESOURCE_SURFACES: usize = 64;
 
+/// Semantic presentation vocabulary installed into every authored module.
+/// Modules compose these primitives; the host owns their theme and geometry
+/// conventions. Keeping this prelude in one place prevents every widget from
+/// inventing another label scale, badge opacity, or metric hierarchy.
+const WIDGET_PRIMITIVES_V1: &str = r#"
+local function required(spec, key)
+  local value = spec[key]
+  if value == nil then error("widget primitive requires " .. key, 3) end
+  return value
+end
+
+local function point(spec)
+  return { spec.x or 0, spec.y or 0, spec.z or 0.2 }
+end
+
+local function text_scale(px)
+  local unit = module.theme.body * 1.25
+  return { px / unit, px / unit, 1 }
+end
+
+function widget.panel(spec)
+  canvas.rect {
+    id = required(spec, "id"), parent = spec.parent,
+    ink = spec.ink or "text", opacity = spec.opacity or 0.055,
+    radius = spec.radius or module.theme.radius,
+    translation = point(spec),
+    scale = { required(spec, "width"), required(spec, "height"), 1 },
+  }
+end
+
+function widget.label(spec)
+  canvas.text {
+    id = required(spec, "id"), parent = spec.parent,
+    text = tostring(spec.text or "—"), ink = spec.ink or "text",
+    translation = point(spec),
+    scale = text_scale(spec.size or module.theme.body),
+  }
+end
+
+function widget.badge(spec)
+  local id = required(spec, "id")
+  widget.panel {
+    id = id .. "-bg", parent = spec.parent,
+    x = spec.x, y = spec.y, z = spec.z or 0.1,
+    width = required(spec, "width"), height = required(spec, "height"),
+    ink = spec.ink or "primary", opacity = spec.opacity or 0.18,
+    radius = spec.radius or module.theme.radius,
+  }
+  widget.label {
+    id = id, parent = spec.parent, text = required(spec, "text"),
+    x = spec.text_x or spec.x, y = spec.text_y or spec.y,
+    z = (spec.z or 0.1) + 0.1, ink = spec.text_ink or spec.ink or "primary",
+    size = spec.size or module.theme.small,
+  }
+end
+
+function widget.metric(spec)
+  local id = required(spec, "id")
+  widget.label {
+    id = id .. "-caption", parent = spec.parent,
+    text = required(spec, "label"), x = spec.x, y = spec.y,
+    ink = "muted", size = module.theme.micro,
+  }
+  widget.label {
+    id = id .. "-value", parent = spec.parent,
+    text = required(spec, "value"), x = spec.x,
+    y = (spec.y or 0) - (spec.value_offset or 0.46),
+    ink = spec.ink or "text", size = spec.size or module.theme.hero,
+  }
+  if spec.detail ~= nil and spec.detail ~= "" then
+    widget.label {
+      id = id .. "-detail", parent = spec.parent,
+      text = spec.detail, x = spec.x,
+      y = (spec.y or 0) - (spec.detail_offset or 0.92),
+      ink = "muted", size = module.theme.small,
+    }
+  end
+end
+"#;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleManifest {
@@ -637,6 +717,13 @@ fn install_widget_api(lua: &Lua, read_theme: bool, theme: ModuleThemeTokens) -> 
     }
 
     lua.globals().set("widget", widget).map_err(lua_error)?;
+
+    if read_theme {
+        lua.load(WIDGET_PRIMITIVES_V1)
+            .set_name("canvas-widget-primitives-v1")
+            .exec()
+            .map_err(lua_error)?;
+    }
 
     let canvas: Table = lua.globals().get("canvas").map_err(lua_error)?;
     canvas
