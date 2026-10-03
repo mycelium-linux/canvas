@@ -10119,14 +10119,19 @@ fn merge_engineering_projects(
 ) -> (BTreeMap<String, EngineeringProject>, Vec<String>) {
     let transmog = std::env::var("CANVAS_TRANSMOG_VIEWER_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:4173".into());
-    let lob =
-        std::env::var("CANVAS_LOB_VIEWER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".into());
+    let lob_candidates =
+        lob_owner_candidates(std::env::var("CANVAS_LOB_VIEWER_URL").ok().as_deref());
     let timeout = Duration::from_secs(2);
     let reads = std::thread::scope(|scope| {
         let transmog_read = scope.spawn(|| owner_get(&transmog, "/api/state", timeout));
-        let lob_read = scope.spawn(|| owner_get(&lob, "/api/circuits", timeout));
-        let lob_repo = scope.spawn(|| owner_get(&lob, "/api/repo", timeout));
-        (transmog_read.join(), lob_read.join(), lob_repo.join())
+        let lob_read = scope.spawn(|| {
+            lob_candidates.iter().find_map(|base| {
+                let circuits = owner_get(base, "/api/circuits", timeout)?;
+                let repo = owner_get(base, "/api/repo", timeout)?;
+                Some((base.clone(), circuits, repo))
+            })
+        });
+        (transmog_read.join(), lob_read.join())
     });
     let mut targets = BTreeMap::new();
     let mut warnings = Vec::new();
@@ -10138,18 +10143,35 @@ fn merge_engineering_projects(
         }
         _ => warnings.push("Transmog is unavailable".into()),
     }
-    match (reads.1, reads.2) {
-        (Ok(Some(body)), Ok(Some(repo))) => {
-            if !merge_lob_body(catalog, &mut targets, &lob, &body, &repo) {
+    let mut lob_base = lob_candidates
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "http://127.0.0.1:8080".into());
+    match reads.1 {
+        Ok(Some((base, body, repo))) => {
+            lob_base = base;
+            if !merge_lob_body(catalog, &mut targets, &lob_base, &body, &repo) {
                 warnings.push("legion-of-bom returned an unsupported catalog".into());
             }
         }
         _ => warnings.push("legion-of-bom is unavailable".into()),
     }
     if !targets.contains_key("lob") {
-        insert_unavailable_lob(&mut targets, &lob);
+        insert_unavailable_lob(&mut targets, &lob_base);
     }
     (targets, warnings)
+}
+
+fn lob_owner_candidates(configured: Option<&str>) -> Vec<String> {
+    configured.map_or_else(
+        || {
+            vec![
+                "http://127.0.0.1:8080".into(),
+                "http://127.0.0.1:8086".into(),
+            ]
+        },
+        |base| vec![base.to_owned()],
+    )
 }
 
 /// Keep the LOB project inspectable when its owner process is absent.
@@ -16059,6 +16081,18 @@ mod tests {
             Some(EngineeringArtifact::Unavailable(reason)) if reason.contains("127.0.0.1:8086")
         ));
         assert!(targets.contains_key("legion-of-bom"));
+    }
+
+    #[test]
+    fn lob_discovery_uses_local_fallback_unless_explicitly_configured() {
+        assert_eq!(
+            lob_owner_candidates(None),
+            ["http://127.0.0.1:8080", "http://127.0.0.1:8086"]
+        );
+        assert_eq!(
+            lob_owner_candidates(Some("http://home-pi.local:8080")),
+            ["http://home-pi.local:8080"]
+        );
     }
 
     #[test]
