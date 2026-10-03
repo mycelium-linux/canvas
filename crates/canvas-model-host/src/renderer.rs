@@ -26,8 +26,10 @@ struct GpuMesh {
     vertices: wgpu::Buffer,
     triangles: wgpu::Buffer,
     edges: wgpu::Buffer,
+    grid: wgpu::Buffer,
     triangle_count: u32,
     edge_count: u32,
+    grid_count: u32,
 }
 
 struct ReadbackSlot {
@@ -273,8 +275,16 @@ impl Renderer {
                     contents: bytemuck::cast_slice(&mesh.edge_indices),
                     usage: wgpu::BufferUsages::INDEX,
                 }),
+            grid: self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("model-grid"),
+                    contents: bytemuck::cast_slice(&mesh.grid_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                }),
             triangle_count: mesh.triangle_indices.len() as u32,
             edge_count: mesh.edge_indices.len() as u32,
+            grid_count: mesh.grid_indices.len() as u32,
         });
     }
 
@@ -382,6 +392,11 @@ impl Renderer {
         pass.set_pipeline(&self.fill_pipeline);
         pass.set_index_buffer(mesh.triangles.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..mesh.triangle_count, 0, 0..1);
+        if mesh.grid_count > 0 {
+            pass.set_pipeline(&self.line_pipeline);
+            pass.set_index_buffer(mesh.grid.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..mesh.grid_count, 0, 0..1);
+        }
         if material.wireframe {
             pass.set_pipeline(&self.line_pipeline);
             pass.set_index_buffer(mesh.edges.slice(..), wgpu::IndexFormat::Uint32);
@@ -518,6 +533,7 @@ mod tests {
             ],
             triangle_indices: vec![0, 1, 2],
             edge_indices: vec![0, 1, 1, 2, 2, 0],
+            grid_indices: vec![],
             source_center: [0.0; 3],
             source_extent: 1.6,
         }

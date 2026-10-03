@@ -673,6 +673,7 @@ enum EngineeringArtifact {
     LocalModel(PathBuf),
     RemoteText { base: String, path: String },
     RemoteModel { base: String, path: String },
+    RemoteModelScene { base: String, report_path: String },
     Unavailable(String),
 }
 
@@ -680,6 +681,7 @@ enum EngineeringArtifact {
 enum EngineeringModelSource {
     Local(PathBuf),
     Remote { base: String, path: String },
+    RemoteScene { base: String, report_path: String },
 }
 
 #[derive(Debug, Clone)]
@@ -1753,6 +1755,24 @@ impl App {
                     |result| Message::EngineeringModelPrepared(Box::new(result)),
                 )
             }
+            EngineeringArtifact::RemoteModelScene { base, report_path } => {
+                let surface_id = model_surface
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("artifact-{}", entry.id));
+                let title = entry.display_name;
+                self.status = format!("Loading {title}…");
+                self.bump();
+                Task::perform(
+                    async move {
+                        prepare_model_set(
+                            surface_id,
+                            title,
+                            vec![EngineeringModelSource::RemoteScene { base, report_path }],
+                        )
+                    },
+                    |result| Message::EngineeringModelPrepared(Box::new(result)),
+                )
+            }
             EngineeringArtifact::Unavailable(reason) => {
                 self.status = reason;
                 self.bump();
@@ -1784,6 +1804,12 @@ impl App {
                     Some(EngineeringModelSource::Remote {
                         base: base.clone(),
                         path: path.clone(),
+                    })
+                }
+                Some(EngineeringArtifact::RemoteModelScene { base, report_path }) => {
+                    Some(EngineeringModelSource::RemoteScene {
+                        base: base.clone(),
+                        report_path: report_path.clone(),
                     })
                 }
                 _ => None,
@@ -10271,9 +10297,20 @@ fn merge_transmog_body(
                 });
                 artifacts.insert(
                     model_id,
-                    EngineeringArtifact::RemoteModel {
-                        base: base.to_owned(),
-                        path: model_path,
+                    if part_id == "assembly"
+                        || part["role"]
+                            .as_str()
+                            .is_some_and(|role| role.ends_with("assembly"))
+                    {
+                        EngineeringArtifact::RemoteModelScene {
+                            base: base.to_owned(),
+                            report_path: report_path.clone(),
+                        }
+                    } else {
+                        EngineeringArtifact::RemoteModel {
+                            base: base.to_owned(),
+                            path: model_path,
+                        }
                     },
                 );
             }
@@ -11246,76 +11283,158 @@ fn prepare_model_set(
     if models.is_empty() {
         return Err(Failure::invalid("No model artifacts were selected"));
     }
-    let scratch = std::env::temp_dir().join(format!("canvas-transmog-{}", unix_ms()));
-    fs::create_dir_all(&scratch).map_err(|error| Failure::invalid(error.to_string()))?;
-    let binary = transmog_binary().ok_or_else(|| {
-        Failure::invalid(
-            "Transmog is serving models, but its CLI is unavailable. Set CANVAS_TRANSMOG_BIN.",
-        )
-    })?;
-    let mut components = Vec::new();
+    #[derive(Serialize)]
+    struct NativeScene<'a> {
+        schema: &'a str,
+        parts: Vec<NativeScenePart>,
+    }
+    #[derive(Serialize)]
+    struct NativeScenePart {
+        file: String,
+        translation_mm: [f32; 3],
+        rotation_xyz_deg: [f32; 3],
+    }
+
+    let generation = unix_ms();
+    let steps = transmog_steps_dir()?;
+    fs::create_dir_all(&steps).map_err(|error| Failure::invalid(error.to_string()))?;
+    let mut parts = Vec::new();
     for (index, model) in models.into_iter().enumerate() {
         match model {
             EngineeringModelSource::Local(path) => {
                 let path = canonical_regular_file(&path)?;
-                if path.extension().and_then(|value| value.to_str()) != Some("stl") {
-                    return Err(Failure::invalid(
-                        "Only STL is currently supported for local native models",
-                    ));
+                if path.extension().and_then(|value| value.to_str()) == Some("stl")
+                    && parts.is_empty()
+                {
+                    let destination = steps.join(format!("step-{generation}.stl"));
+                    fs::copy(path, destination)
+                        .map_err(|error| Failure::invalid(error.to_string()))?;
+                    return Ok((surface_id, title));
                 }
-                components.push(path);
+                if path.extension().and_then(|value| value.to_str()) != Some("glb") {
+                    return Err(Failure::invalid("Native models must be STL or GLB"));
+                }
+                let file = format!("scene-{generation}-{index}.glb");
+                fs::copy(path, steps.join(&file))
+                    .map_err(|error| Failure::invalid(error.to_string()))?;
+                parts.push(NativeScenePart {
+                    file,
+                    translation_mm: [0.0; 3],
+                    rotation_xyz_deg: [0.0; 3],
+                });
             }
             EngineeringModelSource::Remote { base, path } => {
                 let bytes =
                     owner_get_bytes(&base, &path, Duration::from_secs(15)).ok_or_else(|| {
                         Failure::invalid(format!("Could not load {path} from its model owner"))
                     })?;
-                if bytes.is_empty() || bytes.len() as u64 > MAX_FILE_BYTES {
-                    return Err(Failure::resource(format!(
-                        "Model must contain 1–{MAX_FILE_BYTES} bytes"
-                    )));
-                }
-                let input = scratch.join(format!("model-{index}.glb"));
-                fs::write(&input, bytes).map_err(|error| Failure::invalid(error.to_string()))?;
-                let split = scratch.join(format!("split-{index}"));
-                let output = Process::new(&binary)
-                    .arg("split-mesh")
-                    .arg(&input)
-                    .arg("--out")
-                    .arg(&split)
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::piped())
-                    .output()
-                    .map_err(|error| {
-                        Failure::invalid(format!("Could not start Transmog: {error}"))
+                validate_model_bytes(&bytes)?;
+                let file = format!("scene-{generation}-{index}.glb");
+                canvas_core::write_atomic(&steps.join(&file), &bytes)
+                    .map_err(|error| Failure::invalid(error.to_string()))?;
+                parts.push(NativeScenePart {
+                    file,
+                    translation_mm: [0.0; 3],
+                    rotation_xyz_deg: [0.0; 3],
+                });
+            }
+            EngineeringModelSource::RemoteScene { base, report_path } => {
+                let body = owner_get_bytes(&base, &report_path, Duration::from_secs(15))
+                    .ok_or_else(|| {
+                        Failure::invalid(format!(
+                            "Could not load {report_path} from its model owner"
+                        ))
                     })?;
-                if !output.status.success() {
-                    return Err(Failure::invalid(format!(
-                        "Transmog could not prepare {path}: {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    )));
+                let report: serde_json::Value = serde_json::from_slice(&body).map_err(|error| {
+                    Failure::invalid(format!("Invalid Transmog scene report: {error}"))
+                })?;
+                let scene_parts = report["parts"]
+                    .as_array()
+                    .ok_or_else(|| Failure::invalid("Transmog scene report has no parts"))?;
+                for (part_index, part) in scene_parts.iter().take(1024).enumerate() {
+                    let relative = part["variants"]["display"]
+                        .as_str()
+                        .or_else(|| part["file"].as_str())
+                        .ok_or_else(|| {
+                            Failure::invalid("Transmog scene part has no display model")
+                        })?;
+                    let remote_path = resolve_owner_relative(&report_path, relative)?;
+                    let bytes = owner_get_bytes(&base, &remote_path, Duration::from_secs(15))
+                        .ok_or_else(|| {
+                            Failure::invalid(format!("Could not load scene part {remote_path}"))
+                        })?;
+                    validate_model_bytes(&bytes)?;
+                    let file = format!("scene-{generation}-{index}-{part_index}.glb");
+                    canvas_core::write_atomic(&steps.join(&file), &bytes)
+                        .map_err(|error| Failure::invalid(error.to_string()))?;
+                    let translation_mm = json_vec3(&part["transform"]["translation_mm"]);
+                    let rotation_xyz_deg = json_vec3(&part["transform"]["rotation_xyz_deg"]);
+                    parts.push(NativeScenePart {
+                        file,
+                        translation_mm,
+                        rotation_xyz_deg,
+                    });
                 }
-                components.extend(
-                    fs::read_dir(&split)
-                        .map_err(|error| Failure::invalid(error.to_string()))?
-                        .filter_map(Result::ok)
-                        .map(|entry| entry.path())
-                        .filter(|path| {
-                            path.extension().and_then(|value| value.to_str()) == Some("stl")
-                        }),
-                );
             }
         }
     }
-    components.sort();
-    let stl = merge_binary_stls(&components)?;
-    let steps = transmog_steps_dir()?;
-    fs::create_dir_all(&steps).map_err(|error| Failure::invalid(error.to_string()))?;
-    let destination = steps.join(format!("step-{}.stl", unix_ms()));
-    canvas_core::write_atomic(&destination, &stl)
+    if parts.is_empty() {
+        return Err(Failure::invalid("Scene contains no model geometry"));
+    }
+    let manifest = serde_json::to_vec(&NativeScene {
+        schema: "canvas.model.scene-assets.v1",
+        parts,
+    })
+    .map_err(|error| Failure::invalid(error.to_string()))?;
+    let destination = steps.join(format!("step-{generation}.scene.json"));
+    canvas_core::write_atomic(&destination, &manifest)
         .map_err(|error| Failure::invalid(format!("Could not publish model: {error}")))?;
-    let _ = fs::remove_dir_all(&scratch);
     Ok((surface_id, title))
+}
+
+fn validate_model_bytes(bytes: &[u8]) -> Result<(), Failure> {
+    if bytes.len() < 12 || bytes.len() as u64 > MAX_FILE_BYTES || &bytes[..4] != b"glTF" {
+        return Err(Failure::resource(format!(
+            "GLB model must contain 12–{MAX_FILE_BYTES} valid bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn json_vec3(value: &serde_json::Value) -> [f32; 3] {
+    let values = value.as_array();
+    std::array::from_fn(|index| {
+        values
+            .and_then(|v| v.get(index))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0) as f32
+    })
+}
+
+fn resolve_owner_relative(report_path: &str, relative: &str) -> Result<String, Failure> {
+    let mut segments = report_path
+        .trim_start_matches('/')
+        .split('/')
+        .collect::<Vec<_>>();
+    segments.pop();
+    for segment in relative.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments
+                    .pop()
+                    .ok_or_else(|| Failure::invalid("Scene model escapes owner root"))?;
+            }
+            value
+                if engineering_identifier(value.trim_end_matches(".glb"))
+                    || value.ends_with(".glb") =>
+            {
+                segments.push(value)
+            }
+            _ => return Err(Failure::invalid("Scene model has an unsafe path")),
+        }
+    }
+    Ok(format!("/{}", segments.join("/")))
 }
 
 fn prepare_local_model(
@@ -11326,28 +11445,6 @@ fn prepare_local_model(
     prepare_model_set(surface_id, title, vec![EngineeringModelSource::Local(path)])
 }
 
-fn transmog_binary() -> Option<PathBuf> {
-    std::env::var_os("CANVAS_TRANSMOG_BIN")
-        .map(PathBuf::from)
-        .filter(|path| path.is_file())
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|home| home.join("src/fpl/transmog/target/debug/transmog"))
-                .filter(|path| path.is_file())
-        })
-        .or_else(|| {
-            Process::new("/usr/bin/which")
-                .arg("transmog")
-                .output()
-                .ok()
-                .filter(|output| output.status.success())
-                .and_then(|output| String::from_utf8(output.stdout).ok())
-                .map(|path| PathBuf::from(path.trim()))
-                .filter(|path| path.is_file())
-        })
-}
-
 fn transmog_steps_dir() -> Result<PathBuf, Failure> {
     if let Some(path) = std::env::var_os("CANVAS_TRANSMOG_STEPS_DIR") {
         return Ok(PathBuf::from(path));
@@ -11356,34 +11453,6 @@ fn transmog_steps_dir() -> Result<PathBuf, Failure> {
         .map(PathBuf::from)
         .map(|home| home.join(".cache/dock/canvas/transmog-steps"))
         .ok_or_else(|| Failure::invalid("No home directory for the Canvas model cache"))
-}
-
-fn merge_binary_stls(paths: &[PathBuf]) -> Result<Vec<u8>, Failure> {
-    let mut triangles = 0u32;
-    let mut bodies = Vec::new();
-    for path in paths {
-        let bytes = fs::read(path).map_err(|error| Failure::invalid(error.to_string()))?;
-        if bytes.len() < 84 {
-            return Err(Failure::invalid("Transmog emitted an invalid STL"));
-        }
-        let count = u32::from_le_bytes(bytes[80..84].try_into().expect("four-byte STL count"));
-        let expected = 84usize.saturating_add(count as usize * 50);
-        if bytes.len() < expected {
-            return Err(Failure::invalid("Transmog emitted a truncated STL"));
-        }
-        triangles = triangles
-            .checked_add(count)
-            .ok_or_else(|| Failure::resource("Model has too many triangles"))?;
-        bodies.extend_from_slice(&bytes[84..expected]);
-    }
-    if triangles == 0 {
-        return Err(Failure::invalid("Transmog emitted no model geometry"));
-    }
-    let mut merged = vec![0u8; 80];
-    merged[0..28].copy_from_slice(b"Canvas via Transmog binary STL");
-    merged.extend_from_slice(&triangles.to_le_bytes());
-    merged.extend_from_slice(&bodies);
-    Ok(merged)
 }
 
 fn load_content(

@@ -74,11 +74,13 @@ fn colormap(t: f32, which: f32) -> vec3<f32> {
 }
 
 @fragment fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    let view = normalize(vec3<f32>(0.0, 0.0, 1.0));
-    let rim = pow(1.0 - abs(dot(normalize(input.world_normal), view)), 2.2);
-    let scan = 0.74 + 0.26 * sin(input.world_position.y * 95.0 - uniforms.params.x * 4.5);
-    let pulse = 0.88 + 0.12 * sin(uniforms.params.x * 1.7);
-    let energy = (0.28 + rim * uniforms.params.y) * scan * pulse;
+    if (input.field < -0.5) {
+        return vec4<f32>(0.38, 0.41, 0.46, 0.42);
+    }
+    let normal = normalize(input.world_normal);
+    let key = max(dot(normal, normalize(vec3<f32>(0.55, 0.8, 0.45))), 0.0);
+    let fill = max(dot(normal, normalize(vec3<f32>(-0.65, 0.25, -0.35))), 0.0);
+    let energy = 0.24 + key * 0.62 + fill * 0.22;
     let line_boost = mix(1.0, 1.65, uniforms.params.w);
     // When a field is painted the ramp carries the meaning, so it replaces the
     // scene colour outright — tinting it would make two different values look
@@ -86,6 +88,6 @@ fn colormap(t: f32, which: f32) -> vec3<f32> {
     // reads as a hologram without the lighting distorting the reading.
     let painted = uniforms.field_params.x;
     let ramp_color = colormap(input.field, uniforms.field_params.y);
-    let base = mix(uniforms.color.rgb * energy, ramp_color * (0.55 + 0.45 * energy), painted);
+    let base = mix(uniforms.color.rgb * energy, ramp_color * energy, painted);
     return vec4<f32>(base * line_boost, uniforms.params.z);
 }

@@ -276,7 +276,7 @@ impl SceneState {
         ensure!(safe_id(&self.scene_id), "unsafe scene_id");
         ensure!(
             safe_asset(&self.asset),
-            "asset must be a content id ending in .stl"
+            "asset must be a safe STL, GLB, or Canvas scene manifest"
         );
         ensure!(self.transition_ms <= 5_000, "transition_ms exceeds 5000");
         ensure!(
@@ -323,7 +323,7 @@ pub fn safe_id(value: &str) -> bool {
 
 fn safe_asset(value: &str) -> bool {
     value.len() <= 128
-        && value.ends_with(".stl")
+        && (value.ends_with(".stl") || value.ends_with(".glb") || value.ends_with(".scene.json"))
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
@@ -372,7 +372,10 @@ impl SceneContext {
 
 /// The trailing integer in a mesh filename, if it has one.
 fn step_ordinal(name: &str) -> Option<u64> {
-    let stem = name.strip_suffix(".stl")?;
+    let stem = name
+        .strip_suffix(".stl")
+        .or_else(|| name.strip_suffix(".glb"))
+        .or_else(|| name.strip_suffix(".scene.json"))?;
     let digits: String = stem
         .chars()
         .rev()

@@ -2,7 +2,8 @@
 
 use anyhow::{Context, Result, ensure};
 use bytemuck::{Pod, Zeroable};
-use glam::Vec3;
+use glam::{EulerRot, Mat3, Mat4, Vec3};
+use serde::Deserialize;
 use std::{
     collections::BTreeSet,
     fs::File,
@@ -31,12 +32,191 @@ pub struct PreparedMesh {
     pub vertices: Vec<Vertex>,
     pub triangle_indices: Vec<u32>,
     pub edge_indices: Vec<u32>,
+    pub grid_indices: Vec<u32>,
     pub source_center: [f32; 3],
     pub source_extent: f32,
 }
 
 pub fn bake_stl(path: &Path) -> Result<PreparedMesh> {
     bake_stl_with_field(path, None)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SceneManifest {
+    schema: String,
+    parts: Vec<ScenePart>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScenePart {
+    file: String,
+    #[serde(default)]
+    translation_mm: [f32; 3],
+    #[serde(default)]
+    rotation_xyz_deg: [f32; 3],
+}
+
+pub fn bake_asset(path: &Path, field: Option<&crate::Field>) -> Result<PreparedMesh> {
+    match path.extension().and_then(|value| value.to_str()) {
+        Some("stl") => bake_stl_with_field(path, field),
+        Some("glb") => bake_glb_scene(path, &[(path.to_owned(), Mat4::IDENTITY)], field),
+        Some("json") if path.to_string_lossy().ends_with(".scene.json") => {
+            let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+            let manifest: SceneManifest = serde_json::from_slice(&bytes)
+                .with_context(|| format!("parse {}", path.display()))?;
+            ensure!(
+                manifest.schema == "canvas.model.scene-assets.v1",
+                "unsupported scene manifest"
+            );
+            ensure!(
+                !manifest.parts.is_empty() && manifest.parts.len() <= 1024,
+                "scene must contain 1–1024 parts"
+            );
+            let root = path.parent().context("scene manifest has no parent")?;
+            let mut parts = Vec::with_capacity(manifest.parts.len());
+            for part in manifest.parts {
+                ensure!(
+                    super::safe_asset(&part.file) && part.file.ends_with(".glb"),
+                    "unsafe scene part"
+                );
+                let r = part.rotation_xyz_deg.map(f32::to_radians);
+                let transform = Mat4::from_translation(Vec3::from_array(part.translation_mm))
+                    * Mat4::from_euler(EulerRot::XYZ, r[0], r[1], r[2]);
+                parts.push((root.join(part.file), transform));
+            }
+            bake_glb_scene(path, &parts, field)
+        }
+        _ => anyhow::bail!("unsupported model asset {}", path.display()),
+    }
+}
+
+fn bake_glb_scene(
+    asset: &Path,
+    parts: &[(PathBuf, Mat4)],
+    field: Option<&crate::Field>,
+) -> Result<PreparedMesh> {
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut triangle_indices = Vec::new();
+    for (path, outer) in parts {
+        let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+        let gltf =
+            gltf::Gltf::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+        let blob = gltf
+            .blob
+            .as_deref()
+            .context("GLB has no embedded binary buffer")?;
+        for scene in gltf.scenes() {
+            for node in scene.nodes() {
+                append_node(
+                    node,
+                    blob,
+                    *outer,
+                    &mut positions,
+                    &mut normals,
+                    &mut triangle_indices,
+                )?;
+            }
+        }
+    }
+    ensure!(
+        !positions.is_empty() && !triangle_indices.is_empty(),
+        "GLB scene is empty"
+    );
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    for point in &positions {
+        min = min.min(*point);
+        max = max.max(*point);
+    }
+    let center = (min + max) * 0.5;
+    let extent = (max - min).max_element();
+    ensure!(
+        extent.is_finite() && extent > f32::EPSILON,
+        "scene bounds are degenerate"
+    );
+    let mut vertices = positions
+        .iter()
+        .zip(normals)
+        .map(|(position, normal)| Vertex {
+            field: field
+                .map(|spec| spec.normalize(spec.sample(position.to_array())))
+                .unwrap_or(0.0),
+            position: ((*position - center) / extent * 2.0).to_array(),
+            normal: normal.normalize_or_zero().to_array(),
+        })
+        .collect();
+    let mut edges = BTreeSet::new();
+    for face in triangle_indices.chunks_exact(3) {
+        for (a, b) in [(face[0], face[1]), (face[1], face[2]), (face[2], face[0])] {
+            edges.insert(if a < b { (a, b) } else { (b, a) });
+        }
+    }
+    let grid_indices = engineering_grid(&mut vertices);
+    Ok(PreparedMesh {
+        asset: asset.to_owned(),
+        vertices,
+        triangle_indices,
+        edge_indices: edges.into_iter().flat_map(|(a, b)| [a, b]).collect(),
+        grid_indices,
+        source_center: center.to_array(),
+        source_extent: extent,
+    })
+}
+
+fn append_node(
+    node: gltf::Node<'_>,
+    blob: &[u8],
+    parent: Mat4,
+    positions: &mut Vec<Vec3>,
+    normals: &mut Vec<Vec3>,
+    indices: &mut Vec<u32>,
+) -> Result<()> {
+    let local = Mat4::from_cols_array_2d(&node.transform().matrix());
+    let world = parent * local;
+    if let Some(mesh) = node.mesh() {
+        for primitive in mesh.primitives() {
+            ensure!(
+                primitive.mode() == gltf::mesh::Mode::Triangles,
+                "only triangle GLB primitives are supported"
+            );
+            let reader = primitive.reader(|buffer| match buffer.source() {
+                gltf::buffer::Source::Bin => Some(blob),
+                _ => None,
+            });
+            let source_positions: Vec<_> = reader
+                .read_positions()
+                .context("GLB primitive has no positions")?
+                .collect();
+            let source_normals: Vec<_> = reader
+                .read_normals()
+                .map(Iterator::collect)
+                .unwrap_or_else(|| vec![[0.0, 0.0, 0.0]; source_positions.len()]);
+            let base = positions.len() as u32;
+            let normal_matrix = Mat3::from_mat4(world).inverse().transpose();
+            positions.extend(
+                source_positions
+                    .into_iter()
+                    .map(|p| world.transform_point3(Vec3::from_array(p))),
+            );
+            normals.extend(
+                source_normals
+                    .into_iter()
+                    .map(|n| normal_matrix * Vec3::from_array(n)),
+            );
+            if let Some(source) = reader.read_indices() {
+                indices.extend(source.into_u32().map(|i| base + i));
+            } else {
+                indices.extend((0..positions.len() as u32 - base).map(|i| base + i));
+            }
+        }
+    }
+    for child in node.children() {
+        append_node(child, blob, world, positions, normals, indices)?;
+    }
+    Ok(())
 }
 
 pub fn bake_stl_with_field(path: &Path, field: Option<&crate::Field>) -> Result<PreparedMesh> {
@@ -96,7 +276,7 @@ pub fn bake_stl_with_field(path: &Path, field: Option<&crate::Field>) -> Result<
             });
         }
     }
-    let vertices = positions
+    let mut vertices = positions
         .iter()
         .zip(normals)
         .map(|(position, normal)| Vertex {
@@ -114,14 +294,41 @@ pub fn bake_stl_with_field(path: &Path, field: Option<&crate::Field>) -> Result<
         .into_iter()
         .flat_map(|(a, b)| [a as u32, b as u32])
         .collect();
+    let grid_indices = engineering_grid(&mut vertices);
     Ok(PreparedMesh {
         asset: path.to_owned(),
         vertices,
         triangle_indices,
         edge_indices,
+        grid_indices,
         source_center: center.to_array(),
         source_extent: extent,
     })
+}
+
+fn engineering_grid(vertices: &mut Vec<Vertex>) -> Vec<u32> {
+    let mut indices = Vec::with_capacity(100);
+    for step in 0..=24 {
+        let offset = -1.5 + step as f32 * 3.0 / 24.0;
+        for (a, b) in [
+            ([-1.5, -1.04, offset], [1.5, -1.04, offset]),
+            ([offset, -1.04, -1.5], [offset, -1.04, 1.5]),
+        ] {
+            let base = vertices.len() as u32;
+            vertices.push(Vertex {
+                position: a,
+                normal: [0.0, 1.0, 0.0],
+                field: -1.0,
+            });
+            vertices.push(Vertex {
+                position: b,
+                normal: [0.0, 1.0, 0.0],
+                field: -1.0,
+            });
+            indices.extend([base, base + 1]);
+        }
+    }
+    indices
 }
 
 #[derive(Debug)]
@@ -164,7 +371,7 @@ impl BakePool {
                             Ok(request) => request,
                             Err(_) => break,
                         };
-                        let result = bake_stl_with_field(&request.asset, request.field.as_ref());
+                        let result = bake_asset(&request.asset, request.field.as_ref());
                         if results
                             .send(BakeResult {
                                 generation: request.generation,
