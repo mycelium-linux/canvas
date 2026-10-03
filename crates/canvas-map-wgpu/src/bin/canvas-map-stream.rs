@@ -27,9 +27,11 @@ struct Config {
     #[serde(default)]
     endpoint: Option<String>,
     #[serde(default)]
-    local_frame_path: Option<String>,
+    source_id: Option<String>,
     ffmpeg_binary: String,
     snapshot_path: String,
+    #[serde(default)]
+    raster_path: Option<String>,
     theme: ThemePalette,
     camera: CameraConfig,
 }
@@ -152,8 +154,8 @@ fn validate(config: &Config) -> Result<()> {
         "frames_per_second must be 1..=60"
     );
     ensure!(
-        config.endpoint.is_some() ^ config.local_frame_path.is_some(),
-        "set exactly one of endpoint or local_frame_path"
+        config.endpoint.is_some() ^ config.source_id.is_some(),
+        "set exactly one of endpoint or source_id"
     );
     if let Some(endpoint) = &config.endpoint {
         ensure!(endpoint.starts_with("udp://"), "endpoint must use udp://");
@@ -166,6 +168,14 @@ fn validate(config: &Config) -> Result<()> {
 }
 
 async fn run(config: Config, snapshot: canvas::map::spatial::SpatialFeatureSet) -> Result<()> {
+    let local_frame_path = config
+        .source_id
+        .as_deref()
+        .map(|source_id| {
+            canvas_core::video_frame_file(source_id)
+                .with_context(|| format!("invalid Canvas video source id {source_id:?}"))
+        })
+        .transpose()?;
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
@@ -210,13 +220,31 @@ async fn run(config: Config, snapshot: canvas::map::spatial::SpatialFeatureSet) 
     });
     let mut renderer = GlobeRenderer::new(&device, format);
     renderer.set_features(&device, &snapshot)?;
+    if let Some(path) = &config.raster_path {
+        let raster = image::open(path)
+            .with_context(|| format!("decode raster {path}"))?
+            .into_rgba8();
+        renderer.set_raster_rgba8(
+            &device,
+            &queue,
+            raster.width(),
+            raster.height(),
+            raster.as_raw(),
+        )?;
+        eprintln!(
+            "canvas-map-stream: raster='{}' {}x{}",
+            path,
+            raster.width(),
+            raster.height()
+        );
+    }
     let palette = SpatialPalette::from_theme(&config.theme);
     let mut encoder_process = config
         .endpoint
         .as_ref()
         .map(|_| Encoder::spawn(&config))
         .transpose()?;
-    if let Some(path) = &config.local_frame_path {
+    if let Some(path) = &local_frame_path {
         publish_frame_size(path, config.width, config.height)?;
     }
     let interval = Duration::from_secs_f64(1.0 / f64::from(config.frames_per_second));
@@ -231,7 +259,7 @@ async fn run(config: Config, snapshot: canvas::map::spatial::SpatialFeatureSet) 
         config
             .endpoint
             .as_deref()
-            .or(config.local_frame_path.as_deref())
+            .or(local_frame_path.as_ref().and_then(|path| path.to_str()))
             .unwrap()
     );
 
@@ -294,7 +322,7 @@ async fn run(config: Config, snapshot: canvas::map::spatial::SpatialFeatureSet) 
         readback.unmap();
         if let Some(encoder) = &mut encoder_process {
             encoder.write_frame(&rgba)?;
-        } else if let Some(path) = &config.local_frame_path {
+        } else if let Some(path) = &local_frame_path {
             publish_frame(path, &rgba)?;
         }
 
@@ -307,16 +335,14 @@ async fn run(config: Config, snapshot: canvas::map::spatial::SpatialFeatureSet) 
     }
 }
 
-fn publish_frame_size(frame_path: &str, width: u32, height: u32) -> Result<()> {
-    let path = std::path::Path::new(frame_path);
+fn publish_frame_size(path: &std::path::Path, width: u32, height: u32) -> Result<()> {
     let parent = path.parent().context("local frame path needs a parent")?;
     std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     std::fs::write(path.with_extension("size"), format!("{width}x{height}"))
         .context("publish local frame size")
 }
 
-fn publish_frame(frame_path: &str, rgba: &[u8]) -> Result<()> {
-    let path = std::path::Path::new(frame_path);
+fn publish_frame(path: &std::path::Path, rgba: &[u8]) -> Result<()> {
     let temporary = path.with_extension("rgba.next");
     std::fs::write(&temporary, rgba).context("write local frame")?;
     std::fs::rename(&temporary, path).context("publish local frame atomically")

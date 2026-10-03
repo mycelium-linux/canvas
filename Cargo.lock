@@ -616,6 +616,7 @@ dependencies = [
  "bytemuck",
  "canvas",
  "canvas-core",
+ "image",
  "pollster",
  "serde",
  "serde_json",

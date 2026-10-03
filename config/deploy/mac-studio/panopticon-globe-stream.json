@@ -2,9 +2,10 @@
   "width": 1280,
   "height": 720,
   "frames_per_second": 24,
-  "local_frame_path": "/tmp/dock/canvas/video-frames/panopticon-globe.rgba",
+  "source_id": "panopticon-globe",
   "ffmpeg_binary": "/opt/homebrew/bin/ffmpeg",
   "snapshot_path": "/Users/ajmwagar/src/fpl/dock/crates/canvas/tests/fixtures/spatial_snapshot_v1.json",
+  "raster_path": "/Users/ajmwagar/src/fpl/panopticon/galileo/wasm/assets/earth.jpg",
   "theme": {
     "background": "#101014",
     "background_strong": "#08090c",

@@ -28,6 +28,8 @@ struct FrameUniforms {
 };
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
+@group(0) @binding(1) var earth_raster: texture_2d<f32>;
+@group(0) @binding(2) var earth_sampler: sampler;
 
 struct EarthInput {
     @location(0) position: vec3<f32>,
@@ -49,6 +51,11 @@ fn earth_vertex(input: EarthInput) -> EarthOutput {
 
 @fragment
 fn earth_fragment(input: EarthOutput) -> @location(0) vec4<f32> {
+    let raster_uv = vec2<f32>(
+        (input.geo_degrees.y + 180.0) / 360.0,
+        (90.0 - input.geo_degrees.x) / 180.0
+    );
+    let raster = textureSample(earth_raster, earth_sampler, raster_uv);
     let latitude_phase = fract((input.geo_degrees.x + 90.0) / 10.0);
     let longitude_phase = fract((input.geo_degrees.y + 180.0) / 10.0);
     let latitude_cell = min(latitude_phase, 1.0 - latitude_phase);
@@ -58,7 +65,9 @@ fn earth_fragment(input: EarthOutput) -> @location(0) vec4<f32> {
     let latitude_line = 1.0 - smoothstep(0.0, latitude_width * 1.5, latitude_cell);
     let longitude_line = 1.0 - smoothstep(0.0, longitude_width * 1.5, longitude_cell);
     let grid = clamp(max(latitude_line, longitude_line), 0.0, 1.0);
-    return mix(frame.land, frame.boundary, grid * frame.boundary.a);
+    // The grid is a positional reference over imagery, not the subject. Keep
+    // it legible at a glance without washing out terrain and coastlines.
+    return mix(raster, frame.boundary, grid * frame.boundary.a * 0.32);
 }
 
 struct PointInput {
@@ -137,6 +146,7 @@ pub struct RenderStats {
 #[derive(Debug)]
 pub enum RenderError {
     InvalidTarget,
+    InvalidRaster,
     TooManyPoints,
 }
 
@@ -144,6 +154,9 @@ impl std::fmt::Display for RenderError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidTarget => formatter.write_str("external render target has zero size"),
+            Self::InvalidRaster => {
+                formatter.write_str("raster dimensions or RGBA payload are invalid")
+            }
             Self::TooManyPoints => formatter.write_str("spatial point count exceeds u32 capacity"),
         }
     }
@@ -171,7 +184,10 @@ struct DepthTarget {
 pub struct GlobeRenderer {
     earth_pipeline: wgpu::RenderPipeline,
     point_pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
+    raster_texture: wgpu::Texture,
+    raster_sampler: wgpu::Sampler,
     uniform_buffer: wgpu::Buffer,
     earth_vertex_buffer: wgpu::Buffer,
     earth_index_buffer: wgpu::Buffer,
@@ -213,27 +229,53 @@ impl GlobeRenderer {
         });
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Canvas globe frame layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(
-                        std::mem::size_of::<FrameUniforms>() as u64
-                    ),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<FrameUniforms>() as u64,
+                        ),
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
         });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Canvas globe frame bindings"),
-            layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
+        let raster_texture = raster_texture(device, 1, 1);
+        let raster_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Canvas globe raster sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
         });
+        let bind_group = raster_bind_group(
+            device,
+            &bind_group_layout,
+            &uniform_buffer,
+            &raster_texture,
+            &raster_sampler,
+        );
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Canvas globe pipeline layout"),
             bind_group_layouts: &[&bind_group_layout],
@@ -249,7 +291,10 @@ impl GlobeRenderer {
         Self {
             earth_pipeline,
             point_pipeline,
+            bind_group_layout,
             bind_group,
+            raster_texture,
+            raster_sampler,
             uniform_buffer,
             earth_vertex_buffer,
             earth_index_buffer,
@@ -264,6 +309,46 @@ impl GlobeRenderer {
             last_palette: None,
             depth: None,
         }
+    }
+
+    /// Replace the equirectangular imagery draped over the WGS84 ellipsoid.
+    /// Acquisition, caching, attribution, and tile-atlas assembly stay with
+    /// the host; the renderer only accepts a validated RGBA texture.
+    pub fn set_raster_rgba8(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<(), RenderError> {
+        let expected = width
+            .checked_mul(height)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .map(|bytes| bytes as usize);
+        if width == 0 || height == 0 || expected != Some(rgba.len()) {
+            return Err(RenderError::InvalidRaster);
+        }
+        let texture = raster_texture(device, width, height);
+        queue.write_texture(
+            texture.as_image_copy(),
+            rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            texture.size(),
+        );
+        self.bind_group = raster_bind_group(
+            device,
+            &self.bind_group_layout,
+            &self.uniform_buffer,
+            &texture,
+            &self.raster_sampler,
+        );
+        self.raster_texture = texture;
+        Ok(())
     }
 
     pub fn set_features(
@@ -435,6 +520,51 @@ impl GlobeRenderer {
         self.last_origin = Some(plan.world_origin_ecef_m);
         self.last_palette = Some(plan.palette);
     }
+}
+
+fn raster_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Canvas globe equirectangular raster"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
+}
+
+fn raster_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniform_buffer: &wgpu::Buffer,
+    texture: &wgpu::Texture,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Canvas globe frame bindings"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
 }
 
 fn earth_pipeline(
