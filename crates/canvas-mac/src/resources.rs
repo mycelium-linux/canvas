@@ -2,7 +2,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::process::Command;
+use std::process::{Command, Stdio};
+
+use canvas_core::{ThemeMode, ThemeSelection};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
@@ -147,7 +149,7 @@ fn entries(id: &str, context: &Value) -> Result<Vec<Entry>, String> {
         id: "@home".into(),
         title: format!("{name} project home"),
         kind: "project".into(),
-        uri: home.clone(),
+        uri: format!("alfalfa://projects/{id}"),
         note: None,
         home: home.clone(),
         status: project["status"].as_str().unwrap_or("active").into(),
@@ -683,7 +685,10 @@ fn safe_viewer_base(value: &str) -> Option<url::Url> {
     Some(url)
 }
 
-pub fn open(entry: &Entry) -> Result<(), String> {
+pub fn open(entry: &Entry, theme: ThemeSelection) -> Result<(), String> {
+    if let Some(project) = alfalfa_project_id(entry) {
+        return launch_alfalfa_viewer(&project, theme);
+    }
     let output = super::bounded_output(
         std::process::Command::new("/usr/bin/open")
             .arg("--")
@@ -696,6 +701,122 @@ pub fn open(entry: &Entry) -> Result<(), String> {
     } else {
         Err("The selected resource could not be opened.".into())
     }
+}
+
+fn alfalfa_project_id(entry: &Entry) -> Option<String> {
+    if entry.kind != "project"
+        || entry.uri.contains('%')
+        || entry.uri.split('/').any(|part| matches!(part, "." | ".."))
+    {
+        return None;
+    }
+    let locator = url::Url::parse(&entry.uri).ok()?;
+    if locator.scheme() != "alfalfa"
+        || locator.host_str() != Some("projects")
+        || !locator.username().is_empty()
+        || locator.password().is_some()
+        || locator.query().is_some()
+        || locator.fragment().is_some()
+    {
+        return None;
+    }
+    let parts = locator
+        .path_segments()?
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    (parts.len() == 1 && owner_identifier(parts[0])).then(|| parts[0].to_owned())
+}
+
+fn hex(rgb: [u8; 3]) -> String {
+    format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2])
+}
+
+fn alfalfa_theme_snapshot(theme: ThemeSelection, project: &str) -> Value {
+    let palette = theme.palette();
+    serde_json::json!({
+        "schema": "coherence.resolved-theme/1",
+        "source": "canvas",
+        "mode": match theme.mode() { ThemeMode::Light => "light", ThemeMode::Dark => "dark" },
+        "palette": {
+            "background": hex(palette.background),
+            "surface": hex(palette.surface),
+            "text": hex(palette.text),
+            "text_muted": hex(palette.text_muted),
+            "primary": hex(palette.primary),
+            "success": hex(palette.success),
+            "warning": hex(palette.warning),
+            "danger": hex(palette.danger),
+            "border": hex(palette.border),
+        },
+        "provenance": format!("canvas-core/{}:project/{project}", env!("CARGO_PKG_VERSION")),
+    })
+}
+
+fn write_alfalfa_theme(project: &str, theme: ThemeSelection) -> Result<std::path::PathBuf, String> {
+    let directory = std::env::temp_dir()
+        .join("fpl-canvas")
+        .join("alfalfa-themes");
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("Cannot prepare Alfalfa viewer theme: {error}"))?;
+    let path = directory.join(format!("{project}.json"));
+    let temporary = directory.join(format!(".{project}.{}.tmp", std::process::id()));
+    let bytes = serde_json::to_vec_pretty(&alfalfa_theme_snapshot(theme, project))
+        .map_err(|error| format!("Cannot encode Alfalfa viewer theme: {error}"))?;
+    std::fs::write(&temporary, bytes)
+        .map_err(|error| format!("Cannot write Alfalfa viewer theme: {error}"))?;
+    std::fs::rename(&temporary, &path)
+        .map_err(|error| format!("Cannot publish Alfalfa viewer theme: {error}"))?;
+    Ok(path)
+}
+
+fn launch_alfalfa_viewer(project: &str, theme: ThemeSelection) -> Result<(), String> {
+    let viewer =
+        std::env::var_os("CANVAS_ALFALFA_VIEWER_BIN").unwrap_or_else(|| "alfalfa-viewer".into());
+    let port = std::env::var("DOCK_ALFALFA_PORT")
+        .unwrap_or_else(|_| "8791".into())
+        .parse::<u16>()
+        .map_err(|_| "Invalid Alfalfa port")?;
+    if port == 0 {
+        return Err("Invalid Alfalfa port".into());
+    }
+    launch_alfalfa_viewer_with(&viewer, port, project, theme)
+}
+
+fn launch_alfalfa_viewer_with(
+    viewer: &std::ffi::OsStr,
+    port: u16,
+    project: &str,
+    theme: ThemeSelection,
+) -> Result<(), String> {
+    let theme = write_alfalfa_theme(project, theme)?;
+    let arguments = alfalfa_launch_arguments(port, project, &theme);
+    let mut child = Command::new(viewer)
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("Cannot launch the Alfalfa manifest viewer: {error}"))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+fn alfalfa_launch_arguments(
+    port: u16,
+    project: &str,
+    theme: &std::path::Path,
+) -> Vec<std::ffi::OsString> {
+    [
+        std::ffi::OsString::from("--owner"),
+        std::ffi::OsString::from(format!("127.0.0.1:{port}")),
+        std::ffi::OsString::from("--project"),
+        std::ffi::OsString::from(project),
+        std::ffi::OsString::from("--theme"),
+        theme.as_os_str().to_owned(),
+    ]
+    .into()
 }
 
 #[cfg(test)]
@@ -744,6 +865,81 @@ mod tests {
             .as_deref(),
             Some("https://lob.example/viewer/c/controller-board")
         );
+    }
+
+    #[test]
+    fn alfalfa_project_home_is_an_owner_native_locator() {
+        let entries = entries("business", &fixture()).unwrap();
+        assert_eq!(entries[0].uri, "alfalfa://projects/business");
+        assert_eq!(alfalfa_project_id(&entries[0]).as_deref(), Some("business"));
+        assert_eq!(target(&entries[0]), entries[0].home);
+        for locator in [
+            "alfalfa://projects/a/b",
+            "alfalfa://projects/../secret",
+            "alfalfa://projects/name?token=secret",
+            "alfalfa://other/name",
+        ] {
+            let mut entry = entries[0].clone();
+            entry.uri = locator.into();
+            assert_eq!(alfalfa_project_id(&entry), None, "{locator}");
+        }
+    }
+
+    #[test]
+    fn alfalfa_theme_snapshot_uses_the_resolved_canvas_roles() {
+        let theme = ThemeSelection::Coherence {
+            mode: ThemeMode::Dark,
+            accent: canvas_core::Accent::Info,
+        };
+        let palette = theme.palette();
+        let snapshot = alfalfa_theme_snapshot(theme, "business");
+        assert_eq!(snapshot["schema"], "coherence.resolved-theme/1");
+        assert_eq!(snapshot["source"], "canvas");
+        assert_eq!(snapshot["mode"], "dark");
+        assert_eq!(snapshot["palette"]["primary"], hex(palette.primary));
+        assert_eq!(snapshot["palette"]["background"], hex(palette.background));
+        assert_eq!(snapshot["palette"]["border"], hex(palette.border));
+        assert!(snapshot["provenance"]
+            .as_str()
+            .unwrap()
+            .contains("project/business"));
+    }
+
+    #[test]
+    fn alfalfa_launch_arguments_bind_owner_project_and_theme() {
+        let arguments = alfalfa_launch_arguments(
+            8791,
+            "business",
+            std::path::Path::new("/tmp/business-theme.json"),
+        );
+        assert_eq!(
+            arguments,
+            [
+                "--owner",
+                "127.0.0.1:8791",
+                "--project",
+                "business",
+                "--theme",
+                "/tmp/business-theme.json",
+            ]
+            .map(std::ffi::OsString::from)
+        );
+    }
+
+    #[test]
+    fn alfalfa_launch_failure_is_visible() {
+        let theme = ThemeSelection::Coherence {
+            mode: ThemeMode::Dark,
+            accent: canvas_core::Accent::Brand,
+        };
+        let error = launch_alfalfa_viewer_with(
+            std::ffi::OsStr::new("/definitely/missing/alfalfa-viewer"),
+            8791,
+            "business",
+            theme,
+        )
+        .unwrap_err();
+        assert!(error.contains("Cannot launch the Alfalfa manifest viewer"));
     }
 
     #[test]

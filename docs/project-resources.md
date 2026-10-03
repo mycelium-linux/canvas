@@ -45,6 +45,14 @@ the owner's existing web viewer. A `model` at
 circuit workspace. Canvas does not read either tool's project directory or
 duplicate its CAD/EDA model. It resolves the locator only when it is opened.
 
+Alfalfa project homes use the same owner-native boundary. An
+`alfalfa://projects/<project-id>` resource launches Alfalfa's standalone native
+manifest viewer with the selected Canvas project's resolved Coherence theme.
+Canvas writes only the versioned `coherence.resolved-theme/1` semantic snapshot;
+Alfalfa remains responsible for manifest projection, navigation and rendering.
+Set `CANVAS_ALFALFA_VIEWER_BIN` when `alfalfa-viewer` is not on `PATH`, and
+`DOCK_ALFALFA_PORT` when the loopback owner does not use port 8791.
+
 The local defaults are the owners' documented development servers:
 `http://127.0.0.1:4173` for `transmog serve` and
 `http://127.0.0.1:8080` for `lob serve`. Set

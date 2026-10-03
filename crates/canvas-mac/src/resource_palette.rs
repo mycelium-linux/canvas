@@ -102,15 +102,7 @@ impl Palette {
         }
     }
     fn theme(&self) -> Theme {
-        let project = self
-            .selected()
-            .and_then(|entry| self.catalog.projects.iter().find(|p| p.id == entry.project));
-        let theme = project
-            .map(|p| p.theme)
-            .unwrap_or(canvas_core::ThemeSelection::Coherence {
-                mode: canvas_core::ThemeMode::Dark,
-                accent: canvas_core::Accent::Brand,
-            });
+        let theme = self.selected_theme();
         let p = theme.palette();
         let color = |rgb: [u8; 3]| Color::from_rgb8(rgb[0], rgb[1], rgb[2]);
         Theme::custom(
@@ -124,6 +116,17 @@ impl Palette {
                 warning: color(p.warning),
             },
         )
+    }
+    fn selected_theme(&self) -> canvas_core::ThemeSelection {
+        let project = self
+            .selected()
+            .and_then(|entry| self.catalog.projects.iter().find(|p| p.id == entry.project));
+        project
+            .map(|p| p.theme)
+            .unwrap_or(canvas_core::ThemeSelection::Coherence {
+                mode: canvas_core::ThemeMode::Dark,
+                accent: canvas_core::Accent::Brand,
+            })
     }
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
@@ -199,6 +202,7 @@ impl Palette {
                     return iced::widget::operation::focus("resource-query");
                 }
                 if let Some(entry) = self.selected().cloned() {
+                    let theme = self.selected_theme();
                     if entry.kind == "project" && self.project.is_none() {
                         self.project = Some(entry.project);
                         self.query.clear();
@@ -210,7 +214,10 @@ impl Palette {
                         return iced::widget::operation::focus("resource-note");
                     }
                     self.opening = true;
-                    return Task::perform(async move { resources::open(&entry) }, Message::Opened);
+                    return Task::perform(
+                        async move { resources::open(&entry, theme) },
+                        Message::Opened,
+                    );
                 }
             }
             Message::Link(uri) => {
@@ -218,9 +225,13 @@ impl Palette {
                     return Task::none();
                 }
                 if let Some(mut entry) = self.selected().cloned() {
+                    let theme = self.selected_theme();
                     entry.uri = uri;
                     self.opening = true;
-                    return Task::perform(async move { resources::open(&entry) }, Message::Opened);
+                    return Task::perform(
+                        async move { resources::open(&entry, theme) },
+                        Message::Opened,
+                    );
                 }
             }
             Message::Opened(result) => {

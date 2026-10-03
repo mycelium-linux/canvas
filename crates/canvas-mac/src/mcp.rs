@@ -848,7 +848,7 @@ pub fn execute(name: &str, args: &Value) -> Result<Value, String> {
                     Some(viewer_receipt(super::remote::open_desktop(project))),
                 )
             } else {
-                super::resources::open(entry)?;
+                super::resources::open(entry, workspace_theme(project))?;
                 ("mac", None)
             };
             json!({"project_id":project,"resource_id":resource,"title":entry.title,"kind":entry.kind,"opened":true,"destination":destination,"viewer":viewer})
