@@ -15,6 +15,8 @@ pub mod desktop;
 pub mod desktop_theme;
 pub mod display_watch;
 pub mod external_surface;
+#[cfg(unix)]
+pub mod external_surface_ipc;
 pub mod global_hotkey;
 pub mod layout;
 pub mod manifest_query;

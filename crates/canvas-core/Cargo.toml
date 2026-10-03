@@ -13,6 +13,9 @@ unibus.workspace = true
 toml = "0.8"
 sha2 = "0.10"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [[bin]]
 name = "canvas-core-ctl"
 path = "src/main.rs"
