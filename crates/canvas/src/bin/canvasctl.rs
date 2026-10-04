@@ -741,7 +741,7 @@ fn handle_open_terminal(tokens: &[String]) -> Result<(), String> {
 fn handle_workspace(tokens: &[String]) -> Result<(), String> {
     if tokens.len() < 2 {
         return Err(
-            "usage: workspace create <name> | workspace save <name> | workspace switch <name> | workspace list".into(),
+            "usage: workspace create <name> | workspace save <name> | workspace switch <name> | workspace summon <name> --output <output> | workspace list [--output <output>]".into(),
         );
     }
     match tokens[1].as_str() {
@@ -800,6 +800,34 @@ fn handle_workspace(tokens: &[String]) -> Result<(), String> {
             let reply = send_with_retry(&request)?;
             println!("{}", text::format_reply(&reply));
         }
+        "summon" | "move" => {
+            if tokens.len() < 5 || tokens[3] != "--output" {
+                return Err(
+                    "usage: workspace summon <name> --output <screen-neo|screen-studio|screen-tv>"
+                        .into(),
+                );
+            }
+            let name = &tokens[2];
+            let output_id = &tokens[4];
+            let read = send_read(Command::WorkspaceRead { name: name.clone() })?;
+            let Outcome::Ok {
+                receipt: Receipt::WorkspaceDocument { document, .. },
+            } = read.outcome
+            else {
+                return Err(format_reply_error(&read));
+            };
+            let activate = local_output_id().as_deref() == Some(output_id.as_str());
+            let local_output = local_output_id();
+            send_mutation(Command::WorkspaceImport {
+                document: document.clone(),
+                assigned_output: Some(output_id.clone()),
+                local_output,
+                activate,
+            })?;
+            #[cfg(unix)]
+            canvas::workspace_mirror::publish_assignment(&document, output_id)?;
+            println!("summoned={name} output={output_id}");
+        }
         "list" => {
             let req = ControlRequest {
                 schema_version: CONTROL_VERSION,
@@ -813,12 +841,26 @@ fn handle_workspace(tokens: &[String]) -> Result<(), String> {
                 receipt: Receipt::Snapshot { snapshot },
             } = &reply.outcome
             {
-                if snapshot.workspaces.is_empty() {
+                let output_filter = tokens
+                    .windows(2)
+                    .find(|pair| pair[0] == "--output")
+                    .map(|pair| pair[1].as_str());
+                if snapshot.workspace_summaries.is_empty() {
                     println!("No saved workspaces.");
                 } else {
                     println!("Saved workspaces:");
-                    for name in &snapshot.workspaces {
-                        println!("  {name}");
+                    for workspace in &snapshot.workspace_summaries {
+                        if output_filter.is_some()
+                            && workspace.assigned_output.as_deref() != output_filter
+                        {
+                            continue;
+                        }
+                        println!(
+                            "  {} output={}{}",
+                            workspace.project_id,
+                            workspace.assigned_output.as_deref().unwrap_or("unassigned"),
+                            if workspace.active { " active" } else { "" }
+                        );
                     }
                 }
             } else {
@@ -828,6 +870,31 @@ fn handle_workspace(tokens: &[String]) -> Result<(), String> {
         other => return Err(format!("unknown workspace subcommand: {other}")),
     }
     Ok(())
+}
+
+fn local_output_id() -> Option<String> {
+    if let Some(output) = std::env::var_os("CANVAS_OUTPUT_ID") {
+        return Some(output.to_string_lossy().into_owned());
+    }
+    let path = std::env::var_os("CANVAS_EDGE_CONFIG")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .map(|home| home.join(".config/canvas/edge.json"))
+        })?;
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    value
+        .pointer("/mirror/output_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            value
+                .get("screen_anchors")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|anchors| anchors.first())
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(str::to_owned)
 }
 
 fn handle_surface(tokens: &[String]) -> Result<(), String> {

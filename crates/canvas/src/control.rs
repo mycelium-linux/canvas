@@ -208,6 +208,24 @@ pub enum Command {
     WorkspaceSwitch {
         name: String,
     },
+    /// Read any retained workspace without presenting it. This is the narrow
+    /// primitive used to summon a scene to another Canvas output without a
+    /// visible switch on the caller.
+    WorkspaceRead {
+        name: String,
+    },
+    /// Retain one complete portable workspace generation and optionally make
+    /// it visible on this output. Only canvas-edge should originate imports.
+    WorkspaceImport {
+        document: Box<WorkspaceDocument>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assigned_output: Option<String>,
+        /// Identity of the receiving Canvas output. Kept explicit so parking
+        /// the displaced scene remains deterministic and testable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_output: Option<String>,
+        activate: bool,
+    },
     WorkspaceSync {
         projects: Vec<ProjectWorkspaceSpec>,
     },
@@ -738,6 +756,17 @@ pub enum Receipt {
     WorkspaceSwitched {
         name: String,
     },
+    WorkspaceDocument {
+        document: Box<WorkspaceDocument>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assigned_output: Option<String>,
+    },
+    WorkspaceImported {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assigned_output: Option<String>,
+        active: bool,
+    },
     WorkspacesSynced {
         created: usize,
         updated: usize,
@@ -917,6 +946,8 @@ pub struct ProjectWorkspaceSnapshot {
     pub status: String,
     pub surface_count: usize,
     pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_output: Option<String>,
     pub theme: ThemeSelection,
     pub background: Background,
 }
@@ -1096,9 +1127,33 @@ impl ControlRequest {
                     return Err("invalid project workspace id".into());
                 }
             }
-            Command::WorkspaceSave { name } | Command::WorkspaceSwitch { name } => {
+            Command::WorkspaceSave { name }
+            | Command::WorkspaceSwitch { name }
+            | Command::WorkspaceRead { name } => {
                 if !workspace_name(name) {
                     return Err("invalid project workspace id".into());
+                }
+            }
+            Command::WorkspaceImport {
+                document,
+                assigned_output,
+                local_output,
+                ..
+            } => {
+                if !workspace_name(&document.project_id) {
+                    return Err("invalid imported project workspace id".into());
+                }
+                if assigned_output
+                    .as_deref()
+                    .is_some_and(|output| !output_id(output))
+                {
+                    return Err("invalid Canvas output id".into());
+                }
+                if local_output
+                    .as_deref()
+                    .is_some_and(|output| !output_id(output))
+                {
+                    return Err("invalid local Canvas output id".into());
                 }
             }
             Command::SetBackgroundShader {
@@ -1208,6 +1263,16 @@ fn workspace_name(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn output_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'-' | b'_' | b'.' | b'/')
+        })
 }
 
 fn identifier(value: &str) -> bool {
@@ -1839,6 +1904,22 @@ pub mod text {
                     Receipt::PresencePreviewDismissed => "preview dismissed".to_string(),
                     Receipt::WorkspaceSaved { name } => format!("saved={name}"),
                     Receipt::WorkspaceSwitched { name } => format!("switched={name}"),
+                    Receipt::WorkspaceDocument {
+                        document,
+                        assigned_output,
+                    } => format!(
+                        "workspace={} output={}",
+                        document.project_id,
+                        assigned_output.as_deref().unwrap_or("unassigned")
+                    ),
+                    Receipt::WorkspaceImported {
+                        name,
+                        assigned_output,
+                        active,
+                    } => format!(
+                        "imported={name} output={} active={active}",
+                        assigned_output.as_deref().unwrap_or("unassigned")
+                    ),
                     Receipt::WorkspacesSynced {
                         created,
                         updated,

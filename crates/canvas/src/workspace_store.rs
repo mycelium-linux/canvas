@@ -18,7 +18,7 @@ use std::io::{self, BufWriter, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-pub const STORE_SCHEMA_VERSION: u32 = 2;
+pub const STORE_SCHEMA_VERSION: u32 = 3;
 const MAX_STORE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// How many projects back "go back" can reach.
@@ -46,6 +46,12 @@ pub struct WorkspaceStore {
     /// is to survive the restart that loses the human's own memory of the order.
     #[serde(default)]
     pub recent_project_ids: Vec<String>,
+    /// Stable Canvas output assigned to each portable workspace.
+    ///
+    /// The document remains display-independent; assignment is orchestration
+    /// state, so moving a workspace never rewrites its layout or surfaces.
+    #[serde(default)]
+    pub output_assignments: BTreeMap<String, String>,
     /// Saved display and overlay policy, restored across restarts.
     ///
     /// Absent in v1 stores; defaults are applied when None.
@@ -115,6 +121,7 @@ impl Default for WorkspaceStore {
             projects: BTreeMap::new(),
             active_project_id: None,
             recent_project_ids: Vec::new(),
+            output_assignments: BTreeMap::new(),
             display_policy: None,
         }
     }
@@ -178,7 +185,7 @@ impl WorkspaceStore {
     /// Anything older than v1, or newer than this build understands, is left
     /// alone for `validate` to reject.
     pub fn upgrade(&mut self) {
-        if self.schema_version == 1 {
+        if matches!(self.schema_version, 1 | 2) {
             self.schema_version = STORE_SCHEMA_VERSION;
         }
     }
@@ -234,6 +241,18 @@ impl WorkspaceStore {
             return Err(Error(
                 "Canvas workspace history exceeds the retained project count".into(),
             ));
+        }
+        for (project_id, output_id) in &self.output_assignments {
+            if !self.projects.contains_key(project_id) {
+                return Err(Error(format!(
+                    "Canvas output assignment references unknown workspace: {project_id}"
+                )));
+            }
+            if !valid_output_id(output_id) {
+                return Err(Error(format!(
+                    "Canvas output assignment has invalid output id: {output_id}"
+                )));
+            }
         }
         Ok(())
     }
@@ -340,6 +359,29 @@ impl WorkspaceStore {
         self.projects.get(project_id)
     }
 
+    pub fn assigned_output(&self, project_id: &str) -> Option<&str> {
+        self.output_assignments.get(project_id).map(String::as_str)
+    }
+
+    pub fn assign_output(&mut self, project_id: &str, output_id: Option<String>) {
+        match output_id {
+            Some(output_id) => {
+                // One visible workspace per output. Moving another scene here
+                // atomically unassigns the previous occupant; no node can
+                // legitimately render two active workspace identities.
+                self.output_assignments
+                    .retain(|existing_project, existing_output| {
+                        existing_project == project_id || existing_output != &output_id
+                    });
+                self.output_assignments
+                    .insert(project_id.to_owned(), output_id);
+            }
+            None => {
+                self.output_assignments.remove(project_id);
+            }
+        }
+    }
+
     /// Replace one project-specific override with the current inherited
     /// Alfalfa workspace. Other projects and navigation state are untouched.
     pub fn reset_to_default(
@@ -372,6 +414,16 @@ impl WorkspaceStore {
     pub fn set_display_policy(&mut self, policy: DisplayPolicy) {
         self.display_policy = Some(policy);
     }
+}
+
+fn valid_output_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'-' | b'_' | b'.' | b'/')
+        })
 }
 
 fn default_alfalfa_workspace(project_id: &str) -> Result<WorkspaceDocument, Error> {
@@ -732,6 +784,7 @@ mod tests {
             projects: BTreeMap::from([("fab".into(), document("fab"))]),
             active_project_id: Some("fab".into()),
             recent_project_ids: vec!["dock".into()],
+            output_assignments: BTreeMap::new(),
             display_policy: None,
         };
         let before = store.projects.clone();
@@ -750,6 +803,33 @@ mod tests {
         let before = store.clone();
         store.upgrade();
         assert_eq!(store, before);
+    }
+
+    #[test]
+    fn output_assignments_round_trip_separately_from_documents() {
+        let catalog = Catalog::bundled().expect("bundled catalog");
+        let mut store = WorkspaceStore::default();
+        store
+            .sync(
+                vec![
+                    definition("portable", "Portable"),
+                    definition("other", "Other"),
+                ],
+                &catalog,
+            )
+            .unwrap();
+        store.assign_output("portable", Some("screen-tv".into()));
+        assert_eq!(store.assigned_output("portable"), Some("screen-tv"));
+        store.assign_output("other", Some("screen-tv".into()));
+        assert_eq!(store.assigned_output("portable"), None);
+        assert_eq!(store.assigned_output("other"), Some("screen-tv"));
+        store.validate(&catalog).unwrap();
+
+        let encoded = serde_json::to_vec(&store).unwrap();
+        let decoded: WorkspaceStore = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.assigned_output("portable"), None);
+        assert_eq!(decoded.assigned_output("other"), Some("screen-tv"));
+        assert_eq!(decoded.get("portable"), store.get("portable"));
     }
 
     /// An unknown future stamp is not something this build can interpret, so

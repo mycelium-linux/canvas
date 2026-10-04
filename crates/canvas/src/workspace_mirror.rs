@@ -15,6 +15,11 @@ pub const MIRROR_KIND: &str = "canvas.workspace_state.v1";
 pub struct LocalWorkspaceSnapshot {
     pub schema_version: u32,
     pub document: WorkspaceDocument,
+    /// None preserves legacy same-workspace mirroring. Some(output) makes this
+    /// a portable assignment that every peer retains and only that output
+    /// presents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_output: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25,13 +30,15 @@ pub struct WorkspaceState {
     pub origin: String,
     pub sequence: u64,
     pub document: WorkspaceDocument,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_output: Option<String>,
 }
 
 #[cfg(unix)]
 pub struct Publisher {
     stream: Option<std::os::unix::net::UnixStream>,
     path: Option<std::path::PathBuf>,
-    last_sent: Option<WorkspaceDocument>,
+    last_sent: Option<LocalWorkspaceSnapshot>,
 }
 
 #[cfg(unix)]
@@ -47,18 +54,22 @@ impl Publisher {
     /// Best-effort local publication. Absence of an edge is a valid disabled
     /// state; serialization failures remain visible because a valid Canvas
     /// document must always serialize.
-    pub fn publish_if_changed(&mut self, document: &WorkspaceDocument) {
-        if self
-            .last_sent
-            .as_ref()
-            .is_some_and(|previous| same_representation(previous, document))
-        {
-            return;
-        }
+    pub fn publish_if_changed(
+        &mut self,
+        document: &WorkspaceDocument,
+        assigned_output: Option<&str>,
+    ) {
         let snapshot = LocalWorkspaceSnapshot {
             schema_version: MIRROR_SCHEMA_VERSION,
             document: document.clone(),
+            assigned_output: assigned_output.map(str::to_owned),
         };
+        if self.last_sent.as_ref().is_some_and(|previous| {
+            previous.assigned_output == snapshot.assigned_output
+                && same_representation(&previous.document, document)
+        }) {
+            return;
+        }
         let bytes = serde_json::to_vec(&snapshot)
             .expect("a validated Canvas workspace document must serialize");
         let Some(path) = &self.path else { return };
@@ -81,11 +92,37 @@ impl Publisher {
                 .is_some_and(|stream| send(stream).is_ok());
         }
         if sent {
-            self.last_sent = Some(document.clone());
+            self.last_sent = Some(snapshot);
         } else {
             self.stream = None;
         }
     }
+}
+
+/// Publish one complete workspace assignment through the local edge.
+///
+/// This is transport-neutral from the CLI's perspective: the edge owns the
+/// Unibus route, credentials, retry policy, and remote output discovery.
+#[cfg(unix)]
+pub fn publish_assignment(
+    document: &WorkspaceDocument,
+    assigned_output: &str,
+) -> Result<(), String> {
+    use std::io::Write;
+    let path = canvas_core::workspace_mirror_socket_path()
+        .ok_or("Canvas workspace mirror socket is unavailable")?;
+    let snapshot = LocalWorkspaceSnapshot {
+        schema_version: MIRROR_SCHEMA_VERSION,
+        document: document.clone(),
+        assigned_output: Some(assigned_output.to_owned()),
+    };
+    let mut bytes = serde_json::to_vec(&snapshot).map_err(|error| error.to_string())?;
+    bytes.push(b'\n');
+    let mut stream = std::os::unix::net::UnixStream::connect(&path)
+        .map_err(|error| format!("connect {}: {error}", path.display()))?;
+    stream
+        .write_all(&bytes)
+        .map_err(|error| format!("publish workspace assignment: {error}"))
 }
 
 /// Whether two documents describe the same board.
@@ -166,6 +203,7 @@ mod tests {
             origin: "screen-a".into(),
             sequence: 7,
             document,
+            assigned_output: Some("screen-tv".into()),
         };
         let encoded = serde_json::to_vec(&state).unwrap();
         let decoded: WorkspaceState = serde_json::from_slice(&encoded).unwrap();

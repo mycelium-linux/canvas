@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -67,6 +67,10 @@ struct MirrorConfig {
     /// Destination zone. Defaults to the edge's first registered zone.
     #[serde(default)]
     zone: Option<String>,
+    /// Stable identity of the Canvas output this edge fronts. Defaults to the
+    /// first screen anchor for backward-compatible deployments.
+    #[serde(default)]
+    output_id: Option<String>,
 }
 
 fn mirror_enabled() -> bool {
@@ -405,7 +409,10 @@ fn publish_market_data(envelope: &Envelope) -> Result<()> {
     Ok(())
 }
 
-struct MirrorSocketGuard(std::path::PathBuf);
+struct MirrorSocketGuard {
+    path: std::path::PathBuf,
+    stop: Arc<AtomicBool>,
+}
 
 #[derive(Default)]
 struct MirrorRuntime {
@@ -419,7 +426,8 @@ struct MirrorRuntime {
 
 impl Drop for MirrorSocketGuard {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+        self.stop.store(true, Ordering::Release);
+        let _ = fs::remove_file(&self.path);
     }
 }
 
@@ -700,6 +708,9 @@ fn start_workspace_mirror(
         fs::remove_file(&path).context("remove stale mirror socket")?;
     }
     let listener = UnixListener::bind(&path).context("bind workspace mirror socket")?;
+    listener
+        .set_nonblocking(true)
+        .context("make workspace mirror socket interruptible")?;
     fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
         .context("secure workspace mirror socket")?;
     let zone = mirror
@@ -708,18 +719,31 @@ fn start_workspace_mirror(
         .or_else(|| config.bus.zones.first().cloned())
         .context("mirror requires a destination zone")?;
     let origin = config.bus.producer_id.clone();
-    let sequence = Arc::new(AtomicU64::new(0));
+    // The receiver retains the last sequence per producer. Seed from wall
+    // time so restarting one edge does not reset it to 1 and make healthy
+    // peers reject every new snapshot until the old counter is surpassed.
+    let sequence = Arc::new(AtomicU64::new(canvas::stream_binding::now_ms()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let listener_stop = Arc::clone(&stop);
     thread::Builder::new()
         .name("canvas-workspace-mirror".into())
         .spawn(move || {
-            for accepted in listener.incoming() {
-                let stream = match accepted {
-                    Ok(stream) => stream,
+            while !listener_stop.load(Ordering::Acquire) {
+                let stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(100));
+                        continue;
+                    }
                     Err(error) => {
                         eprintln!("canvas-edge: mirror socket accept failed: {error}");
                         continue;
                     }
                 };
+                if let Err(error) = stream.set_nonblocking(true) {
+                    eprintln!("canvas-edge: mirror peer nonblocking setup failed: {error}");
+                    continue;
+                }
                 // One thread per peer. Reading a connection inline meant this
                 // listener served exactly one client at a time: a Canvas that
                 // connected and then sat idle — which is what a reconnect after
@@ -732,12 +756,13 @@ fn start_workspace_mirror(
                 let sequence = Arc::clone(&sequence);
                 let zone = zone.clone();
                 let origin = origin.clone();
+                let peer_stop = Arc::clone(&listener_stop);
                 if let Err(error) = thread::Builder::new()
                     .name("canvas-workspace-mirror-peer".into())
                     .spawn(move || {
                         let mut reader = BufReader::new(stream);
                         let mut frame = Vec::new();
-                        loop {
+                        while !peer_stop.load(Ordering::Acquire) {
                             frame.clear();
                             match reader
                                 .by_ref()
@@ -752,6 +777,16 @@ fn start_workspace_mirror(
                                 Ok(_) => {
                                     eprintln!("canvas-edge: rejected oversized mirror snapshot");
                                     break;
+                                }
+                                Err(error)
+                                    if matches!(
+                                        error.kind(),
+                                        std::io::ErrorKind::WouldBlock
+                                            | std::io::ErrorKind::TimedOut
+                                    ) =>
+                                {
+                                    thread::sleep(Duration::from_millis(50));
+                                    continue;
                                 }
                                 Err(error) => {
                                     eprintln!("canvas-edge: mirror socket receive failed: {error}");
@@ -796,6 +831,7 @@ fn start_workspace_mirror(
                                 origin: origin.clone(),
                                 sequence: sequence.fetch_add(1, Ordering::Relaxed) + 1,
                                 document: local.document,
+                                assigned_output: local.assigned_output,
                             };
                             let message = canvas_core::unibus::Message::new(
                                 MIRROR_KIND,
@@ -823,6 +859,7 @@ fn start_workspace_mirror(
         let snapshot = LocalWorkspaceSnapshot {
             schema_version: MIRROR_SCHEMA_VERSION,
             document,
+            assigned_output: None,
         };
         if let Ok(mut stream) = UnixStream::connect(&path) {
             if let Ok(mut bytes) = serde_json::to_vec(&snapshot) {
@@ -831,7 +868,7 @@ fn start_workspace_mirror(
             }
         }
     }
-    Ok(Some(MirrorSocketGuard(path)))
+    Ok(Some(MirrorSocketGuard { path, stop }))
 }
 
 fn apply_workspace_mirror(
@@ -869,11 +906,17 @@ fn apply_workspace_mirror(
         .clone()
         .map(Ok)
         .unwrap_or_else(read_document)?;
-    // "Mirror" is intentionally opt-in by representation: two canvases only
-    // converge while they are displaying the same named workspace.
-    if !should_apply_workspace_state(&current, &state) {
-        return Ok(());
-    }
+    let local_output = config
+        .mirror
+        .as_ref()
+        .and_then(|mirror| mirror.output_id.as_deref())
+        .or_else(|| config.bus.screen_anchors.first().map(String::as_str));
+    let disposition = mirror_disposition(&current, &state, local_output);
+    let (portable, activate) = match disposition {
+        MirrorDisposition::Ignore => return Ok(()),
+        MirrorDisposition::Legacy => (false, true),
+        MirrorDisposition::Import { activate } => (true, activate),
+    };
     // Snapshot QoS may legitimately redeliver the latest value after a peer
     // reconnects. Applying an identical document would restart transitions,
     // wake render work, and echo through the local publisher for no visual
@@ -882,18 +925,52 @@ fn apply_workspace_mirror(
         let mut runtime = runtime
             .lock()
             .map_err(|_| anyhow::anyhow!("mirror runtime lock poisoned"))?;
-        runtime.suppress_snapshot = Some(state.document.clone());
-        runtime.local_document = Some(state.document.clone());
+        if activate || !portable {
+            runtime.suppress_snapshot = Some(state.document.clone());
+            runtime.local_document = Some(state.document.clone());
+        }
     }
+    let command = if portable {
+        Command::WorkspaceImport {
+            document: Box::new(state.document),
+            assigned_output: state.assigned_output,
+            local_output: local_output.map(str::to_owned),
+            activate,
+        }
+    } else {
+        Command::ApplyDocument {
+            document: state.document,
+        }
+    };
     submit(ControlRequest {
         schema_version: canvas::control::CONTROL_VERSION,
         request_id: format!("mirror-{}-{}", state.origin, state.sequence),
         expected_revision: None,
         actor: None,
-        command: Command::ApplyDocument {
-            document: state.document,
-        },
+        command,
     })
+    .map(|_| ())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MirrorDisposition {
+    Ignore,
+    Legacy,
+    Import { activate: bool },
+}
+
+fn mirror_disposition(
+    current: &canvas::WorkspaceDocument,
+    state: &WorkspaceState,
+    local_output: Option<&str>,
+) -> MirrorDisposition {
+    match state.assigned_output.as_deref() {
+        Some(assigned) => MirrorDisposition::Import {
+            activate: Some(assigned) == local_output,
+        },
+        None if should_apply_workspace_state(current, state) => MirrorDisposition::Legacy,
+        None => MirrorDisposition::Ignore,
+    }
 }
 
 fn should_apply_workspace_state(
@@ -1760,12 +1837,38 @@ mod tests {
             origin: "other-screen".into(),
             sequence: 1,
             document: document.clone(),
+            assigned_output: None,
         };
         assert!(!should_apply_workspace_state(&document, &state));
         state.document.revision += 1;
         assert!(should_apply_workspace_state(&document, &state));
         state.workspace_key = "another-workspace".into();
         assert!(!should_apply_workspace_state(&document, &state));
+    }
+
+    #[test]
+    fn portable_workspace_is_retained_everywhere_and_active_only_at_its_output() {
+        let document: canvas::WorkspaceDocument =
+            serde_json::from_str(include_str!("../../../../config/workspaces/tv/speedy.json"))
+                .unwrap();
+        let state = WorkspaceState {
+            schema_version: MIRROR_SCHEMA_VERSION,
+            workspace_key: document.id.clone(),
+            origin: "screen-neo".into(),
+            sequence: 8,
+            document: document.clone(),
+            assigned_output: Some("screen-tv".into()),
+        };
+        assert_eq!(
+            mirror_disposition(&document, &state, Some("screen-tv")),
+            MirrorDisposition::Import { activate: true }
+        );
+        for output in ["screen-neo", "screen-studio"] {
+            assert_eq!(
+                mirror_disposition(&document, &state, Some(output)),
+                MirrorDisposition::Import { activate: false }
+            );
+        }
     }
 
     fn command_envelope_from(producer: &str, inner: serde_json::Value) -> Envelope {

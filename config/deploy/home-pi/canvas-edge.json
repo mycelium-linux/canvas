@@ -7,7 +7,7 @@
   "capabilities": ["display", "canvas.audio_level", "canvas.rlcd", "canvas.workspace_mirror"],
   "screen_anchors": ["screen-tv"],
   "schema_version": 1,
-  "mirror": {"enabled": true, "zone": "living-room"},
+  "mirror": {"enabled": true, "zone": "living-room", "output_id": "screen-tv"},
   "actors": [
     {
       "producer": "canvas-central-studio",

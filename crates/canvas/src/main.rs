@@ -4676,6 +4676,61 @@ impl App {
                     Task::none()
                 }
             }
+            Command::WorkspaceRead { name } => {
+                let Some(document) = self.workspaces.get(&name).cloned() else {
+                    self.fail(
+                        pending,
+                        Failure::invalid(format!("unknown project workspace: {name}")),
+                    );
+                    return Task::none();
+                };
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::WorkspaceDocument {
+                            document: Box::new(document),
+                            assigned_output: self
+                                .workspaces
+                                .assigned_output(&name)
+                                .map(str::to_owned),
+                        },
+                    },
+                );
+                Task::none()
+            }
+            Command::WorkspaceImport {
+                document,
+                assigned_output,
+                local_output,
+                activate,
+            } => {
+                let name = document.project_id.clone();
+                match self.import_portable_workspace(
+                    *document,
+                    assigned_output.clone(),
+                    local_output,
+                    activate,
+                ) {
+                    Ok(active) => {
+                        self.status = format!(
+                            "Imported workspace '{name}' for {}.",
+                            assigned_output.as_deref().unwrap_or("the shared pool")
+                        );
+                        self.answer(
+                            pending,
+                            Outcome::Ok {
+                                receipt: Receipt::WorkspaceImported {
+                                    name,
+                                    assigned_output,
+                                    active,
+                                },
+                            },
+                        );
+                    }
+                    Err(failure) => self.fail(pending, failure),
+                }
+                Task::none()
+            }
             Command::WorkspaceSync { projects } => {
                 let base_catalog =
                     Catalog::bundled().expect("bundled project catalog must remain valid");
@@ -5606,6 +5661,10 @@ impl App {
                             .unwrap_or_else(|| "active".into()),
                         surface_count: document.surfaces.len(),
                         active: self.document.project_id == *project_id,
+                        assigned_output: self
+                            .workspaces
+                            .assigned_output(project_id)
+                            .map(str::to_owned),
                         theme: project.theme,
                         background: document.background.clone(),
                     })
@@ -6070,7 +6129,131 @@ impl App {
         // one that mattered. Cheap because it only writes when the set differs.
         self.publish_wanted_video();
         #[cfg(unix)]
-        self.workspace_mirror.publish_if_changed(&self.document);
+        {
+            let assigned_output = self
+                .workspaces
+                .assigned_output(&self.document.project_id)
+                .map(str::to_owned);
+            self.workspace_mirror
+                .publish_if_changed(&self.document, assigned_output.as_deref());
+        }
+    }
+
+    /// Retain one complete workspace generation and reconcile whether this
+    /// output should present it. The edge decides `activate` from its own
+    /// stable output identity; Canvas owns persistence and presentation.
+    fn import_portable_workspace(
+        &mut self,
+        document: WorkspaceDocument,
+        assigned_output: Option<String>,
+        local_output: Option<String>,
+        activate: bool,
+    ) -> Result<bool, Failure> {
+        let project_id = document.project_id.clone();
+        let mut next = self.workspaces.clone();
+        if !next.definitions.contains_key(&project_id) {
+            let theme = self
+                .catalog
+                .project(&project_id)
+                .map(|project| project.theme)
+                .unwrap_or(canvas_core::ThemeSelection::Coherence {
+                    mode: canvas_core::ThemeMode::Dark,
+                    accent: canvas_core::Accent::Info,
+                });
+            next.definitions.insert(
+                project_id.clone(),
+                ::canvas::control::ProjectWorkspaceSpec {
+                    project_id: project_id.clone(),
+                    name: project_id.replace('-', " "),
+                    status: "active".into(),
+                    theme,
+                },
+            );
+        }
+        if self.active_project_workspace.as_deref() == Some(self.document.project_id.as_str()) {
+            next.upsert(self.document.clone());
+        }
+        next.upsert(document.clone());
+        next.assign_output(&project_id, assigned_output);
+
+        let replacement = if activate {
+            next.activate(&project_id);
+            Some(document)
+        } else if self.document.project_id == project_id {
+            let fallback = next.previous_project_id().map(str::to_owned).or_else(|| {
+                next.project_ids()
+                    .find(|id| *id != project_id)
+                    .map(str::to_owned)
+            });
+            let fallback = fallback.unwrap_or_else(|| {
+                let idle = "canvas-idle".to_string();
+                next.definitions.entry(idle.clone()).or_insert_with(|| {
+                    ::canvas::control::ProjectWorkspaceSpec {
+                        project_id: idle.clone(),
+                        name: "Canvas Idle".into(),
+                        status: "system".into(),
+                        theme: canvas_core::ThemeSelection::Coherence {
+                            mode: canvas_core::ThemeMode::Dark,
+                            accent: canvas_core::Accent::Info,
+                        },
+                    }
+                });
+                next.projects
+                    .entry(idle.clone())
+                    .or_insert_with(|| WorkspaceDocument {
+                        schema_version: SCHEMA_VERSION,
+                        id: "canvas-idle-workspace".into(),
+                        project_id: idle.clone(),
+                        revision: 1,
+                        theme: ThemeRef::Project,
+                        background: Background::Theme,
+                        chrome: SurfaceChrome::default(),
+                        surfaces: Vec::new(),
+                        layout: Layout::Empty,
+                        pages: Vec::new(),
+                        active_page: 0,
+                        bindings: Vec::new(),
+                        focused_surface_id: None,
+                    });
+                idle
+            });
+            next.activate(&fallback);
+            next.assign_output(&fallback, local_output);
+            next.get(&fallback).cloned()
+        } else {
+            None
+        };
+
+        let base_catalog = Catalog::bundled().expect("bundled project catalog must remain valid");
+        let catalog = next
+            .effective_catalog(&base_catalog)
+            .map_err(|error| Failure::invalid(error.to_string()))?;
+        workspace_store::save(&self.workspace_store_path, &next, &base_catalog)
+            .map_err(|error| Failure::resource(error.to_string()))?;
+        self.workspaces = next;
+        self.catalog = catalog;
+
+        let became_active = replacement.is_some();
+        if let Some(document) = replacement {
+            self.ensure_background_available(&document)?;
+            self.start_transition();
+            self.document = document;
+            self.snapped_view = inferred_snapped_view(&self.document);
+            self.free_layout = None;
+            self.layout_policy = self
+                .snapped_view
+                .as_deref()
+                .and_then(|view_id| ::canvas::operational_views::load(view_id).ok())
+                .map(|view| view.layout_policy)
+                .unwrap_or_default();
+            self.active_project_workspace = Some(self.document.project_id.clone());
+            self.publish_web_themes();
+            self.reset_workspace_runtime();
+            self.ensure_scene_decoded();
+            self.reset_background_animation();
+        }
+        self.bump();
+        Ok(became_active && self.document.project_id == project_id)
     }
 
     /// Open a Canvas-native text input overlay for JARVIS. Unlike the
