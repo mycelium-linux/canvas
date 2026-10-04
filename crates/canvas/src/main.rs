@@ -9781,75 +9781,7 @@ fn visible_surface_bounds(
 }
 
 fn flatten_layout(layout: &Layout) -> Vec<Placement> {
-    fn visit(layout: &Layout, bounds: NormalizedRect, placements: &mut Vec<Placement>) {
-        match layout {
-            Layout::Empty => {}
-            Layout::Surface { surface_id } => placements.push(Placement {
-                surface_id: surface_id.clone(),
-                bounds,
-                layer: placements.len() as i32,
-            }),
-            Layout::Split {
-                axis,
-                ratio,
-                first,
-                second,
-            } => {
-                let ratio = ratio.clamp(0.0, 1.0);
-                let (first_bounds, second_bounds) = match axis {
-                    Axis::Horizontal => (
-                        NormalizedRect {
-                            width: bounds.width * ratio,
-                            ..bounds
-                        },
-                        NormalizedRect {
-                            x: bounds.x + bounds.width * ratio,
-                            width: bounds.width * (1.0 - ratio),
-                            ..bounds
-                        },
-                    ),
-                    Axis::Vertical => (
-                        NormalizedRect {
-                            height: bounds.height * ratio,
-                            ..bounds
-                        },
-                        NormalizedRect {
-                            y: bounds.y + bounds.height * ratio,
-                            height: bounds.height * (1.0 - ratio),
-                            ..bounds
-                        },
-                    ),
-                };
-                visit(first, first_bounds, placements);
-                visit(second, second_bounds, placements);
-            }
-            Layout::Stack { surface_ids, .. } => {
-                for surface_id in surface_ids {
-                    placements.push(Placement {
-                        surface_id: surface_id.clone(),
-                        bounds,
-                        layer: placements.len() as i32,
-                    });
-                }
-            }
-            Layout::Canvas {
-                placements: existing,
-            } => placements.extend(existing.iter().cloned()),
-        }
-    }
-
-    let mut placements = Vec::new();
-    visit(
-        layout,
-        NormalizedRect {
-            x: 0.0,
-            y: 0.0,
-            width: 1.0,
-            height: 1.0,
-        },
-        &mut placements,
-    );
-    placements
+    ::canvas::layout_tree::placements(layout)
 }
 
 fn layout_surface_bounds(

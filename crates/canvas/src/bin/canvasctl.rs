@@ -8,9 +8,10 @@ use canvas::control::{
     ProjectWorkspaceSpec, Receipt, text,
 };
 use canvas::{
-    Background, Layout, NormalizedRect, Placement, SCHEMA_VERSION, Surface, SurfaceChrome,
+    Axis, Background, Layout, NormalizedRect, Placement, SCHEMA_VERSION, Surface, SurfaceChrome,
     SurfaceContent, SurfaceTitleMode, ThemeRef, WorkspaceDocument, WorkspacePatch,
     compose::{self, LayoutMode},
+    layout_tree::{self, SplitSide},
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -535,9 +536,7 @@ fn handle_doc(tokens: &[String]) -> Result<(), String> {
 
 fn handle_tile(tokens: &[String]) -> Result<(), String> {
     if tokens.len() < 2 {
-        return Err(
-            "usage: tile grid <rows> <cols> | tile golden | tile monocle | tile next".into(),
-        );
+        return Err("usage: tile grid <rows> <cols> | tile golden | tile monocle | tile next | tile split <horizontal|vertical> <surface_id> [before|after] [ratio] | tile resize <delta> | tile rotate | tile balance | tile normalize".into());
     }
     let state = read_document_state()?;
     let doc_rev = state.doc_revision;
@@ -597,6 +596,67 @@ fn handle_tile(tokens: &[String]) -> Result<(), String> {
             canvas::PatchOperation::SetFocus {
                 surface_id: Some(next),
             }
+        }
+        "split" => {
+            if tokens.len() < 4 {
+                return Err(
+                    "usage: tile split <horizontal|vertical> <surface_id> [before|after] [ratio]"
+                        .into(),
+                );
+            }
+            let axis = match tokens[2].as_str() {
+                "horizontal" | "h" => Axis::Horizontal,
+                "vertical" | "v" => Axis::Vertical,
+                other => return Err(format!("unknown split axis: {other}")),
+            };
+            let new_surface_id = &tokens[3];
+            if !surfaces.iter().any(|surface| surface == new_surface_id) {
+                return Err(format!("unknown workspace surface: {new_surface_id}"));
+            }
+            let side = match tokens.get(4).map(String::as_str).unwrap_or("after") {
+                "before" => SplitSide::Before,
+                "after" => SplitSide::After,
+                other => return Err(format!("unknown split side: {other}")),
+            };
+            let ratio = tokens
+                .get(5)
+                .map(|value| value.parse::<f32>())
+                .transpose()
+                .map_err(|error| format!("invalid split ratio: {error}"))?
+                .unwrap_or(0.5);
+            let target = focused.ok_or("tile split requires a focused surface")?;
+            let mut layout = state.layout;
+            layout_tree::split_surface(&mut layout, &target, new_surface_id, axis, ratio, side)
+                .map_err(|error| error.to_string())?;
+            canvas::PatchOperation::SetLayout { layout }
+        }
+        "balance" => {
+            let mut layout = state.layout;
+            layout_tree::balance(&mut layout);
+            canvas::PatchOperation::SetLayout { layout }
+        }
+        "resize" => {
+            let delta = tokens
+                .get(2)
+                .ok_or("usage: tile resize <delta>")?
+                .parse::<f32>()
+                .map_err(|error| format!("invalid resize delta: {error}"))?;
+            let target = focused.ok_or("tile resize requires a focused surface")?;
+            let mut layout = state.layout;
+            layout_tree::resize_nearest(&mut layout, &target, delta)
+                .map_err(|error| error.to_string())?;
+            canvas::PatchOperation::SetLayout { layout }
+        }
+        "rotate" => {
+            let target = focused.ok_or("tile rotate requires a focused surface")?;
+            let mut layout = state.layout;
+            layout_tree::rotate_nearest(&mut layout, &target).map_err(|error| error.to_string())?;
+            canvas::PatchOperation::SetLayout { layout }
+        }
+        "normalize" => {
+            let mut layout = state.layout;
+            layout_tree::normalize(&mut layout);
+            canvas::PatchOperation::SetLayout { layout }
         }
         other => return Err(format!("unknown tile mode: {other}")),
     };
@@ -658,6 +718,7 @@ struct DocumentState {
     runtime_revision: u64,
     surfaces: Vec<String>,
     focused: Option<String>,
+    layout: Layout,
     workspace_id: String,
     chrome: SurfaceChrome,
     frame: canvas_core::layout::Rect,
@@ -888,6 +949,7 @@ fn read_document_state() -> Result<DocumentState, String> {
                 runtime_revision: snapshot.revision,
                 surfaces,
                 focused: document.focused_surface_id.clone(),
+                layout: document.active_layout().clone(),
                 workspace_id: document.id.clone(),
                 chrome: document.chrome,
                 frame: snapshot.frame,
