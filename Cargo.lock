@@ -5688,6 +5688,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
+]
 
 [[package]]
 name = "unibus-sdk"
@@ -5697,5 +5698,4 @@ dependencies = [
  "serde",
  "serde_json",
  "unibus 0.1.0",
-]
 ]
