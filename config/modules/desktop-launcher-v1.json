@@ -4,6 +4,11 @@
   "title": "Canvas launcher",
   "inputs": [
     {
+      "id": "window-cycle",
+      "kind": "boolean",
+      "required": false
+    },
+    {
       "id": "target",
       "kind": "text",
       "required": false

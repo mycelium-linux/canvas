@@ -51,7 +51,22 @@ Omitting `appearance` preserves the standard treatment. Unknown appearances are
 rejected; arbitrary CSS/colors/callbacks are not part of the Lua button API.
 This requires the updated native host before installing the new Lua files.
 
-## Native apps are not attached by launching them
+## Window switching
+
+With Canvas focused, **Alt-Tab** (Option-Tab on Neo) previews attached windows
+in most-recently-focused order. Shift reverses the cycle; releasing Alt commits
+focus, restores a minimized destination, changes its page if necessary, and
+raises it through the same path as a dock click. Escape or loss of Canvas focus
+cancels without changing selection. Frameless desktop instruments, including
+the analog clock, are excluded. The order stays frozen during each chord;
+a destination closed during preview is not replaced with another window.
+
+The overlay reuses bounded Lua launcher presentation, not OS-wide discovery.
+It does not intercept macOS Command-Tab or provide a global shortcut. Existing
+HID destinations release held keys before switching; native captures remain
+read-only until their separate input capability is installed and verified.
+
+## Native attachment boundary
 
 The application catalog discovers launchable apps. Launching one delegates to
 macOS; it does not yet attach its windows to Canvas. These are separate operations.

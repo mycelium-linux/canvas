@@ -7,6 +7,13 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, path::PathBuf};
 pub const LEASE_MS: u64 = 10_000;
 pub const MAX_ENTRIES: usize = 512;
+/// Frameless instruments are desktop content, not app-switching destinations.
+pub fn dock_surfaces(document: &crate::WorkspaceDocument) -> impl Iterator<Item = &crate::Surface> {
+    document.surfaces.iter().filter(|surface| {
+        !matches!(&surface.content, crate::SurfaceContent::Widget { spec }
+            if spec.chrome == canvas_widgets::WidgetChrome::Frameless)
+    })
+}
 fn generation() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -366,6 +373,7 @@ fn remote(
 
 #[derive(Debug, Clone)]
 pub struct Launcher {
+    pub window_cycle: bool,
     pub targets: Vec<Target>,
     pub target: usize,
     pub generation: u64,
@@ -386,6 +394,7 @@ pub struct Launcher {
 impl Launcher {
     pub fn new() -> Result<Self, String> {
         Ok(Self {
+            window_cycle: false,
             targets: targets()?,
             target: 0,
             generation: generation(),
@@ -554,8 +563,9 @@ impl Launcher {
     ) -> Result<(), String> {
         use crate::lua_module::{ModuleInputSnapshot, ModuleInputValue};
         let mut values = std::collections::BTreeMap::new();
-        let fresh =
-            self.catalog.is_some() && now.saturating_sub(self.observed) < LEASE_MS && !self.busy;
+        let fresh = self.catalog.is_some()
+            && (self.window_cycle || now.saturating_sub(self.observed) < LEASE_MS) && !self.busy;
+        values.insert("window-cycle".into(), ModuleInputValue::Boolean(self.window_cycle));
         for (id, value) in [
             ("target", self.targets[self.target].label.clone()),
             ("query", self.query.clone()),

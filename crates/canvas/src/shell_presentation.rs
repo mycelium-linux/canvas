@@ -40,15 +40,7 @@ pub const DESKTOP_DOCK: Artifact = Artifact {
 
 /// Frameless instruments are desktop content, not app-switching destinations.
 /// Use this same projection for presentation slots and their native actions.
-pub fn dock_surfaces(document: &crate::WorkspaceDocument) -> impl Iterator<Item = &crate::Surface> {
-    document.surfaces.iter().filter(|surface| {
-        !matches!(
-            &surface.content,
-            crate::SurfaceContent::Widget { spec }
-                if spec.chrome == canvas_widgets::WidgetChrome::Frameless
-        )
-    })
-}
+pub use crate::shell_launcher::dock_surfaces;
 
 #[derive(Debug, Clone, Default)]
 pub struct Presentation {

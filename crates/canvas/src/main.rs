@@ -742,6 +742,8 @@ struct App {
     theme_picker: Option<::canvas::theme_picker::ThemePicker>,
     project_picker: Option<::canvas::project_picker::ProjectPicker>,
     project_switcher: Option<::canvas::shell_launcher::Launcher>,
+    window_cycle: ::canvas::window_cycle::WindowCycle,
+    window_cycle_workspace: Option<String>,
     #[cfg(feature = "lua-scenes")]
     desktop_bar: ::canvas::shell_presentation::Presentation,
     #[cfg(feature = "lua-scenes")]
@@ -1159,6 +1161,8 @@ impl App {
             theme_picker: None,
             project_picker: None,
             project_switcher: None,
+            window_cycle: Default::default(),
+            window_cycle_workspace: None,
             #[cfg(feature = "lua-scenes")]
             desktop_bar: Default::default(),
             #[cfg(feature = "lua-scenes")]
@@ -1707,6 +1711,20 @@ impl App {
             }
             Message::ShellProjects => self.toggle_project_switcher(),
             Message::ShellLauncherPick { generation, revision, entry_id } => {
+                if self.window_cycle.active() {
+                    if let Some(id) = entry_id.strip_prefix("surface:") {
+                        let valid = self.project_switcher.as_ref().is_some_and(|picker|
+                            picker.generation == generation && picker.catalog.as_ref()
+                                .is_some_and(|catalog| catalog.revision == revision)
+                                && picker.matches().iter().any(|entry| entry.id == entry_id));
+                        if valid && self.cycle_window_ids().iter().any(|candidate| candidate == id) {
+                            self.window_cycle.cancel();
+                            self.project_switcher = None;
+                            self.focus_shell_surface(id);
+                        }
+                    }
+                    return Task::none();
+                }
                 if self.project_switcher.as_mut().is_some_and(|picker| picker.select_entry(generation, &revision, &entry_id, now_unix_ms())) {
                     return self.activate_launcher_choice();
                 }
@@ -1887,7 +1905,7 @@ impl App {
                     self.refresh_stream_health();
                 }
                 let mut tasks = vec![self.drain_commands(), self.reload_live_images()];
-                if let Some((target, generation)) = self
+                if !self.window_cycle.active() && let Some((target, generation)) = self
                     .project_switcher
                     .as_mut()
                     .and_then(|l| l.refresh_due(now_unix_ms()))
@@ -1962,6 +1980,10 @@ impl App {
                 let mut metrics_changed = false;
                 match event {
                     iced::window::Event::Unfocused => {
+                        if self.window_cycle.active() {
+                            self.window_cycle.cancel();
+                            self.project_switcher = None;
+                        }
                         if let Some(target_id) = self.focused_hid_target() {
                             if let Err(error) = self.hid_output.release(&target_id) {
                                 self.status = format!("Canvas HID release failed: {error}");
@@ -2127,6 +2149,9 @@ impl App {
                 Task::none()
             }
             Message::TerminalInput(kbd_event) => {
+                if self.handle_window_cycle(&kbd_event) {
+                    return Task::none();
+                }
                 // Canvas-native text input to JARVIS. The text appears on the
                 // wall as an overlay, not a macOS dialog.
                 if self.jarvis_text_visible {
@@ -3864,6 +3889,79 @@ impl App {
             InteractionIntent::PromoteToFront { surface_id: id.into() },
         ]);
         self.bump();
+    }
+
+    fn cycle_window_ids(&self) -> Vec<String> {
+        ::canvas::shell_launcher::dock_surfaces(&self.document)
+            .filter(|surface| self.decoded.contains_key(&surface.id))
+            .map(|surface| surface.id.clone()).collect()
+    }
+
+    fn handle_window_cycle(&mut self, event: &iced::keyboard::Event) -> bool {
+        use iced::keyboard::{Event, Key, key::Named};
+        let cycle = matches!(event, Event::KeyPressed {
+            key: Key::Named(Named::Tab), modifiers, ..
+        } if modifiers.alt() && !modifiers.control() && !modifiers.logo());
+        if cycle {
+            // Never commandeer an existing modal picker.
+            if !self.window_cycle.active() && (self.project_switcher.is_some()
+                || self.background_picker.is_some() || self.theme_picker.is_some()
+                || self.project_picker.is_some() || self.jarvis_text_visible) { return false; }
+            let reverse = matches!(event, Event::KeyPressed { modifiers, .. } if modifiers.shift());
+            if !self.window_cycle.active() && let Some(target) = self.focused_hid_target() {
+                // Alt may already have reached the old target before Tab arrived.
+                if let Err(error) = self.hid_output.release(&target) {
+                    self.status = format!("Cannot switch windows: HID release failed: {error}");
+                    return true;
+                }
+            }
+            let ids = self.cycle_window_ids();
+            if !self.window_cycle.active() {
+                self.window_cycle_workspace = Some(self.document.project_id.clone());
+            }
+            let Some(selected) = self.window_cycle.cycle(&ids, reverse).map(str::to_owned)
+                else { return true; };
+            if self.project_switcher.is_none() {
+                let mut launcher = match ::canvas::shell_launcher::Launcher::new() {
+                    Ok(launcher) => launcher,
+                    Err(error) => { self.window_cycle.cancel(); self.status = error; return true; }
+                };
+                let entries = self.window_cycle.order().iter().filter_map(|id| {
+                    let surface = self.document.surfaces.iter().find(|surface| &surface.id == id)?;
+                    Some(::canvas::shell_launcher::Entry {
+                        id: format!("surface:{id}"), title: surface.title.clone(),
+                        detail: "WINDOW · recent".into(), available: true,
+                        choice: ::canvas::shell_launcher::Choice::Surface { id: id.clone() },
+                    })
+                }).collect();
+                launcher.window_cycle = true;
+                launcher.accept(launcher.generation, Ok(::canvas::shell_launcher::Catalog {
+                    revision: "window-cycle".into(), entries,
+                }), now_unix_ms());
+                self.project_switcher = Some(launcher);
+            }
+            if let Some(launcher) = self.project_switcher.as_mut() {
+                launcher.selected = launcher.matches().iter().position(|entry|
+                    entry.id == format!("surface:{selected}")).unwrap_or(0);
+                launcher.status = "Alt-Tab · Shift reverses · release Alt to focus · Esc cancels".into();
+            }
+            self.refresh_launcher_scene();
+            self.bump();
+            return true;
+        }
+        if !self.window_cycle.active() { return false; }
+        if matches!(event, Event::KeyPressed { key: Key::Named(Named::Escape), .. }) {
+            self.window_cycle.cancel();
+            self.project_switcher = None;
+            self.bump();
+        } else if matches!(event, Event::ModifiersChanged(modifiers) if !modifiers.alt()) {
+            let ids = self.cycle_window_ids();
+            let selected = self.window_cycle.commit(&ids);
+            self.project_switcher = None;
+            if let Some(id) = selected { self.focus_shell_surface(&id); }
+            else { self.status = "Selected window closed; focus unchanged.".into(); self.bump(); }
+        }
+        true
     }
 
     fn apply_picked_theme(
@@ -6805,6 +6903,14 @@ impl App {
     }
 
     fn bump(&mut self) {
+        if self.window_cycle.active() && self.window_cycle_workspace.as_deref()
+            != Some(self.document.project_id.as_str()) {
+            self.window_cycle.cancel();
+            self.project_switcher = None;
+        }
+        if let Some(id) = self.document.focused_surface_id.as_deref() {
+            self.window_cycle.observe_focus(id);
+        }
         #[cfg(feature = "lua-scenes")]
         self.refresh_desktop_bar(false);
         self.runtime_revision = self.runtime_revision.saturating_add(1);

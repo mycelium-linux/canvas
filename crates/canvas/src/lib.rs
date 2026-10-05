@@ -55,6 +55,7 @@ pub mod theme_picker;
 pub mod view;
 pub mod workspace_mirror;
 pub mod workspace_store;
+pub mod window_cycle;
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const DESKTOP_BAR_HEIGHT: u32 = 44;
