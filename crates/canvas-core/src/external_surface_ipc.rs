@@ -5,7 +5,7 @@
 //! a byte-stream protocol can accidentally attach a descriptor to the wrong
 //! frame after partial reads. The receiving process owns every returned fd.
 
-use crate::external_surface::ExternalSurfaceMessage;
+use crate::external_surface::{ExternalSurfaceInput, ExternalSurfaceMessage};
 use std::{
     io,
     mem::{size_of, zeroed},
@@ -136,6 +136,33 @@ pub fn receive(socket: &UnixDatagram) -> io::Result<(ExternalSurfaceMessage, Vec
     Ok((message, handles))
 }
 
+/// Sends one already-bounded interaction event over the producer's dedicated
+/// return socket. Input never shares the frame registration queue.
+pub fn send_input(socket: &UnixDatagram, input: &ExternalSurfaceInput) -> io::Result<()> {
+    input.validate().map_err(invalid)?;
+    let payload = serde_json::to_vec(input).map_err(invalid)?;
+    if payload.len() > MAX_EXTERNAL_SURFACE_MESSAGE {
+        return Err(invalid("external surface input message is too large"));
+    }
+    let written = socket.send(&payload)?;
+    if written != payload.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "external surface input datagram was truncated",
+        ));
+    }
+    Ok(())
+}
+
+pub fn receive_input(socket: &UnixDatagram) -> io::Result<ExternalSurfaceInput> {
+    let mut payload = vec![0_u8; MAX_EXTERNAL_SURFACE_MESSAGE];
+    let read = socket.recv(&mut payload)?;
+    payload.truncate(read);
+    let input: ExternalSurfaceInput = serde_json::from_slice(&payload).map_err(invalid)?;
+    input.validate().map_err(invalid)?;
+    Ok(input)
+}
+
 fn invalid(error: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error.to_string())
 }
@@ -169,6 +196,8 @@ mod tests {
                     stride: 16 * 4,
                     slots: 1,
                 },
+                input: None,
+                streams: Vec::new(),
             },
         };
         send(&sender, &message, &[file.as_fd()]).unwrap();
@@ -196,6 +225,8 @@ mod tests {
                     stride: 16 * 4,
                     slots: 1,
                 },
+                input: None,
+                streams: Vec::new(),
             },
         };
         send(&sender, &message, &[]).unwrap();
@@ -203,5 +234,22 @@ mod tests {
             receive(&receiver).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn normalized_input_round_trips_on_its_dedicated_channel() {
+        use crate::external_surface::{ExternalSurfaceInput, ExternalSurfaceInputPhase};
+
+        let (canvas, producer) = UnixDatagram::pair().unwrap();
+        let input = ExternalSurfaceInput {
+            schema_version: EXTERNAL_SURFACE_VERSION,
+            source_id: "synesthesia/mix-overview".into(),
+            generation: 7,
+            phase: ExternalSurfaceInputPhase::Move,
+            x: 0.25,
+            y: 0.75,
+        };
+        send_input(&canvas, &input).unwrap();
+        assert_eq!(receive_input(&producer).unwrap(), input);
     }
 }

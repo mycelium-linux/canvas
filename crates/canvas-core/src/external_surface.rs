@@ -63,6 +63,88 @@ pub enum SurfaceTransport {
     IoSurface { surface_id: u32 },
 }
 
+/// Optional owner-local return path for bounded interaction events. The
+/// descriptor is transferred with registration, so it never becomes network
+/// configuration or persistent workspace state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "transport", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SurfaceInputTransport {
+    UnixDatagram { handle_index: u8 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalSurfaceInputPhase {
+    Press,
+    Move,
+    Release,
+}
+
+/// How an external widget participates in a canonical Unibus stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfaceStreamDirection {
+    Consume,
+    Publish,
+}
+
+/// Whether the widget can render/usefully operate without this stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SurfaceStreamImportance {
+    Needed,
+    Wanted,
+}
+
+/// Transport-neutral stream declaration supplied by the widget producer.
+/// Canvas can turn active `consume` declarations into renewable Unibus
+/// interests without understanding the payload contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceStreamRequirement {
+    pub stream_id: String,
+    pub contract: String,
+    pub direction: SurfaceStreamDirection,
+    pub importance: SurfaceStreamImportance,
+}
+
+/// One normalized pointer event returned to the producer that registered the
+/// current surface generation. Coordinates are bounded to the visible surface
+/// rather than exposing Canvas's display or workspace geometry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalSurfaceInput {
+    pub schema_version: u32,
+    pub source_id: String,
+    pub generation: u64,
+    pub phase: ExternalSurfaceInputPhase,
+    pub x: f32,
+    pub y: f32,
+}
+
+impl ExternalSurfaceInput {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != EXTERNAL_SURFACE_VERSION {
+            return Err(format!(
+                "unsupported external surface input schema version {}",
+                self.schema_version
+            ));
+        }
+        validate_source_id(&self.source_id)?;
+        if self.generation == 0 {
+            return Err("external surface input generation must be positive".into());
+        }
+        if !self.x.is_finite()
+            || !self.y.is_finite()
+            || !(0.0..=1.0).contains(&self.x)
+            || !(0.0..=1.0).contains(&self.y)
+        {
+            return Err("external surface input coordinates must be normalized".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DmaBufPlane {
@@ -94,6 +176,10 @@ pub struct ExternalSurfaceDescriptor {
     pub color_space: ColorSpace,
     pub alpha_mode: AlphaMode,
     pub transport: SurfaceTransport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<SurfaceInputTransport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub streams: Vec<SurfaceStreamRequirement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,8 +398,34 @@ impl ExternalSurfaceDescriptor {
             }
             SurfaceTransport::IoSurface { .. } => {}
         }
+        if let Some(SurfaceInputTransport::UnixDatagram { handle_index }) = self.input {
+            validate_handle(handle_index, received_handles)?;
+        }
+        let mut stream_ids = std::collections::BTreeSet::new();
+        for stream in &self.streams {
+            validate_stream_token("stream id", &stream.stream_id)?;
+            validate_stream_token("stream contract", &stream.contract)?;
+            if !stream_ids.insert((&stream.stream_id, stream.direction)) {
+                return Err(format!(
+                    "duplicate {:?} stream declaration {}",
+                    stream.direction, stream.stream_id
+                ));
+            }
+        }
         Ok(())
     }
+}
+
+fn validate_stream_token(label: &str, value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':' | b'/')
+        })
+    {
+        return Err(format!("invalid {label}"));
+    }
+    Ok(())
 }
 
 impl ExternalSurfaceMessage {
@@ -407,12 +519,51 @@ mod tests {
                 stride: 640 * 4,
                 slots: 2,
             },
+            input: None,
+            streams: Vec::new(),
         }
     }
 
     #[test]
     fn validates_a_bounded_double_buffer() {
         assert_eq!(shared().validate(1), Ok(()));
+    }
+
+    #[test]
+    fn input_requires_its_own_received_handle() {
+        let mut descriptor = shared();
+        descriptor.input = Some(SurfaceInputTransport::UnixDatagram { handle_index: 1 });
+        assert!(descriptor.validate(1).unwrap_err().contains("index 1"));
+        assert_eq!(descriptor.validate(2), Ok(()));
+    }
+
+    #[test]
+    fn pointer_input_is_normalized_and_generation_bound() {
+        let mut input = ExternalSurfaceInput {
+            schema_version: EXTERNAL_SURFACE_VERSION,
+            source_id: "synesthesia/mix-overview".into(),
+            generation: 2,
+            phase: ExternalSurfaceInputPhase::Press,
+            x: 0.5,
+            y: 0.75,
+        };
+        assert_eq!(input.validate(), Ok(()));
+        input.x = 1.1;
+        assert!(input.validate().is_err());
+    }
+
+    #[test]
+    fn stream_requirements_are_canonical_and_unique_per_direction() {
+        let mut descriptor = shared();
+        descriptor.streams.push(SurfaceStreamRequirement {
+            stream_id: "synesthesia/home-studio/mix-control".into(),
+            contract: "synesthesia.mix.control.v1".into(),
+            direction: SurfaceStreamDirection::Publish,
+            importance: SurfaceStreamImportance::Needed,
+        });
+        assert_eq!(descriptor.validate(1), Ok(()));
+        descriptor.streams.push(descriptor.streams[0].clone());
+        assert!(descriptor.validate(1).unwrap_err().contains("duplicate"));
     }
 
     #[test]

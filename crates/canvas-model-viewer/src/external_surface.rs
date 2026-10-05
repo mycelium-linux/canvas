@@ -5,8 +5,9 @@
 //! handle into a texture owned by the same wgpu device iced is rendering with.
 
 use canvas_core::external_surface::{
-    ColorSpace, ExternalSurfaceDescriptor, ExternalSurfaceMessage, ExternalSurfaceRegistry,
-    PixelFormat, PresentedSurface, RegistryChange, SurfaceTransport,
+    ColorSpace, EXTERNAL_SURFACE_VERSION, ExternalSurfaceDescriptor, ExternalSurfaceInput,
+    ExternalSurfaceInputPhase, ExternalSurfaceMessage, ExternalSurfaceRegistry, PixelFormat,
+    PresentedSurface, RegistryChange, SurfaceInputTransport, SurfaceTransport,
 };
 use memmap2::{Mmap, MmapOptions};
 use std::collections::BTreeMap;
@@ -73,6 +74,7 @@ pub struct ExternalSurfaceInbox {
     registry: ExternalSurfaceRegistry,
     registration_handles: BTreeMap<(String, u64), Vec<OwnedFd>>,
     shared_memory: BTreeMap<(String, u64), Arc<Mmap>>,
+    input_sockets: BTreeMap<(String, u64), Arc<UnixDatagram>>,
 }
 
 impl ExternalSurfaceInbox {
@@ -130,14 +132,39 @@ impl ExternalSurfaceInbox {
             },
             _ => None,
         };
+        let input_socket = match &message {
+            ExternalSurfaceMessage::Register { surface } => match surface.input {
+                Some(SurfaceInputTransport::UnixDatagram { handle_index }) => {
+                    let handle = handles
+                        .get(usize::from(handle_index))
+                        .ok_or("external surface input handle is missing")?;
+                    let socket = UnixDatagram::from(
+                        handle
+                            .try_clone()
+                            .map_err(|error| format!("clone external surface input: {error}"))?,
+                    );
+                    socket
+                        .set_nonblocking(true)
+                        .map_err(|error| format!("configure external surface input: {error}"))?;
+                    Some(Arc::new(socket))
+                }
+                None => None,
+            },
+            _ => None,
+        };
         let change = self.registry.apply(message, handles.len())?;
         if let Some((source_id, generation)) = registration {
             self.registration_handles
                 .retain(|(id, _), _| id != &source_id);
             self.shared_memory.retain(|(id, _), _| id != &source_id);
+            self.input_sockets.retain(|(id, _), _| id != &source_id);
             if let Some(mapping) = shared_mapping {
                 self.shared_memory
                     .insert((source_id.clone(), generation), mapping);
+            }
+            if let Some(socket) = input_socket {
+                self.input_sockets
+                    .insert((source_id.clone(), generation), socket);
             }
             self.registration_handles
                 .insert((source_id, generation), handles);
@@ -145,6 +172,7 @@ impl ExternalSurfaceInbox {
         if let Some(key) = withdrawal {
             self.registration_handles.remove(&key);
             self.shared_memory.remove(&key);
+            self.input_sockets.remove(&key);
         }
         Ok(change)
     }
@@ -169,6 +197,36 @@ impl ExternalSurfaceInbox {
             presented_at_unix_ns,
             shared_memory,
         })
+    }
+
+    pub fn send_input(
+        &self,
+        source_id: &str,
+        phase: ExternalSurfaceInputPhase,
+        x: f32,
+        y: f32,
+    ) -> Result<(), String> {
+        let presented = self
+            .registry
+            .get(source_id)
+            .ok_or_else(|| format!("external surface is not registered: {source_id}"))?;
+        let key = (source_id.to_owned(), presented.descriptor.generation);
+        let socket = self
+            .input_sockets
+            .get(&key)
+            .ok_or_else(|| format!("external surface has no input channel: {source_id}"))?;
+        canvas_core::external_surface_ipc::send_input(
+            socket,
+            &ExternalSurfaceInput {
+                schema_version: EXTERNAL_SURFACE_VERSION,
+                source_id: source_id.to_owned(),
+                generation: presented.descriptor.generation,
+                phase,
+                x,
+                y,
+            },
+        )
+        .map_err(|error| format!("send external surface input: {error}"))
     }
 }
 
@@ -399,6 +457,8 @@ mod tests {
                 stride: 8,
                 slots: 2,
             },
+            input: None,
+            streams: Vec::new(),
         };
         let mut inbox = ExternalSurfaceInbox::default();
         inbox
@@ -439,6 +499,8 @@ mod tests {
             color_space: ColorSpace::DisplayP3,
             alpha_mode: AlphaMode::Opaque,
             transport: SurfaceTransport::IoSurface { surface_id: 42 },
+            input: None,
+            streams: Vec::new(),
         };
         canvas_core::external_surface_ipc::send(
             &sender,
@@ -474,5 +536,59 @@ mod tests {
         let presented = inbox.presented("surf/local").unwrap();
         assert_eq!(presented.slot, Some(0));
         assert_eq!(presented.presented_at_unix_ns, Some(123));
+    }
+
+    #[test]
+    fn inbox_returns_normalized_input_to_the_registered_generation() {
+        use std::os::fd::AsFd;
+
+        let file = tempfile::tempfile().unwrap();
+        file.set_len(16).unwrap();
+        let (canvas_input, producer_input) = UnixDatagram::pair().unwrap();
+        let descriptor = ExternalSurfaceDescriptor {
+            schema_version: EXTERNAL_SURFACE_VERSION,
+            source_id: "synesthesia/mix-overview".into(),
+            generation: 9,
+            width: 2,
+            height: 2,
+            format: PixelFormat::Rgba8Unorm,
+            color_space: ColorSpace::Srgb,
+            alpha_mode: AlphaMode::Opaque,
+            transport: SurfaceTransport::SharedMemory {
+                handle_index: 0,
+                byte_len: 16,
+                stride: 8,
+                slots: 1,
+            },
+            input: Some(SurfaceInputTransport::UnixDatagram { handle_index: 1 }),
+            streams: Vec::new(),
+        };
+        let mut inbox = ExternalSurfaceInbox::default();
+        inbox
+            .apply(
+                ExternalSurfaceMessage::Register {
+                    surface: descriptor,
+                },
+                vec![
+                    file.as_fd().try_clone_to_owned().unwrap(),
+                    canvas_input.as_fd().try_clone_to_owned().unwrap(),
+                ],
+            )
+            .unwrap();
+
+        inbox
+            .send_input(
+                "synesthesia/mix-overview",
+                ExternalSurfaceInputPhase::Move,
+                0.25,
+                0.75,
+            )
+            .unwrap();
+
+        let returned = canvas_core::external_surface_ipc::receive_input(&producer_input).unwrap();
+        assert_eq!(returned.source_id, "synesthesia/mix-overview");
+        assert_eq!(returned.generation, 9);
+        assert_eq!(returned.phase, ExternalSurfaceInputPhase::Move);
+        assert_eq!((returned.x, returned.y), (0.25, 0.75));
     }
 }
