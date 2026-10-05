@@ -31,7 +31,7 @@
             "trace": { "type": "text", "value": "waiting for controller" }
           },
           "theme": null,
-          "refresh_ms": null,
+          "refresh_ms": 1000,
           "chrome": "frameless",
           "data": {
             "state": "ready",
@@ -43,7 +43,7 @@
           }
         }
       },
-      "inputs": []
+      "inputs": [{ "id": "race", "contract": "canvas.widget.snapshot.v1" }]
     },
     {
       "id": "surf-browser",
@@ -74,6 +74,12 @@
   },
   "pages": [],
   "active_page": 0,
-  "bindings": [],
+  "bindings": [{
+    "id": "wiki-race-state",
+    "source": { "owner": "surf", "stream": "wiki-race", "contract": "canvas.widget.snapshot.v1" },
+    "target": { "surface_id": "wiki-race-hud", "input_id": "race" },
+    "adapter": "wiki-race-state-v1",
+    "delivery": { "mode": "latest" }
+  }],
   "focused_surface_id": "surf-browser"
 }

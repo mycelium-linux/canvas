@@ -11,6 +11,13 @@ The manifest explicitly lists readable input IDs, whether theme tokens are
 visible, and which declared host resources may be presented. Unknown manifest
 fields fail parsing. There are no filesystem, network, process, package, native
 module, clock, random, GPU, media decode, or workspace mutation capabilities.
+Optional manifest `actions` declare route IDs, destination principals and message
+kinds. `widget.button` declares a bounded themed control and object body. Only
+a matching enabled `activate` event returns an action intent; Lua never sends
+network traffic itself. The trusted Rust host dispatches validated intents over
+Unibus, outside scene generation, and retains transport authority. Load, pulse
+and reload do not emit commands. See [the wiki HUD runbook](wiki-race-lua-hud.md).
+
 The same Luau sandbox, memory ceiling, interrupt budget, source limit, asset
 grants, and combined node limit apply to every lifecycle call.
 

@@ -9,11 +9,22 @@
     { "id": "clicks", "kind": "number", "required": true },
     { "id": "raceclock", "kind": "text", "required": true },
     { "id": "wallclock", "kind": "text", "required": true },
-    { "id": "trace", "kind": "text", "required": false }
+    { "id": "trace", "kind": "text", "required": false },
+    { "id": "page", "kind": "text", "required": false },
+    { "id": "raceid", "kind": "text", "required": false },
+    { "id": "revision", "kind": "number", "required": false },
+    { "id": "racems", "kind": "number", "required": false },
+    { "id": "wallms", "kind": "number", "required": false },
+    { "id": "observed", "kind": "number", "required": false },
+    { "id": "connected", "kind": "boolean", "required": false }
   ],
   "capabilities": {
     "write_scene": true,
-    "read_inputs": ["start", "target", "status", "clicks", "raceclock", "wallclock", "trace"],
+    "read_inputs": ["start", "target", "status", "clicks", "raceclock", "wallclock", "trace", "page", "raceid", "revision", "racems", "wallms", "observed", "connected"],
     "read_theme": true
-  }
+  },
+  "actions": [
+    { "id": "start", "destination": "wiki-race-controller", "kind": "wiki.race.control.v1" },
+    { "id": "stop", "destination": "wiki-race-controller", "kind": "wiki.race.control.v1" }
+  ]
 }

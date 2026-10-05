@@ -12,7 +12,7 @@ use super::{
     visible,
 };
 use canvas_core::{Accent, ProjectTheme, ThemeMode, VisualTheme};
-use mlua::{Lua, Table};
+use mlua::{Lua, LuaSerdeExt, Table};
 use serde::{Deserialize, Serialize};
 use std::{
     cell::RefCell,
@@ -116,6 +116,35 @@ pub struct ModuleManifest {
     #[serde(default)]
     pub resources: Vec<ResourceDeclaration>,
     pub capabilities: ModuleCapabilities,
+    /// Trusted artifact routes. Scripts cannot select endpoints or credentials.
+    #[serde(default)]
+    pub actions: Vec<ModuleActionGrant>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModuleActionGrant {
+    pub id: String,
+    pub destination: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ModuleButton {
+    pub id: String,
+    pub label: String,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ModuleAction {
+    pub destination: String,
+    pub kind: String,
+    pub body: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -393,6 +422,9 @@ pub struct RetainedModuleScene {
     pub input_revision: u64,
     pub scene: Scene,
     pub host_resources: Vec<HostResourceSurface>,
+    pub buttons: Vec<ModuleButton>,
+    /// Intents from one validated activation; never emitted on load/reload.
+    pub actions: Vec<ModuleAction>,
 }
 
 pub struct LuaModule {
@@ -430,6 +462,22 @@ impl ModuleManifest {
             self.capabilities.write_scene,
             "Canvas Lua module must explicitly request write_scene",
         )?;
+
+        ensure(
+            self.actions.len() <= 16,
+            "Too many Canvas module action routes",
+        )?;
+        let mut action_ids = BTreeSet::new();
+        for action in &self.actions {
+            ensure(
+                identifier(&action.id)
+                    && action_ids.insert(&action.id)
+                    && !action.destination.is_empty()
+                    && action.destination.len() <= 128
+                    && contract(&action.kind),
+                "Invalid or duplicate Canvas module action route",
+            )?;
+        }
 
         let mut inputs = BTreeMap::new();
         for input in &self.inputs {
@@ -608,12 +656,17 @@ fn render_module(request: RenderRequest<'_>) -> Result<RetainedModuleScene> {
     let snapshot = request.snapshot.clone();
     let event = request.event.clone();
     let resources = request.resources.clone();
+    let buttons = Rc::new(RefCell::new(Vec::new()));
+    let actions = Rc::new(RefCell::new(Vec::new()));
+    let setup_buttons = buttons.clone();
+    let setup_actions = actions.clone();
     let scene = generate_scene_with_setup(
         request.source,
         request.scene_capabilities,
         request.limits,
         move |lua| {
             install_module_context(lua, &manifest, &snapshot, request.theme, &event, &resources)?;
+            install_button_api(lua, &manifest, &event, setup_buttons, setup_actions)?;
             install_host_resource_api(lua, &manifest, &resources, setup_placements)
         },
     )?;
@@ -621,13 +674,118 @@ fn render_module(request: RenderRequest<'_>) -> Result<RetainedModuleScene> {
         .map_err(|_| Error("Canvas Lua retained internal resource state".into()))?
         .into_inner();
     validate_retained_output(&scene, &host_resources, request.limits.max_nodes)?;
+    let buttons = buttons.borrow().clone();
+    let actions = actions.borrow().clone();
+    ensure(
+        scene.nodes.len() + host_resources.len() + buttons.len() <= request.limits.max_nodes,
+        "Canvas module controls exceed combined node budget",
+    )?;
+    for button in &buttons {
+        ensure(
+            !scene.nodes.iter().any(|node| node.id == button.id)
+                && !host_resources.iter().any(|surface| surface.id == button.id),
+            "Canvas module button id collides with a retained node",
+        )?;
+    }
     Ok(RetainedModuleScene {
         output_revision: request.output_revision,
         module_generation: request.generation,
         input_revision: request.snapshot.revision,
         scene,
         host_resources,
+        buttons,
+        actions,
     })
+}
+
+fn install_button_api(
+    lua: &Lua,
+    manifest: &ModuleManifest,
+    event: &ModuleEvent,
+    buttons: Rc<RefCell<Vec<ModuleButton>>>,
+    actions: Rc<RefCell<Vec<ModuleAction>>>,
+) -> Result<()> {
+    let grants = manifest.actions.clone();
+    let target = match event {
+        ModuleEvent::Activate { target_id } => Some(target_id.clone()),
+        _ => None,
+    };
+    let widget: Table = lua.globals().get("widget").map_err(lua_error)?;
+    widget
+        .set(
+            "button",
+            lua.create_function(move |lua, spec: Table| {
+                reject_unknown_fields(
+                    &spec,
+                    &[
+                        "id", "label", "action", "body", "x", "y", "width", "height", "enabled",
+                    ],
+                )?;
+                let id = required_string(&spec, "id")?;
+                let label = required_string(&spec, "label")?;
+                let action_id = required_string(&spec, "action")?;
+                let grant = grants
+                    .iter()
+                    .find(|grant| grant.id == action_id)
+                    .ok_or_else(|| mlua::Error::external("undeclared module action"))?;
+                let button = ModuleButton {
+                    id,
+                    label,
+                    x: spec.get("x")?,
+                    y: spec.get("y")?,
+                    width: spec.get("width")?,
+                    height: spec.get("height")?,
+                    enabled: spec.get::<Option<bool>>("enabled")?.unwrap_or(true),
+                };
+                if !identifier(&button.id)
+                    || !visible(&button.label)
+                    || button.label.len() > 128
+                    || ![button.x, button.y, button.width, button.height]
+                        .iter()
+                        .all(|n| n.is_finite())
+                    || button.width <= 0.0
+                    || button.height <= 0.0
+                    || button.width > 8.0
+                    || button.height > 8.0
+                    || !(-4.0..=4.0).contains(&button.x)
+                    || !(-4.0..=4.0).contains(&button.y)
+                {
+                    return Err(mlua::Error::external(
+                        "invalid module button geometry or label",
+                    ));
+                }
+                let body: serde_json::Value = lua.from_value(spec.get("body")?)?;
+                if !body.is_object()
+                    || body.get("message_type").is_some()
+                    || serde_json::to_vec(&body)
+                        .map_err(mlua::Error::external)?
+                        .len()
+                        > 4096
+                {
+                    return Err(mlua::Error::external(
+                        "module action needs a bounded object body",
+                    ));
+                }
+                let mut retained = buttons.borrow_mut();
+                if retained.len() >= 16 || retained.iter().any(|existing| existing.id == button.id)
+                {
+                    return Err(mlua::Error::external(
+                        "duplicate or excessive module buttons",
+                    ));
+                }
+                if button.enabled && target.as_deref() == Some(button.id.as_str()) {
+                    actions.borrow_mut().push(ModuleAction {
+                        destination: grant.destination.clone(),
+                        kind: grant.kind.clone(),
+                        body,
+                    });
+                }
+                retained.push(button);
+                Ok(())
+            })
+            .map_err(lua_error)?,
+        )
+        .map_err(lua_error)
 }
 
 fn install_module_context(

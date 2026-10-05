@@ -29,6 +29,8 @@ pub mod loopback;
 #[cfg(feature = "lua-scenes")]
 pub mod lua_module;
 #[cfg(feature = "lua-scenes")]
+pub mod module_bus;
+#[cfg(feature = "lua-scenes")]
 pub mod lua_scene;
 pub mod map;
 #[cfg(all(feature = "mcp", unix))]
@@ -938,6 +940,8 @@ impl Default for Transform3 {
 pub enum SemanticInk {
     /// Body text. The default, and the only thing a pre-`ink` scene meant.
     Text,
+    Surface,
+    Background,
     Muted,
     Primary,
     Success,

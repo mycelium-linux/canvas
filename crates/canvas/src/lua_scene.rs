@@ -354,6 +354,8 @@ fn optional_ink(table: &Table) -> mlua::Result<Option<SemanticInk>> {
     };
     let ink = match name.as_str() {
         "text" => SemanticInk::Text,
+        "surface" => SemanticInk::Surface,
+        "background" => SemanticInk::Background,
         "muted" => SemanticInk::Muted,
         "primary" => SemanticInk::Primary,
         "success" => SemanticInk::Success,

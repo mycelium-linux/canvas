@@ -220,6 +220,7 @@ enum ModuleSurface {
     Rendered {
         key: u64,
         scene: Scene,
+        buttons: Vec<::canvas::lua_module::ModuleButton>,
         /// A rejected reload never replaces the last valid scene.
         last_error: Option<String>,
     },
@@ -476,6 +477,11 @@ type TimelineAction = canvas_model_viewer::view::TimelineAction;
 #[derive(Debug, Clone)]
 enum Message {
     Tick,
+    #[cfg(feature = "lua-scenes")]
+    ModuleActivate {
+        surface_id: String,
+        target_id: String,
+    },
     ShellBack,
     ShellForward,
     ShellProjects,
@@ -789,6 +795,8 @@ struct App {
     status: String,
     interaction: InteractionEngine,
     snap_preview: Option<LogicalRect>,
+    #[cfg(feature = "lua-scenes")]
+    module_bus: ::canvas::module_bus::ModuleBus,
     cursor: Option<LogicalPoint>,
     cursor_window: Option<iced::window::Id>,
     desktop_focused: bool,
@@ -1192,6 +1200,8 @@ impl App {
             system: sysinfo::System::new(),
             networks: sysinfo::Networks::new(),
             status: if shortcut_errors.is_empty() {
+            module_bus: ::canvas::module_bus::ModuleBus::from_env(),
+            #[cfg(feature = "lua-scenes")]
                 "Canvas is ready; Ctrl+Option+C toggles its displays.".into()
             } else {
                 format!(
@@ -1644,6 +1654,14 @@ impl App {
                             })
                         };
                         if let Some(page) = destination_page {
+            #[cfg(feature = "lua-scenes")]
+            Message::ModuleActivate {
+                surface_id,
+                target_id,
+            } => {
+                self.activate_module(&surface_id, &target_id);
+                Task::none()
+            }
                             self.document.active_page = page;
                         }
                         self.update(Message::PromptNew(surface_id))
@@ -1700,6 +1718,8 @@ impl App {
                         self.refresh_interaction_geometry();
                         self.bump();
                     }
+                #[cfg(feature = "lua-scenes")]
+                self.drain_module_bus();
                 }
                 let clock_second = now_unix_ms() / 1_000;
                 if clock_second != self.last_clock_second {
@@ -7647,7 +7667,8 @@ impl App {
             let resolved = match resolve_module(&name, &inputs, theme, now_ms) {
                 Ok(scene) => ModuleSurface::Rendered {
                     key,
-                    scene,
+                    buttons: scene.buttons,
+                    scene: scene.scene,
                     last_error: None,
                 },
                 Err(reason) => {
@@ -7656,11 +7677,14 @@ impl App {
                     // working widget.
                     eprintln!("Canvas module {name} on surface {id}: {reason}");
                     match self.modules.get(&id) {
-                        Some(ModuleSurface::Rendered { scene, .. }) => ModuleSurface::Rendered {
-                            key,
-                            scene: scene.clone(),
-                            last_error: Some(reason),
-                        },
+                        Some(ModuleSurface::Rendered { scene, buttons, .. }) => {
+                            ModuleSurface::Rendered {
+                                key,
+                                scene: scene.clone(),
+                                buttons: buttons.clone(),
+                                last_error: Some(reason),
+                            }
+                        }
                         _ => ModuleSurface::Failed { key, reason },
                     }
                 }
@@ -7709,7 +7733,7 @@ impl App {
                 let content: Element<'static, Message> = match &node.content {
                     NodeContent::Text { text: label, ink } => {
                         let font_size =
-                            (scale[0] * scale[1] * metrics.body * z_scale).max(metrics.micro);
+                            scene_text_size(scale[1], metrics.body, z_scale, metrics.micro);
                         container(
                             text(label.clone())
                                 .size(font_size)
@@ -7727,6 +7751,140 @@ impl App {
                         let mut fill = color(scene_ink(*ink, &palette));
                         fill.a = *opacity;
                         let radius = *radius;
+    #[cfg(feature = "lua-scenes")]
+    fn drain_module_bus(&mut self) {
+        for event in self.module_bus.poll() {
+            if event.kind == "canvas.widget.snapshot.v1" {
+                match serde_json::from_value::<::canvas::stream_contract::StreamEnvelope>(
+                    event.body,
+                )
+                .map_err(|error| error.to_string())
+                .and_then(|event| {
+                    event
+                        .validate()
+                        .map(|_| event)
+                        .map_err(|error| error.to_string())
+                }) {
+                    Ok(event) => self.stream_inbox.push(event),
+                    Err(error) => self.status = format!("Module stream rejected: {error}"),
+                }
+            } else if event.kind == "canvas.module.action.result.v1" {
+                self.status = self
+                    .module_bus
+                    .receipt(&event)
+                    .unwrap_or_else(|error| format!("Module receipt rejected: {error}"));
+            }
+        }
+        if let Some(error) = self.module_bus.error.take() {
+            eprintln!("Canvas module bus: {error}");
+            self.status = format!("Module bus: {error}");
+        }
+    }
+
+    #[cfg(feature = "lua-scenes")]
+    fn activate_module(&mut self, surface_id: &str, target_id: &str) {
+        // Re-evaluate the current artifact and state: a stale button cannot
+        // replay the body retained before a reload or newer controller revision.
+        let Some(surface) = self.decoded.get(surface_id) else {
+            return;
+        };
+        let ContentSource::Widget { spec } = &surface.source else {
+            return;
+        };
+        let canvas_widgets::WidgetKind::Module { module, inputs } = &spec.kind else {
+            return;
+        };
+        let visual = self.presented_visual_theme();
+        let theme = ::canvas::lua_module::ModuleThemeTokens::from_visual(
+            &visual,
+            self.effective_theme(&self.document).accent(),
+        );
+        let result = resolve_module_event(
+            module,
+            inputs,
+            theme,
+            now_unix_ms(),
+            Some(::canvas::lua_module::ModuleEvent::Activate {
+                target_id: target_id.to_owned(),
+            }),
+        );
+        match result {
+            Ok(retained) => {
+                for action in retained.actions {
+                    match self.module_bus.publish(action) {
+                        Ok(request_id) => {
+                            self.status = format!(
+                                "Module command queued · {request_id} (awaiting controller)"
+                            )
+                        }
+                        Err(error) => self.status = format!("Module command failed: {error}"),
+                    }
+                }
+            }
+            Err(error) => self.status = format!("Module activation rejected: {error}"),
+        }
+    }
+
+    #[cfg(feature = "lua-scenes")]
+    fn module_button_layer(
+        &self,
+        surface_id: &str,
+        buttons: &[::canvas::lua_module::ModuleButton],
+        viewport: LogicalSize,
+    ) -> Element<'static, Message> {
+        let visual = self.presented_visual_theme();
+        let children = buttons
+            .iter()
+            .map(|control| {
+                let [x, y] = scene_node_position([control.x, control.y, 0.0], viewport);
+                let width = control.width * viewport.width as f32 / 8.0;
+                let height = control.height * viewport.height as f32 / 8.0;
+                let item = button(
+                    text(control.label.clone())
+                        .size(visual.metrics.small)
+                        .center(),
+                )
+                .width(width)
+                .height(height)
+                .on_press_maybe((control.enabled && self.module_bus.connected()).then(|| {
+                    Message::ModuleActivate {
+                        surface_id: surface_id.to_owned(),
+                        target_id: control.id.clone(),
+                    }
+                }))
+                .style(move |_, status| {
+                    canvas_widgets::live::app_chrome::cube_button_style(visual, false, status)
+                });
+                container(item)
+                    .padding(iced::Padding {
+                        top: y,
+                        left: x,
+                        right: 0.0,
+                        bottom: 0.0,
+                    })
+                    .into()
+            })
+            .collect::<Vec<Element<'static, Message>>>();
+        let mut children = children;
+        if !buttons.is_empty() && !self.module_bus.connected() {
+            children.push(
+                container(
+                    text("CONTROLS OFFLINE · Unibus session unavailable")
+                        .size(visual.metrics.micro)
+                        .color(color(visual.palette.warning)),
+                )
+                .padding(iced::Padding {
+                    top: (viewport.height as f32 - 22.0).max(0.0),
+                    left: 12.0,
+                    right: 0.0,
+                    bottom: 0.0,
+                })
+                .into(),
+            );
+        }
+        stack(children).into()
+    }
+
                         container(space::horizontal())
                             .width(width)
                             .height(height)
@@ -7749,6 +7907,10 @@ impl App {
                         top: pos_y,
                         right: 0.0,
                         bottom: 0.0,
+                // Explicit low-frequency freshness refresh, off the draw path.
+                let key = spec
+                    .refresh_ms
+                    .map_or(key, |refresh| key ^ (now_ms / refresh.max(1_000)));
                         left: pos_x,
                     })
                     .into()
@@ -7821,6 +7983,8 @@ impl App {
                     axis_color: color(palette.text),
                     muted_color: color(palette.text_muted),
                     surface_color: color(palette.surface),
+                        // Font size is a length, not an area: multiplying X
+                        // and Y made a 2x Lua label grow 4x and clip its frame.
                     // Categorical identity, not status: a ramp of
                     // `[primary, success, danger, warning]` made series three
                     // and four claim "failed" and "degraded" by list position.
@@ -8065,11 +8229,17 @@ impl App {
                 if let canvas_widgets::WidgetKind::Module { .. } = &spec.kind {
                     return match self.modules.get(&surface.snapshot.id) {
                         Some(ModuleSurface::Rendered {
-                            scene, last_error, ..
+                            scene,
+                            buttons,
+                            last_error,
+                            ..
                         }) => {
-                            let scene = container(self.scene_layer(scene, viewport))
-                                .width(Length::Fill)
-                                .height(Length::Fill);
+                            let scene = container(stack![
+                                self.scene_layer(scene, viewport),
+                                self.module_button_layer(&surface.snapshot.id, buttons, viewport)
+                            ])
+                            .width(Length::Fill)
+                            .height(Length::Fill);
                             if let Some(error) = last_error {
                                 let visual = self.presented_visual_theme();
                                 let palette = visual.palette;
@@ -10584,7 +10754,18 @@ fn resolve_module(
     inputs: &BTreeMap<String, canvas_widgets::WidgetInput>,
     theme: ::canvas::lua_module::ModuleThemeTokens,
     now_ms: u64,
-) -> std::result::Result<Scene, String> {
+) -> std::result::Result<::canvas::lua_module::RetainedModuleScene, String> {
+    resolve_module_event(name, inputs, theme, now_ms, None)
+}
+
+#[cfg(feature = "lua-scenes")]
+fn resolve_module_event(
+    name: &str,
+    inputs: &BTreeMap<String, canvas_widgets::WidgetInput>,
+    theme: ::canvas::lua_module::ModuleThemeTokens,
+    now_ms: u64,
+    event: Option<::canvas::lua_module::ModuleEvent>,
+) -> std::result::Result<::canvas::lua_module::RetainedModuleScene, String> {
     use ::canvas::lua_module::{LuaModule, ModuleInputSnapshot, ModuleManifest};
     use ::canvas::lua_scene::{LuaSceneCapabilities, LuaSceneLimits};
 
@@ -10619,17 +10800,26 @@ fn resolve_module(
     // a surface reference has to come from a trusted caller, and a spec written
     // by an agent is not one. A module that asks for one fails loudly here
     // rather than drawing a blank where a video should be.
-    LuaModule::load(
+    let mut module = LuaModule::load(
         manifest,
         source,
-        snapshot,
+        snapshot.clone(),
         theme,
         BTreeMap::new(),
         LuaSceneCapabilities::default(),
         LuaSceneLimits::default(),
     )
-    .map(|module| module.retained().scene.clone())
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    if let Some(event) = event {
+        let snapshot = ModuleInputSnapshot {
+            revision: 2,
+            ..snapshot
+        };
+        module
+            .update(snapshot, theme, event)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(module.retained().clone())
 }
 
 /// One declared input, in the vocabulary the module host accepts.
@@ -10777,6 +10967,8 @@ fn apply_plan_diagnostics(
     snapshot.display_logical = Some([plan.display_logical.width, plan.display_logical.height]);
     snapshot.scale_factor = Some(plan.scale_factor);
 }
+        SemanticInk::Surface => palette.surface,
+        SemanticInk::Background => palette.background,
 
 fn load_content(
     surface_id: String,
@@ -10805,6 +10997,10 @@ fn load_content(
         .to_ascii_lowercase();
     let display_title = title.unwrap_or_else(|| {
         path.file_name()
+fn scene_text_size(scale_y: f32, body: f32, depth: f32, minimum: f32) -> f32 {
+    (scale_y.abs() * body * depth).max(minimum)
+}
+
             .and_then(|value| value.to_str())
             .unwrap_or("Untitled")
             .to_owned()
@@ -12294,6 +12490,13 @@ mod tests {
                     width: 0.8,
                     height: 0.8,
                 },
+    #[test]
+    fn lua_text_size_scales_linearly_not_quadratically() {
+        let base = scene_text_size(1.0, 16.0, 1.25, 8.0);
+        assert_eq!(scene_text_size(2.0, 16.0, 1.25, 8.0), base * 2.0);
+        assert_eq!(scene_text_size(0.01, 16.0, 1.25, 8.0), 8.0);
+    }
+
                 layer: 1,
             }],
         };
