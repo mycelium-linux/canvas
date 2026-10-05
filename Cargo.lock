@@ -621,11 +621,14 @@ dependencies = [
 name = "canvas-widgets"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "canvas-core",
  "coherence-native",
  "fpl-gfx",
  "iced",
+ "iced_wgpu",
  "libc",
+ "pollster",
  "schemars",
  "serde",
  "serde_json",

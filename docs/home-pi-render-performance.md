@@ -140,3 +140,61 @@ The current compatible store has `dock`, `coherence-preview`, and `qemu`.
 Tracked separately as `dock-0jc`: restore with schema-compatible code, preserving
 subsequent edits. Do not strip unknown fields, overwrite the backup, or claim
 that all original workspaces were restored by this performance investigation.
+
+## Retained theme cache rollout
+
+The theme ground now rasterizes to a GPU texture on a cache miss and samples
+that texture inside iced's existing compositor pass thereafter. This applies
+to `Background::Theme` and the theme fallback for unsupported background kinds;
+explicit user gradients and animated shader backgrounds retain their existing
+behavior. The analog clock shader and Coherence palette mapping are unchanged.
+
+Cache keys include iced's canonical packed gradient (including its color-space,
+f16 packing, and angle geometry), physical extent, and display-scale bits.
+Resources belong to the renderer/device and each window's retained widget.
+Disposed widgets age out; cache capacity is 16 window entries. The grace period
+accounts for iced trimming shared storage after each window's presentation,
+so four live windows do not evict one another every frame.
+
+At the same 1920×1080 size, warm ten-second traces measured:
+
+| View | Before: flips/sec / render-job p95 | Cached: flips/sec / render-job p95 | Cached flip-interval p95 |
+| --- | ---: | ---: | ---: |
+| Clock (restart-to-restart baseline) | 8.48 / 128.65 ms | 17.90 / 42.71 ms | 116.66 ms |
+| Empty desktop | 11.26 / 91.42 ms | 28.50 / 17.61 ms | 50.00 ms |
+
+Final evidence uses `cached-*-layout-summary.json`, with the clock baseline in
+`gradient-restarted-summary.json`. An initial capture differed in content size
+from the pre-restart UI. To avoid any sizing-base change, the final version uses
+`Stack::push_under` beneath the existing outer container. A fresh restart of the
+original binary confirmed the same clock size/framing as the final cached build,
+isolating startup layout state from the cache comparison. The earlier
+`cached-*-summary.json` files remain preliminary evidence, not used above.
+
+The log showed one 1920×1080 cache miss over the measured run, not one per tick.
+These remain display flips and scheduler job timings, **not unique app FPS or
+per-frame histograms**. The clock still does not establish a 25-FPS presentation
+budget. Bounded in-flight rendering and true frame telemetry remain in
+`dock-o5b`; this completed cache slice is `dock-o5b.1`.
+
+Validation on Agora: host/ARM checks, 85 widget tests, and the explicitly run
+Vulkan GPU test passed. The GPU test compares actual cached output against
+iced's original gradient, within one 8-bit channel value, for dark, light,
+and saturated colors at scales 1, 2 and 1.25. It verifies allocation reuse,
+four-window stability, and resource retirement. The actual TV capture was also
+inspected. Strict Clippy still reports the five pre-existing diagnostics noted
+in the rollout report; rerunning with only those legacy lint categories allowed
+passed. No unrelated legacy widgets were rewritten.
+
+The cache was cross-built in the isolated compatibility snapshot described in
+`coherence-home-pi-rollout.md`; current main's unrelated transport changes were
+not deployed. The pre-cache UI is retained at
+`/usr/local/lib/canvas/rollback/gradient-cache-20261005/canvas`, and the compatible
+workspace state was copied to
+`/home/ajm/.cache/canvas-perf-20261005/workspaces.before-gradient-cache.json`.
+The original 24-workspace backup remains untouched. Only the UI binary changed;
+the compositor, capture geometry, service configuration, and media transport
+were preserved. QEMU was restored after profiling.
+
+Installed UI SHA-256:
+`e80da2e65313a226e9f44644dc40780426be92bb96a5c7ab5ac9efd3cd3cf9b9`.

@@ -19,6 +19,7 @@ libc = { version = "0.2", optional = true }
 wasmtime = { version = "24", optional = true, features = ["component-model"] }
 # Iced wgpu for hyperspace shader rendering
 iced_wgpu = "0.14"
+bytemuck = "1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
@@ -28,3 +29,6 @@ wasm-bindgen = "0.2"
 default = []
 live = ["dep:iced", "dep:libc", "dep:coherence-native"]
 schema = ["dep:schemars"]
+
+[dev-dependencies]
+pollster = "0.4"

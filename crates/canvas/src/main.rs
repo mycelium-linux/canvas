@@ -9433,12 +9433,8 @@ impl App {
             Color::TRANSPARENT.into()
         } else {
             match &self.document.background {
-                Background::Theme => iced::Gradient::Linear(
-                    iced::gradient::Linear::new(core::f32::consts::PI / 2.0)
-                        .add_stop(0.0, color(palette.background))
-                        .add_stop(1.0, color(palette.background_strong)),
-                )
-                .into(),
+                // The theme ground is a retained GPU underlay.
+                Background::Theme => Color::TRANSPARENT.into(),
                 Background::Solid { color } => rgba(*color).into(),
                 Background::Gradient {
                     angle_degrees,
@@ -9448,12 +9444,7 @@ impl App {
                 // A background written by a newer Canvas. It is retained
                 // verbatim, but this build cannot draw it, so fall back to the
                 // theme ground rather than leaving the desktop black.
-                Background::Unsupported(_) => iced::Gradient::Linear(
-                    iced::gradient::Linear::new(core::f32::consts::PI / 2.0)
-                        .add_stop(0.0, color(palette.background))
-                        .add_stop(1.0, color(palette.background_strong)),
-                )
-                .into(),
+                Background::Unsupported(_) => Color::TRANSPARENT.into(),
             }
         };
         let surface_color = color(palette.surface);
@@ -10306,17 +10297,32 @@ impl App {
             }
         }
 
-        mouse_area(
-            container(stack(layers))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(move |_| container::Style {
-                    background: Some(background),
-                    ..Default::default()
-                }),
-        )
-        .interaction(self.pointer_interaction(window))
-        .into()
+        let ground = container(stack(layers))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_| container::Style {
+                background: Some(background),
+                ..Default::default()
+            });
+        // An underlay must not become the content stack's sizing base.
+        let ground: Element<'_, Message> = if !self.screensaver_settings.enabled
+            && matches!(
+                self.document.background,
+                Background::Theme | Background::Unsupported(_)
+            )
+        {
+            stack([ground.into()])
+                .push_under(canvas_widgets::live::retained_gradient::view(
+                    color(palette.background),
+                    color(palette.background_strong),
+                ))
+                .into()
+        } else {
+            ground.into()
+        };
+        mouse_area(ground)
+            .interaction(self.pointer_interaction(window))
+            .into()
     }
 
     fn overlay_on_viewport(&self, target: OverlayTarget, viewport: Rect) -> bool {

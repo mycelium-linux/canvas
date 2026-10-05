@@ -31,6 +31,7 @@ pub mod app_chrome;
 mod clock;
 mod gfx_clock;
 pub mod gfx_theme;
+pub mod retained_gradient;
 mod primitives;
 mod quality;
 mod quant;
