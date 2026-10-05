@@ -38,6 +38,18 @@ pub const DESKTOP_DOCK: Artifact = Artifact {
     source_fallback: include_str!("../../../config/modules/desktop-dock-v1.lua"),
 };
 
+/// Frameless instruments are desktop content, not app-switching destinations.
+/// Use this same projection for presentation slots and their native actions.
+pub fn dock_surfaces(document: &crate::WorkspaceDocument) -> impl Iterator<Item = &crate::Surface> {
+    document.surfaces.iter().filter(|surface| {
+        !matches!(
+            &surface.content,
+            crate::SurfaceContent::Widget { spec }
+                if spec.chrome == canvas_widgets::WidgetChrome::Frameless
+        )
+    })
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Presentation {
     key: Option<[u8; 32]>,
@@ -282,6 +294,10 @@ mod tests {
                 assert_eq!(output.buttons[0].id, "launcher");
                 assert!(output.buttons.len() <= 7);
                 for button in &output.buttons {
+                    assert_eq!(
+                        button.appearance,
+                        crate::lua_module::ModuleButtonAppearance::Quiet
+                    );
                     assert!(
                         button.x >= -4.0 && button.x + button.width <= 4.001,
                         "{width}: {button:?}"
@@ -293,6 +309,57 @@ mod tests {
                         .unwrap()
                         .contains("\"opacity\":1.0")
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn frameless_desktop_content_is_not_an_application() {
+        let mut document: crate::WorkspaceDocument =
+            serde_json::from_str(include_str!("../../../config/workspaces/neo/fungos.json"))
+                .unwrap();
+        assert_eq!(dock_surfaces(&document).count(), 0);
+        document.surfaces.push(crate::Surface {
+            id: "simulator".into(),
+            title: "Simulator".into(),
+            content: crate::SurfaceContent::ExternalSurface {
+                source_id: "native/simulator".into(),
+            },
+            inputs: vec![],
+        });
+        assert_eq!(
+            dock_surfaces(&document)
+                .map(|surface| surface.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["simulator"]
+        );
+    }
+
+    #[test]
+    fn button_appearance_is_semantic_bounded_and_backward_compatible() {
+        let manifest = r#"{"schema_version":1,"id":"appearance-test","title":"Appearance","inputs":[],"capabilities":{"write_scene":true},"actions":[{"id":"select","destination":"canvas.shell","kind":"select"}]}"#;
+        for (field, expected) in [
+            (
+                "",
+                Some(crate::lua_module::ModuleButtonAppearance::Standard),
+            ),
+            (
+                ",appearance='quiet'",
+                Some(crate::lua_module::ModuleButtonAppearance::Quiet),
+            ),
+            (",appearance='arbitrary-css'", None),
+        ] {
+            let source = format!(
+                "widget.button({{id='select',label='Select',action='select',body={{}},x=-1,y=1,width=2,height=1{field}}})"
+            );
+            let mut p = Presentation::default();
+            let result = p.refresh(manifest, &source, snapshot(), theme());
+            if let Some(expected) = expected {
+                result.unwrap();
+                assert_eq!(p.retained().unwrap().buttons[0].appearance, expected);
+                assert!(p.retained().unwrap().actions.is_empty());
+            } else {
+                assert!(result.is_err());
             }
         }
     }

@@ -28,7 +28,8 @@ existing target-labelled application/workspace selector. Up to six actual Canvas
 windows fit beside it, with responsive overflow available through Apps. A short
 accent underline means focused, a dot means open, and a dim dot means minimized.
 These are Canvas window states, **not** invented native process or stream-health
-states. Selecting a window restores it, activates its page, and raises it through
+states. Frameless instruments are excluded from the dock: the clock and desktop
+identity are content, not applications. Selecting a window restores it, activates its page, and raises it through
 the same native focus path as the launcher. Presentation reloads at one-second
 cadence; unchanged state retains its output and never executes Lua in `view`.
 
@@ -43,6 +44,38 @@ analog clock, theme-derived background and bounded Lua welcome module. It does
 not change the renderer or the saved TV workspace. Deploy the welcome artifacts
 to the runtime modules directory before applying that workspace. This first dock
 does not yet pin native apps, show their icons, or claim OS-wide running status.
+
+Shell controls use `widget.button({appearance="quiet", ...})`: borderless at
+rest, with native hover/pressed/selected/disabled feedback derived from Coherence.
+Omitting `appearance` preserves the standard treatment. Unknown appearances are
+rejected; arbitrary CSS/colors/callbacks are not part of the Lua button API.
+This requires the updated native host before installing the new Lua files.
+
+## Native apps are not attached by launching them
+
+The application catalog discovers launchable apps. Launching one delegates to
+macOS; it does not yet attach its windows to Canvas. These are separate operations.
+
+The local external-surface contract already supports `IoSurface`, and the Metal
+renderer has an importer in `canvas-model-viewer/src/external_surface.rs`.
+However, `canvas-window-stream` currently produces H.264, not IOSurface frames.
+There is no automatic native-window-to-IOSurface producer integrated with the
+launcher today. A native capture view must not be labelled zero-copy merely
+because the renderer contains that importer.
+
+The direct local attachment belongs in the capture adapter: select an explicit
+window through ScreenCaptureKit, register a volatile external-surface generation,
+and let Canvas tile/composite its stable source ID. IOSurface handles never travel
+over Unibus or enter persisted workspace documents. Remote nodes retain the media
+transport. Frame ownership/release and bounded in-flight work must be verified
+before importing recyclable capture buffers; registration alone is not a GPU
+completion acknowledgement. Native keyboard/mouse actions still belong to the
+permission-bearing platform helper, not Lua or the pixel transport.
+
+`config/deploy/neo/simulator-local-stream.json` is a local H.264 capture profile
+for testing this separately from the TV stream. It sends to loopback only; it is
+not auto-enabled and still requires capture permission and a healthy Unibus
+registration. Do not present an empty surface as a successful live attachment.
 
 Neo runs the separately signed `~/Applications/Canvas.app` bundle using
 `config/deploy/neo/Canvas.Info.plist`. Its existing `dev.fpl.canvas` LaunchAgent

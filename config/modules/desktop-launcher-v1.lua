@@ -12,7 +12,7 @@ for n=0,5 do
     local y=1.85-n*0.69
     local selected=i[key .. "-selected"]==true
     if selected then widget.panel({id=key .. "-bg",x=-3.7,y=y+0.16,width=7.4,height=0.66,ink="primary",opacity=0.16}) end
-    widget.button({id=key,label=title,action="select",body={origin="desktop-launcher"},x=-3.7,y=y+0.16,width=7.4,height=0.4,enabled=i[key .. "-available"]==true})
+    widget.button({id=key,label=title,appearance="quiet",action="select",body={origin="desktop-launcher"},x=-3.7,y=y+0.16,width=7.4,height=0.4,enabled=i[key .. "-available"]==true})
     widget.label({id=key.."-detail",text=i[key.."-detail"] or "",x=-3.5,y=y-0.29,size=t.micro,ink="muted"})
   end
 end

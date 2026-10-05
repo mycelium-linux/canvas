@@ -3835,9 +3835,9 @@ impl App {
         let mut values = BTreeMap::from([
             ("width".into(), Value::Number(f64::from(self.frame.width.max(1)))),
             ("height".into(), Value::Number(68.0)),
-            ("count".into(), Value::Number(self.document.surfaces.len() as f64)),
+            ("count".into(), Value::Number(::canvas::shell_presentation::dock_surfaces(&self.document).count() as f64)),
         ]);
-        for (n, surface) in self.document.surfaces.iter().take(6).enumerate() {
+        for (n, surface) in ::canvas::shell_presentation::dock_surfaces(&self.document).take(6).enumerate() {
             let key = format!("item{n}");
             values.insert(format!("{key}-id"), Value::Text(surface.id.clone()));
             values.insert(format!("{key}-title"), Value::Text(surface.title.chars().take(16).collect()));
@@ -8061,6 +8061,7 @@ impl App {
                 let width = control.width * viewport.width as f32 / 8.0;
                 let height = control.height * viewport.height as f32 / 8.0;
                 let selected = selected(control);
+                let appearance = control.appearance;
                 let item = button(
                     text(control.label.clone())
                         .size(visual.metrics.small)
@@ -8070,7 +8071,10 @@ impl App {
                 .height(height)
                 .on_press_maybe(action(control))
                 .style(move |_, status| {
-                    canvas_widgets::live::app_chrome::cube_button_style(visual, selected, status)
+                    match appearance {
+                        ::canvas::lua_module::ModuleButtonAppearance::Standard => canvas_widgets::live::app_chrome::cube_button_style(visual, selected, status),
+                        ::canvas::lua_module::ModuleButtonAppearance::Quiet => canvas_widgets::live::app_chrome::quiet_button_style(visual, selected, status),
+                    }
                 });
                 container(item)
                     .padding(iced::Padding {
@@ -10169,7 +10173,7 @@ impl App {
                     match control.id.as_str() {
                         "launcher" => Some(Message::ShellProjects),
                         id => id.strip_prefix("item").and_then(|n| n.parse::<usize>().ok())
-                            .filter(|n| *n < 6).and_then(|n| self.document.surfaces.get(n))
+                            .filter(|n| *n < 6).and_then(|n| ::canvas::shell_presentation::dock_surfaces(&self.document).nth(n))
                             .filter(|surface| self.decoded.contains_key(&surface.id))
                             .map(|surface| Message::ShellFocusSurface(surface.id.clone())),
                     }

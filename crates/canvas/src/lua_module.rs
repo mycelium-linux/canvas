@@ -138,6 +138,16 @@ pub struct ModuleButton {
     pub width: f32,
     pub height: f32,
     pub enabled: bool,
+    pub appearance: ModuleButtonAppearance,
+}
+
+/// Semantic control treatment; Lua never supplies native colors or callbacks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModuleButtonAppearance {
+    #[default]
+    Standard,
+    Quiet,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -718,7 +728,16 @@ fn install_button_api(
                 reject_unknown_fields(
                     &spec,
                     &[
-                        "id", "label", "action", "body", "x", "y", "width", "height", "enabled",
+                        "id",
+                        "label",
+                        "action",
+                        "body",
+                        "x",
+                        "y",
+                        "width",
+                        "height",
+                        "enabled",
+                        "appearance",
                     ],
                 )?;
                 let id = required_string(&spec, "id")?;
@@ -736,6 +755,11 @@ fn install_button_api(
                     width: spec.get("width")?,
                     height: spec.get("height")?,
                     enabled: spec.get::<Option<bool>>("enabled")?.unwrap_or(true),
+                    appearance: match spec.get::<Option<String>>("appearance")?.as_deref() {
+                        None | Some("standard") => ModuleButtonAppearance::Standard,
+                        Some("quiet") => ModuleButtonAppearance::Quiet,
+                        _ => return Err(mlua::Error::external("unknown module button appearance")),
+                    },
                 };
                 if !identifier(&button.id)
                     || !visible(&button.label)

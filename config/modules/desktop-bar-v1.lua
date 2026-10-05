@@ -7,7 +7,7 @@ local function label(id,value,px,ink)
   widget.label({id=id,text=value,x=x(px),y=y((h-t.small)/2),size=t.small,ink=ink or "muted"})
 end
 local function control(id,value,px,width,enabled)
-  widget.button({id=id,label=value,action=id,body={origin="desktop-shell"},x=x(px),y=y(8),width=8*width/w,height=8*(h-16)/h,enabled=enabled})
+  widget.button({id=id,label=value,appearance="quiet",action=id,body={origin="desktop-shell"},x=x(px),y=y(8),width=8*width/w,height=8*(h-16)/h,enabled=enabled})
 end
 widget.panel({id="ground",x=-4,y=4,width=8,height=8,ink="surface",opacity=1,radius=0})
 widget.panel({id="rule",x=-4,y=y(h-1),width=8,height=8/h,ink="muted",opacity=0.18,radius=0})

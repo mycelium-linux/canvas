@@ -287,6 +287,22 @@ pub fn cube_button_style(
     style
 }
 
+/// Borderless shell control, sharing the same Coherence state colors as app
+/// chrome. The host still owns native focus, disabled state and hit testing.
+pub fn quiet_button_style(
+    visual: VisualTheme,
+    active: bool,
+    status: button::Status,
+) -> button::Style {
+    let mut style = action_style(visual, active, false, status);
+    if !active && !matches!(status, button::Status::Hovered | button::Status::Pressed) {
+        style.background = None;
+    }
+    style.border.width = 0.0;
+    style.border.radius = visual.metrics.radius_md.into();
+    style
+}
+
 pub(super) fn rgb(value: [u8; 3]) -> Color {
     Color::from_rgb8(value[0], value[1], value[2])
 }
@@ -318,6 +334,25 @@ mod tests {
         };
         assert_eq!(message, None);
         assert!(!active);
+    }
+
+    #[test]
+    fn quiet_controls_keep_native_state_without_idle_box_borders() {
+        let visual = canvas_core::ThemeSelection::coherence(
+            canvas_core::ThemeMode::Dark,
+            canvas_core::Accent::Brand,
+        )
+        .visual_theme();
+        let idle = quiet_button_style(visual, false, button::Status::Active);
+        let hovered = quiet_button_style(visual, false, button::Status::Hovered);
+        let selected = quiet_button_style(visual, true, button::Status::Active);
+        let disabled = quiet_button_style(visual, false, button::Status::Disabled);
+        assert!(idle.background.is_none());
+        assert!(hovered.background.is_some());
+        assert!(selected.background.is_some());
+        assert_eq!(idle.border.width, 0.0);
+        assert_eq!(hovered.border.width, 0.0);
+        assert_ne!(disabled.text_color, idle.text_color);
     }
 
     #[test]
