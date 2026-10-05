@@ -402,6 +402,7 @@ dependencies = [
  "unibus 0.1.0 (git+ssh://git@github.com/FuturePresentLabs/unibus.git?rev=b47a6cc15a6246296ac34136d513533d21dd11c1)",
  "unibus-device",
  "unibus-media",
+ "unibus-sdk",
  "wgpu",
 ]
 
@@ -454,7 +455,6 @@ dependencies = [
 
 [[package]]
 name = "canvas-control"
- "unibus-sdk",
 version = "0.1.0"
 dependencies = [
  "core-foundation-sys",
