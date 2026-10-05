@@ -173,12 +173,14 @@ mod macos {
         );
         let socket = UnixDatagram::unbound()?;
         socket.set_write_timeout(Some(Duration::from_secs(1)))?;
-        socket.connect(
-            config
-                .socket
-                .or_else(canvas_core::external_surface_socket_path)
-                .context("Canvas socket path unavailable")?,
-        )?;
+        let socket_path = config
+            .socket
+            .or_else(canvas_core::external_surface_socket_path)
+            .context("Canvas socket path unavailable")?;
+        socket.connect(&socket_path)?;
+        let rights =
+            canvas_core::native_surface_port::NativeSurfacePortSender::connect(&socket_path)
+                .map_err(anyhow::Error::msg)?;
         let mut publisher = Publisher {
             socket,
             source: config.source_id,
@@ -252,7 +254,7 @@ mod macos {
                     format: canvas_core::external_surface::PixelFormat::Bgra8Unorm,
                     color_space: ColorSpace::Srgb,
                     alpha_mode: AlphaMode::Premultiplied,
-                    transport: SurfaceTransport::IoSurface {
+                    transport: SurfaceTransport::IoSurfaceMachPort {
                         surface_id: surface.id(),
                     },
                     input: None,
@@ -264,6 +266,17 @@ mod macos {
                     "capture returned non-BGRA pixels"
                 );
                 descriptor.validate(1).map_err(anyhow::Error::msg)?;
+                // SAFETY: capture_hold keeps this IOSurfaceRef and its pixels
+                // alive until Canvas has retained the transferred right.
+                let right = unsafe {
+                    canvas_core::native_surface_port::NativeSurfacePort::from_iosurface(
+                        surface.as_ptr(),
+                    )
+                }
+                .map_err(anyhow::Error::msg)?;
+                rights
+                    .send(&publisher.source, generation, surface.id(), &right)
+                    .map_err(anyhow::Error::msg)?;
                 // Keep the CMSampleBuffer alive until Canvas confirms it has
                 // independently acquired its IOSurface use-count hold.
                 ipc::send(

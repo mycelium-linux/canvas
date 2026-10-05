@@ -96,6 +96,25 @@ impl ExternalSurfaceInbox {
         message: ExternalSurfaceMessage,
         handles: Vec<OwnedFd>,
     ) -> Result<RegistryChange, String> {
+        self.apply_inner(message, handles, None)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn apply_with_native_port(
+        &mut self,
+        message: ExternalSurfaceMessage,
+        handles: Vec<OwnedFd>,
+        port: &canvas_core::native_surface_port::NativeSurfacePort,
+    ) -> Result<RegistryChange, String> {
+        self.apply_inner(message, handles, Some(port.raw()))
+    }
+
+    fn apply_inner(
+        &mut self,
+        message: ExternalSurfaceMessage,
+        handles: Vec<OwnedFd>,
+        native_port: Option<u32>,
+    ) -> Result<RegistryChange, String> {
         message.validate(handles.len())?;
         let registration = match &message {
             ExternalSurfaceMessage::Register { surface } => {
@@ -157,11 +176,20 @@ impl ExternalSurfaceInbox {
         };
         let native_surface = match &message {
             ExternalSurfaceMessage::Register { surface }
-                if matches!(surface.transport, SurfaceTransport::IoSurface { .. }) =>
+                if matches!(
+                    surface.transport,
+                    SurfaceTransport::IoSurface { .. } | SurfaceTransport::IoSurfaceMachPort { .. }
+                ) =>
             {
-                Some(Arc::new(crate::native_surface::NativeSurface::retain(
-                    surface,
-                )?))
+                #[cfg(target_os = "macos")]
+                let retained =
+                    crate::native_surface::NativeSurface::retain_with_port(surface, native_port)?;
+                #[cfg(not(target_os = "macos"))]
+                let retained = {
+                    let _ = native_port;
+                    crate::native_surface::NativeSurface::retain(surface)?
+                };
+                Some(Arc::new(retained))
             }
             _ => None,
         };
@@ -351,7 +379,21 @@ pub fn import_iosurface(
     device: &wgpu::Device,
     surface: &ExternalSurfaceDescriptor,
 ) -> Result<wgpu::Texture, ImportError> {
-    macos::import(device, surface)
+    macos::import(device, surface, None)
+}
+
+pub(crate) fn import_retained_iosurface(
+    device: &wgpu::Device,
+    frame: &ExternalSurfaceFrame,
+) -> Result<wgpu::Texture, ImportError> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::import(device, &frame.descriptor, frame.native_surface.as_deref())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        import_iosurface(device, &frame.descriptor)
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -359,7 +401,10 @@ pub fn import_iosurface(
     _device: &wgpu::Device,
     surface: &ExternalSurfaceDescriptor,
 ) -> Result<wgpu::Texture, ImportError> {
-    if !matches!(surface.transport, SurfaceTransport::IoSurface { .. }) {
+    if !matches!(
+        surface.transport,
+        SurfaceTransport::IoSurface { .. } | SurfaceTransport::IoSurfaceMachPort { .. }
+    ) {
         return Err(ImportError::WrongTransport);
     }
     Err(ImportError::UnsupportedBackend)
@@ -427,15 +472,27 @@ mod macos {
     pub(super) fn import(
         device: &wgpu::Device,
         surface: &ExternalSurfaceDescriptor,
+        retained: Option<&crate::native_surface::NativeSurface>,
     ) -> Result<wgpu::Texture, ImportError> {
-        let SurfaceTransport::IoSurface { surface_id } = surface.transport else {
-            return Err(ImportError::WrongTransport);
+        let surface_id = match surface.transport {
+            SurfaceTransport::IoSurface { surface_id } => surface_id,
+            SurfaceTransport::IoSurfaceMachPort { surface_id } if retained.is_some() => surface_id,
+            _ => return Err(ImportError::WrongTransport),
         };
         let format = wgpu_format(surface.format, surface.color_space)?;
         let metal_format = metal_format(surface.format)?;
-        let io_surface = NonNull::new(unsafe { IOSurfaceLookup(surface_id) })
-            .map(SurfaceRef)
-            .ok_or(ImportError::SurfaceUnavailable(surface_id))?;
+        let looked_up = if retained.is_none() {
+            Some(
+                NonNull::new(unsafe { IOSurfaceLookup(surface_id) })
+                    .map(SurfaceRef)
+                    .ok_or(ImportError::SurfaceUnavailable(surface_id))?,
+            )
+        } else {
+            None
+        };
+        let io_surface = retained
+            .map(|surface| surface.as_ptr())
+            .unwrap_or_else(|| looked_up.as_ref().unwrap().0.as_ptr());
 
         let descriptor = TextureDescriptor::new();
         descriptor.set_texture_type(MTLTextureType::D2);
@@ -456,7 +513,7 @@ mod macos {
             msg_send![
                 raw_device.as_ptr(),
                 newTextureWithDescriptor: descriptor.as_ptr()
-                iosurface: io_surface.0.as_ptr()
+                iosurface: io_surface
                 plane: 0_u64
             ]
         };

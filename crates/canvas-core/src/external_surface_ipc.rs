@@ -362,6 +362,9 @@ fn acceptance_is_bounded_versioned_and_generation_bound() {
     receipt.generation = 42;
     receipt.schema_version = 99;
     assert!(send_acceptance(&sender, &receipt).is_err());
-    sender.send(&vec![b' '; MAX_EXTERNAL_SURFACE_MESSAGE + 1]).unwrap();
-    assert!(receive_acceptance(&receiver).is_err());
+    match sender.send(&vec![b' '; MAX_EXTERNAL_SURFACE_MESSAGE + 1]) {
+        Ok(_) => assert!(receive_acceptance(&receiver).is_err()),
+        // macOS may enforce a smaller kernel datagram ceiling first.
+        Err(error) => assert_eq!(error.raw_os_error(), Some(libc::EMSGSIZE)),
+    }
 }

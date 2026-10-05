@@ -61,6 +61,9 @@ pub enum SurfaceTransport {
     /// macOS zero-copy image. The IOSurface id is valid only for the local
     /// owner session and must be looked up by the receiving process.
     IoSurface { surface_id: u32 },
+    /// A non-global surface whose right arrives on the local Mach channel,
+    /// correlated by source ID, generation and surface ID.
+    IoSurfaceMachPort { surface_id: u32 },
 }
 
 /// Optional owner-local return path for bounded interaction events. The
@@ -373,7 +376,9 @@ impl ExternalSurfaceRegistry {
                 }
                 let slots = match &current.descriptor.transport {
                     SurfaceTransport::SharedMemory { slots, .. } => *slots,
-                    SurfaceTransport::DmaBuf { .. } | SurfaceTransport::IoSurface { .. } => 1,
+                    SurfaceTransport::DmaBuf { .. }
+                    | SurfaceTransport::IoSurface { .. }
+                    | SurfaceTransport::IoSurfaceMachPort { .. } => 1,
                 };
                 if slot >= slots {
                     return Err(format!("external surface slot {slot} is out of range"));
@@ -476,10 +481,13 @@ impl ExternalSurfaceDescriptor {
                     }
                 }
             }
-            SurfaceTransport::IoSurface { surface_id } if *surface_id == 0 => {
+            SurfaceTransport::IoSurface { surface_id }
+            | SurfaceTransport::IoSurfaceMachPort { surface_id }
+                if *surface_id == 0 =>
+            {
                 return Err("IOSurface id must be positive".into());
             }
-            SurfaceTransport::IoSurface { .. } => {}
+            SurfaceTransport::IoSurface { .. } | SurfaceTransport::IoSurfaceMachPort { .. } => {}
         }
         if let Some(SurfaceInputTransport::UnixDatagram { handle_index }) = self.input {
             validate_handle(handle_index, received_handles)?;

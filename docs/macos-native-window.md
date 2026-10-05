@@ -35,14 +35,24 @@ registration alone does not change workspaces or create a visible window.
 ## Boundary and lifetime
 
 The descriptor carries source identity, generation, actual native dimensions,
-BGRA/sRGB format, premultiplied alpha, and IOSurface ID. A dedicated ancillary
+BGRA/sRGB format, premultiplied alpha, and IOSurface ID. Non-global capture
+surfaces use the explicit `io_surface_mach_port` transport. Their native send
+right travels through a local Mach rendezvous named from the owned Canvas Unix
+socket's UID/device/inode; source hash, generation and surface ID correlate the
+two channels. Restarting Canvas requires reconnecting the producer. The bounded
+rights receiver retains at most eight unmatched rights and checks a one-second
+expiry on consumption. Legacy globally lookupable IDs remain a separate transport.
+
+A dedicated ancillary
 datagram FD carries a versioned, generation-bound acceptance receipt. This is not
 an input channel and is not a GPU completion signal.
 
-Canvas looks up and validates the real IOSurface, retains it and increments its
+Canvas resolves the transferred Mach right and validates the real IOSurface,
+retains it and increments its
 use count before acknowledging. The producer holds the capture sample and its
 own use count until acceptance. The renderer retains its native buffer until
-submitted GPU work completes. Unsupported formats, unavailable surfaces, stale
+submitted GPU work completes. The Metal importer uses that retained reference,
+not a second global ID lookup. Unsupported formats, unavailable surfaces, stale
 generations and timeouts fail explicitly.
 
 Capture uses a five-buffer pool and a latest-only, one-sample mailbox. Real capture

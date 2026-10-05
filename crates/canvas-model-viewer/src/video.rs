@@ -554,8 +554,8 @@ impl shader::Primitive for Primitive {
                     };
                     let imported = match &descriptor.transport {
                         SurfaceTransport::SharedMemory { .. } => None,
-                        SurfaceTransport::IoSurface { .. } => {
-                            match crate::external_surface::import_iosurface(device, descriptor) {
+                        SurfaceTransport::IoSurface { .. } | SurfaceTransport::IoSurfaceMachPort { .. } => {
+                            match crate::external_surface::import_retained_iosurface(device, frame) {
                                 Ok(texture) => Some(texture),
                                 Err(error) => {
                                     eprintln!(

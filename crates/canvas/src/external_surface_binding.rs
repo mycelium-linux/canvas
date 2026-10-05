@@ -134,9 +134,18 @@ fn start_server_at(
         .map_err(|error| error.to_string())?;
     let feed = ExternalSurfaceFeed::default();
     let receiver = feed.clone();
+    #[cfg(target_os = "macos")]
+    let rights = canvas_core::native_surface_port::NativeSurfacePortReceiver::bind(&path)?;
     std::thread::Builder::new()
         .name("canvas-external-surfaces".into())
-        .spawn(move || receive(socket, receiver))
+        .spawn(move || {
+            receive(
+                socket,
+                receiver,
+                #[cfg(target_os = "macos")]
+                rights,
+            )
+        })
         .map_err(|error| error.to_string())?;
     Ok((feed, ExternalSurfaceSocketGuard { path }))
 }
@@ -154,18 +163,44 @@ fn prepare_parent(path: &Path) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-fn receive(socket: UnixDatagram, feed: ExternalSurfaceFeed) {
+fn receive(
+    socket: UnixDatagram,
+    feed: ExternalSurfaceFeed,
+    #[cfg(target_os = "macos")]
+    mut rights: canvas_core::native_surface_port::NativeSurfacePortReceiver,
+) {
     let mut consecutive_failures = 0_u32;
     loop {
         match canvas_core::external_surface_ipc::receive(&socket) {
             Ok((message, handles)) => {
                 consecutive_failures = 0;
-                if let Err(error) = feed
+                #[cfg(target_os = "macos")]
+                let native_port = match &message {
+                    canvas_core::external_surface::ExternalSurfaceMessage::Register { surface } => {
+                        match surface.transport {
+                            canvas_core::external_surface::SurfaceTransport::IoSurfaceMachPort { surface_id } => {
+                                match rights.take(&surface.source_id, surface.generation, surface_id) {
+                                    Ok(port) => Some(port),
+                                    Err(error) => { eprintln!("Canvas rejected native surface right: {error}"); continue; }
+                                }
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                let mut inbox = feed
                     .inbox
                     .write()
-                    .expect("Canvas external-surface inbox poisoned")
-                    .apply(message, handles)
-                {
+                    .expect("Canvas external-surface inbox poisoned");
+                #[cfg(target_os = "macos")]
+                let result = match native_port.as_ref() {
+                    Some(port) => inbox.apply_with_native_port(message, handles, port),
+                    None => inbox.apply(message, handles),
+                };
+                #[cfg(not(target_os = "macos"))]
+                let result = inbox.apply(message, handles);
+                if let Err(error) = result {
                     eprintln!("Canvas rejected external surface: {error}");
                 }
             }

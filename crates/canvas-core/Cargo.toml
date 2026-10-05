@@ -16,6 +16,9 @@ sha2 = "0.10"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+mach2 = "0.4.3"
+
 [[bin]]
 name = "canvas-core-ctl"
 path = "src/main.rs"

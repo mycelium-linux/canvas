@@ -18,6 +18,8 @@ mod macos {
     #[link(name = "IOSurface", kind = "framework")]
     unsafe extern "C" {
         fn IOSurfaceLookup(id: u32) -> *mut c_void;
+        fn IOSurfaceLookupFromMachPort(port: u32) -> *mut c_void;
+        fn IOSurfaceGetID(surface: *mut c_void) -> u32;
         fn IOSurfaceGetWidth(surface: *mut c_void) -> usize;
         fn IOSurfaceGetHeight(surface: *mut c_void) -> usize;
         fn IOSurfaceGetPixelFormat(surface: *mut c_void) -> u32;
@@ -35,12 +37,25 @@ mod macos {
     unsafe impl Sync for NativeSurface {}
 
     impl NativeSurface {
-        pub(crate) fn retain(descriptor: &ExternalSurfaceDescriptor) -> Result<Self, String> {
-            let SurfaceTransport::IoSurface { surface_id } = descriptor.transport else {
-                return Err("not an IOSurface registration".into());
+        pub(crate) fn as_ptr(&self) -> *mut c_void {
+            self.0.as_ptr()
+        }
+        pub(crate) fn retain_with_port(
+            descriptor: &ExternalSurfaceDescriptor,
+            port: Option<u32>,
+        ) -> Result<Self, String> {
+            let surface_id = match descriptor.transport {
+                SurfaceTransport::IoSurface { surface_id } => surface_id,
+                SurfaceTransport::IoSurfaceMachPort { surface_id } if port.is_some() => surface_id,
+                _ => return Err("IOSurface registration is missing its native right".into()),
             };
-            let ptr = NonNull::new(unsafe { IOSurfaceLookup(surface_id) })
-                .ok_or_else(|| format!("IOSurface {surface_id} is unavailable"))?;
+            let ptr = NonNull::new(unsafe {
+                match port {
+                    Some(port) => IOSurfaceLookupFromMachPort(port),
+                    None => IOSurfaceLookup(surface_id),
+                }
+            })
+            .ok_or_else(|| format!("IOSurface {surface_id} is unavailable"))?;
             let expected = match descriptor.format {
                 PixelFormat::Bgra8Unorm => u32::from_be_bytes(*b"BGRA"),
                 PixelFormat::Rgba8Unorm => u32::from_be_bytes(*b"RGBA"),
@@ -52,7 +67,8 @@ mod macos {
                 }
             };
             let matches = unsafe {
-                IOSurfaceGetWidth(ptr.as_ptr()) == descriptor.width as usize
+                IOSurfaceGetID(ptr.as_ptr()) == surface_id
+                    && IOSurfaceGetWidth(ptr.as_ptr()) == descriptor.width as usize
                     && IOSurfaceGetHeight(ptr.as_ptr()) == descriptor.height as usize
                     && IOSurfaceGetPixelFormat(ptr.as_ptr()) == expected
             };
