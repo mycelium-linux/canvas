@@ -157,6 +157,7 @@
   "capabilities": {
     "write_scene": true,
     "read_inputs": [
+      "window-cycle",
       "target",
       "query",
       "health",
