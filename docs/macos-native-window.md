@@ -14,7 +14,8 @@ target/release/canvas-native-window --list
 target/release/canvas-native-window config/deploy/neo/simulator-native.json
 ```
 
-Run the updated Canvas first. The example selects the Simulator's iPhone 17 Pro
+Run the updated Canvas first and wait for its control CLI to respond before
+starting capture. The example selects the Simulator's iPhone 17 Pro
 window; edit the explicit selector for another device or app. Missing or ambiguous
 matches fail rather than capturing an entire desktop. Screen Recording permission
 is required for the capture executable. Do not replace the independently installed
@@ -25,11 +26,12 @@ Attach the source using the local Canvas owner's stdin CLI:
 ```sh
 canvasctl <<'EOF'
 surface add-external simulator native/simulator
-surface center simulator 0.7
+workspace save fungos
 EOF
 ```
 
-Use the existing active workspace or switch explicitly before attaching. Capture
+Use the existing active workspace or switch explicitly before attaching; replace
+`fungos` with that workspace's name when saving. Capture
 registration alone does not change workspaces or create a visible window.
 
 ## Boundary and lifetime
@@ -51,9 +53,15 @@ Canvas resolves the transferred Mach right and validates the real IOSurface,
 retains it and increments its
 use count before acknowledging. The producer holds the capture sample and its
 own use count until acceptance. The renderer retains its native buffer until
-submitted GPU work completes. The Metal importer uses that retained reference,
+submitted GPU work completes. Capture requests a transparent background and
+Canvas omits the opaque video matte for alpha-bearing native frames.
+The Metal importer uses that retained reference,
 not a second global ID lookup. Unsupported formats, unavailable surfaces, stale
 generations and timeouts fail explicitly.
+
+Acceptance waits are bounded at ten seconds; successful acknowledgements taking
+over 100 ms are logged. On failure, withdrawal targets the latest sent registration,
+including an unacknowledged pending generation, rather than leaving it retained.
 
 Capture uses a five-buffer pool and a latest-only, one-sample mailbox. Real capture
 idle observations renew the unchanged frame; process liveness alone does not.

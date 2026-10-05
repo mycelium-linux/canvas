@@ -88,6 +88,27 @@ mod macos {
         generation: u64,
     }
     impl Publisher {
+        fn register(
+            &mut self,
+            descriptor: ExternalSurfaceDescriptor,
+            return_socket: &UnixDatagram,
+        ) -> Result<()> {
+            ensure!(
+                descriptor.source_id == self.source && descriptor.generation > self.generation,
+                "native registration identity is stale or mismatched"
+            );
+            let generation = descriptor.generation;
+            ipc::send(
+                &self.socket,
+                &ExternalSurfaceMessage::Register {
+                    surface: descriptor,
+                },
+                &[return_socket.as_fd()],
+            )?;
+            // Track the pending registration even before its receipt arrives.
+            self.generation = generation;
+            Ok(())
+        }
         fn present(&self) -> Result<()> {
             ipc::send(
                 &self.socket,
@@ -245,7 +266,7 @@ mod macos {
                 let surface = &capture_hold.0;
                 let generation = epoch_ns()?.max(publisher.generation.saturating_add(1));
                 let (receipt, return_socket) = UnixDatagram::pair()?;
-                receipt.set_read_timeout(Some(Duration::from_secs(2)))?;
+                receipt.set_read_timeout(Some(Duration::from_secs(10)))?;
                 let descriptor = ExternalSurfaceDescriptor {
                     schema_version: EXTERNAL_SURFACE_VERSION,
                     source_id: publisher.source.clone(),
@@ -280,22 +301,25 @@ mod macos {
                     .map_err(anyhow::Error::msg)?;
                 // Keep the CMSampleBuffer alive until Canvas confirms it has
                 // independently acquired its IOSurface use-count hold.
-                ipc::send(
-                    &publisher.socket,
-                    &ExternalSurfaceMessage::Register {
-                        surface: descriptor,
-                    },
-                    &[return_socket.as_fd()],
-                )?;
+                publisher.register(descriptor, &return_socket)?;
+                // Registration may have committed even if acknowledgement is
+                // delayed. Withdrawal must target this pending generation on
+                // every error path, not the previously presented generation.
+                let acceptance_started = Instant::now();
                 let acknowledgement = ipc::receive_acceptance(&receipt).context(
                     "Canvas did not retain the native frame (requires updated compositor)",
                 )?;
+                if acceptance_started.elapsed() > Duration::from_millis(100) {
+                    eprintln!(
+                        "native acceptance delayed: {} ms",
+                        acceptance_started.elapsed().as_millis()
+                    );
+                }
                 ensure!(
                     acknowledgement.source_id == publisher.source
                         && acknowledgement.generation == generation,
                     "native frame acceptance mismatch"
                 );
-                publisher.generation = generation;
                 publisher.present()?;
                 drop(sample);
                 accepted += 1;
@@ -311,6 +335,50 @@ mod macos {
                 publisher.present()?;
             }
             last_observed = Some(observed);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn shutdown_withdraws_an_unacknowledged_pending_generation() {
+            let (sender, receiver) = UnixDatagram::pair().unwrap();
+            let (_, return_socket) = UnixDatagram::pair().unwrap();
+            let mut publisher = Publisher {
+                socket: sender,
+                source: "native/test".into(),
+                generation: 7,
+            };
+            let descriptor = ExternalSurfaceDescriptor {
+                schema_version: EXTERNAL_SURFACE_VERSION,
+                source_id: "native/test".into(),
+                generation: 8,
+                width: 2,
+                height: 2,
+                format: canvas_core::external_surface::PixelFormat::Bgra8Unorm,
+                color_space: ColorSpace::Srgb,
+                alpha_mode: AlphaMode::Premultiplied,
+                transport: SurfaceTransport::IoSurfaceMachPort { surface_id: 1 },
+                input: None,
+                acceptance: Some(SurfaceInputTransport::UnixDatagram { handle_index: 0 }),
+                streams: vec![],
+            };
+            publisher
+                .register(descriptor.clone(), &return_socket)
+                .unwrap();
+            let (registration, handles) = ipc::receive(&receiver).unwrap();
+            assert!(
+                matches!(registration, ExternalSurfaceMessage::Register { surface } if surface.generation == 8)
+            );
+            assert_eq!(handles.len(), 1);
+            assert!(publisher.register(descriptor, &return_socket).is_err());
+            drop(publisher); // No acceptance or Present has occurred.
+            let (withdrawal, handles) = ipc::receive(&receiver).unwrap();
+            assert!(handles.is_empty());
+            assert!(
+                matches!(withdrawal, ExternalSurfaceMessage::Withdraw { source_id, generation: 8 } if source_id == "native/test")
+            );
         }
     }
 }
