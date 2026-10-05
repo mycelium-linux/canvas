@@ -457,6 +457,7 @@ pub fn apply_named_adapter_batch(
 /// table matches `config/binders/`, so a new binder file can never be
 /// added without registering it here too.
 const BUILT_IN_BINDERS: &[(&str, &str)] = &[
+    ("printer-status-v1", include_str!("../../../config/binders/printer-status-v1.lua")),
     (
         "wiki-race-state-v1",
         include_str!("../../../config/binders/wiki-race-state-v1.lua"),
