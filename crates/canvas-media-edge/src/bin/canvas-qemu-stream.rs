@@ -4,11 +4,11 @@
 //! come directly from QEMU's RFB server, are encoded by the host GPU, and ride
 //! the existing Canvas media plane. No desktop/window capture is involved.
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use canvas::bus::{Bus, BusConfig};
 use canvas_core::unibus::Message;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader, Write},
     os::unix::net::UnixStream,
@@ -18,8 +18,8 @@ use std::{
     time::{Duration, Instant},
 };
 use unibus_media::{
-    TransportRole, VideoCodec, VideoStream, VideoTransport, MEDIA_SCHEMA_VERSION,
-    VIDEO_STREAM_CONTRACT,
+    MEDIA_SCHEMA_VERSION, TransportRole, VIDEO_STREAM_CONTRACT, VideoCodec, VideoStream,
+    VideoTransport,
 };
 
 #[derive(Debug, Deserialize)]
@@ -236,7 +236,7 @@ fn announce(bus: &Bus, config: &Config) -> Result<()> {
         schema_version: MEDIA_SCHEMA_VERSION,
         stream_id: config.stream_id.clone(),
         display_name: config.display_name.clone(),
-        zone: "compute".into(),
+        zone: config.destination.clone(),
         transport: VideoTransport::UdpMpegTs,
         transport_role: TransportRole::Listen,
         endpoint: config.advertised_endpoint.clone(),

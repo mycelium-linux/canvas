@@ -225,6 +225,22 @@
    ]
   },
   {
+   "producer_id": "agora-one-qemu",
+   "token_file": "/home/ajm/.config/unibus/tokens/agora-one-qemu.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "media.video_stream.source"
+   ],
+   "publishes": [
+    "media.video_stream.v1"
+   ],
+   "publish_zones": [
+    "living-room"
+   ]
+  },
+  {
    "producer_id": "macbook-neo-display",
    "token_file": "/home/ajm/.config/unibus/tokens/macbook-neo-display.token",
    "zones": [

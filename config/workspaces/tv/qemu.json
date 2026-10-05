@@ -5,7 +5,7 @@
   "revision": 1,
   "theme": { "source": "project" },
   "background": { "kind": "shader", "shader_id": "smoke-rings", "speed": 0.08 },
-  "chrome": { "title": "visible", "canvas_padding": 28, "surface_gap": 12 },
+  "chrome": { "title": "always", "canvas_padding": 28, "surface_gap": 12 },
   "surfaces": [{
     "id": "agora-qemu-display",
     "title": "Agora One · QEMU",
