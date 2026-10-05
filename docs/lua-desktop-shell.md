@@ -58,10 +58,11 @@ macOS; it does not yet attach its windows to Canvas. These are separate operatio
 
 The local external-surface contract already supports `IoSurface`, and the Metal
 renderer has an importer in `canvas-model-viewer/src/external_surface.rs`.
-However, `canvas-window-stream` currently produces H.264, not IOSurface frames.
-There is no automatic native-window-to-IOSurface producer integrated with the
-launcher today. A native capture view must not be labelled zero-copy merely
-because the renderer contains that importer.
+`canvas-window-stream` produces H.264 for remote transport. The separate
+`canvas-native-window` producer now implements direct owner-local capture; see
+[the local window runbook](macos-native-window.md). It is not yet integrated with
+the launcher. Live capture and GPU import must be verified before claiming a
+successful attachment.
 
 The direct local attachment belongs in the capture adapter: select an explicit
 window through ScreenCaptureKit, register a volatile external-surface generation,

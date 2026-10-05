@@ -38,3 +38,7 @@ path = "src/bin/simulator.rs"
 [[bin]]
 name = "canvas-window-stream"
 path = "src/bin/window.rs"
+
+[[bin]]
+name = "canvas-native-window"
+path = "src/bin/native-window.rs"

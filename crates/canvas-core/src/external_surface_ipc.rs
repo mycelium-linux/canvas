@@ -22,6 +22,32 @@ use std::{
 pub const MAX_EXTERNAL_SURFACE_MESSAGE: usize = 64 * 1024;
 pub const MAX_EXTERNAL_SURFACE_HANDLES: usize = 8;
 
+pub fn send_acceptance(
+    socket: &UnixDatagram,
+    receipt: &crate::external_surface::ExternalSurfaceAcceptance,
+) -> io::Result<()> {
+    receipt.validate().map_err(invalid)?;
+    let payload = serde_json::to_vec(receipt).map_err(invalid)?;
+    if socket.send(&payload)? != payload.len() {
+        return Err(invalid("truncated external-surface acceptance"));
+    }
+    Ok(())
+}
+
+pub fn receive_acceptance(
+    socket: &UnixDatagram,
+) -> io::Result<crate::external_surface::ExternalSurfaceAcceptance> {
+    let mut payload = vec![0; MAX_EXTERNAL_SURFACE_MESSAGE + 1];
+    let read = socket.recv(&mut payload)?;
+    if read > MAX_EXTERNAL_SURFACE_MESSAGE {
+        return Err(invalid("external-surface acceptance is too large"));
+    }
+    let receipt: crate::external_surface::ExternalSurfaceAcceptance =
+        serde_json::from_slice(&payload[..read]).map_err(invalid)?;
+    receipt.validate().map_err(invalid)?;
+    Ok(receipt)
+}
+
 pub fn send(
     socket: &UnixDatagram,
     message: &ExternalSurfaceMessage,
@@ -236,6 +262,7 @@ mod tests {
                     slots: 1,
                 },
                 input: None,
+                acceptance: None,
                 streams: Vec::new(),
             },
         };
@@ -265,6 +292,7 @@ mod tests {
                     slots: 1,
                 },
                 input: None,
+                acceptance: None,
                 streams: Vec::new(),
             },
         };
@@ -318,4 +346,22 @@ mod tests {
             ExternalSurfaceHostEvent::Visibility(visibility)
         );
     }
+}
+#[test]
+fn acceptance_is_bounded_versioned_and_generation_bound() {
+    let (sender, receiver) = UnixDatagram::pair().unwrap();
+    let mut receipt = crate::external_surface::ExternalSurfaceAcceptance {
+        schema_version: 1,
+        source_id: "native/simulator".into(),
+        generation: 42,
+    };
+    send_acceptance(&sender, &receipt).unwrap();
+    assert_eq!(receive_acceptance(&receiver).unwrap(), receipt);
+    receipt.generation = 0;
+    assert!(send_acceptance(&sender, &receipt).is_err());
+    receipt.generation = 42;
+    receipt.schema_version = 99;
+    assert!(send_acceptance(&sender, &receipt).is_err());
+    sender.send(&vec![b' '; MAX_EXTERNAL_SURFACE_MESSAGE + 1]).unwrap();
+    assert!(receive_acceptance(&receiver).is_err());
 }

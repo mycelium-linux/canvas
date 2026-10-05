@@ -239,6 +239,10 @@ pub struct ExternalSurfaceDescriptor {
     pub transport: SurfaceTransport,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<SurfaceInputTransport>,
+    /// Optional owner-local registration receipt. The receipt proves native
+    /// resources were retained, NOT that a frame was rendered or GPU-complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceptance: Option<SurfaceInputTransport>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub streams: Vec<SurfaceStreamRequirement>,
 }
@@ -260,6 +264,24 @@ pub enum ExternalSurfaceMessage {
         source_id: String,
         generation: u64,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalSurfaceAcceptance {
+    pub schema_version: u32,
+    pub source_id: String,
+    pub generation: u64,
+}
+
+impl ExternalSurfaceAcceptance {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_source_id(&self.source_id)?;
+        if self.schema_version != EXTERNAL_SURFACE_VERSION || self.generation == 0 {
+            return Err("invalid external-surface acceptance generation/version".into());
+        }
+        Ok(())
+    }
 }
 
 /// Latest accepted presentation for one registered source. GPU allocations
@@ -462,6 +484,12 @@ impl ExternalSurfaceDescriptor {
         if let Some(SurfaceInputTransport::UnixDatagram { handle_index }) = self.input {
             validate_handle(handle_index, received_handles)?;
         }
+        if let Some(SurfaceInputTransport::UnixDatagram { handle_index }) = self.acceptance {
+            validate_handle(handle_index, received_handles)?;
+            if self.input == self.acceptance {
+                return Err("acceptance and input must use separate return channels".into());
+            }
+        }
         let mut stream_ids = std::collections::BTreeSet::new();
         for stream in &self.streams {
             validate_stream_token("stream id", &stream.stream_id)?;
@@ -581,6 +609,7 @@ mod tests {
                 slots: 2,
             },
             input: None,
+            acceptance: None,
             streams: Vec::new(),
         }
     }

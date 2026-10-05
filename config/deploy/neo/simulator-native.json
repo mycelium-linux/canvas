@@ -1,0 +1,7 @@
+{
+  "source_id": "native/simulator",
+  "selector": {"bundle_id": "com.apple.iphonesimulator", "title_contains": "iPhone 17 Pro"},
+  "fps": 30,
+  "capture_scale": 2.0,
+  "max_height": 1530
+}

@@ -49,8 +49,8 @@ struct Uniforms {
     // Scalars, not a vec3: a vec3 here aligns the struct to 16 and grows it to
     // 48 bytes against a 32-byte binding, which wgpu rejects outright.
     _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
+    premultiplied: f32,
+    native_alpha: f32,
 };
 
 @group(0) @binding(0) var frame: texture_2d<f32>;
@@ -108,7 +108,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let point = uv * content_size;
     let q = abs(point - content_size * 0.5) - (content_size * 0.5 - vec2<f32>(radius));
     let distance = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - radius;
-    let mask = 1.0 - smoothstep(-1.25, 1.25, distance);
+    let mask = select(1.0 - smoothstep(-1.25, 1.25, distance), 1.0, u.native_alpha > 0.5);
     // A camera that has stopped keeps its last frame on the texture forever, so
     // a dead feed has to be marked. NOT by draining colour: these cameras
     // switch to infrared at night and produce legitimately black-and-white
@@ -117,7 +117,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // for the scene. Computed in framebuffer space to keep the bands an even
     // width whatever size the surface is.
     let band = step(0.5, fract((in.position.x + in.position.y) / 24.0));
-    let dimmed = frame_color.rgb * (1.0 - 0.45 * u.staleness);
+    let rgb = select(frame_color.rgb, frame_color.rgb / max(frame_color.a, 0.00001), u.premultiplied > 0.5);
+    let dimmed = rgb * (1.0 - 0.45 * u.staleness);
     let barred = dimmed * (1.0 - 0.35 * u.staleness * band);
     return vec4<f32>(barred, frame_color.a * mask);
 }
@@ -210,6 +211,22 @@ struct TextureState {
     /// is one line rather than one per frame.
     reported_mismatch: Option<(usize, usize)>,
     source_generation: u64,
+    native_hold: Option<DeferredNativeHold>,
+}
+
+struct DeferredNativeHold {
+    surface: Option<std::sync::Arc<crate::native_surface::NativeSurface>>,
+    queue: wgpu::Queue,
+}
+
+impl Drop for DeferredNativeHold {
+    fn drop(&mut self) {
+        if let Some(surface) = self.surface.take() {
+            // Replacement/trim occurs in prepare, before this frame's draw.
+            // Earlier uses of this texture are in already-submitted work.
+            self.queue.on_submitted_work_done(move || drop(surface));
+        }
+    }
 }
 
 struct Pipeline {
@@ -282,6 +299,7 @@ impl Pipeline {
             generation: self.generation,
             reported_mismatch: None,
             source_generation,
+            native_hold: None,
         }
     }
 }
@@ -301,8 +319,14 @@ impl<Message> shader::Program<Message> for Program<Message> {
         // primitive own its redraw cadence, just like the animated background,
         // without mutating the workspace revision on every video frame.
         if let iced::Event::Window(iced::window::Event::RedrawRequested(now)) = event {
+            let interval = match &self.source {
+                FrameSource::External(frame) if frame.native_surface.is_some() => {
+                    std::time::Duration::from_millis(33)
+                }
+                _ => REDRAW_INTERVAL,
+            };
             return Some(iced::widget::Action::request_redraw_at(
-                *now + REDRAW_INTERVAL,
+                *now + interval,
             ));
         }
         let Some(hook) = self.on_orbit.as_ref() else {
@@ -553,7 +577,7 @@ impl shader::Primitive for Primitive {
                     (format, imported)
                 }
             };
-            let state = pipeline.texture_state(
+            let mut state = pipeline.texture_state(
                 device,
                 source_width,
                 source_height,
@@ -561,6 +585,11 @@ impl shader::Primitive for Primitive {
                 format,
                 imported,
             );
+            if let FrameSource::External(frame) = &self.source {
+                state.native_hold = frame.native_surface.clone().map(|surface| DeferredNativeHold {
+                    surface: Some(surface), queue: queue.clone(),
+                });
+            }
             pipeline.textures.insert(self.ticket, state);
         }
         let state = pipeline
@@ -599,8 +628,8 @@ impl shader::Primitive for Primitive {
             source_height as f32,
             staleness,
             0.0,
-            0.0,
-            0.0,
+            if matches!(&self.source, FrameSource::External(frame) if frame.descriptor.alpha_mode == canvas_core::external_surface::AlphaMode::Premultiplied) { 1.0 } else { 0.0 },
+            if matches!(&self.source, FrameSource::External(frame) if frame.descriptor.alpha_mode != canvas_core::external_surface::AlphaMode::Opaque) { 1.0 } else { 0.0 },
         ];
         queue.write_buffer(&state.uniform, 0, unsafe {
             std::slice::from_raw_parts(uniforms.as_ptr().cast::<u8>(), UNIFORM_BYTES as usize)

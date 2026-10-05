@@ -30,6 +30,7 @@ pub struct ExternalSurfaceFrame {
     pub slot: u8,
     pub presented_at_unix_ns: u64,
     shared_memory: Option<Arc<Mmap>>,
+    pub(crate) native_surface: Option<Arc<crate::native_surface::NativeSurface>>,
 }
 
 impl ExternalSurfaceFrame {
@@ -76,6 +77,7 @@ pub struct ExternalSurfaceInbox {
     registration_handles: BTreeMap<(String, u64), Vec<OwnedFd>>,
     shared_memory: BTreeMap<(String, u64), Arc<Mmap>>,
     input_sockets: BTreeMap<(String, u64), Arc<UnixDatagram>>,
+    native_surfaces: BTreeMap<(String, u64), Arc<crate::native_surface::NativeSurface>>,
 }
 
 impl ExternalSurfaceInbox {
@@ -153,12 +155,52 @@ impl ExternalSurfaceInbox {
             },
             _ => None,
         };
+        let native_surface = match &message {
+            ExternalSurfaceMessage::Register { surface }
+                if matches!(surface.transport, SurfaceTransport::IoSurface { .. }) =>
+            {
+                Some(Arc::new(crate::native_surface::NativeSurface::retain(
+                    surface,
+                )?))
+            }
+            _ => None,
+        };
+        let acceptance = match &message {
+            ExternalSurfaceMessage::Register { surface } => surface
+                .acceptance
+                .map(|transport| {
+                    let SurfaceInputTransport::UnixDatagram { handle_index } = transport;
+                    let socket = UnixDatagram::from(
+                        handles[usize::from(handle_index)]
+                            .try_clone()
+                            .map_err(|error| format!("clone acceptance socket: {error}"))?,
+                    );
+                    socket
+                        .set_nonblocking(true)
+                        .map_err(|error| error.to_string())?;
+                    Ok::<_, String>((
+                        socket,
+                        canvas_core::external_surface::ExternalSurfaceAcceptance {
+                            schema_version: EXTERNAL_SURFACE_VERSION,
+                            source_id: surface.source_id.clone(),
+                            generation: surface.generation,
+                        },
+                    ))
+                })
+                .transpose()?,
+            _ => None,
+        };
         let change = self.registry.apply(message, handles.len())?;
         if let Some((source_id, generation)) = registration {
             self.registration_handles
                 .retain(|(id, _), _| id != &source_id);
             self.shared_memory.retain(|(id, _), _| id != &source_id);
             self.input_sockets.retain(|(id, _), _| id != &source_id);
+            self.native_surfaces.retain(|(id, _), _| id != &source_id);
+            if let Some(surface) = native_surface {
+                self.native_surfaces
+                    .insert((source_id.clone(), generation), surface);
+            }
             if let Some(mapping) = shared_mapping {
                 self.shared_memory
                     .insert((source_id.clone(), generation), mapping);
@@ -174,6 +216,11 @@ impl ExternalSurfaceInbox {
             self.registration_handles.remove(&key);
             self.shared_memory.remove(&key);
             self.input_sockets.remove(&key);
+            self.native_surfaces.remove(&key);
+        }
+        if let Some((socket, receipt)) = acceptance {
+            canvas_core::external_surface_ipc::send_acceptance(&socket, &receipt)
+                .map_err(|error| format!("send registration acceptance: {error}"))?;
         }
         Ok(change)
     }
@@ -197,6 +244,7 @@ impl ExternalSurfaceInbox {
             slot,
             presented_at_unix_ns,
             shared_memory,
+            native_surface: self.native_surfaces.get(&key).cloned(),
         })
     }
 
@@ -456,6 +504,7 @@ mod tests {
     use canvas_core::external_surface::{
         AlphaMode, ColorSpace, EXTERNAL_SURFACE_VERSION, FrameSync,
     };
+    use std::os::fd::AsFd;
 
     #[test]
     fn sampled_formats_are_explicit() {
@@ -494,6 +543,7 @@ mod tests {
                 slots: 2,
             },
             input: None,
+            acceptance: None,
             streams: Vec::new(),
         };
         let mut inbox = ExternalSurfaceInbox::default();
@@ -525,6 +575,8 @@ mod tests {
     #[test]
     fn inbox_publishes_only_presented_registered_generations() {
         let (sender, receiver) = UnixDatagram::pair().unwrap();
+        let file = tempfile::tempfile().unwrap();
+        file.set_len(1280 * 720 * 4).unwrap();
         let descriptor = ExternalSurfaceDescriptor {
             schema_version: EXTERNAL_SURFACE_VERSION,
             source_id: "surf/local".into(),
@@ -534,8 +586,14 @@ mod tests {
             format: PixelFormat::Bgra8Unorm,
             color_space: ColorSpace::DisplayP3,
             alpha_mode: AlphaMode::Opaque,
-            transport: SurfaceTransport::IoSurface { surface_id: 42 },
+            transport: SurfaceTransport::SharedMemory {
+                handle_index: 0,
+                byte_len: 1280 * 720 * 4,
+                stride: 1280 * 4,
+                slots: 1,
+            },
             input: None,
+            acceptance: None,
             streams: Vec::new(),
         };
         canvas_core::external_surface_ipc::send(
@@ -543,7 +601,7 @@ mod tests {
             &ExternalSurfaceMessage::Register {
                 surface: descriptor,
             },
-            &[],
+            &[file.as_fd()],
         )
         .unwrap();
         canvas_core::external_surface_ipc::send(
@@ -597,6 +655,7 @@ mod tests {
                 slots: 1,
             },
             input: Some(SurfaceInputTransport::UnixDatagram { handle_index: 1 }),
+            acceptance: None,
             streams: vec![SurfaceStreamRequirement {
                 stream_id: "synesthesia/transport".into(),
                 contract: "synesthesia.transport.v1".into(),
@@ -645,5 +704,98 @@ mod tests {
         assert!(returned.visible);
         assert_eq!(returned.streams.len(), 1);
         assert_eq!(returned.streams[0].stream_id, "synesthesia/transport");
+    }
+    #[test]
+    fn acceptance_follows_resource_retention_and_rejection_sends_no_receipt() {
+        use std::os::fd::AsFd;
+        let file = tempfile::tempfile().unwrap();
+        file.set_len(16).unwrap();
+        let (sender, receiver) = UnixDatagram::pair().unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_millis(20)))
+            .unwrap();
+        let descriptor = ExternalSurfaceDescriptor {
+            schema_version: 1,
+            source_id: "native/test".into(),
+            generation: 1,
+            width: 2,
+            height: 2,
+            format: PixelFormat::Bgra8Unorm,
+            color_space: ColorSpace::Srgb,
+            alpha_mode: AlphaMode::Premultiplied,
+            transport: SurfaceTransport::SharedMemory {
+                handle_index: 0,
+                byte_len: 16,
+                stride: 8,
+                slots: 1,
+            },
+            input: None,
+            acceptance: Some(SurfaceInputTransport::UnixDatagram { handle_index: 1 }),
+            streams: vec![],
+        };
+        let mut inbox = ExternalSurfaceInbox::default();
+        let register = ExternalSurfaceMessage::Register {
+            surface: descriptor,
+        };
+        inbox
+            .apply(
+                register.clone(),
+                vec![
+                    file.as_fd().try_clone_to_owned().unwrap(),
+                    sender.as_fd().try_clone_to_owned().unwrap(),
+                ],
+            )
+            .unwrap();
+        let receipt = canvas_core::external_surface_ipc::receive_acceptance(&receiver).unwrap();
+        assert_eq!(receipt.source_id, "native/test");
+        assert_eq!(receipt.generation, 1);
+        assert!(
+            inbox.frame("native/test").is_none(),
+            "acceptance does not imply presentation"
+        );
+        assert!(
+            inbox
+                .apply(
+                    register,
+                    vec![
+                        file.as_fd().try_clone_to_owned().unwrap(),
+                        sender.as_fd().try_clone_to_owned().unwrap()
+                    ]
+                )
+                .is_err()
+        );
+        assert!(canvas_core::external_surface_ipc::receive_acceptance(&receiver).is_err());
+    }
+
+    #[test]
+    fn unavailable_iosurface_is_rejected_before_registration() {
+        let mut inbox = ExternalSurfaceInbox::default();
+        let descriptor = ExternalSurfaceDescriptor {
+            schema_version: 1,
+            source_id: "native/unavailable".into(),
+            generation: 1,
+            width: 2,
+            height: 2,
+            format: PixelFormat::Bgra8Unorm,
+            color_space: ColorSpace::Srgb,
+            alpha_mode: AlphaMode::Opaque,
+            transport: SurfaceTransport::IoSurface {
+                surface_id: u32::MAX,
+            },
+            input: None,
+            acceptance: None,
+            streams: vec![],
+        };
+        assert!(
+            inbox
+                .apply(
+                    ExternalSurfaceMessage::Register {
+                        surface: descriptor
+                    },
+                    vec![]
+                )
+                .is_err()
+        );
+        assert!(inbox.presented("native/unavailable").is_none());
     }
 }

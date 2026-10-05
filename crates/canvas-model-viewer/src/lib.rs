@@ -5,6 +5,7 @@
 //! a narrow adapter supplied by the embedding application.
 
 pub mod external_surface;
+mod native_surface;
 pub mod orbit;
 pub mod state;
 pub mod video;
