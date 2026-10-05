@@ -80,3 +80,20 @@ verify shape, alpha and updates; compilation alone does not prove cross-process
 IOSurface sharing works. Stop the producer before restoring an older Canvas
 binary. Normal process exit withdraws the source; abrupt termination instead
 leaves a stale frame until replacement or Canvas exit.
+
+## Neo verification, 2026-10-05
+
+The installed Canvas app and `~/.local/bin/canvas-native-window` were verified
+together against Simulator's iPhone 17 Pro. A 682 × 1530 capture was rendered in
+the saved `fungos` workspace beside the existing analog clock. Canvas screenshots
+confirmed portrait geometry, live content, native transparency and removal of the
+black video matte. Installed Dock Control and Canvas Window Stream helpers were
+not replaced. A rollback shell binary is retained under
+`~/.local/state/canvas/backups/canvas-before-iosurface-20261005`.
+
+Capture is currently a manually started process, not a login service or automatic
+launcher attachment. Keyboard/mouse forwarding is not implemented in this slice.
+Thirty FPS is the configured capture target, not a measured display-FPS guarantee.
+The initial two-second receipt deadline timed out under build pressure during a
+longer soak; the pending-generation cleanup regression test passes, and the final
+producer uses the bounded ten-second wait with slow-acceptance logging.
