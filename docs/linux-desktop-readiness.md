@@ -1,8 +1,11 @@
 # Canvas Linux desktop readiness
 
 Canvas owns surface composition, workspace intent, focus and presentation.
-The current Linux native-window provider is Sway (`canvas-linux`); the iced
-Canvas application is not a Wayland server. Native application lifecycle,
+The Linux adapter in this checkout uses Sway (`canvas-linux`). Home-Pi currently
+runs a newer deployed `canvas-linux desktop-compositor start` that owns the
+Wayland/KMS session and replaces Sway. Its source must be reconciled with this
+checkout before changing native compositor behavior. The iced Canvas
+application itself is a Wayland client. Native application lifecycle,
 clipboard, portals and secure session locking belong to platform providers.
 Remote applications continue to own their application state.
 
