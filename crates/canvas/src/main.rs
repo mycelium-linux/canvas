@@ -740,6 +740,8 @@ struct App {
     theme_picker: Option<::canvas::theme_picker::ThemePicker>,
     project_picker: Option<::canvas::project_picker::ProjectPicker>,
     project_switcher: Option<::canvas::shell_launcher::Launcher>,
+    #[cfg(feature = "lua-scenes")]
+    desktop_bar: ::canvas::shell_presentation::Presentation,
     jarvis_visible: bool,
     hud_visible: bool,
     scale_factor: f64,
@@ -1153,6 +1155,8 @@ impl App {
             theme_picker: None,
             project_picker: None,
             project_switcher: None,
+            #[cfg(feature = "lua-scenes")]
+            desktop_bar: Default::default(),
             jarvis_visible: true,
             hud_visible: false,
             scale_factor: 1.0,
@@ -1260,6 +1264,8 @@ impl App {
         app.publish_active_project();
         app.publish_wanted_video();
         app.ensure_scene_decoded();
+        #[cfg(feature = "lua-scenes")]
+        app.refresh_desktop_bar(true);
         app.reset_background_animation();
         Ok(app)
     }
@@ -1773,6 +1779,8 @@ impl App {
                 }
                 let clock_second = now_unix_ms() / 1_000;
                 if clock_second != self.last_clock_second {
+                    #[cfg(feature = "lua-scenes")]
+                    self.refresh_desktop_bar(true);
                     if self.project_switcher.is_some() {
                         self.refresh_launcher_scene();
                     }
@@ -3768,10 +3776,41 @@ impl App {
             if let Some(launcher) = self.project_switcher.as_mut()
                 && let Err(error) = launcher.render(theme, now_unix_ms())
             {
-                launcher.scene = None;
                 launcher.status = format!("Launcher Lua error: {error}");
                 self.status = launcher.status.clone();
             }
+        }
+    }
+
+    #[cfg(feature = "lua-scenes")]
+    fn refresh_desktop_bar(&mut self, poll_files: bool) {
+        use ::canvas::lua_module::{ModuleInputSnapshot, ModuleInputValue as Value, ModuleThemeTokens};
+        let visual = self.presented_visual_theme();
+        let accent = self.effective_theme(&self.document).accent();
+        let now = canvas_widgets::live::chrono_now();
+        let sources = self.decoded.values().filter(|s| matches!(s.source, ContentSource::LiveVideo { .. })).count();
+        let creator = self.decoded.values().any(|s| matches!(&s.source, ContentSource::Prompt { task_kinds, .. } if !task_kinds.is_empty()));
+        let values = BTreeMap::from([
+            ("width".into(), Value::Number(f64::from(self.frame.width.max(1)))),
+            ("height".into(), Value::Number(f64::from(::canvas::DESKTOP_BAR_HEIGHT))),
+            ("workspace".into(), Value::Text(workspace_identity_name(&self.catalog, &self.document.project_id).chars().take(24).collect::<String>().to_uppercase())),
+            ("page".into(), Value::Text(self.document.active_page_name().chars().take(20).collect::<String>().to_uppercase())),
+            ("clock".into(), Value::Text(format!("{:02}:{:02}:{:02}", now.hour, now.minute, now.second))),
+            ("sources".into(), Value::Number(sources as f64)),
+            ("back".into(), Value::Boolean(self.jump_history.can_go_back())),
+            ("forward".into(), Value::Boolean(self.jump_history.can_go_forward())),
+            ("create".into(), Value::Boolean(creator)),
+        ]);
+        let snapshot = ModuleInputSnapshot { revision: 1, now_ms: (now_unix_ms() / 1000 * 1000).max(1), values };
+        let theme = ModuleThemeTokens::from_visual(&visual, accent);
+        let artifact = ::canvas::shell_presentation::DESKTOP_BAR;
+        let result = if poll_files {
+            self.desktop_bar.refresh_files(artifact, snapshot, theme)
+        } else {
+            self.desktop_bar.refresh_current(artifact, snapshot, theme)
+        };
+        if let Err(error) = result {
+            self.status = format!("Desktop bar Lua error (last good retained): {error}");
         }
     }
 
@@ -6404,7 +6443,7 @@ impl App {
         };
         let shell_height = self
             .overlay_on_viewport(self.overlays.fpl_mark, self.frame)
-            .then_some(44_u32)
+            .then_some(::canvas::DESKTOP_BAR_HEIGHT)
             .unwrap_or_default();
         let content_frame = Rect {
             height: self.frame.height.saturating_sub(shell_height).max(1),
@@ -6726,6 +6765,8 @@ impl App {
     }
 
     fn bump(&mut self) {
+        #[cfg(feature = "lua-scenes")]
+        self.refresh_desktop_bar(false);
         self.runtime_revision = self.runtime_revision.saturating_add(1);
         // Every document change lands here, which is the only place that sees
         // all of them: applying a board, switching project and paging all
@@ -7938,7 +7979,31 @@ impl App {
         viewport: LogicalSize,
     ) -> Element<'static, Message> {
         let visual = self.presented_visual_theme();
-        let children = buttons
+        let children = self.native_module_buttons(buttons, viewport, |control| {
+            (control.enabled && self.module_bus.connected()).then(|| Message::ModuleActivate {
+                surface_id: surface_id.to_owned(), target_id: control.id.clone(),
+            })
+        });
+        let mut children = children;
+        if !buttons.is_empty() && !self.module_bus.connected() {
+            children.push(
+                container(text("CONTROLS OFFLINE · Unibus session unavailable")
+                    .size(visual.metrics.micro).color(color(visual.palette.warning)))
+                    .padding(iced::Padding { top: (viewport.height as f32 - 22.0).max(0.0), left: 12.0, right: 0.0, bottom: 0.0 }).into(),
+            );
+        }
+        stack(children).into()
+    }
+
+    #[cfg(feature = "lua-scenes")]
+    fn native_module_buttons(
+        &self,
+        buttons: &[::canvas::lua_module::ModuleButton],
+        viewport: LogicalSize,
+        action: impl Fn(&::canvas::lua_module::ModuleButton) -> Option<Message>,
+    ) -> Vec<Element<'static, Message>> {
+        let visual = self.presented_visual_theme();
+        buttons
             .iter()
             .map(|control| {
                 let [x, y] = scene_node_position([control.x, control.y, 0.0], viewport);
@@ -7951,12 +8016,7 @@ impl App {
                 )
                 .width(width)
                 .height(height)
-                .on_press_maybe((control.enabled && self.module_bus.connected()).then(|| {
-                    Message::ModuleActivate {
-                        surface_id: surface_id.to_owned(),
-                        target_id: control.id.clone(),
-                    }
-                }))
+                .on_press_maybe(action(control))
                 .style(move |_, status| {
                     canvas_widgets::live::app_chrome::cube_button_style(visual, false, status)
                 });
@@ -7969,25 +8029,7 @@ impl App {
                     })
                     .into()
             })
-            .collect::<Vec<Element<'static, Message>>>();
-        let mut children = children;
-        if !buttons.is_empty() && !self.module_bus.connected() {
-            children.push(
-                container(
-                    text("CONTROLS OFFLINE · Unibus session unavailable")
-                        .size(visual.metrics.micro)
-                        .color(color(visual.palette.warning)),
-                )
-                .padding(iced::Padding {
-                    top: (viewport.height as f32 - 22.0).max(0.0),
-                    left: 12.0,
-                    right: 0.0,
-                    bottom: 0.0,
-                })
-                .into(),
-            );
-        }
-        stack(children).into()
+            .collect()
     }
 
     #[cfg(feature = "lua-scenes")]
@@ -9453,7 +9495,7 @@ impl App {
         let text_color = color(palette.text);
         let shell_bar_height = self
             .overlay_on_viewport(self.overlays.fpl_mark, viewport)
-            .then_some(44_u32)
+            .then_some(::canvas::DESKTOP_BAR_HEIGHT)
             .unwrap_or_default();
         let content_frame = Rect {
             height: self.frame.height.saturating_sub(shell_bar_height).max(1),
@@ -9988,13 +10030,9 @@ impl App {
             .spacing(7)
             .align_y(iced::Alignment::Center);
             let health = row![
-                text(format!("{live_sources} LIVE"))
+                text(format!("{live_sources} SOURCES"))
                     .size(10)
                     .color(Color { a: 0.72, ..primary }),
-                text("●").size(8).color(Color {
-                    a: 0.88,
-                    ..color(palette.success)
-                }),
                 text(clock).size(12).color(Color {
                     a: 0.94,
                     ..text_color
@@ -10031,6 +10069,25 @@ impl App {
                     },
                     ..Default::default()
                 });
+            let signature: Element<'static, Message> = signature.into();
+            #[cfg(feature = "lua-scenes")]
+            let signature = if let Some(presentation) = self.desktop_bar.retained() {
+                let size = LogicalSize { width: f64::from(viewport.width), height: f64::from(shell_bar_height) };
+                let controls = self.native_module_buttons(&presentation.buttons, size, |control| {
+                    if !control.enabled { return None; }
+                    match control.id.as_str() {
+                        "back" => self.jump_history.can_go_back().then_some(Message::ShellBack),
+                        "forward" => self.jump_history.can_go_forward().then_some(Message::ShellForward),
+                        "launcher" => Some(Message::ShellProjects),
+                        "create" => has_creator.then_some(Message::ShellNewTask),
+                        _ => None,
+                    }
+                });
+                let mut children = vec![self.scene_layer(&presentation.scene, size)];
+                children.extend(controls);
+                container(stack(children)).width(Length::Fill)
+                    .height(Length::Fixed(shell_bar_height as f32)).clip(true).into()
+            } else { signature };
             layers.push(
                 container(signature)
                     .width(Length::Fill)

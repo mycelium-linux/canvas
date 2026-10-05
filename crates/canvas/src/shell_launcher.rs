@@ -376,6 +376,8 @@ pub struct Launcher {
     pub loading: bool,
     #[cfg(feature = "lua-scenes")]
     pub scene: Option<crate::Scene>,
+    #[cfg(feature = "lua-scenes")]
+    presentation: crate::shell_presentation::Presentation,
 }
 impl Launcher {
     pub fn new() -> Result<Self, String> {
@@ -392,6 +394,8 @@ impl Launcher {
             loading: true,
             #[cfg(feature = "lua-scenes")]
             scene: None,
+            #[cfg(feature = "lua-scenes")]
+            presentation: Default::default(),
         })
     }
     pub fn matches(&self) -> Vec<&Entry> {
@@ -523,10 +527,7 @@ impl Launcher {
         theme: crate::lua_module::ModuleThemeTokens,
         now: u64,
     ) -> Result<(), String> {
-        use crate::{
-            lua_module::{LuaModule, ModuleInputSnapshot, ModuleInputValue, ModuleManifest},
-            lua_scene::{LuaSceneCapabilities, LuaSceneLimits},
-        };
+        use crate::lua_module::{ModuleInputSnapshot, ModuleInputValue};
         let mut values = std::collections::BTreeMap::new();
         let fresh =
             self.catalog.is_some() && now.saturating_sub(self.observed) < LEASE_MS && !self.busy;
@@ -568,38 +569,21 @@ impl Launcher {
             );
         }
         values.insert("count".into(), ModuleInputValue::Number(rows.len() as f64));
-        let read = |name: &str, fallback: &str| -> Result<String, String> {
-            Ok(
-                crate::runtime_config::read(std::path::Path::new(name), 32 * 1024)
-                    .map_err(|e| e.to_string())?
-                    .map(|b| String::from_utf8(b).map_err(|e| e.to_string()))
-                    .transpose()?
-                    .unwrap_or_else(|| fallback.into()),
+        self.presentation
+            .refresh_files(
+                crate::shell_presentation::DESKTOP_LAUNCHER,
+                ModuleInputSnapshot {
+                    revision: self.generation,
+                    now_ms: (now / 1000 * 1000).max(1),
+                    values,
+                },
+                theme,
             )
-        };
-        let manifest = read(
-            "modules/desktop-launcher-v1.json",
-            include_str!("../../../config/modules/desktop-launcher-v1.json"),
-        )?;
-        let source = read(
-            "modules/desktop-launcher-v1.lua",
-            include_str!("../../../config/modules/desktop-launcher-v1.lua"),
-        )?;
-        let module = LuaModule::load(
-            ModuleManifest::parse(&manifest).map_err(|e| e.to_string())?,
-            &source,
-            ModuleInputSnapshot {
-                revision: self.generation,
-                now_ms: now,
-                values,
-            },
-            theme,
-            std::collections::BTreeMap::new(),
-            LuaSceneCapabilities::default(),
-            LuaSceneLimits::default(),
-        )
-        .map_err(|e| e.to_string())?;
-        self.scene = Some(module.retained().scene.clone());
+            .map_err(|e| e.to_string())?;
+        self.scene = self
+            .presentation
+            .retained()
+            .map(|output| output.scene.clone());
         Ok(())
     }
 }

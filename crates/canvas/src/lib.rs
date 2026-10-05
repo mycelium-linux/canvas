@@ -41,6 +41,8 @@ pub mod performance;
 pub mod project_picker;
 pub mod project_switcher;
 pub mod shell_launcher;
+#[cfg(feature = "lua-scenes")]
+pub mod shell_presentation;
 pub mod reconcile;
 pub mod runtime_config;
 pub mod screensaver;
@@ -55,6 +57,7 @@ pub mod workspace_mirror;
 pub mod workspace_store;
 
 pub const SCHEMA_VERSION: u32 = 1;
+pub const DESKTOP_BAR_HEIGHT: u32 = 44;
 const MAX_ITEMS: usize = 1_024;
 const MAX_GRADIENT_STOPS: usize = 8;
 pub const MAX_CANVAS_PADDING: u16 = 96;
