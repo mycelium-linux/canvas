@@ -1,0 +1,63 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,7 +1,7 @@
+ [workspace]
+ members = ["crates/canvas-browser-host", "crates/canvas-feeds", "crates/canvas-alfalfa", "crates/canvas-bifrost", "crates/canvas-fab", "crates/canvas-shroud", "crates/canvas-frigate", "crates/canvas-media-edge", "crates/canvas-model-host", "crates/canvas-metrics", "crates/canvas-sse", "crates/canvas", "crates/canvas-core", "crates/canvas-linux", "crates/canvas-mac", "crates/canvas-control", "crates/canvas-widgets", "crates/canvas-survey", "crates/canvas-agents"]
+ default-members = ["crates/canvas-core", "crates/canvas-linux", "crates/canvas-mac"]
+-exclude = ["vendor/coherence-tokens"]
++exclude = ["vendor/coherence-tokens", "vendor/coherence-native"]
+ resolver = "2"
+ 
+ [workspace.package]
+@@ -15,6 +15,8 @@
+ schemars = "1"
+ canvas-core = { path = "crates/canvas-core" }
+ canvas = { path = "crates/canvas" }
++fpl-gfx = { git = "https://github.com/ajmwagar/gfx.git", rev = "ba980e8251ec65d3fc25bcd9cfa3b882ca0e1034" }
++coherence-native = { path = "vendor/coherence-native", default-features = false, features = ["gfx"] }
+ anyhow = "1"
+ tempfile = "3"
+ coherence-tokens = { path = "vendor/coherence-tokens" }
+--- a/crates/canvas-widgets/Cargo.toml
++++ b/crates/canvas-widgets/Cargo.toml
+@@ -7,6 +7,9 @@
+ serde.workspace = true
+ serde_json.workspace = true
+ canvas-core.workspace = true
++fpl-gfx.workspace = true
++coherence-native = { workspace = true, optional = true }
++iced_wgpu = "0.14"
+ iced = { version = "0.14", default-features = false, features = ["wgpu", "canvas", "image-without-codecs", "tokio"], optional = true }
+ # Only for callers that publish these types over a schema-carrying protocol (MCP).
+ schemars = { version = "1", optional = true }
+@@ -16,5 +19,5 @@
+ 
+ [features]
+ default = []
+-live = ["dep:iced", "dep:libc"]
++live = ["dep:iced", "dep:libc", "dep:coherence-native"]
+ schema = ["dep:schemars"]
+--- a/crates/canvas-widgets/src/live.rs
++++ b/crates/canvas-widgets/src/live.rs
+@@ -26,6 +26,8 @@
+ use iced::{Color, ContentFit, Element, Length, Point, Rectangle, Renderer, Size, Theme};
+ 
+ mod clock;
++mod gfx_clock;
++pub mod gfx_theme;
+ mod quality;
+ mod quant;
+ use clock::AnalogClockProgram;
+@@ -431,6 +433,12 @@
+                 .height(Length::Fill)
+                 .center(Length::Fill)
+                 .into(),
++                ClockMode::Analog if !gfx_clock::legacy_requested() => gfx_clock::view(
++                    now.hour as u8,
++                    now.minute as u8,
++                    now.second as f32 + now.millisecond as f32 / 1_000.0,
++                    visual,
++                ),
+                 ClockMode::Analog => Canvas::new(AnalogClockProgram {
+                     hour: now.hour,
+                     minute: now.minute,
