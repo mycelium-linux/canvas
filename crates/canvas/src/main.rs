@@ -733,6 +733,7 @@ struct App {
         Option<::canvas::external_surface_binding::ExternalSurfaceSocketGuard>,
     external_surface_pointer: Option<ExternalPointerCapture>,
     hid_output: hid_output::HidOutput,
+    update_timings: ::canvas::performance::UpdateTimings,
     #[cfg(feature = "lua-scenes")]
     stream_inbox: ::canvas::stream_binding::StreamInbox,
     #[cfg(feature = "lua-scenes")]
@@ -1142,6 +1143,7 @@ impl App {
             _external_surface_socket: external_surface_socket,
             external_surface_pointer: None,
             hid_output: hid_output::HidOutput::default(),
+            update_timings: ::canvas::performance::UpdateTimings::default(),
             #[cfg(feature = "lua-scenes")]
             stream_inbox,
             #[cfg(feature = "lua-scenes")]
@@ -1599,6 +1601,21 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        let started = Instant::now();
+        let previous_target = self.focused_hid_target();
+        let task = self.update_inner(message);
+        if previous_target != self.focused_hid_target() {
+            if let Some(target) = previous_target {
+                if let Err(error) = self.hid_output.release_if_active(&target) {
+                    self.status = format!("Canvas HID release failed: {error}");
+                }
+            }
+        }
+        self.update_timings.record(started.elapsed());
+        task
+    }
+
+    fn update_inner(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::ShellBack => {
                 self.jump_back();
@@ -1835,6 +1852,14 @@ impl App {
             Message::WindowEvent(window, event) => {
                 let mut metrics_changed = false;
                 match event {
+                    iced::window::Event::Unfocused => {
+                        if let Some(target_id) = self.focused_hid_target() {
+                            if let Err(error) = self.hid_output.release(&target_id) {
+                                self.status = format!("Canvas HID release failed: {error}");
+                            }
+                        }
+                        self.desktop_focused = true;
+                    }
                     iced::window::Event::Moved(point) => {
                         if let Some(frame) = self.windows.get_mut(&window) {
                             frame.x = point.x.round() as i32;
@@ -3839,7 +3864,9 @@ impl App {
         }
         if !matches!(
             pending.request.command,
-            Command::Inspect | Command::ReadDocument
+            Command::Inspect
+                | Command::Performance
+                | Command::ReadDocument
         ) && pending
             .request
             .expected_revision
@@ -3878,6 +3905,31 @@ impl App {
                     pending,
                     Outcome::Ok {
                         receipt: Receipt::Snapshot { snapshot },
+                    },
+                );
+                Task::none()
+            }
+            Command::Performance => {
+                let mut metrics = self.update_timings.snapshot();
+                metrics["pending_raster_decodes"] = serde_json::json!(self.live_pending.len());
+                metrics["video_sources"] = serde_json::json!(self.decoded.values().filter_map(|surface| {
+                    let ContentSource::LiveVideo { source_id, path, width, height, .. } = &surface.source else { return None; };
+                    let age = std::fs::metadata(path).ok()
+                        .and_then(|metadata| metadata.modified().ok())
+                        .and_then(|modified| modified.elapsed().ok())
+                        .map(|elapsed| elapsed.as_millis().min(u64::MAX as u128) as u64);
+                    Some(serde_json::json!({
+                        "source_id": source_id,
+                        "width": width,
+                        "height": height,
+                        "published_frame_age_ms": age,
+                        "state": if age.is_none() { "missing" } else if age.is_some_and(|age| age > 2000) { "stale" } else { "recent" },
+                    }))
+                }).collect::<Vec<_>>());
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::Performance { metrics },
                     },
                 );
                 Task::none()
@@ -5967,6 +6019,9 @@ impl App {
     }
 
     fn focused_hid_target(&self) -> Option<String> {
+        if self.desktop_focused {
+            return None;
+        }
         let surface_id = self.document.focused_surface_id.as_deref()?;
         self.hid_target_for_surface(surface_id)
     }
@@ -5989,6 +6044,9 @@ impl App {
         surfaces: &[SurfaceGeometry],
     ) -> bool {
         let pressed = matches!(event, iced::mouse::Event::ButtonPressed(_));
+        if !pressed && self.desktop_focused {
+            return false;
+        }
         let surface_id = if pressed {
             let Ok(Some(target)) = hit_test(
                 surfaces,
@@ -5998,9 +6056,17 @@ impl App {
             ) else {
                 return false;
             };
-            if target.region != HitRegion::Body
-                || self.hid_target_for_surface(&target.surface_id).is_none()
-            {
+            let has_title = self.document.chrome.title != SurfaceTitleMode::Hidden
+                && !matches!(
+                    self.widget_chrome(&target.surface_id),
+                    Some(
+                        canvas_widgets::WidgetChrome::Frameless
+                            | canvas_widgets::WidgetChrome::Integrated
+                    )
+                );
+            let content_region = target.region == HitRegion::Body
+                || (!has_title && target.region == HitRegion::TopBar);
+            if !content_region || self.hid_target_for_surface(&target.surface_id).is_none() {
                 return false;
             }
             target.surface_id
@@ -6019,10 +6085,31 @@ impl App {
         else {
             return false;
         };
-        let inside = position.x >= geometry.bounds.x
-            && position.x <= geometry.bounds.x + geometry.bounds.width
-            && position.y >= geometry.bounds.y
-            && position.y <= geometry.bounds.y + geometry.bounds.height;
+        let Some(loaded) = self.decoded.get(&surface_id) else {
+            return false;
+        };
+        let title_height = if self.document.chrome.title == SurfaceTitleMode::Hidden
+            || matches!(
+                self.widget_chrome(&surface_id),
+                Some(
+                    canvas_widgets::WidgetChrome::Frameless
+                        | canvas_widgets::WidgetChrome::Integrated
+                )
+            ) {
+            0.0
+        } else {
+            f64::from(self.window_chrome().titlebar_height)
+        };
+        let source_pixels = stream_source_pixels(loaded);
+        let Some(content) =
+            ::canvas::stream_geometry::fitted_content(geometry.bounds, source_pixels, title_height)
+        else {
+            return false;
+        };
+        let inside = position.x >= content.x
+            && position.x <= content.x + content.width
+            && position.y >= content.y
+            && position.y <= content.y + content.height;
         if !inside && !matches!(event, iced::mouse::Event::ButtonReleased(_)) {
             return false;
         }
@@ -6040,8 +6127,8 @@ impl App {
         let Some(target_id) = self.hid_target_for_surface(&surface_id) else {
             return false;
         };
-        let x = (position.x - geometry.bounds.x) / geometry.bounds.width;
-        let y = (position.y - geometry.bounds.y) / geometry.bounds.height;
+        let x = (position.x - content.x) / content.width;
+        let y = (position.y - content.y) / content.height;
         if let Err(error) = self.hid_output.pointer(&target_id, x, y, event) {
             self.status = format!("Canvas HID pointer failed: {error}");
         }
@@ -6050,14 +6137,47 @@ impl App {
 
     fn interaction_surfaces(&self) -> Vec<SurfaceGeometry> {
         let Layout::Canvas { placements } = self.document.active_layout() else {
-            return Vec::new();
+            return self
+                .document
+                .surfaces
+                .iter()
+                .filter_map(|surface| {
+                    if self.minimized_surfaces.contains(&surface.id) {
+                        return None;
+                    }
+                    let bounds = layout_surface_bounds(
+                        self.document.active_layout(),
+                        &surface.id,
+                        LogicalRect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: f64::from(self.frame.width),
+                            height: f64::from(self.frame.height),
+                        },
+                    )?;
+                    Some(SurfaceGeometry {
+                        surface_id: surface.id.clone(),
+                        bounds,
+                        z_order: 0,
+                    })
+                })
+                .collect();
+        };
+        let shell_height = self
+            .overlay_on_viewport(self.overlays.fpl_mark, self.frame)
+            .then_some(44_u32)
+            .unwrap_or_default();
+        let content_frame = Rect {
+            height: self.frame.height.saturating_sub(shell_height).max(1),
+            ..self.frame
         };
         placements
             .iter()
             .filter(|placement| !self.minimized_surfaces.contains(&placement.surface_id))
             .map(|placement| SurfaceGeometry {
                 surface_id: placement.surface_id.clone(),
-                bounds: visible_surface_bounds(
+                bounds: self.presented_surface_geometry(
+                    &placement.surface_id,
                     if self.maximized_surfaces.contains(&placement.surface_id) {
                         NormalizedRect {
                             x: 0.0,
@@ -6068,8 +6188,8 @@ impl App {
                     } else {
                         placement.bounds
                     },
-                    self.frame,
-                    self.document.chrome,
+                    content_frame,
+                    shell_height,
                 ),
                 z_order: if self.maximized_surfaces.contains(&placement.surface_id) {
                     i64::MAX
@@ -6078,6 +6198,28 @@ impl App {
                 },
             })
             .collect()
+    }
+
+    fn presented_surface_geometry(
+        &self,
+        surface_id: &str,
+        target: NormalizedRect,
+        content_frame: Rect,
+        shell_height: u32,
+    ) -> LogicalRect {
+        let animated = self.presented_bounds(surface_id, target);
+        let mut bounds = visible_surface_bounds(
+            NormalizedRect {
+                x: animated[0],
+                y: animated[1],
+                width: animated[2],
+                height: animated[3],
+            },
+            content_frame,
+            self.document.chrome,
+        );
+        bounds.y += f64::from(shell_height);
+        bounds
     }
 
     fn handle_external_surface_pointer(
@@ -8109,7 +8251,7 @@ impl App {
                     container(visual)
                         .width(Length::Fill)
                         .height(Length::Fill)
-                        .padding(stream_matte_padding(surface.source_pixels))
+                        .padding(stream_matte_padding(stream_source_pixels(surface)))
                         .style(|_| container::Style {
                             background: Some(Color::BLACK.into()),
                             ..Default::default()
@@ -8963,19 +9105,12 @@ impl App {
                             } else {
                                 placement.bounds
                             };
-                            let animated = self.presented_bounds(&placement.surface_id, target);
-                            let mut bounds = visible_surface_bounds(
-                                NormalizedRect {
-                                    x: animated[0],
-                                    y: animated[1],
-                                    width: animated[2],
-                                    height: animated[3],
-                                },
+                            self.presented_surface_geometry(
+                                &placement.surface_id,
+                                target,
                                 content_frame,
-                                self.document.chrome,
-                            );
-                            bounds.y += f64::from(shell_bar_height);
-                            bounds
+                                shell_bar_height,
+                            )
                         };
                         let bounds = LogicalRect {
                             x: bounds.x - viewport_x,
@@ -10024,8 +10159,23 @@ fn color(rgb: [u8; 3]) -> Color {
 }
 
 fn stream_matte_padding(source_pixels: [u32; 2]) -> f32 {
-    let short_edge = source_pixels[0].min(source_pixels[1]) as f32;
-    (short_edge * 0.008).clamp(6.0, 12.0)
+    ::canvas::stream_geometry::matte_padding(source_pixels)
+}
+
+fn stream_source_pixels(surface: &RuntimeSurface) -> [u32; 2] {
+    match &surface.source {
+        ContentSource::LiveVideo {
+            path,
+            width,
+            height,
+            ..
+        } => canvas_core::video_frame_size_file_for(path)
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|text| canvas_core::parse_frame_size(&text))
+            .map(|(width, height)| [width, height])
+            .unwrap_or([*width, *height]),
+        _ => surface.source_pixels,
+    }
 }
 
 fn workspace_identity_name<'a>(catalog: &'a Catalog, project_id: &'a str) -> &'a str {
@@ -11729,6 +11879,31 @@ fn assemble_presence(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_takeover_disables_remote_keyboard_target() {
+        let mut app = test_app();
+        app.document.surfaces.push(Surface {
+            id: "hid-test".into(),
+            title: "Input test".into(),
+            content: SurfaceContent::LiveVideo {
+                source_id: "hid-test".into(),
+                width: 1280,
+                height: 720,
+                orbitable: false,
+                timeline: false,
+            },
+            inputs: vec![InputPort {
+                id: "guest".into(),
+                contract: "input.desktop_state.v1".into(),
+            }],
+        });
+        app.document.focused_surface_id = Some("hid-test".into());
+        app.desktop_focused = false;
+        assert_eq!(app.focused_hid_target().as_deref(), Some("guest"));
+        app.desktop_focused = true;
+        assert_eq!(app.focused_hid_target(), None);
+    }
 
     #[test]
     fn browser_keys_preserve_named_keys_text_and_modifiers() {

@@ -18,6 +18,7 @@ pub(crate) struct HidOutput {
     pointer_y: u16,
     pointer_buttons: u8,
     sequence: u64,
+    target: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -45,6 +46,7 @@ impl HidOutput {
         let Some(usage) = code_to_hid(*code) else {
             return Ok(false);
         };
+        self.select_target(target_id)?;
         if down {
             self.keys.insert(usage);
         } else {
@@ -61,8 +63,17 @@ impl HidOutput {
         y: f64,
         event: &iced::mouse::Event,
     ) -> Result<(), String> {
-        self.pointer_x = (x.clamp(0.0, 1.0) * f64::from(u16::MAX)).round() as u16;
-        self.pointer_y = (y.clamp(0.0, 1.0) * f64::from(u16::MAX)).round() as u16;
+        self.select_target(target_id)?;
+        let next_x = (x.clamp(0.0, 1.0) * f64::from(u16::MAX)).round() as u16;
+        let next_y = (y.clamp(0.0, 1.0) * f64::from(u16::MAX)).round() as u16;
+        if matches!(event, iced::mouse::Event::CursorMoved { .. })
+            && next_x == self.pointer_x
+            && next_y == self.pointer_y
+        {
+            return Ok(());
+        }
+        self.pointer_x = next_x;
+        self.pointer_y = next_y;
         let mut scroll_x = 0;
         let mut scroll_y = 0;
         match event {
@@ -103,10 +114,27 @@ impl HidOutput {
         self.send(target_id, 0, 0)
     }
 
+    pub(crate) fn release_if_active(&mut self, target_id: &str) -> Result<(), String> {
+        if self.target.as_deref() == Some(target_id) {
+            self.release(target_id)?;
+        }
+        Ok(())
+    }
+
+    fn select_target(&mut self, target_id: &str) -> Result<(), String> {
+        if self.target.as_deref() != Some(target_id) {
+            if let Some(previous) = self.target.clone() {
+                self.release(&previous)?;
+            }
+            self.target = Some(target_id.to_owned());
+        }
+        Ok(())
+    }
+
     fn send(&mut self, target_id: &str, scroll_x: i16, scroll_y: i16) -> Result<(), String> {
-        let Some(path) = socket_path() else {
-            return Ok(());
-        };
+        let path = socket_path().ok_or_else(|| {
+            "CANVAS_HID_SOCKET is not configured for this input surface".to_owned()
+        })?;
         self.sequence = self.sequence.wrapping_add(1);
         let report = LocalReport {
             target_id,
@@ -223,6 +251,19 @@ fn code_to_hid(code: Code) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn releasing_previous_target_preserves_new_targets_held_state() {
+        let mut output = HidOutput {
+            target: Some("new-guest".into()),
+            keys: BTreeSet::from([0x04]),
+            pointer_buttons: 1,
+            ..Default::default()
+        };
+        output.release_if_active("old-guest").unwrap();
+        assert_eq!(output.keys, BTreeSet::from([0x04]));
+        assert_eq!(output.pointer_buttons, 1);
+    }
 
     #[test]
     fn physical_keys_use_usb_hid_usage_ids() {

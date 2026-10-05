@@ -1042,7 +1042,13 @@ fn parse_explicit_rev(tokens: &[String]) -> Option<u64> {
 }
 
 fn is_mutation(cmd: &Command) -> bool {
-    !matches!(cmd, Command::Inspect | Command::ReadDocument)
+    !matches!(
+        cmd,
+        Command::Inspect
+            | Command::Performance
+            | Command::ReadDocument
+            | Command::WorkspaceRead { .. }
+    )
 }
 
 fn maybe_auto_revision(request: &mut ControlRequest) -> Result<(), String> {

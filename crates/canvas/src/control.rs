@@ -79,6 +79,7 @@ pub struct ActorContext {
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
     Inspect,
+    Performance,
     ReadDocument,
     ApplyDocument {
         document: WorkspaceDocument,
@@ -669,6 +670,9 @@ pub enum ErrorCode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Receipt {
+    Performance {
+        metrics: serde_json::Value,
+    },
     DocumentSnapshot {
         document: Box<WorkspaceDocument>,
         snapshot: RuntimeSnapshot,
@@ -1221,6 +1225,7 @@ impl ControlRequest {
             Command::ApplyDocument { .. }
             | Command::ApplyPatch { .. }
             | Command::Inspect
+            | Command::Performance
             | Command::ReadDocument
             | Command::Focus
             | Command::DismissPresencePreview
@@ -1479,6 +1484,7 @@ pub mod text {
         }
         match tokens[0].as_str() {
             "inspect" | "info" => Ok(Command::Inspect),
+            "perf" => Ok(Command::Performance),
             "focus" => Ok(Command::Focus),
             "show" => Ok(Command::SetVisibility { visible: true }),
             "hide" => Ok(Command::SetVisibility { visible: false }),
@@ -1798,6 +1804,7 @@ pub mod text {
         match &reply.outcome {
             Outcome::Ok { receipt } => {
                 let detail = match receipt {
+                    Receipt::Performance { metrics } => metrics.to_string(),
                     Receipt::DocumentSnapshot { snapshot, .. } => format!(
                         "project={} frame={},{},{},{} focus={} surfaces={} indicators={}",
                         snapshot.project_id,

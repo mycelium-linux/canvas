@@ -35,6 +35,7 @@ pub mod map;
 pub mod mcp;
 pub mod media;
 pub mod operational_views;
+pub mod performance;
 pub mod project_picker;
 pub mod project_switcher;
 pub mod reconcile;
@@ -43,6 +44,7 @@ pub mod screensaver;
 #[cfg(feature = "lua-scenes")]
 pub mod stream_binding;
 pub mod stream_contract;
+pub mod stream_geometry;
 pub mod theme_pack;
 pub mod theme_picker;
 pub mod view;
