@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "qemu",
+  "project_id": "qemu",
+  "revision": 1,
+  "theme": { "source": "project" },
+  "background": { "kind": "shader", "shader_id": "smoke-rings", "speed": 0.08 },
+  "chrome": { "title": "visible", "canvas_padding": 28, "surface_gap": 12 },
+  "surfaces": [{
+    "id": "agora-qemu-display",
+    "title": "Agora One · QEMU",
+    "content": { "kind": "live_video", "source_id": "agora-qemu-demo", "width": 1280, "height": 720 },
+    "inputs": []
+  }],
+  "layout": { "kind": "surface", "surface_id": "agora-qemu-display" },
+  "bindings": [],
+  "pages": [],
+  "active_page": 0,
+  "focused_surface_id": "agora-qemu-display"
+}
