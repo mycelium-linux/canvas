@@ -61,6 +61,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use unibus_media::CameraDetections;
 
+mod hid_output;
 mod indicator;
 mod keyboard_input;
 mod notification;
@@ -417,6 +418,18 @@ fn orbit_action(event: &iced::keyboard::Event) -> Option<canvas_model_viewer::Or
     canvas_model_viewer::action_for_key(name)
 }
 
+fn hid_escape_requested(event: &iced::keyboard::Event) -> bool {
+    use iced::keyboard::{
+        Event,
+        key::{Code, Physical},
+    };
+    matches!(
+        event,
+        Event::KeyPressed { physical_key: Physical::Code(Code::Escape), modifiers, .. }
+            if modifiers.control() && modifiers.alt()
+    )
+}
+
 /// Whether a press belongs to interactive content rather than surface layout.
 ///
 /// Model video uses the whole visible frame for orbit, including the strip
@@ -719,6 +732,7 @@ struct App {
     _external_surface_socket:
         Option<::canvas::external_surface_binding::ExternalSurfaceSocketGuard>,
     external_surface_pointer: Option<ExternalPointerCapture>,
+    hid_output: hid_output::HidOutput,
     #[cfg(feature = "lua-scenes")]
     stream_inbox: ::canvas::stream_binding::StreamInbox,
     #[cfg(feature = "lua-scenes")]
@@ -1127,6 +1141,7 @@ impl App {
             external_surfaces,
             _external_surface_socket: external_surface_socket,
             external_surface_pointer: None,
+            hid_output: hid_output::HidOutput::default(),
             #[cfg(feature = "lua-scenes")]
             stream_inbox,
             #[cfg(feature = "lua-scenes")]
@@ -2145,6 +2160,25 @@ impl App {
                         matches!(surface.source, ContentSource::Prompt { .. })
                     }) {
                         return self.handle_prompt_key(&id, kbd_event);
+                    }
+                }
+                if let Some(target_id) = self.focused_hid_target() {
+                    if hid_escape_requested(&kbd_event) {
+                        if let Err(error) = self.hid_output.release(&target_id) {
+                            self.status = format!("Canvas HID release failed: {error}");
+                        } else {
+                            self.desktop_focused = true;
+                            self.status = "Released remote input (Ctrl+Option+Escape).".into();
+                        }
+                        return Task::none();
+                    }
+                    match self.hid_output.key(&target_id, &kbd_event) {
+                        Ok(true) => return Task::none(),
+                        Ok(false) => {}
+                        Err(error) => {
+                            self.status = format!("Canvas HID output failed: {error}");
+                            return Task::none();
+                        }
                     }
                 }
                 #[allow(clippy::collapsible_if)]
@@ -5745,6 +5779,7 @@ impl App {
     fn handle_mouse(&mut self, window: iced::window::Id, event: iced::mouse::Event) {
         use iced::mouse::{Button, Event};
 
+        let hid_event = event;
         let viewport = self.windows.get(&window).copied().unwrap_or(self.frame);
         let offset = LogicalPoint {
             x: f64::from(viewport.x - self.frame.x),
@@ -5752,11 +5787,11 @@ impl App {
         };
 
         match event {
-            Event::ButtonPressed(Button::Back) => {
+            Event::ButtonPressed(Button::Back) if self.focused_hid_target().is_none() => {
                 self.jump_back();
                 return;
             }
-            Event::ButtonPressed(Button::Forward) => {
+            Event::ButtonPressed(Button::Forward) if self.focused_hid_target().is_none() => {
                 self.jump_forward();
                 return;
             }
@@ -5864,10 +5899,15 @@ impl App {
             }
             _ => None,
         };
+        let surfaces = self.interaction_surfaces();
+        if let Some(position) = self.cursor
+            && self.handle_hid_pointer(&hid_event, position, &surfaces)
+        {
+            return;
+        }
         let (Some(phase), Some(position)) = (phase, self.cursor) else {
             return;
         };
-        let surfaces = self.interaction_surfaces();
         if self.handle_external_surface_pointer(phase, position, &surfaces) {
             return;
         }
@@ -5924,6 +5964,88 @@ impl App {
             }
             Err(error) => self.status = format!("Canvas pointer rejected: {error}"),
         }
+    }
+
+    fn focused_hid_target(&self) -> Option<String> {
+        let surface_id = self.document.focused_surface_id.as_deref()?;
+        self.hid_target_for_surface(surface_id)
+    }
+
+    fn hid_target_for_surface(&self, surface_id: &str) -> Option<String> {
+        self.document
+            .surfaces
+            .iter()
+            .find(|surface| surface.id == surface_id)?
+            .inputs
+            .iter()
+            .find(|input| input.contract == "input.desktop_state.v1")
+            .map(|input| input.id.clone())
+    }
+
+    fn handle_hid_pointer(
+        &mut self,
+        event: &iced::mouse::Event,
+        position: LogicalPoint,
+        surfaces: &[SurfaceGeometry],
+    ) -> bool {
+        let pressed = matches!(event, iced::mouse::Event::ButtonPressed(_));
+        let surface_id = if pressed {
+            let Ok(Some(target)) = hit_test(
+                surfaces,
+                position,
+                SURFACE_RESIZE_HANDLE_SIZE,
+                f64::from(self.window_chrome().titlebar_height),
+            ) else {
+                return false;
+            };
+            if target.region != HitRegion::Body
+                || self.hid_target_for_surface(&target.surface_id).is_none()
+            {
+                return false;
+            }
+            target.surface_id
+        } else {
+            let Some(surface_id) = self.document.focused_surface_id.clone() else {
+                return false;
+            };
+            if self.hid_target_for_surface(&surface_id).is_none() {
+                return false;
+            }
+            surface_id
+        };
+        let Some(geometry) = surfaces
+            .iter()
+            .find(|surface| surface.surface_id == surface_id)
+        else {
+            return false;
+        };
+        let inside = position.x >= geometry.bounds.x
+            && position.x <= geometry.bounds.x + geometry.bounds.width
+            && position.y >= geometry.bounds.y
+            && position.y <= geometry.bounds.y + geometry.bounds.height;
+        if !inside && !matches!(event, iced::mouse::Event::ButtonReleased(_)) {
+            return false;
+        }
+        if pressed {
+            self.desktop_focused = false;
+            self.apply_interaction_intents(vec![
+                InteractionIntent::Focus {
+                    surface_id: surface_id.clone(),
+                },
+                InteractionIntent::PromoteToFront {
+                    surface_id: surface_id.clone(),
+                },
+            ]);
+        }
+        let Some(target_id) = self.hid_target_for_surface(&surface_id) else {
+            return false;
+        };
+        let x = (position.x - geometry.bounds.x) / geometry.bounds.width;
+        let y = (position.y - geometry.bounds.y) / geometry.bounds.height;
+        if let Err(error) = self.hid_output.pointer(&target_id, x, y, event) {
+            self.status = format!("Canvas HID pointer failed: {error}");
+        }
+        true
     }
 
     fn interaction_surfaces(&self) -> Vec<SurfaceGeometry> {
@@ -7977,6 +8099,25 @@ impl App {
                     );
                 }
                 let visual: Element<'_, Message> = stack(layers).into();
+                // Pixel streams are often letterboxed by their producer and do not carry an
+                // alpha channel. Give them an opaque inner matte so the desktop/background
+                // cannot bleed through their edges while preserving the stream's aspect ratio.
+                let visual: Element<'_, Message> = if matches!(
+                    &surface.source,
+                    ContentSource::LiveVideo { .. } | ContentSource::ExternalSurface { .. }
+                ) {
+                    container(visual)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .padding(stream_matte_padding(surface.source_pixels))
+                        .style(|_| container::Style {
+                            background: Some(Color::BLACK.into()),
+                            ..Default::default()
+                        })
+                        .into()
+                } else {
+                    visual
+                };
                 match &surface.source {
                     ContentSource::Pdf {
                         page_index,
@@ -9880,6 +10021,11 @@ fn load_terminal(
 
 fn color(rgb: [u8; 3]) -> Color {
     Color::from_rgb8(rgb[0], rgb[1], rgb[2])
+}
+
+fn stream_matte_padding(source_pixels: [u32; 2]) -> f32 {
+    let short_edge = source_pixels[0].min(source_pixels[1]) as f32;
+    (short_edge * 0.008).clamp(6.0, 12.0)
 }
 
 fn workspace_identity_name<'a>(catalog: &'a Catalog, project_id: &'a str) -> &'a str {
@@ -12247,6 +12393,13 @@ mod tests {
         assert_eq!(background_fit(BackgroundFit::Contain), ContentFit::Contain);
         assert_eq!(background_fit(BackgroundFit::Stretch), ContentFit::Fill);
         assert_eq!(background_fit(BackgroundFit::Center), ContentFit::None);
+    }
+
+    #[test]
+    fn stream_matte_padding_scales_with_source_and_stays_bounded() {
+        assert_eq!(stream_matte_padding([640, 480]), 6.0);
+        assert_eq!(stream_matte_padding([1920, 1080]), 8.64);
+        assert_eq!(stream_matte_padding([7680, 4320]), 12.0);
     }
 
     #[test]

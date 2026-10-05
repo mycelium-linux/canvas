@@ -46,6 +46,13 @@
    }
   },
   {
+   "kind": "input.desktop_state.v1",
+   "target": {
+    "mode": "capability",
+    "name": "qemu.input"
+   }
+  },
+  {
    "kind": "rlcd.decision.v1",
    "target": {
     "mode": "any_holder",
@@ -235,10 +242,12 @@
    "producer_id": "agora-one-qemu",
    "token_file": "/home/ajm/.config/unibus/tokens/agora-one-qemu.token",
    "zones": [
+    "compute",
     "living-room"
    ],
    "capabilities": [
-    "media.video_stream.source"
+    "media.video_stream.source",
+    "qemu.input"
    ],
    "publishes": [
     "media.video_stream.v1"
@@ -258,6 +267,22 @@
    ],
    "screen_anchors": [
     "screen-tv"
+   ]
+  },
+  {
+   "producer_id": "macbook-neo-hid",
+   "token_file": "/home/ajm/.config/unibus/tokens/macbook-neo-hid.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "input.desktop.source"
+   ],
+   "publishes": [
+    "input.desktop_state.v1"
+   ],
+   "publish_zones": [
+    "compute"
    ]
   },
   {

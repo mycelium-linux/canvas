@@ -10,9 +10,16 @@
     "id": "agora-qemu-display",
     "title": "Agora One · QEMU",
     "content": { "kind": "live_video", "source_id": "agora-qemu-demo", "width": 1280, "height": 720 },
-    "inputs": []
+    "inputs": [{ "id": "agora-qemu-demo", "contract": "input.desktop_state.v1" }]
   }],
-  "layout": { "kind": "surface", "surface_id": "agora-qemu-display" },
+  "layout": {
+    "kind": "canvas",
+    "placements": [{
+      "surface_id": "agora-qemu-display",
+      "bounds": { "x": 0.19, "y": 0.216, "width": 0.62, "height": 0.568 },
+      "layer": 0
+    }]
+  },
   "bindings": [],
   "pages": [],
   "active_page": 0,

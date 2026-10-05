@@ -89,7 +89,9 @@ fn contract(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'.' | b'/')
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'-' | b'_' | b'.' | b'/')
         })
 }
 
@@ -1775,6 +1777,11 @@ mod forward_compatibility_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn namespaced_contracts_accept_existing_unibus_underscores() {
+        assert!(contract("input.desktop_state.v1"));
+    }
 
     fn catalog() -> Catalog {
         Catalog::parse(
