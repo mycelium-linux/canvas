@@ -122,6 +122,28 @@ pub struct ExternalSurfaceInput {
     pub y: f32,
 }
 
+/// Visibility activation sent by Canvas to a producer-owned surface.
+///
+/// The stream list is copied from the accepted descriptor rather than authored
+/// again by Canvas. A producer can therefore acquire authenticated consume
+/// leases only while its exact generation is on screen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalSurfaceVisibility {
+    pub schema_version: u32,
+    pub source_id: String,
+    pub generation: u64,
+    pub visible: bool,
+    pub streams: Vec<SurfaceStreamRequirement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ExternalSurfaceHostEvent {
+    Pointer(ExternalSurfaceInput),
+    Visibility(ExternalSurfaceVisibility),
+}
+
 impl ExternalSurfaceInput {
     pub fn validate(&self) -> Result<(), String> {
         if self.schema_version != EXTERNAL_SURFACE_VERSION {
@@ -142,6 +164,45 @@ impl ExternalSurfaceInput {
             return Err("external surface input coordinates must be normalized".into());
         }
         Ok(())
+    }
+}
+
+impl ExternalSurfaceVisibility {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != EXTERNAL_SURFACE_VERSION {
+            return Err(format!(
+                "unsupported external surface visibility schema version {}",
+                self.schema_version
+            ));
+        }
+        validate_source_id(&self.source_id)?;
+        if self.generation == 0 {
+            return Err("external surface visibility generation must be positive".into());
+        }
+        let mut stream_ids = std::collections::BTreeSet::new();
+        for stream in &self.streams {
+            if stream.direction != SurfaceStreamDirection::Consume {
+                return Err("external surface visibility can activate only consume streams".into());
+            }
+            validate_stream_token("stream id", &stream.stream_id)?;
+            validate_stream_token("stream contract", &stream.contract)?;
+            if !stream_ids.insert(&stream.stream_id) {
+                return Err(format!(
+                    "duplicate consume stream declaration {}",
+                    stream.stream_id
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ExternalSurfaceHostEvent {
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Pointer(input) => input.validate(),
+            Self::Visibility(visibility) => visibility.validate(),
+        }
     }
 }
 
@@ -550,6 +611,25 @@ mod tests {
         assert_eq!(input.validate(), Ok(()));
         input.x = 1.1;
         assert!(input.validate().is_err());
+    }
+
+    #[test]
+    fn visibility_activates_only_declared_consume_streams() {
+        let mut visibility = ExternalSurfaceVisibility {
+            schema_version: EXTERNAL_SURFACE_VERSION,
+            source_id: "synesthesia/mix-overview".into(),
+            generation: 2,
+            visible: true,
+            streams: vec![SurfaceStreamRequirement {
+                stream_id: "synesthesia/mix/snapshot".into(),
+                contract: "synesthesia.mix.snapshot.v1".into(),
+                direction: SurfaceStreamDirection::Consume,
+                importance: SurfaceStreamImportance::Needed,
+            }],
+        };
+        assert_eq!(visibility.validate(), Ok(()));
+        visibility.streams[0].direction = SurfaceStreamDirection::Publish;
+        assert!(visibility.validate().is_err());
     }
 
     #[test]

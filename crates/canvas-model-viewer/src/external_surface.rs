@@ -6,8 +6,9 @@
 
 use canvas_core::external_surface::{
     ColorSpace, EXTERNAL_SURFACE_VERSION, ExternalSurfaceDescriptor, ExternalSurfaceInput,
-    ExternalSurfaceInputPhase, ExternalSurfaceMessage, ExternalSurfaceRegistry, PixelFormat,
-    PresentedSurface, RegistryChange, SurfaceInputTransport, SurfaceTransport,
+    ExternalSurfaceInputPhase, ExternalSurfaceMessage, ExternalSurfaceRegistry,
+    ExternalSurfaceVisibility, PixelFormat, PresentedSurface, RegistryChange,
+    SurfaceInputTransport, SurfaceStreamDirection, SurfaceStreamRequirement, SurfaceTransport,
 };
 use memmap2::{Mmap, MmapOptions};
 use std::collections::BTreeMap;
@@ -227,6 +228,41 @@ impl ExternalSurfaceInbox {
             },
         )
         .map_err(|error| format!("send external surface input: {error}"))
+    }
+
+    pub fn send_visibility(&self, source_id: &str, visible: bool) -> Result<u64, String> {
+        let presented = self
+            .registry
+            .get(source_id)
+            .ok_or_else(|| format!("external surface is not registered: {source_id}"))?;
+        let generation = presented.descriptor.generation;
+        let key = (source_id.to_owned(), generation);
+        let socket = self
+            .input_sockets
+            .get(&key)
+            .ok_or_else(|| format!("external surface has no input channel: {source_id}"))?;
+        let streams = presented
+            .descriptor
+            .streams
+            .iter()
+            .filter(|stream| stream.direction == SurfaceStreamDirection::Consume)
+            .cloned()
+            .collect::<Vec<SurfaceStreamRequirement>>();
+        if streams.is_empty() {
+            return Ok(generation);
+        }
+        canvas_core::external_surface_ipc::send_visibility(
+            socket,
+            &ExternalSurfaceVisibility {
+                schema_version: EXTERNAL_SURFACE_VERSION,
+                source_id: source_id.to_owned(),
+                generation,
+                visible,
+                streams,
+            },
+        )
+        .map_err(|error| format!("send external surface visibility: {error}"))?;
+        Ok(generation)
     }
 }
 
@@ -561,7 +597,12 @@ mod tests {
                 slots: 1,
             },
             input: Some(SurfaceInputTransport::UnixDatagram { handle_index: 1 }),
-            streams: Vec::new(),
+            streams: vec![SurfaceStreamRequirement {
+                stream_id: "synesthesia/transport".into(),
+                contract: "synesthesia.transport.v1".into(),
+                direction: SurfaceStreamDirection::Consume,
+                importance: canvas_core::external_surface::SurfaceStreamImportance::Needed,
+            }],
         };
         let mut inbox = ExternalSurfaceInbox::default();
         inbox
@@ -590,5 +631,19 @@ mod tests {
         assert_eq!(returned.generation, 9);
         assert_eq!(returned.phase, ExternalSurfaceInputPhase::Move);
         assert_eq!((returned.x, returned.y), (0.25, 0.75));
+
+        inbox
+            .send_visibility("synesthesia/mix-overview", true)
+            .unwrap();
+        let returned =
+            canvas_core::external_surface_ipc::receive_host_event(&producer_input).unwrap();
+        let canvas_core::external_surface::ExternalSurfaceHostEvent::Visibility(returned) =
+            returned
+        else {
+            panic!("expected visibility event")
+        };
+        assert!(returned.visible);
+        assert_eq!(returned.streams.len(), 1);
+        assert_eq!(returned.streams[0].stream_id, "synesthesia/transport");
     }
 }

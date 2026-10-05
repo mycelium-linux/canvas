@@ -4,7 +4,9 @@
 //! socket and native handles, while `canvas-model-viewer` owns importing or
 //! uploading the accepted generation into the compositor's WGPU device.
 
+use canvas_core::external_surface::ExternalSurfaceInputPhase;
 use canvas_model_viewer::external_surface::{ExternalSurfaceFrame, ExternalSurfaceInbox};
+use std::collections::{BTreeMap, BTreeSet};
 use std::{
     fs,
     os::unix::{
@@ -19,6 +21,7 @@ use std::{
 #[derive(Debug, Clone, Default)]
 pub struct ExternalSurfaceFeed {
     inbox: Arc<RwLock<ExternalSurfaceInbox>>,
+    visibility: Arc<std::sync::Mutex<BTreeMap<String, (u64, bool)>>>,
 }
 
 impl ExternalSurfaceFeed {
@@ -27,6 +30,71 @@ impl ExternalSurfaceFeed {
             .read()
             .expect("Canvas external-surface inbox poisoned")
             .frame(source_id)
+    }
+
+    pub fn send_input(
+        &self,
+        source_id: &str,
+        phase: ExternalSurfaceInputPhase,
+        x: f32,
+        y: f32,
+    ) -> Result<(), String> {
+        self.inbox
+            .read()
+            .expect("Canvas external-surface inbox poisoned")
+            .send_input(source_id, phase, x, y)
+    }
+
+    /// Reconcile generation-bound stream activation for every registered
+    /// external surface. Unchanged visibility costs no datagram.
+    pub fn reconcile_stream_visibility(&self, visible_sources: &BTreeSet<String>) -> Vec<String> {
+        let surfaces = self
+            .inbox
+            .read()
+            .expect("Canvas external-surface inbox poisoned")
+            .iter()
+            .filter(|(_, surface)| {
+                surface.descriptor.input.is_some()
+                    && surface.descriptor.streams.iter().any(|stream| {
+                        stream.direction
+                            == canvas_core::external_surface::SurfaceStreamDirection::Consume
+                    })
+            })
+            .map(|(source_id, surface)| {
+                (
+                    source_id.to_owned(),
+                    surface.descriptor.generation,
+                    visible_sources.contains(source_id),
+                )
+            })
+            .collect::<Vec<_>>();
+        let live = surfaces
+            .iter()
+            .map(|(source_id, _, _)| source_id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut sent = self
+            .visibility
+            .lock()
+            .expect("Canvas external-surface visibility poisoned");
+        sent.retain(|source_id, _| live.contains(source_id));
+        let mut errors = Vec::new();
+        for (source_id, generation, visible) in surfaces {
+            if sent.get(&source_id) == Some(&(generation, visible)) {
+                continue;
+            }
+            match self
+                .inbox
+                .read()
+                .expect("Canvas external-surface inbox poisoned")
+                .send_visibility(&source_id, visible)
+            {
+                Ok(actual_generation) => {
+                    sent.insert(source_id, (actual_generation, visible));
+                }
+                Err(error) => errors.push(error),
+            }
+        }
+        errors
     }
 }
 

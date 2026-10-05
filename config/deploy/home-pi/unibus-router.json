@@ -463,6 +463,36 @@
    ]
   },
   {
+   "producer_id": "home-pi-midi",
+   "token_file": "/home/ajm/.config/unibus/tokens/home-pi-midi.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "midi.output",
+    "synesthesia.control"
+   ],
+   "publishes": [
+    "unibus.stream.event.v1",
+    "unibus.stream.interest.v1"
+   ]
+  },
+  {
+   "producer_id": "macbook-neo-synesthesia-ui",
+   "token_file": "/home/ajm/.config/unibus/tokens/macbook-neo-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "synesthesia.ui"
+   ],
+   "publishes": [
+    "unibus.stream.event.v1",
+    "unibus.stream.interest.v1",
+    "unibus.stream.interest.release.v1"
+   ]
+  },
+  {
    "producer_id": "trader-alpaca",
    "token_file": "/home/ajm/.config/unibus/tokens/trader-alpaca.token",
    "zones": [

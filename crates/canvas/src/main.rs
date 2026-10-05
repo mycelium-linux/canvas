@@ -346,6 +346,12 @@ struct RuntimeSurface {
     upload_pixels: [u32; 2],
 }
 
+#[derive(Debug, Clone)]
+struct ExternalPointerCapture {
+    surface_id: String,
+    source_id: String,
+}
+
 /// A live frame decoded and planned off the main thread, ready to swap in.
 /// JPEG decode is the expensive half of a `live_image` update; a Pi 4 wall
 /// at camera rates must never pay it inside the event loop.
@@ -712,6 +718,7 @@ struct App {
     external_surfaces: ::canvas::external_surface_binding::ExternalSurfaceFeed,
     _external_surface_socket:
         Option<::canvas::external_surface_binding::ExternalSurfaceSocketGuard>,
+    external_surface_pointer: Option<ExternalPointerCapture>,
     #[cfg(feature = "lua-scenes")]
     stream_inbox: ::canvas::stream_binding::StreamInbox,
     #[cfg(feature = "lua-scenes")]
@@ -1119,6 +1126,7 @@ impl App {
             _socket: socket,
             external_surfaces,
             _external_surface_socket: external_surface_socket,
+            external_surface_pointer: None,
             #[cfg(feature = "lua-scenes")]
             stream_inbox,
             #[cfg(feature = "lua-scenes")]
@@ -1743,6 +1751,7 @@ impl App {
                 }
                 self.refresh_terminal();
                 self.refresh_camera_detections();
+                self.reconcile_external_stream_visibility();
                 #[cfg(feature = "lua-scenes")]
                 {
                     self.drain_stream_events();
@@ -5827,6 +5836,16 @@ impl App {
                     // drag that stalled off-frame and prevents the captured
                     // gesture from wedging all later input.
                     self.primary_pointer_down = false;
+                    if self.external_surface_pointer.is_some()
+                        && let Some(position) = self.cursor
+                    {
+                        let surfaces = self.interaction_surfaces();
+                        self.handle_external_surface_pointer(
+                            PointerPhase::Cancel,
+                            position,
+                            &surfaces,
+                        );
+                    }
                     self.cursor = None;
                     self.cursor_window = None;
                     let intents = self.interaction.force_release();
@@ -5849,6 +5868,9 @@ impl App {
             return;
         };
         let surfaces = self.interaction_surfaces();
+        if self.handle_external_surface_pointer(phase, position, &surfaces) {
+            return;
+        }
         if phase == PointerPhase::Press
             && let Ok(Some(target)) = hit_test(
                 &surfaces,
@@ -5934,6 +5956,85 @@ impl App {
                 },
             })
             .collect()
+    }
+
+    fn handle_external_surface_pointer(
+        &mut self,
+        phase: PointerPhase,
+        position: LogicalPoint,
+        surfaces: &[SurfaceGeometry],
+    ) -> bool {
+        use canvas_core::external_surface::ExternalSurfaceInputPhase;
+
+        let capture = if phase == PointerPhase::Press {
+            let Ok(Some(target)) = hit_test(
+                surfaces,
+                position,
+                SURFACE_RESIZE_HANDLE_SIZE,
+                f64::from(self.window_chrome().titlebar_height),
+            ) else {
+                return false;
+            };
+            if !matches!(target.region, HitRegion::Body | HitRegion::TopBar) {
+                return false;
+            }
+            let Some(source_id) = self.decoded.get(&target.surface_id).and_then(|surface| {
+                let ContentSource::ExternalSurface { source_id } = &surface.source else {
+                    return None;
+                };
+                self.external_surfaces
+                    .frame(source_id)
+                    .filter(|frame| frame.descriptor.input.is_some())
+                    .map(|_| source_id.clone())
+            }) else {
+                return false;
+            };
+            let capture = ExternalPointerCapture {
+                surface_id: target.surface_id.clone(),
+                source_id,
+            };
+            self.external_surface_pointer = Some(capture.clone());
+            self.desktop_focused = false;
+            self.apply_interaction_intents(vec![
+                InteractionIntent::Focus {
+                    surface_id: target.surface_id.clone(),
+                },
+                InteractionIntent::PromoteToFront {
+                    surface_id: target.surface_id,
+                },
+            ]);
+            capture
+        } else {
+            let Some(capture) = self.external_surface_pointer.clone() else {
+                return false;
+            };
+            capture
+        };
+
+        let Some(geometry) = surfaces
+            .iter()
+            .find(|surface| surface.surface_id == capture.surface_id)
+        else {
+            self.external_surface_pointer = None;
+            return true;
+        };
+        let x = ((position.x - geometry.bounds.x) / geometry.bounds.width).clamp(0.0, 1.0) as f32;
+        let y = ((position.y - geometry.bounds.y) / geometry.bounds.height).clamp(0.0, 1.0) as f32;
+        let input_phase = match phase {
+            PointerPhase::Press => ExternalSurfaceInputPhase::Press,
+            PointerPhase::Move => ExternalSurfaceInputPhase::Move,
+            PointerPhase::Release | PointerPhase::Cancel => ExternalSurfaceInputPhase::Release,
+        };
+        if let Err(error) = self
+            .external_surfaces
+            .send_input(&capture.source_id, input_phase, x, y)
+        {
+            self.status = format!("Canvas external-surface input failed: {error}");
+        }
+        if matches!(phase, PointerPhase::Release | PointerPhase::Cancel) {
+            self.external_surface_pointer = None;
+        }
+        true
     }
 
     fn widget_chrome(&self, surface_id: &str) -> Option<canvas_widgets::WidgetChrome> {
@@ -6867,6 +6968,34 @@ impl App {
         {
             self.events
                 .push(format!("wanted_video_publish_failed {error}"));
+        }
+    }
+
+    fn reconcile_external_stream_visibility(&mut self) {
+        let placed = if self.canvas_visible {
+            placement_surface_ids(self.document.active_layout())
+        } else {
+            Vec::new()
+        };
+        let visible_sources = self
+            .document
+            .surfaces
+            .iter()
+            .filter(|surface| {
+                placed.iter().any(|id| id == &surface.id)
+                    && !self.minimized_surfaces.contains(&surface.id)
+            })
+            .filter_map(|surface| match &surface.content {
+                SurfaceContent::ExternalSurface { source_id } => Some(source_id.clone()),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        for error in self
+            .external_surfaces
+            .reconcile_stream_visibility(&visible_sources)
+        {
+            eprintln!("Canvas external-surface stream activation failed: {error}");
+            self.emit_event(format!("external_stream_activation_failed error={error}"));
         }
     }
 

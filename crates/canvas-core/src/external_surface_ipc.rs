@@ -5,7 +5,10 @@
 //! a byte-stream protocol can accidentally attach a descriptor to the wrong
 //! frame after partial reads. The receiving process owns every returned fd.
 
-use crate::external_surface::{ExternalSurfaceInput, ExternalSurfaceMessage};
+use crate::external_surface::{
+    ExternalSurfaceHostEvent, ExternalSurfaceInput, ExternalSurfaceMessage,
+    ExternalSurfaceVisibility,
+};
 use std::{
     io,
     mem::{size_of, zeroed},
@@ -163,6 +166,42 @@ pub fn receive_input(socket: &UnixDatagram) -> io::Result<ExternalSurfaceInput> 
     Ok(input)
 }
 
+pub fn send_visibility(
+    socket: &UnixDatagram,
+    visibility: &ExternalSurfaceVisibility,
+) -> io::Result<()> {
+    visibility.validate().map_err(invalid)?;
+    send_host_event(
+        socket,
+        &ExternalSurfaceHostEvent::Visibility(visibility.clone()),
+    )
+}
+
+pub fn receive_host_event(socket: &UnixDatagram) -> io::Result<ExternalSurfaceHostEvent> {
+    let mut payload = vec![0_u8; MAX_EXTERNAL_SURFACE_MESSAGE];
+    let read = socket.recv(&mut payload)?;
+    payload.truncate(read);
+    let event: ExternalSurfaceHostEvent = serde_json::from_slice(&payload).map_err(invalid)?;
+    event.validate().map_err(invalid)?;
+    Ok(event)
+}
+
+fn send_host_event(socket: &UnixDatagram, event: &ExternalSurfaceHostEvent) -> io::Result<()> {
+    event.validate().map_err(invalid)?;
+    let payload = serde_json::to_vec(event).map_err(invalid)?;
+    if payload.len() > MAX_EXTERNAL_SURFACE_MESSAGE {
+        return Err(invalid("external surface host event is too large"));
+    }
+    let written = socket.send(&payload)?;
+    if written != payload.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "external surface host event datagram was truncated",
+        ));
+    }
+    Ok(())
+}
+
 fn invalid(error: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error.to_string())
 }
@@ -251,5 +290,32 @@ mod tests {
         };
         send_input(&canvas, &input).unwrap();
         assert_eq!(receive_input(&producer).unwrap(), input);
+    }
+
+    #[test]
+    fn visibility_round_trips_with_descriptor_owned_streams() {
+        use crate::external_surface::{
+            ExternalSurfaceHostEvent, ExternalSurfaceVisibility, SurfaceStreamDirection,
+            SurfaceStreamImportance, SurfaceStreamRequirement,
+        };
+
+        let (canvas, producer) = UnixDatagram::pair().unwrap();
+        let visibility = ExternalSurfaceVisibility {
+            schema_version: EXTERNAL_SURFACE_VERSION,
+            source_id: "synesthesia/mix-overview".into(),
+            generation: 7,
+            visible: true,
+            streams: vec![SurfaceStreamRequirement {
+                stream_id: "synesthesia/transport".into(),
+                contract: "synesthesia.transport.v1".into(),
+                direction: SurfaceStreamDirection::Consume,
+                importance: SurfaceStreamImportance::Needed,
+            }],
+        };
+        send_visibility(&canvas, &visibility).unwrap();
+        assert_eq!(
+            receive_host_event(&producer).unwrap(),
+            ExternalSurfaceHostEvent::Visibility(visibility)
+        );
     }
 }
