@@ -3954,7 +3954,8 @@ impl App {
             self.window_cycle.cancel();
             self.project_switcher = None;
             self.bump();
-        } else if matches!(event, Event::ModifiersChanged(modifiers) if !modifiers.alt()) {
+        } else if matches!(event, Event::ModifiersChanged(modifiers) if !modifiers.alt())
+            || matches!(event, Event::KeyPressed { key: Key::Named(Named::Enter), .. }) {
             let ids = self.cycle_window_ids();
             let selected = self.window_cycle.commit(&ids);
             self.project_switcher = None;

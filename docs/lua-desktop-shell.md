@@ -55,7 +55,7 @@ This requires the updated native host before installing the new Lua files.
 
 With Canvas focused, **Alt-Tab** (Option-Tab on Neo) previews attached windows
 in most-recently-focused order. Shift reverses the cycle; releasing Alt commits
-focus, restores a minimized destination, changes its page if necessary, and
+focus (Enter also commits), restores a minimized destination, changes its page if necessary, and
 raises it through the same path as a dock click. Escape or loss of Canvas focus
 cancels without changing selection. Frameless desktop instruments, including
 the analog clock, are excluded. The order stays frozen during each chord;
