@@ -184,5 +184,5 @@
     ],
     "read_theme": true
   },
-  "actions": []
+  "actions": [{"id":"select","destination":"canvas.shell","kind":"select"}]
 }

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "id": "desktop-dock-v1",
+  "title": "Canvas bottom dock",
+  "inputs": [
+    {"id":"width","kind":"number","required":true},
+    {"id":"height","kind":"number","required":true},
+    {"id":"count","kind":"number","required":true},
+    {"id":"item0-id","kind":"text","required":false},{"id":"item0-title","kind":"text","required":false},{"id":"item0-focused","kind":"boolean","required":false},{"id":"item0-minimized","kind":"boolean","required":false},
+    {"id":"item1-id","kind":"text","required":false},{"id":"item1-title","kind":"text","required":false},{"id":"item1-focused","kind":"boolean","required":false},{"id":"item1-minimized","kind":"boolean","required":false},
+    {"id":"item2-id","kind":"text","required":false},{"id":"item2-title","kind":"text","required":false},{"id":"item2-focused","kind":"boolean","required":false},{"id":"item2-minimized","kind":"boolean","required":false},
+    {"id":"item3-id","kind":"text","required":false},{"id":"item3-title","kind":"text","required":false},{"id":"item3-focused","kind":"boolean","required":false},{"id":"item3-minimized","kind":"boolean","required":false},
+    {"id":"item4-id","kind":"text","required":false},{"id":"item4-title","kind":"text","required":false},{"id":"item4-focused","kind":"boolean","required":false},{"id":"item4-minimized","kind":"boolean","required":false},
+    {"id":"item5-id","kind":"text","required":false},{"id":"item5-title","kind":"text","required":false},{"id":"item5-focused","kind":"boolean","required":false},{"id":"item5-minimized","kind":"boolean","required":false}
+  ],
+  "capabilities": {"write_scene":true,"read_inputs":["width","height","count","item0-id","item0-title","item0-focused","item0-minimized","item1-id","item1-title","item1-focused","item1-minimized","item2-id","item2-title","item2-focused","item2-minimized","item3-id","item3-title","item3-focused","item3-minimized","item4-id","item4-title","item4-focused","item4-minimized","item5-id","item5-title","item5-focused","item5-minimized"],"read_theme":true},
+  "actions": [
+    {"id":"launcher","destination":"canvas.shell","kind":"launcher"},
+    {"id":"focus","destination":"canvas.shell","kind":"focus"}
+  ]
+}

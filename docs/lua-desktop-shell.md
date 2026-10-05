@@ -19,6 +19,37 @@ Override these shipped artifacts under the Canvas runtime configuration root
 
 - `modules/desktop-bar-v1.json` and `modules/desktop-bar-v1.lua`
 - `modules/desktop-launcher-v1.json` and `modules/desktop-launcher-v1.lua`
+- `modules/desktop-dock-v1.json` and `modules/desktop-dock-v1.lua`
+
+## Neo bottom dock
+
+The floating 68-pixel dock sits 12 pixels above the bottom edge. Apps opens the
+existing target-labelled application/workspace selector. Up to six actual Canvas
+windows fit beside it, with responsive overflow available through Apps. A short
+accent underline means focused, a dot means open, and a dim dot means minimized.
+These are Canvas window states, **not** invented native process or stream-health
+states. Selecting a window restores it, activates its page, and raises it through
+the same native focus path as the launcher. Presentation reloads at one-second
+cadence; unchanged state retains its output and never executes Lua in `view`.
+
+Launcher rows now support clicks as well as arrows/Enter. Clicks carry entry ID,
+target generation and catalog revision; stale/unavailable/busy choices are refused.
+Source discovery includes macOS Utilities folders (the first Neo release still
+uses the older discovery list until the next binary rollout). Iced-captured
+shell clicks are not also forwarded into underlying remote windows.
+
+`config/workspaces/neo/fungos.json` is a quiet local desktop using the existing
+analog clock, theme-derived background and bounded Lua welcome module. It does
+not change the renderer or the saved TV workspace. Deploy the welcome artifacts
+to the runtime modules directory before applying that workspace. This first dock
+does not yet pin native apps, show their icons, or claim OS-wide running status.
+
+Neo runs the separately signed `~/Applications/Canvas.app` bundle using
+`config/deploy/neo/Canvas.Info.plist`. Its existing `dev.fpl.canvas` LaunchAgent
+points to `Contents/MacOS/canvas`; environment and the permission-bearing Dock
+Control helper stay unchanged. The previous `.local/bin/canvas` remains available
+for rollback. Restore the backed-up LaunchAgent executable path and reload that
+agent to roll back; do not replace the input helper to update the GUI.
 
 The desktop bar polls at one-second cadence. The launcher polls while open and
 refreshes on input. Missing overrides use shipped artifacts; malformed or oversized

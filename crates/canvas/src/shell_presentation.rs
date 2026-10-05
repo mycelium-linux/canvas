@@ -31,6 +31,12 @@ pub const DESKTOP_LAUNCHER: Artifact = Artifact {
     source_path: "modules/desktop-launcher-v1.lua",
     source_fallback: include_str!("../../../config/modules/desktop-launcher-v1.lua"),
 };
+pub const DESKTOP_DOCK: Artifact = Artifact {
+    manifest_path: "modules/desktop-dock-v1.json",
+    manifest_fallback: include_str!("../../../config/modules/desktop-dock-v1.json"),
+    source_path: "modules/desktop-dock-v1.lua",
+    source_fallback: include_str!("../../../config/modules/desktop-dock-v1.lua"),
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct Presentation {
@@ -239,6 +245,55 @@ mod tests {
             assert!(encoded.contains("SOURCES") == (width >= 750.0));
             assert!(!encoded.contains("LIVE"));
             assert!(encoded.contains("\"opacity\":1.0"));
+        }
+    }
+
+    #[test]
+    fn bottom_dock_is_bounded_opaque_and_never_emits_actions_on_refresh() {
+        use crate::lua_module::ModuleInputValue as V;
+        for width in [180.0, 320.0, 600.0, 1408.0, 1920.0] {
+            for count in [0, 1, 6, 25] {
+                let mut s = snapshot();
+                s.values = std::collections::BTreeMap::from([
+                    ("width".into(), V::Number(width)),
+                    ("height".into(), V::Number(68.0)),
+                    ("count".into(), V::Number(count as f64)),
+                ]);
+                for n in 0..count.min(6) {
+                    s.values
+                        .insert(format!("item{n}-id"), V::Text(format!("surface-{n}")));
+                    s.values
+                        .insert(format!("item{n}-title"), V::Text(format!("Window {n}")));
+                    s.values
+                        .insert(format!("item{n}-focused"), V::Boolean(n == 0));
+                    s.values
+                        .insert(format!("item{n}-minimized"), V::Boolean(n == 1));
+                }
+                let mut p = Presentation::default();
+                p.refresh(
+                    DESKTOP_DOCK.manifest_fallback,
+                    DESKTOP_DOCK.source_fallback,
+                    s,
+                    theme(),
+                )
+                .unwrap();
+                let output = p.retained().unwrap();
+                assert!(output.actions.is_empty());
+                assert_eq!(output.buttons[0].id, "launcher");
+                assert!(output.buttons.len() <= 7);
+                for button in &output.buttons {
+                    assert!(
+                        button.x >= -4.0 && button.x + button.width <= 4.001,
+                        "{width}: {button:?}"
+                    );
+                    assert!(button.y <= 4.0 && button.y - button.height >= -4.001);
+                }
+                assert!(
+                    serde_json::to_string(&output.scene)
+                        .unwrap()
+                        .contains("\"opacity\":1.0")
+                );
+            }
         }
     }
 }

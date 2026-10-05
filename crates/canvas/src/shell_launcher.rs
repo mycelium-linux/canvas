@@ -93,6 +93,8 @@ fn applications() -> Vec<Entry> {
         roots.extend([
             PathBuf::from("/Applications"),
             PathBuf::from("/System/Applications"),
+            PathBuf::from("/Applications/Utilities"),
+            PathBuf::from("/System/Applications/Utilities"),
         ]);
         if let Some(home) = std::env::var_os("HOME") {
             roots.push(PathBuf::from(home).join("Applications"));
@@ -377,6 +379,8 @@ pub struct Launcher {
     #[cfg(feature = "lua-scenes")]
     pub scene: Option<crate::Scene>,
     #[cfg(feature = "lua-scenes")]
+    pub buttons: Vec<crate::lua_module::ModuleButton>,
+    #[cfg(feature = "lua-scenes")]
     presentation: crate::shell_presentation::Presentation,
 }
 impl Launcher {
@@ -394,6 +398,8 @@ impl Launcher {
             loading: true,
             #[cfg(feature = "lua-scenes")]
             scene: None,
+            #[cfg(feature = "lua-scenes")]
+            buttons: Vec::new(),
             #[cfg(feature = "lua-scenes")]
             presentation: Default::default(),
         })
@@ -451,6 +457,25 @@ impl Launcher {
                 },
             )
         })
+    }
+    /// Pointer choices carry the same provenance as keyboard activation.
+    pub fn select_entry(&mut self, generation: u64, revision: &str, id: &str, now: u64) -> bool {
+        if self.generation != generation
+            || self.busy
+            || now.saturating_sub(self.observed) >= LEASE_MS
+            || self.catalog.as_ref().is_none_or(|c| c.revision != revision)
+        {
+            return false;
+        }
+        let Some(index) = self
+            .matches()
+            .iter()
+            .position(|e| e.id == id && e.available)
+        else {
+            return false;
+        };
+        self.selected = index;
+        true
     }
     pub fn refresh_due(&mut self, now: u64) -> Option<(Target, u64)> {
         if self.loading || self.busy || now.saturating_sub(self.observed) < 6000 {
@@ -554,7 +579,16 @@ impl Launcher {
         let start = self.selected.saturating_sub(5);
         for (slot, (index, e)) in rows.iter().enumerate().skip(start).take(6).enumerate() {
             for (suffix, value) in [
-                ("title", e.title.chars().take(54).collect()),
+                (
+                    "title",
+                    e.title
+                        .chars()
+                        .scan(0usize, |bytes, ch| {
+                            *bytes += ch.len_utf8();
+                            (*bytes <= 80).then_some(ch)
+                        })
+                        .collect(),
+                ),
                 ("detail", e.detail.clone()),
             ] {
                 values.insert(format!("row{slot}-{suffix}"), ModuleInputValue::Text(value));
@@ -584,6 +618,11 @@ impl Launcher {
             .presentation
             .retained()
             .map(|output| output.scene.clone());
+        self.buttons = self
+            .presentation
+            .retained()
+            .map(|output| output.buttons.clone())
+            .unwrap_or_default();
         Ok(())
     }
 }

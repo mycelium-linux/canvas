@@ -88,6 +88,25 @@ fn unavailable_stale_busy_and_empty_choices_cannot_execute() {
     l.query = "no such choice".into();
     assert!(l.action(101).is_none());
 }
+
+#[test]
+fn pointer_choice_rejects_changed_catalog_generation_and_unavailable_rows() {
+    let mut l = Launcher::new().unwrap();
+    let generation = l.generation;
+    let revision = "a".repeat(64);
+    l.accept(generation, Ok(catalog()), 100);
+    assert!(!l.select_entry(generation + 1, &revision, "workspace:studio", 101));
+    assert!(!l.select_entry(generation, "wrong", "workspace:studio", 101));
+    assert!(!l.select_entry(generation, &revision, "surface:surf", 101));
+    assert!(!l.select_entry(generation, &revision, "unknown", 101));
+    assert!(!l.select_entry(generation, &revision, "workspace:studio", 100 + LEASE_MS));
+    assert!(l.select_entry(generation, &revision, "workspace:studio", 101));
+    assert!(
+        matches!(l.action(101), Some((_, Command::ShellActivate { entry_id, .. })) if entry_id == "workspace:studio")
+    );
+    l.busy = true;
+    assert!(!l.select_entry(generation, &revision, "workspace:studio", 101));
+}
 #[test]
 fn reopening_never_reuses_a_pending_generation() {
     assert_ne!(
@@ -108,13 +127,14 @@ fn lua_shell_uses_themed_primitives_and_never_issues_actions() {
     .into();
     l.render(theme, 101).unwrap();
     let scene = l.scene.as_ref().unwrap();
-    assert!(scene.nodes.len() > 10);
-    assert!(
-        scene
-            .nodes
-            .iter()
-            .any(|n| matches!(&n.content,canvas::NodeContent::Text{text,..} if text=="Studio"))
-    );
+    assert!(!scene.nodes.is_empty());
+    assert_eq!(l.buttons.len(), 2);
+    assert!(l.buttons.iter().any(|button| button.label == "Studio"));
+    // Native buttons own row titles; the retained scene must not draw a second
+    // copy behind them (native buttons can be translucent).
+    assert!(!scene.nodes.iter().any(
+        |n| matches!(&n.content, canvas::NodeContent::Text{text,..} if text == "Studio")
+    ));
     l.render(theme, 100 + LEASE_MS).unwrap();
     assert!(l.scene.as_ref().unwrap().nodes.iter().any(
         |n| matches!(&n.content,canvas::NodeContent::Text{text,..} if text.contains("STALE"))

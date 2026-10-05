@@ -491,6 +491,8 @@ enum Message {
     ShellBack,
     ShellForward,
     ShellProjects,
+    ShellFocusSurface(String),
+    ShellLauncherPick { generation: u64, revision: String, entry_id: String },
     ShellNewTask,
     /// A gesture on a model surface. Carries the stream rather than the
     /// surface: the camera belongs to the thing being rendered, so two
@@ -742,6 +744,8 @@ struct App {
     project_switcher: Option<::canvas::shell_launcher::Launcher>,
     #[cfg(feature = "lua-scenes")]
     desktop_bar: ::canvas::shell_presentation::Presentation,
+    #[cfg(feature = "lua-scenes")]
+    desktop_dock: ::canvas::shell_presentation::Presentation,
     jarvis_visible: bool,
     hud_visible: bool,
     scale_factor: f64,
@@ -1157,6 +1161,8 @@ impl App {
             project_switcher: None,
             #[cfg(feature = "lua-scenes")]
             desktop_bar: Default::default(),
+            #[cfg(feature = "lua-scenes")]
+            desktop_dock: Default::default(),
             jarvis_visible: true,
             hud_visible: false,
             scale_factor: 1.0,
@@ -1700,6 +1706,16 @@ impl App {
                 Task::none()
             }
             Message::ShellProjects => self.toggle_project_switcher(),
+            Message::ShellLauncherPick { generation, revision, entry_id } => {
+                if self.project_switcher.as_mut().is_some_and(|picker| picker.select_entry(generation, &revision, &entry_id, now_unix_ms())) {
+                    return self.activate_launcher_choice();
+                }
+                Task::none()
+            }
+            Message::ShellFocusSurface(id) => {
+                self.focus_shell_surface(&id);
+                Task::none()
+            }
             Message::ShellNewTask => {
                 let prompt = self.decoded.iter().find_map(|(id, surface)| {
                     matches!(
@@ -2193,21 +2209,7 @@ impl App {
                             return Task::none();
                         }
                         SwitchAction::Apply => {
-                            if switcher.busy {
-                                return Task::none();
-                            }
-                            if let Some((target, command)) = switcher.action(now_unix_ms()) {
-                                let generation = switcher.generation;
-                                switcher.busy = true;
-                                switcher.status = "Opening on selected target…".into();
-                                self.refresh_launcher_scene();
-                                self.bump();
-                                return launcher_task(target, command, generation, true);
-                            }
-                            switcher.status = "Unavailable / stale · F5 to refresh".into();
-                            self.refresh_launcher_scene();
-                            self.bump();
-                            return Task::none();
+                            return self.activate_launcher_choice();
                         }
                         SwitchAction::Cancel => {
                             self.project_switcher = None;
@@ -3767,6 +3769,18 @@ impl App {
         launcher_task(target, Command::ShellCatalog, generation, false)
     }
 
+    fn activate_launcher_choice(&mut self) -> Task<Message> {
+        let Some(picker) = self.project_switcher.as_mut() else { return Task::none(); };
+        if picker.busy { return Task::none(); }
+        let action = picker.action(now_unix_ms());
+        let generation = picker.generation;
+        picker.busy = action.is_some();
+        picker.status = if action.is_some() { "Opening on selected screen…" } else { "Unavailable / stale · F5 to refresh" }.into();
+        self.refresh_launcher_scene();
+        self.bump();
+        action.map(|(target, command)| launcher_task(target, command, generation, true)).unwrap_or_else(Task::none)
+    }
+
     fn refresh_launcher_scene(&mut self) {
         #[cfg(feature = "lua-scenes")]
         {
@@ -3812,6 +3826,44 @@ impl App {
         if let Err(error) = result {
             self.status = format!("Desktop bar Lua error (last good retained): {error}");
         }
+        self.refresh_desktop_dock(poll_files);
+    }
+
+    #[cfg(feature = "lua-scenes")]
+    fn refresh_desktop_dock(&mut self, poll_files: bool) {
+        use ::canvas::lua_module::{ModuleInputSnapshot, ModuleInputValue as Value, ModuleThemeTokens};
+        let mut values = BTreeMap::from([
+            ("width".into(), Value::Number(f64::from(self.frame.width.max(1)))),
+            ("height".into(), Value::Number(68.0)),
+            ("count".into(), Value::Number(self.document.surfaces.len() as f64)),
+        ]);
+        for (n, surface) in self.document.surfaces.iter().take(6).enumerate() {
+            let key = format!("item{n}");
+            values.insert(format!("{key}-id"), Value::Text(surface.id.clone()));
+            values.insert(format!("{key}-title"), Value::Text(surface.title.chars().take(16).collect()));
+            values.insert(format!("{key}-focused"), Value::Boolean(!self.desktop_focused && self.document.focused_surface_id.as_ref() == Some(&surface.id)));
+            values.insert(format!("{key}-minimized"), Value::Boolean(self.minimized_surfaces.contains(&surface.id)));
+        }
+        let visual = self.presented_visual_theme();
+        let theme = ModuleThemeTokens::from_visual(&visual, self.effective_theme(&self.document).accent());
+        let snapshot = ModuleInputSnapshot { revision: 1, now_ms: 1, values };
+        let artifact = ::canvas::shell_presentation::DESKTOP_DOCK;
+        let result = if poll_files { self.desktop_dock.refresh_files(artifact, snapshot, theme) }
+            else { self.desktop_dock.refresh_current(artifact, snapshot, theme) };
+        if let Err(error) = result { self.status = format!("Desktop dock Lua error (last good retained): {error}"); }
+    }
+
+    fn focus_shell_surface(&mut self, id: &str) {
+        if !self.decoded.contains_key(id) { return; }
+        self.minimized_surfaces.remove(id);
+        let page = self.document.layouts().position(|layout| flatten_layout(layout).iter().any(|p| p.surface_id == id));
+        if let Some(page) = page { self.document.active_page = page; }
+        self.desktop_focused = false;
+        self.apply_interaction_intents(vec![
+            InteractionIntent::Focus { surface_id: id.into() },
+            InteractionIntent::PromoteToFront { surface_id: id.into() },
+        ]);
+        self.bump();
     }
 
     fn apply_picked_theme(
@@ -4070,20 +4122,7 @@ impl App {
                         task
                     }
                     Choice::Surface { id } => {
-                        self.minimized_surfaces.remove(&id);
-                        let page = self.document.layouts().position(|layout| {
-                            flatten_layout(layout).iter().any(|p| p.surface_id == id)
-                        });
-                        if let Some(page) = page {
-                            self.document.active_page = page;
-                        }
-                        self.desktop_focused = false;
-                        self.apply_interaction_intents(vec![
-                            InteractionIntent::Focus {
-                                surface_id: id.clone(),
-                            },
-                            InteractionIntent::PromoteToFront { surface_id: id },
-                        ]);
+                        self.focus_shell_surface(&id);
                         Task::none()
                     }
                     Choice::Application { path } => {
@@ -4554,6 +4593,7 @@ impl App {
                 }
                 self.bump();
                 self.status = "Canvas focused.".into();
+                platform::activate_for_focus();
                 self.answer(
                     pending,
                     Outcome::Ok {
@@ -8002,6 +8042,17 @@ impl App {
         viewport: LogicalSize,
         action: impl Fn(&::canvas::lua_module::ModuleButton) -> Option<Message>,
     ) -> Vec<Element<'static, Message>> {
+        self.native_module_buttons_selected(buttons, viewport, action, |_| false)
+    }
+
+    #[cfg(feature = "lua-scenes")]
+    fn native_module_buttons_selected(
+        &self,
+        buttons: &[::canvas::lua_module::ModuleButton],
+        viewport: LogicalSize,
+        action: impl Fn(&::canvas::lua_module::ModuleButton) -> Option<Message>,
+        selected: impl Fn(&::canvas::lua_module::ModuleButton) -> bool,
+    ) -> Vec<Element<'static, Message>> {
         let visual = self.presented_visual_theme();
         buttons
             .iter()
@@ -8009,6 +8060,7 @@ impl App {
                 let [x, y] = scene_node_position([control.x, control.y, 0.0], viewport);
                 let width = control.width * viewport.width as f32 / 8.0;
                 let height = control.height * viewport.height as f32 / 8.0;
+                let selected = selected(control);
                 let item = button(
                     text(control.label.clone())
                         .size(visual.metrics.small)
@@ -8018,7 +8070,7 @@ impl App {
                 .height(height)
                 .on_press_maybe(action(control))
                 .style(move |_, status| {
-                    canvas_widgets::live::app_chrome::cube_button_style(visual, false, status)
+                    canvas_widgets::live::app_chrome::cube_button_style(visual, selected, status)
                 });
                 container(item)
                     .padding(iced::Padding {
@@ -9856,13 +9908,23 @@ impl App {
                     .clamp(420.0, 760.0)
                     .min(viewport.width as f32);
                 let height = (viewport.height as f32 * 0.80).min(600.0);
-                let sheet = self.scene_layer(
+                let size = LogicalSize { width: width as f64, height: height as f64 };
+                let mut sheet_layers = vec![self.scene_layer(
                     scene,
-                    LogicalSize {
-                        width: width as f64,
-                        height: height as f64,
-                    },
-                );
+                    size,
+                )];
+                let rows = picker.matches();
+                let start = picker.selected.saturating_sub(5);
+                sheet_layers.extend(self.native_module_buttons_selected(&picker.buttons, size, |control| {
+                    if !control.enabled { return None; }
+                    let slot = control.id.strip_prefix("row")?.parse::<usize>().ok()?;
+                    if slot >= 6 { return None; }
+                    let entry = rows.get(start + slot)?;
+                    Some(Message::ShellLauncherPick { generation: picker.generation,
+                        revision: picker.catalog.as_ref()?.revision.clone(), entry_id: entry.id.clone() })
+                }, |control| control.id.strip_prefix("row").and_then(|n| n.parse::<usize>().ok())
+                    .is_some_and(|slot| start + slot == picker.selected)));
+                let sheet = stack(sheet_layers);
                 layers.push(
                     container(container(sheet).width(width).height(height))
                         .center(Length::Fill)
@@ -10096,6 +10158,29 @@ impl App {
                     .align_y(iced::alignment::Vertical::Top)
                     .into(),
             );
+        }
+
+        #[cfg(feature = "lua-scenes")]
+        if shell_bar_height > 0 && self.project_switcher.is_none() {
+            if let Some(presentation) = self.desktop_dock.retained() {
+                let size = LogicalSize { width: f64::from(viewport.width), height: 68.0 };
+                let controls = self.native_module_buttons(&presentation.buttons, size, |control| {
+                    if !control.enabled { return None; }
+                    match control.id.as_str() {
+                        "launcher" => Some(Message::ShellProjects),
+                        id => id.strip_prefix("item").and_then(|n| n.parse::<usize>().ok())
+                            .filter(|n| *n < 6).and_then(|n| self.document.surfaces.get(n))
+                            .filter(|surface| self.decoded.contains_key(&surface.id))
+                            .map(|surface| Message::ShellFocusSurface(surface.id.clone())),
+                    }
+                });
+                let mut children = vec![self.scene_layer(&presentation.scene, size)];
+                children.extend(controls);
+                layers.push(container(container(stack(children)).height(Length::Fixed(68.0)).clip(true))
+                    .width(Length::Fill).height(Length::Fill)
+                    .padding(iced::Padding { bottom: 12.0, ..Default::default() })
+                    .align_y(iced::alignment::Vertical::Bottom).into());
+            }
         }
 
         let global_tasks = self
@@ -11891,6 +11976,19 @@ mod platform {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
+    // This stable API also supports older macOS deployments; the newer activate
+    // selector is macOS 14+. Both calls stay inside our own GUI process.
+    #[allow(deprecated)]
+    pub fn activate_for_focus() {
+        if let Some(marker) = objc2_foundation::MainThreadMarker::new() {
+            objc2_app_kit::NSApplication::sharedApplication(marker).activateIgnoringOtherApps(true);
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn activate_for_focus() {}
+
     #[cfg(not(target_os = "macos"))]
     pub fn displays() -> Result<Vec<DisplayInfo>, String> {
         Ok(Vec::new())
@@ -12300,8 +12398,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         Subscription::batch([
             iced::time::every(cadence).map(|_| Message::Tick),
-            iced::event::listen_with(|event, _, window| match event {
+            iced::event::listen_with(|event, status, window| match event {
                 iced::Event::Window(event) => Some(Message::WindowEvent(window, event)),
+                iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_) | iced::mouse::Event::WheelScrolled { .. })
+                    if status == iced::event::Status::Captured => None,
                 iced::Event::Mouse(event) => Some(Message::MouseEvent(window, event)),
                 iced::Event::Keyboard(event) => Some(Message::TerminalInput(event)),
                 _ => None,
