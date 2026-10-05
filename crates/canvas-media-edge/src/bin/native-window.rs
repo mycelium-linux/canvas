@@ -199,6 +199,7 @@ mod macos {
             .with_width(width)
             .with_height(height)
             .with_pixel_format(screencapturekit::prelude::PixelFormat::BGRA)
+            .with_background_color_rgba(0.0, 0.0, 0.0, 0.0)
             .with_queue_depth(5)
             .with_shows_cursor(false)
             .with_minimum_frame_interval(&CMTime::new(1, i32::try_from(config.fps)?))

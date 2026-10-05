@@ -8632,6 +8632,7 @@ impl App {
             | ContentSource::LiveVideo { .. }
             | ContentSource::ExternalSurface { .. } => {
                 let view = self.shared_views.get(&surface.snapshot.id);
+                let mut native_alpha = false;
                 let picture: Element<'_, Message> = match &surface.source {
                     ContentSource::LiveVideo {
                         path,
@@ -8656,7 +8657,11 @@ impl App {
                     }
                     ContentSource::ExternalSurface { source_id } => {
                         match self.external_surfaces.frame(source_id) {
-                            Some(frame) => canvas_model_viewer::video::external_view(frame),
+                            Some(frame) => {
+                                native_alpha = frame.descriptor.alpha_mode
+                                    != canvas_core::external_surface::AlphaMode::Opaque;
+                                canvas_model_viewer::video::external_view(frame)
+                            }
                             None => {
                                 let visual = self.presented_visual_theme();
                                 container(
@@ -8732,12 +8737,14 @@ impl App {
                 }
                 let visual: Element<'_, Message> = stack(layers).into();
                 // Pixel streams are often letterboxed by their producer and do not carry an
-                // alpha channel. Give them an opaque inner matte so the desktop/background
+                // alpha channel. Only opaque streams get an inner matte; native
+                // alpha-bearing surfaces must compose over the desktop directly.
+                // Give opaque streams a matte so the desktop/background
                 // cannot bleed through their edges while preserving the stream's aspect ratio.
                 let visual: Element<'_, Message> = if matches!(
                     &surface.source,
                     ContentSource::LiveVideo { .. } | ContentSource::ExternalSurface { .. }
-                ) {
+                ) && !native_alpha {
                     container(visual)
                         .width(Length::Fill)
                         .height(Length::Fill)
