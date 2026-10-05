@@ -25,6 +25,13 @@
    }
   },
   {
+   "kind": "media.video_alpha_mask.v1",
+   "target": {
+    "mode": "any_holder",
+    "name": "canvas.media"
+   }
+  },
+  {
    "kind": "camera.detections.v1",
    "target": {
     "mode": "any_holder",
@@ -238,6 +245,19 @@
    ],
    "publish_zones": [
     "living-room"
+   ]
+  },
+  {
+   "producer_id": "mac-studio-android",
+   "token_file": "/home/ajm/.config/unibus/tokens/mac-studio-media.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "canvas.media"
+   ],
+   "screen_anchors": [
+    "screen-tv"
    ]
   },
   {
@@ -484,9 +504,10 @@
    "zones": [
     "living-room"
    ],
-   "capabilities": [
-    "midi.output",
-    "synesthesia.control"
+      "capabilities": [
+        "midi.output",
+        "synesthesia.control",
+        "unibus.stream.source"
    ],
    "publishes": [
     "unibus.stream.event.v1",
