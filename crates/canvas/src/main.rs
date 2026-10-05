@@ -772,6 +772,8 @@ struct App {
     /// drawing that came from a script instead of from a Rust kind.
     #[cfg(feature = "lua-scenes")]
     modules: BTreeMap<String, ModuleSurface>,
+    #[cfg(feature = "lua-scenes")]
+    module_bus: ::canvas::module_bus::ModuleBus,
     /// The civil day the authored modules were resolved for.
     ///
     /// Held rather than recomputed because the point is to notice the change: a
@@ -795,8 +797,6 @@ struct App {
     status: String,
     interaction: InteractionEngine,
     snap_preview: Option<LogicalRect>,
-    #[cfg(feature = "lua-scenes")]
-    module_bus: ::canvas::module_bus::ModuleBus,
     cursor: Option<LogicalPoint>,
     cursor_window: Option<iced::window::Id>,
     desktop_focused: bool,
@@ -1173,6 +1173,8 @@ impl App {
             #[cfg(feature = "lua-scenes")]
             modules: BTreeMap::new(),
             #[cfg(feature = "lua-scenes")]
+            module_bus: ::canvas::module_bus::ModuleBus::from_env(),
+            #[cfg(feature = "lua-scenes")]
             module_day: ::canvas::hud::local_parts(now_unix_ms()).day,
             shared_views: BTreeMap::new(),
             indicators: BTreeMap::new(),
@@ -1200,8 +1202,6 @@ impl App {
             system: sysinfo::System::new(),
             networks: sysinfo::Networks::new(),
             status: if shortcut_errors.is_empty() {
-            module_bus: ::canvas::module_bus::ModuleBus::from_env(),
-            #[cfg(feature = "lua-scenes")]
                 "Canvas is ready; Ctrl+Option+C toggles its displays.".into()
             } else {
                 format!(
@@ -1627,6 +1627,14 @@ impl App {
 
     fn update_inner(&mut self, message: Message) -> Task<Message> {
         match message {
+            #[cfg(feature = "lua-scenes")]
+            Message::ModuleActivate {
+                surface_id,
+                target_id,
+            } => {
+                self.activate_module(&surface_id, &target_id);
+                Task::none()
+            }
             Message::ShellBack => {
                 self.jump_back();
                 Task::none()
@@ -1654,14 +1662,6 @@ impl App {
                             })
                         };
                         if let Some(page) = destination_page {
-            #[cfg(feature = "lua-scenes")]
-            Message::ModuleActivate {
-                surface_id,
-                target_id,
-            } => {
-                self.activate_module(&surface_id, &target_id);
-                Task::none()
-            }
                             self.document.active_page = page;
                         }
                         self.update(Message::PromptNew(surface_id))
@@ -7635,123 +7635,6 @@ impl App {
     /// authored calendar that does not roll at midnight is a wall that lies once a
     /// day. Never per frame: the retained key means a steady wall starts no VM.
     #[cfg(feature = "lua-scenes")]
-    fn refresh_modules(&mut self) {
-        let now_ms = now_unix_ms();
-        let visual = self.presented_visual_theme();
-        let accent = self.effective_theme(&self.document).accent();
-        let theme = ::canvas::lua_module::ModuleThemeTokens::from_visual(&visual, accent);
-        let today = ::canvas::hud::local_parts(now_ms);
-        let mut targets = Vec::new();
-        for (id, surface) in &self.decoded {
-            if let ContentSource::Widget { spec } = &surface.source
-                && let canvas_widgets::WidgetKind::Module { module, inputs } = &spec.kind
-            {
-                let artifact_revision = module_artifact_revision(module);
-                let key = module_key(
-                    module,
-                    inputs,
-                    &visual,
-                    today.year,
-                    today.month,
-                    today.day,
-                    artifact_revision,
-                );
-                targets.push((id.clone(), module.clone(), inputs.clone(), key));
-            }
-        }
-        let live: BTreeSet<String> = targets.iter().map(|(id, _, _, _)| id.clone()).collect();
-        for (id, name, inputs, key) in targets {
-            if self.modules.get(&id).is_some_and(|done| done.key() == key) {
-                continue;
-            }
-            let resolved = match resolve_module(&name, &inputs, theme, now_ms) {
-                Ok(scene) => ModuleSurface::Rendered {
-                    key,
-                    buttons: scene.buttons,
-                    scene: scene.scene,
-                    last_error: None,
-                },
-                Err(reason) => {
-                    // Loud on the console as well as on the wall: this is the one
-                    // failure mode where a silent fallback would look like a
-                    // working widget.
-                    eprintln!("Canvas module {name} on surface {id}: {reason}");
-                    match self.modules.get(&id) {
-                        Some(ModuleSurface::Rendered { scene, buttons, .. }) => {
-                            ModuleSurface::Rendered {
-                                key,
-                                scene: scene.clone(),
-                                buttons: buttons.clone(),
-                                last_error: Some(reason),
-                            }
-                        }
-                        _ => ModuleSurface::Failed { key, reason },
-                    }
-                }
-            };
-            self.modules.insert(id, resolved);
-        }
-        self.modules.retain(|id, _| live.contains(id));
-    }
-
-    /// Draw a scene's text nodes in 2D, sized and coloured from the presented theme.
-    ///
-    /// Shared by document-authored scenes and resolved Lua modules, so an
-    /// authored widget can never look like a different toolkit than a placed one.
-    fn scene_layer(&self, scene: &Scene, viewport: LogicalSize) -> Element<'static, Message> {
-        let visual = self.presented_visual_theme();
-        let palette = visual.palette;
-        let metrics = visual.metrics;
-        // Flat primitives are retained scene nodes. Group/Mesh/Camera/Light
-        // nodes contribute transforms without inventing a second layout owner.
-        let mut sorted: Vec<usize> = scene
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, node)| {
-                matches!(
-                    node.content,
-                    NodeContent::Text { .. } | NodeContent::Rect { .. }
-                )
-            })
-            .map(|(index, _)| index)
-            .collect();
-        // Farther nodes draw first so closer ones appear on top.
-        sorted.sort_by(|a, b| {
-            scene.nodes[*a].transform.translation[2]
-                .total_cmp(&scene.nodes[*b].transform.translation[2])
-        });
-        let children: Vec<Element<'static, Message>> = sorted
-            .iter()
-            .map(|&index| {
-                let node = &scene.nodes[index];
-                let parents = scene_parent_chain(index, &scene.nodes);
-                let (translation, _rotation, scale) =
-                    scene_node_effective(index, &scene.nodes, &parents);
-                let [pos_x, pos_y] = scene_node_position(translation, viewport);
-                let z_scale = scene_node_scale(translation[2]);
-                let content: Element<'static, Message> = match &node.content {
-                    NodeContent::Text { text: label, ink } => {
-                        let font_size =
-                            scene_text_size(scale[1], metrics.body, z_scale, metrics.micro);
-                        container(
-                            text(label.clone())
-                                .size(font_size)
-                                .color(color(scene_ink(*ink, &palette))),
-                        )
-                        .into()
-                    }
-                    NodeContent::Rect {
-                        ink,
-                        opacity,
-                        radius,
-                    } => {
-                        let width = (scale[0].abs() * viewport.width as f32 / 8.0).max(1.0);
-                        let height = (scale[1].abs() * viewport.height as f32 / 8.0).max(1.0);
-                        let mut fill = color(scene_ink(*ink, &palette));
-                        fill.a = *opacity;
-                        let radius = *radius;
-    #[cfg(feature = "lua-scenes")]
     fn drain_module_bus(&mut self) {
         for event in self.module_bus.poll() {
             if event.kind == "canvas.widget.snapshot.v1" {
@@ -7885,6 +7768,129 @@ impl App {
         stack(children).into()
     }
 
+    #[cfg(feature = "lua-scenes")]
+    fn refresh_modules(&mut self) {
+        let now_ms = now_unix_ms();
+        let visual = self.presented_visual_theme();
+        let accent = self.effective_theme(&self.document).accent();
+        let theme = ::canvas::lua_module::ModuleThemeTokens::from_visual(&visual, accent);
+        let today = ::canvas::hud::local_parts(now_ms);
+        let mut targets = Vec::new();
+        for (id, surface) in &self.decoded {
+            if let ContentSource::Widget { spec } = &surface.source
+                && let canvas_widgets::WidgetKind::Module { module, inputs } = &spec.kind
+            {
+                let artifact_revision = module_artifact_revision(module);
+                let key = module_key(
+                    module,
+                    inputs,
+                    &visual,
+                    today.year,
+                    today.month,
+                    today.day,
+                    artifact_revision,
+                );
+                // Explicit low-frequency freshness refresh, off the draw path.
+                let key = spec
+                    .refresh_ms
+                    .map_or(key, |refresh| key ^ (now_ms / refresh.max(1_000)));
+                targets.push((id.clone(), module.clone(), inputs.clone(), key));
+            }
+        }
+        let live: BTreeSet<String> = targets.iter().map(|(id, _, _, _)| id.clone()).collect();
+        for (id, name, inputs, key) in targets {
+            if self.modules.get(&id).is_some_and(|done| done.key() == key) {
+                continue;
+            }
+            let resolved = match resolve_module(&name, &inputs, theme, now_ms) {
+                Ok(scene) => ModuleSurface::Rendered {
+                    key,
+                    buttons: scene.buttons,
+                    scene: scene.scene,
+                    last_error: None,
+                },
+                Err(reason) => {
+                    // Loud on the console as well as on the wall: this is the one
+                    // failure mode where a silent fallback would look like a
+                    // working widget.
+                    eprintln!("Canvas module {name} on surface {id}: {reason}");
+                    match self.modules.get(&id) {
+                        Some(ModuleSurface::Rendered { scene, buttons, .. }) => {
+                            ModuleSurface::Rendered {
+                                key,
+                                scene: scene.clone(),
+                                buttons: buttons.clone(),
+                                last_error: Some(reason),
+                            }
+                        }
+                        _ => ModuleSurface::Failed { key, reason },
+                    }
+                }
+            };
+            self.modules.insert(id, resolved);
+        }
+        self.modules.retain(|id, _| live.contains(id));
+    }
+
+    /// Draw a scene's text nodes in 2D, sized and coloured from the presented theme.
+    ///
+    /// Shared by document-authored scenes and resolved Lua modules, so an
+    /// authored widget can never look like a different toolkit than a placed one.
+    fn scene_layer(&self, scene: &Scene, viewport: LogicalSize) -> Element<'static, Message> {
+        let visual = self.presented_visual_theme();
+        let palette = visual.palette;
+        let metrics = visual.metrics;
+        // Flat primitives are retained scene nodes. Group/Mesh/Camera/Light
+        // nodes contribute transforms without inventing a second layout owner.
+        let mut sorted: Vec<usize> = scene
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| {
+                matches!(
+                    node.content,
+                    NodeContent::Text { .. } | NodeContent::Rect { .. }
+                )
+            })
+            .map(|(index, _)| index)
+            .collect();
+        // Farther nodes draw first so closer ones appear on top.
+        sorted.sort_by(|a, b| {
+            scene.nodes[*a].transform.translation[2]
+                .total_cmp(&scene.nodes[*b].transform.translation[2])
+        });
+        let children: Vec<Element<'static, Message>> = sorted
+            .iter()
+            .map(|&index| {
+                let node = &scene.nodes[index];
+                let parents = scene_parent_chain(index, &scene.nodes);
+                let (translation, _rotation, scale) =
+                    scene_node_effective(index, &scene.nodes, &parents);
+                let [pos_x, pos_y] = scene_node_position(translation, viewport);
+                let z_scale = scene_node_scale(translation[2]);
+                let content: Element<'static, Message> = match &node.content {
+                    NodeContent::Text { text: label, ink } => {
+                        // Font size is a length, not an area: multiplying X
+                        // and Y made a 2x Lua label grow 4x and clip its frame.
+                        let font_size =
+                            scene_text_size(scale[1], metrics.body, z_scale, metrics.micro);
+                        container(
+                            text(label.clone())
+                                .size(font_size)
+                                .color(color(scene_ink(*ink, &palette))),
+                        )
+                        .into()
+                    }
+                    NodeContent::Rect {
+                        ink,
+                        opacity,
+                        radius,
+                    } => {
+                        let width = (scale[0].abs() * viewport.width as f32 / 8.0).max(1.0);
+                        let height = (scale[1].abs() * viewport.height as f32 / 8.0).max(1.0);
+                        let mut fill = color(scene_ink(*ink, &palette));
+                        fill.a = *opacity;
+                        let radius = *radius;
                         container(space::horizontal())
                             .width(width)
                             .height(height)
@@ -7907,10 +7913,6 @@ impl App {
                         top: pos_y,
                         right: 0.0,
                         bottom: 0.0,
-                // Explicit low-frequency freshness refresh, off the draw path.
-                let key = spec
-                    .refresh_ms
-                    .map_or(key, |refresh| key ^ (now_ms / refresh.max(1_000)));
                         left: pos_x,
                     })
                     .into()
@@ -7983,8 +7985,6 @@ impl App {
                     axis_color: color(palette.text),
                     muted_color: color(palette.text_muted),
                     surface_color: color(palette.surface),
-                        // Font size is a length, not an area: multiplying X
-                        // and Y made a 2x Lua label grow 4x and clip its frame.
                     // Categorical identity, not status: a ramp of
                     // `[primary, success, danger, warning]` made series three
                     // and four claim "failed" and "degraded" by list position.
@@ -10854,6 +10854,8 @@ fn module_input(value: &canvas_widgets::WidgetInput) -> ::canvas::lua_module::Mo
 fn scene_ink(ink: Option<SemanticInk>, palette: &ThemePalette) -> [u8; 3] {
     match ink.unwrap_or(SemanticInk::Text) {
         SemanticInk::Text => palette.text,
+        SemanticInk::Surface => palette.surface,
+        SemanticInk::Background => palette.background,
         SemanticInk::Muted => palette.text_muted,
         SemanticInk::Primary => palette.primary,
         SemanticInk::Success => palette.success,
@@ -10880,6 +10882,10 @@ fn scene_node_position(translation: [f32; 3], viewport: LogicalSize) -> [f32; 2]
 fn scene_node_scale(translation_z: f32) -> f32 {
     let clamped = translation_z.clamp(-4.0, 4.0);
     0.5 + ((clamped + 4.0) / 8.0) * 1.5
+}
+
+fn scene_text_size(scale_y: f32, body: f32, depth: f32, minimum: f32) -> f32 {
+    (scale_y.abs() * body * depth).max(minimum)
 }
 
 /// Extract the 2D rotation angle (radians) from a quaternion.
@@ -10967,8 +10973,6 @@ fn apply_plan_diagnostics(
     snapshot.display_logical = Some([plan.display_logical.width, plan.display_logical.height]);
     snapshot.scale_factor = Some(plan.scale_factor);
 }
-        SemanticInk::Surface => palette.surface,
-        SemanticInk::Background => palette.background,
 
 fn load_content(
     surface_id: String,
@@ -10997,10 +11001,6 @@ fn load_content(
         .to_ascii_lowercase();
     let display_title = title.unwrap_or_else(|| {
         path.file_name()
-fn scene_text_size(scale_y: f32, body: f32, depth: f32, minimum: f32) -> f32 {
-    (scale_y.abs() * body * depth).max(minimum)
-}
-
             .and_then(|value| value.to_str())
             .unwrap_or("Untitled")
             .to_owned()
@@ -12359,6 +12359,13 @@ mod tests {
     }
 
     #[test]
+    fn lua_text_size_scales_linearly_not_quadratically() {
+        let base = scene_text_size(1.0, 16.0, 1.25, 8.0);
+        assert_eq!(scene_text_size(2.0, 16.0, 1.25, 8.0), base * 2.0);
+        assert_eq!(scene_text_size(0.01, 16.0, 1.25, 8.0), 8.0);
+    }
+
+    #[test]
     fn scene_node_rotation_extracts_z_angle() {
         use std::f32::consts::PI;
         // No rotation: identity quaternion [0,0,0,1]
@@ -12490,13 +12497,6 @@ mod tests {
                     width: 0.8,
                     height: 0.8,
                 },
-    #[test]
-    fn lua_text_size_scales_linearly_not_quadratically() {
-        let base = scene_text_size(1.0, 16.0, 1.25, 8.0);
-        assert_eq!(scene_text_size(2.0, 16.0, 1.25, 8.0), base * 2.0);
-        assert_eq!(scene_text_size(0.01, 16.0, 1.25, 8.0), 8.0);
-    }
-
                 layer: 1,
             }],
         };
