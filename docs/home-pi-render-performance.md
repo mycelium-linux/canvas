@@ -196,5 +196,88 @@ The original 24-workspace backup remains untouched. Only the UI binary changed;
 the compositor, capture geometry, service configuration, and media transport
 were preserved. QEMU was restored after profiling.
 
-Installed UI SHA-256:
+Cache-slice UI SHA-256 (retained as the next rollout's rollback binary):
 `e80da2e65313a226e9f44644dc40780426be92bb96a5c7ab5ac9efd3cd3cf9b9`.
+
+## Bounded native-window submission rollout
+
+`dock-o5b.2` adds a pinned `iced_wgpu` 0.14.0 source patch because the public
+custom-primitive API cannot intercept whole-window submission. The upstream
+renderer/shaders are retained; the small admission integration is documented
+in `vendor/iced_wgpu/CANVAS-PATCH.md`, alongside the upstream MIT license.
+
+Each native surface admits **one unfinished GPU frame**. Busy redraws submit
+nothing and retain no history; an off-event-loop completion worker wakes the
+shell to render current state. Surface failures release the reservation and
+completion failures fail visibly. Limits are per window, not device-wide, so
+one busy display cannot monopolize admission for another. The total is bounded
+by live native windows rather than redraw count. Offscreen captures, asynchronous
+image-cache work and external applications are outside this window-frame bound;
+individual driver jobs inside an admitted frame can still queue.
+
+`CANVAS_GPU_MAX_IN_FLIGHT=0` is an explicit A/B bypass; default/`1` enables the
+gate. Other values are rejected. `CANVAS_GPU_FRAME_METRICS=1` enables optional
+submit-to-completion wall-time logs, completed/admitted counts and coalesced
+attempts. It is diagnostic logging, not presentation FPS or GPU shader timing.
+
+A fresh cached-binary baseline and the bounded candidate were measured at
+1920×1080, with warm ten-second clock traces:
+
+| Clock measurement | Cached baseline | Bounded candidate |
+| --- | ---: | ---: |
+| Canvas render-job queue wait p50 | 12.050 ms | 1.174 ms |
+| Canvas render-job queue wait p95 | 64.971 ms | 50.778 ms |
+| Canvas render-job queue wait max | 75.012 ms | 58.669 ms |
+| Canvas render-job execution p95 | 42.707 ms | 42.727 ms |
+| Compositor render-job queue wait p95 | 80.120 ms | 76.161 ms |
+| Display flips/sec | 17.900 | 20.235 |
+| Display flip interval p95 | 100.030 ms | 100.007 ms |
+
+Evidence: `queue-before-clock-summary.json` and
+`queue-after-clock-summary.json`; Canvas DRM clients were respectively 399 and
+417, and compositor client 4. Queue backpressure reduces typical/tail backlog
+but **does not cure p95 presentation jitter or make the clock cheaper**. These
+remain scheduler-job distributions and display flips, not unique app FPS,
+per-frame execution times or end-to-end input latency. No 25/60-FPS claim follows.
+
+The empty desktop measured 28.600 display flips/sec, 50.004 ms flip-interval p95,
+17.721 ms render-job execution p95 and 25.855 ms render queue-wait p95
+(`queue-after-idle-summary.json`). The configured QEMU workspace measured 22.651
+flips/sec and 66.677 ms flip-interval p95 (`queue-after-qemu-summary.json`), but
+**its video feed was missing**, so those numbers do not characterize active
+video playback. Its `.rgba` file predates this rollout (03:19), the decoder was
+registered but had no fresh frames, and the Agora producer subsequently stopped.
+The QEMU UI capture was blank. This separate source-health finding is recorded
+under `dock-qvl`; the TV was left showing the working analog clock rather than
+claiming that video restoration succeeded. `grim` cannot verify the composed
+output because the current compositor lacks wlr-screencopy.
+
+Five `canvasctl inspect` queries during the configured QEMU view took 20–40 ms
+including CLI process startup, measured with `/usr/bin/time`. This verifies a
+responsive control socket, **not keyboard-to-display latency**. The analog clock
+capture was visually inspected, and the clock shader/palette are unchanged.
+
+Validation: current-host and compatibility-host checks, 85 regular widget tests,
+three admission-state tests, a real GPU completion/wakeup test (including
+independent windows), the retained-gradient GPU test, and ARM release cross-build
+passed on Agora. Strict backend Clippy found three categories in unmodified
+upstream code (`drain_collect`, `default_constructed_unit_structs`,
+`too_many_arguments`); allowing only those categories passed after fixing the
+new test diagnostics. This does not certify the entire dirty workspace lint-clean.
+
+Deployment reused the isolated compatibility snapshot rather than shipping
+current main's unrelated transport changes. Only the UI binary was atomically
+replaced; the native compositor, geometry, service settings and source/transport
+config were preserved. All three Pi services are active. The original 24-workspace
+backup remains untouched. The cached binary is retained at
+`/usr/local/lib/canvas/rollback/gpu-queue-20261005/canvas`; compatible workspace
+state was copied to
+`/home/ajm/.cache/canvas-perf-20261005/workspaces.before-gpu-queue.json`.
+Task-owned tracing instances were removed after measurement.
+
+Installed bounded UI SHA-256:
+`d1ab8bfb37c8784999763144e782d9fc1e18846bb12f4a47a04b68cee8bf3c53`.
+
+Remaining work in `dock-o5b`: true per-frame/presentation telemetry and reducing
+the clock's ~43 ms heavy jobs. Bounding unfinished frames is not a substitute
+for making their rendering cheaper.
