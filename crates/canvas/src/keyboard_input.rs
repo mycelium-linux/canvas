@@ -285,6 +285,11 @@ pub(crate) fn new_task_requested(event: &iced::keyboard::Event) -> bool {
 
 pub(crate) fn switcher_requested(event: &iced::keyboard::Event) -> bool {
     use iced::keyboard::{Event, Key};
+    if matches!(event, Event::KeyPressed { key:Key::Named(iced::keyboard::key::Named::Space),modifiers,repeat:false,.. }
+        if modifiers.control() && !modifiers.alt() && !modifiers.logo() && !modifiers.shift())
+    {
+        return true;
+    }
     matches!(
         event,
         Event::KeyPressed {

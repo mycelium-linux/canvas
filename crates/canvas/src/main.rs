@@ -476,6 +476,12 @@ type TimelineAction = canvas_model_viewer::view::TimelineAction;
 
 #[derive(Debug, Clone)]
 enum Message {
+    LauncherReply {
+        generation: u64,
+        target_id: String,
+        activating: bool,
+        result: Result<Receipt, String>,
+    },
     Tick,
     #[cfg(feature = "lua-scenes")]
     ModuleActivate {
@@ -554,6 +560,11 @@ enum Message {
         screenshot: iced::window::Screenshot,
     },
     LinkOpened(String),
+    NativeAppLaunched {
+        pending: Box<Pending>,
+        entry_id: String,
+        result: Result<(), String>,
+    },
     TerminalInput(iced::keyboard::Event),
     ThemePickerSelect(usize),
     SurfaceHover(Option<String>),
@@ -728,7 +739,7 @@ struct App {
     background_picker: Option<::canvas::background_picker::BackgroundPicker>,
     theme_picker: Option<::canvas::theme_picker::ThemePicker>,
     project_picker: Option<::canvas::project_picker::ProjectPicker>,
-    project_switcher: Option<::canvas::project_switcher::ProjectSwitcher>,
+    project_switcher: Option<::canvas::shell_launcher::Launcher>,
     jarvis_visible: bool,
     hud_visible: bool,
     scale_factor: f64,
@@ -1627,6 +1638,45 @@ impl App {
 
     fn update_inner(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::LauncherReply {
+                generation,
+                target_id,
+                activating,
+                result,
+            } => {
+                if !self.project_switcher.as_ref().is_some_and(|l| {
+                    l.generation == generation && l.targets[l.target].id == target_id
+                }) {
+                    return Task::none();
+                }
+                if activating {
+                    if let Some(l) = self.project_switcher.as_mut() {
+                        l.busy = false;
+                    }
+                    match result {
+                        Ok(Receipt::ShellActivated { .. }) => {
+                            self.project_switcher = None;
+                            self.status = "Opened on selected target.".into();
+                        }
+                        Ok(_) => self.status = "Unexpected launcher action receipt".into(),
+                        Err(error) => {
+                            self.status = error.clone();
+                            if let Some(l) = self.project_switcher.as_mut() {
+                                l.status = error;
+                            }
+                        }
+                    }
+                } else if let Some(l) = self.project_switcher.as_mut() {
+                    let catalog = result.and_then(|r| match r {
+                        Receipt::ShellCatalog { catalog } => Ok(catalog),
+                        _ => Err("Target does not support launcher catalog".into()),
+                    });
+                    l.accept(generation, catalog, now_unix_ms());
+                }
+                self.refresh_launcher_scene();
+                self.bump();
+                Task::none()
+            }
             #[cfg(feature = "lua-scenes")]
             Message::ModuleActivate {
                 surface_id,
@@ -1643,7 +1693,7 @@ impl App {
                 self.jump_forward();
                 Task::none()
             }
-            Message::ShellProjects => self.toggle_project_picker(),
+            Message::ShellProjects => self.toggle_project_switcher(),
             Message::ShellNewTask => {
                 let prompt = self.decoded.iter().find_map(|(id, surface)| {
                     matches!(
@@ -1718,11 +1768,14 @@ impl App {
                         self.refresh_interaction_geometry();
                         self.bump();
                     }
-                #[cfg(feature = "lua-scenes")]
-                self.drain_module_bus();
+                    #[cfg(feature = "lua-scenes")]
+                    self.drain_module_bus();
                 }
                 let clock_second = now_unix_ms() / 1_000;
                 if clock_second != self.last_clock_second {
+                    if self.project_switcher.is_some() {
+                        self.refresh_launcher_scene();
+                    }
                     self.last_clock_second = clock_second;
                     let has_clock = self.document.surfaces.iter().any(|surface| {
                         matches!(
@@ -1810,6 +1863,18 @@ impl App {
                     self.refresh_stream_health();
                 }
                 let mut tasks = vec![self.drain_commands(), self.reload_live_images()];
+                if let Some((target, generation)) = self
+                    .project_switcher
+                    .as_mut()
+                    .and_then(|l| l.refresh_due(now_unix_ms()))
+                {
+                    tasks.push(launcher_task(
+                        target,
+                        Command::ShellCatalog,
+                        generation,
+                        false,
+                    ));
+                }
                 if let Some(settled) = self.display_watch.poll() {
                     tasks.push(self.apply_display_change(settled));
                 }
@@ -1912,6 +1977,9 @@ impl App {
                 Task::none()
             }
             Message::MouseEvent(window, event) => {
+                if self.project_switcher.is_some() {
+                    return Task::none();
+                }
                 self.handle_mouse(window, event);
                 Task::none()
             }
@@ -2109,15 +2177,29 @@ impl App {
                     }
                 }
                 if let Some(switcher) = self.project_switcher.as_mut() {
-                    use ::canvas::project_switcher::Action as SwitchAction;
-                    match switcher.handle(&kbd_event, &self.catalog) {
+                    use ::canvas::shell_launcher::Input as SwitchAction;
+                    match switcher.handle(&kbd_event) {
                         SwitchAction::Consumed => {
+                            self.refresh_launcher_scene();
                             self.bump();
                             return Task::none();
                         }
-                        SwitchAction::Apply(project) => {
-                            self.project_switcher = None;
-                            return self.switch_project(project);
+                        SwitchAction::Apply => {
+                            if switcher.busy {
+                                return Task::none();
+                            }
+                            if let Some((target, command)) = switcher.action(now_unix_ms()) {
+                                let generation = switcher.generation;
+                                switcher.busy = true;
+                                switcher.status = "Opening on selected target…".into();
+                                self.refresh_launcher_scene();
+                                self.bump();
+                                return launcher_task(target, command, generation, true);
+                            }
+                            switcher.status = "Unavailable / stale · F5 to refresh".into();
+                            self.refresh_launcher_scene();
+                            self.bump();
+                            return Task::none();
                         }
                         SwitchAction::Cancel => {
                             self.project_switcher = None;
@@ -2125,7 +2207,13 @@ impl App {
                             self.bump();
                             return Task::none();
                         }
-                        SwitchAction::Ignored => {}
+                        SwitchAction::Reload => {
+                            let target = switcher.targets[switcher.target].clone();
+                            let generation = switcher.generation;
+                            self.refresh_launcher_scene();
+                            self.bump();
+                            return launcher_task(target, Command::ShellCatalog, generation, false);
+                        }
                     }
                 }
                 if snap_layout_requested(&kbd_event) {
@@ -2144,7 +2232,7 @@ impl App {
                     return self.toggle_theme_picker();
                 }
                 if project_picker_requested(&kbd_event) {
-                    return self.toggle_project_picker();
+                    return self.toggle_project_switcher();
                 }
                 if switcher_requested(&kbd_event) {
                     return self.toggle_project_switcher();
@@ -2433,6 +2521,22 @@ impl App {
                         );
                     }
                     Err(failure) => self.fail(pending, failure),
+                }
+                Task::none()
+            }
+            Message::NativeAppLaunched {
+                pending,
+                entry_id,
+                result,
+            } => {
+                match result {
+                    Ok(()) => self.answer(
+                        *pending,
+                        Outcome::Ok {
+                            receipt: Receipt::ShellActivated { entry_id },
+                        },
+                    ),
+                    Err(error) => self.fail(*pending, Failure::resource(error)),
                 }
                 Task::none()
             }
@@ -3629,60 +3733,45 @@ impl App {
     }
 
     fn toggle_project_switcher(&mut self) -> Task<Message> {
-        self.project_switcher = self.project_switcher.take().or(Some(Default::default()));
-        let visible = self.project_switcher.is_some();
-        self.status = if visible {
-            "Switch project: type to filter, arrows to navigate, Enter to switch.".into()
-        } else {
-            "Kept the current project.".into()
-        };
-        self.bump();
-        self.emit_event(format!(
-            "project_switcher {}",
-            if visible { "shown" } else { "hidden" }
-        ));
-        Task::none()
-    }
-
-    fn toggle_project_picker(&mut self) -> Task<Message> {
+        if self.project_switcher.take().is_some() {
+            self.bump();
+            return Task::none();
+        }
         self.background_picker = None;
         self.theme_picker = None;
-        self.project_picker = match self.project_picker {
-            Some(_) => None,
-            None => {
-                // LRU order for the empty-query view: what's open now leads,
-                // then recent departures (store already tracks them).
-                let mut recency = vec![self.document.project_id.clone()];
-                for recent in &self.workspaces.recent_project_ids {
-                    if !recency.contains(recent) {
-                        recency.push(recent.clone());
-                    }
-                }
-                Some(::canvas::project_picker::ProjectPicker::with_recency(
-                    recency,
-                ))
+        self.project_picker = None;
+        let launcher = match ::canvas::shell_launcher::Launcher::new() {
+            Ok(l) => l,
+            Err(e) => {
+                self.status = e;
+                self.bump();
+                return Task::none();
             }
         };
-        let open = self.project_picker.is_some();
-        if open {
-            // Re-sync from the Alfalfa index so projects added while Canvas
-            // was running appear in the picker without a restart.
-            Self::merge_alfalfa_projects(&mut self.catalog);
-        }
-        self.status = if open {
-            "Choose a project: type to filter, Enter to switch.".into()
-        } else {
-            "Kept the current project.".into()
-        };
+        let target = launcher.targets[launcher.target].clone();
+        let generation = launcher.generation;
+        self.project_switcher = Some(launcher);
+        self.status = "Launcher · type to search, Tab target, Enter open.".into();
+        self.desktop_focused = true;
+        self.refresh_launcher_scene();
         self.bump();
-        self.emit_event(format!(
-            "project_picker {}",
-            if open { "shown" } else { "hidden" }
-        ));
-        if open && !self.canvas_visible {
-            self.set_canvas_visible(true)
-        } else {
-            Task::none()
+        self.emit_event(format!("project_switcher {}", "shown"));
+        launcher_task(target, Command::ShellCatalog, generation, false)
+    }
+
+    fn refresh_launcher_scene(&mut self) {
+        #[cfg(feature = "lua-scenes")]
+        {
+            let visual = self.presented_visual_theme();
+            let accent = self.effective_theme(&self.document).accent();
+            let theme = ::canvas::lua_module::ModuleThemeTokens::from_visual(&visual, accent);
+            if let Some(launcher) = self.project_switcher.as_mut()
+                && let Err(error) = launcher.render(theme, now_unix_ms())
+            {
+                launcher.scene = None;
+                launcher.status = format!("Launcher Lua error: {error}");
+                self.status = launcher.status.clone();
+            }
         }
     }
 
@@ -3884,9 +3973,7 @@ impl App {
         }
         if !matches!(
             pending.request.command,
-            Command::Inspect
-                | Command::Performance
-                | Command::ReadDocument
+            Command::Inspect | Command::ShellCatalog | Command::Performance | Command::ReadDocument
         ) && pending
             .request
             .expected_revision
@@ -3907,6 +3994,86 @@ impl App {
         }
 
         match pending.request.command.clone() {
+            Command::ShellCatalog => {
+                Self::merge_alfalfa_projects(&mut self.catalog);
+                let catalog = self.launcher_catalog();
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::ShellCatalog { catalog },
+                    },
+                );
+                Task::none()
+            }
+            Command::ShellActivate {
+                catalog_revision,
+                entry_id,
+            } => {
+                use ::canvas::shell_launcher::Choice;
+                let catalog = self.launcher_catalog();
+                let Some(entry) = catalog
+                    .entries
+                    .iter()
+                    .find(|e| e.id == entry_id && e.available)
+                    .cloned()
+                    .filter(|_| catalog.revision == catalog_revision)
+                else {
+                    self.fail(pending,Failure{code:ErrorCode::Conflict,message:"Launcher catalog changed or choice unavailable; refresh this target.".into()});
+                    return Task::none();
+                };
+                let task = match entry.choice {
+                    Choice::Workspace { id } => {
+                        let task = self.switch_project(id.clone());
+                        if self.document.project_id != id {
+                            self.fail(pending, Failure::resource(self.status.clone()));
+                            return task;
+                        }
+                        task
+                    }
+                    Choice::Surface { id } => {
+                        self.minimized_surfaces.remove(&id);
+                        let page = self.document.layouts().position(|layout| {
+                            flatten_layout(layout).iter().any(|p| p.surface_id == id)
+                        });
+                        if let Some(page) = page {
+                            self.document.active_page = page;
+                        }
+                        self.desktop_focused = false;
+                        self.apply_interaction_intents(vec![
+                            InteractionIntent::Focus {
+                                surface_id: id.clone(),
+                            },
+                            InteractionIntent::PromoteToFront { surface_id: id },
+                        ]);
+                        Task::none()
+                    }
+                    Choice::Application { path } => {
+                        let (send, receive) = iced::futures::channel::oneshot::channel();
+                        std::thread::spawn(move || {
+                            let _ = send.send(::canvas::shell_launcher::launch(&path));
+                        });
+                        return Task::perform(
+                            async move {
+                                receive.await.unwrap_or_else(|_| {
+                                    Err("Native application worker stopped".into())
+                                })
+                            },
+                            move |result| Message::NativeAppLaunched {
+                                pending: Box::new(pending.clone()),
+                                entry_id: entry_id.clone(),
+                                result,
+                            },
+                        );
+                    }
+                };
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::ShellActivated { entry_id },
+                    },
+                );
+                task
+            }
             Command::ReadDocument => {
                 self.answer(
                     pending,
@@ -5698,6 +5865,58 @@ impl App {
         self.screensaver_fps = self.screensaver_clock.measured_fps();
     }
 
+    fn launcher_catalog(&self) -> ::canvas::shell_launcher::Catalog {
+        let mut catalog = ::canvas::shell_launcher::Catalog::collect(&self.snapshot());
+        for project in &self.catalog.projects {
+            if !catalog.entries.iter().any(|e|matches!(&e.choice,::canvas::shell_launcher::Choice::Workspace{id} if id==&project.id)) {
+                catalog.entries.push(::canvas::shell_launcher::Entry{id:format!("workspace:{}",project.id),title:project.name.clone(),detail:"WORKSPACE · available".into(),available:true,choice: ::canvas::shell_launcher::Choice::Workspace{id:project.id.clone()}});
+            }
+        }
+        catalog.entries.sort_by(|a, b| {
+            a.title
+                .to_lowercase()
+                .cmp(&b.title.to_lowercase())
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        catalog
+            .entries
+            .truncate(::canvas::shell_launcher::MAX_ENTRIES);
+        for entry in &mut catalog.entries {
+            let ::canvas::shell_launcher::Choice::Surface { id } = &entry.choice else {
+                continue;
+            };
+            if let Some(decoded) = self.decoded.get(id) {
+                let path = match &decoded.source {
+                    ContentSource::LiveVideo { path, .. }
+                    | ContentSource::LiveImage { path, .. } => Some(path),
+                    _ => None,
+                };
+                if let Some(path) = path {
+                    let recent = std::fs::metadata(path)
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|m| m.elapsed().ok())
+                        .is_some_and(|age| age <= Duration::from_secs(2));
+                    entry.available = recent;
+                    entry.detail = if recent {
+                        "WINDOW · live stream"
+                    } else {
+                        "WINDOW · disconnected / stale"
+                    }
+                    .into();
+                }
+            }
+        }
+        catalog.revision = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(&self.document.project_id, &catalog.entries))
+                    .expect("catalog serializes")
+            )
+        );
+        catalog
+    }
+
     fn snapshot(&self) -> RuntimeSnapshot {
         RuntimeSnapshot {
             workspace_id: self.document.id.clone(),
@@ -6039,7 +6258,7 @@ impl App {
     }
 
     fn focused_hid_target(&self) -> Option<String> {
-        if self.desktop_focused {
+        if self.desktop_focused || self.project_switcher.is_some() {
             return None;
         }
         let surface_id = self.document.focused_surface_id.as_deref()?;
@@ -7107,6 +7326,9 @@ impl App {
     }
 
     fn handle_browser_pointer(&mut self, phase: &str, x: f32, y: f32, delta: f32) {
+        if self.project_switcher.is_some() {
+            return;
+        }
         use canvas_model_viewer::video::OrbitEvent;
 
         let snapshot = self.snapshot();
@@ -9595,7 +9817,37 @@ impl App {
             layers.push(picker.view::<Message>(&|index| Message::ThemePickerSelect(index)));
         }
         if let Some(picker) = self.project_switcher.as_ref() {
-            layers.push(picker.view(&self.catalog, &self.document.project_id));
+            #[cfg(feature = "lua-scenes")]
+            if let Some(scene) = &picker.scene {
+                let width = (viewport.width as f32 * 0.60)
+                    .clamp(420.0, 760.0)
+                    .min(viewport.width as f32);
+                let height = (viewport.height as f32 * 0.80).min(600.0);
+                let sheet = self.scene_layer(
+                    scene,
+                    LogicalSize {
+                        width: width as f64,
+                        height: height as f64,
+                    },
+                );
+                layers.push(
+                    container(container(sheet).width(width).height(height))
+                        .center(Length::Fill)
+                        .into(),
+                );
+            } else {
+                layers.push(
+                    container(text(&picker.status).color(color(self.presented_palette().warning)))
+                        .center(Length::Fill)
+                        .into(),
+                );
+            }
+            #[cfg(not(feature = "lua-scenes"))]
+            layers.push(
+                container(text("Launcher requires Lua scenes"))
+                    .center(Length::Fill)
+                    .into(),
+            );
         }
         if let Some(picker) = self.project_picker.as_ref() {
             layers.push(picker.view(&self.catalog, &self.document.project_id));
@@ -10193,7 +10445,7 @@ fn shortcut_help<'a>(
          F2                     Choose background\n\
          F3                     Toggle diagnostics\n\
          F4                     Choose theme / palette\n\
-         Ctrl-P                 Find project\n\
+         Ctrl-Space / Ctrl-P   Canvas launcher\n\
          Ctrl-1 / 2 / 3         Toggle left / center / right display\n\
          Ctrl-0                 Show Canvas on every display\n\
          {SNAP_LAYOUT_KEYS:<22} Snap layout to saved view (again to restore)\n\
@@ -10756,6 +11008,32 @@ fn resolve_module(
     now_ms: u64,
 ) -> std::result::Result<::canvas::lua_module::RetainedModuleScene, String> {
     resolve_module_event(name, inputs, theme, now_ms, None)
+}
+
+fn launcher_task(
+    target: ::canvas::shell_launcher::Target,
+    command: Command,
+    generation: u64,
+    activating: bool,
+) -> Task<Message> {
+    let target_id = target.id.clone();
+    let (send, receive) = iced::futures::channel::oneshot::channel();
+    std::thread::spawn(move || {
+        let _ = send.send(::canvas::shell_launcher::request(&target, command));
+    });
+    Task::perform(
+        async move {
+            receive
+                .await
+                .unwrap_or_else(|_| Err("Launcher worker stopped".into()))
+        },
+        move |result| Message::LauncherReply {
+            generation,
+            target_id: target_id.clone(),
+            activating,
+            result,
+        },
+    )
 }
 
 #[cfg(feature = "lua-scenes")]
@@ -12075,6 +12353,65 @@ fn assemble_presence(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn launcher_catalog_is_revision_bound_and_rejects_unknown_choices() {
+        let mut app = test_app();
+        let reply = execute(&mut app, "shell-read", Command::ShellCatalog);
+        let Outcome::Ok {
+            receipt: Receipt::ShellCatalog { catalog },
+        } = reply.outcome
+        else {
+            panic!("shell catalog")
+        };
+        assert!(!catalog.entries.is_empty());
+        let reply = execute(
+            &mut app,
+            "shell-stale",
+            Command::ShellActivate {
+                catalog_revision: "0".repeat(64),
+                entry_id: catalog.entries[0].id.clone(),
+            },
+        );
+        assert!(matches!(
+            reply.outcome,
+            Outcome::Error {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ));
+        let reply = execute(
+            &mut app,
+            "shell-unknown",
+            Command::ShellActivate {
+                catalog_revision: catalog.revision,
+                entry_id: "app:/not/enrolled".into(),
+            },
+        );
+        assert!(matches!(
+            reply.outcome,
+            Outcome::Error {
+                code: ErrorCode::Conflict,
+                ..
+            }
+        ));
+    }
+    #[test]
+    fn launcher_focus_captures_input_instead_of_the_remote_surface() {
+        let mut app = test_app();
+        app.project_switcher = Some(::canvas::shell_launcher::Launcher::new().unwrap());
+        let mut launcher = app.project_switcher.take().unwrap();
+        let generation = launcher.generation;
+        launcher.accept(generation, Ok(app.launcher_catalog()), now_unix_ms());
+        app.project_switcher = Some(launcher);
+        app.desktop_focused = false;
+        let focused = app.document.focused_surface_id.clone();
+        app.handle_browser_pointer("press", 0.5, 0.5, 0.0);
+        assert_eq!(app.document.focused_surface_id, focused);
+        assert_eq!(app.focused_hid_target(), None);
+        assert!(switcher_requested(
+            &browser_key_event(" ", false, true, false, false).unwrap()
+        ));
+    }
 
     #[test]
     fn desktop_takeover_disables_remote_keyboard_target() {

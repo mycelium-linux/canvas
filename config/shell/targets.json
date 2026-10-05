@@ -1,0 +1,4 @@
+[
+  {"id":"studio","label":"Studio","mycelium_peer":"darwin-averys-mac-studio"},
+  {"id":"tv","label":"TV · Home Pi","mycelium_peer":"linux-home-pi","unix_user":"ajm"}
+]

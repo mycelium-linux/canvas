@@ -78,6 +78,11 @@ pub struct ActorContext {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
+    ShellCatalog,
+    ShellActivate {
+        catalog_revision: String,
+        entry_id: String,
+    },
     Inspect,
     Performance,
     ReadDocument,
@@ -670,6 +675,12 @@ pub enum ErrorCode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Receipt {
+    ShellCatalog {
+        catalog: crate::shell_launcher::Catalog,
+    },
+    ShellActivated {
+        entry_id: String,
+    },
     Performance {
         metrics: serde_json::Value,
     },
@@ -1015,6 +1026,19 @@ impl ControlRequest {
             return Err("request_id must be 1–64 lowercase identifier characters".into());
         }
         match &self.command {
+            Command::ShellActivate {
+                catalog_revision,
+                entry_id,
+            } => {
+                if catalog_revision.len() != 64
+                    || !catalog_revision.bytes().all(|b| b.is_ascii_hexdigit())
+                    || entry_id.is_empty()
+                    || entry_id.len() > 4096
+                    || entry_id.chars().any(char::is_control)
+                {
+                    return Err("invalid launcher choice or catalog revision".into());
+                }
+            }
             Command::OpenFile {
                 surface_id,
                 path,
@@ -1225,6 +1249,7 @@ impl ControlRequest {
             Command::ApplyDocument { .. }
             | Command::ApplyPatch { .. }
             | Command::Inspect
+            | Command::ShellCatalog
             | Command::Performance
             | Command::ReadDocument
             | Command::Focus
@@ -1484,6 +1509,9 @@ pub mod text {
         }
         match tokens[0].as_str() {
             "inspect" | "info" => Ok(Command::Inspect),
+            "launcher" if tokens.get(1).map(String::as_str) == Some("catalog") => {
+                Ok(Command::ShellCatalog)
+            }
             "perf" => Ok(Command::Performance),
             "focus" => Ok(Command::Focus),
             "show" => Ok(Command::SetVisibility { visible: true }),
@@ -1821,6 +1849,10 @@ pub mod text {
                             .join(","),
                         snapshot.active_indicators.len()
                     ),
+                    Receipt::ShellCatalog { catalog } => {
+                        serde_json::to_string(catalog).unwrap_or_else(|e| e.to_string())
+                    }
+                    Receipt::ShellActivated { entry_id } => format!("opened={entry_id}"),
                     Receipt::Snapshot { snapshot } => format!(
                         "project={} frame={},{},{},{} surfaces={} indicators={} events={} displays={} visible={}",
                         snapshot.project_id,

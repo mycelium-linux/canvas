@@ -40,6 +40,7 @@ pub mod operational_views;
 pub mod performance;
 pub mod project_picker;
 pub mod project_switcher;
+pub mod shell_launcher;
 pub mod reconcile;
 pub mod runtime_config;
 pub mod screensaver;
