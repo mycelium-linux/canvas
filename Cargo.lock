@@ -622,6 +622,7 @@ name = "canvas-widgets"
 version = "0.1.0"
 dependencies = [
  "canvas-core",
+ "coherence-native",
  "fpl-gfx",
  "iced",
  "libc",
@@ -728,8 +729,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "coherence-tokens"
+name = "coherence-native"
 version = "0.1.0"
+dependencies = [
+ "coherence-tokens",
+ "fpl-gfx",
+]
+
+[[package]]
+name = "coherence-tokens"
+version = "0.2.3"
 
 [[package]]
 name = "combine"
@@ -1241,7 +1250,7 @@ dependencies = [
 [[package]]
 name = "fpl-gfx"
 version = "0.1.0"
-source = "git+https://github.com/ajmwagar/gfx.git?rev=a37cc03#a37cc03b38cf4a2b2f5ff1301d4c48ec5699a117"
+source = "git+https://github.com/ajmwagar/gfx.git?rev=ba980e8251ec65d3fc25bcd9cfa3b882ca0e1034#ba980e8251ec65d3fc25bcd9cfa3b882ca0e1034"
 dependencies = [
  "bytemuck",
  "serde",

@@ -1,10 +1,7 @@
 //! `fpl-gfx` clock hosted directly in iced's existing compositor pass.
 
 use canvas_core::VisualTheme;
-use fpl_gfx::{
-    AnalogClock, Color, MaterialTheme, MotionTheme, Rect, Renderer, RendererConfig, Scene,
-    ShapeTheme, Theme, ThemeRole, Viewport,
-};
+use fpl_gfx::{AnalogClock, MotionTheme, Rect, Renderer, RendererConfig, Scene, Theme, Viewport};
 use iced::widget::shader::{self, Shader};
 use iced::{Element, Length, Rectangle};
 use iced_wgpu::wgpu;
@@ -48,13 +45,17 @@ pub(super) fn view<'a, Message: 'a>(
     second: f32,
     visual: &VisualTheme,
 ) -> Element<'a, Message> {
+    let theme = match theme_from_canvas(visual) {
+        Ok(theme) => theme,
+        Err(error) => return iced::widget::text(format!("Clock theme error: {error}")).into(),
+    };
     Shader::new(Program {
         clock: AnalogClock {
             hour,
             minute,
             second,
         },
-        theme: theme_from_canvas(visual),
+        theme,
     })
     .width(Length::Fill)
     .height(Length::Fill)
@@ -70,50 +71,15 @@ pub(super) fn legacy_requested() -> bool {
     })
 }
 
-fn theme_from_canvas(visual: &VisualTheme) -> Theme {
-    let palette = visual.palette;
+fn theme_from_canvas(visual: &VisualTheme) -> Result<Theme, coherence_native::InvalidMetrics> {
     let mut theme = Theme::studio_dark();
-    for (role, rgb) in [
-        (ThemeRole::Background, palette.background),
-        (ThemeRole::Surface, palette.surface),
-        (ThemeRole::SurfaceRaised, visual.surface_raised),
-        (ThemeRole::SurfaceRecessed, palette.background_strong),
-        (ThemeRole::Text, palette.text),
-        (ThemeRole::TextMuted, palette.text_muted),
-        (ThemeRole::Primary, palette.primary),
-        (ThemeRole::Secondary, palette.info),
-        (ThemeRole::Success, palette.success),
-        (ThemeRole::Warning, palette.warning),
-        (ThemeRole::Danger, palette.danger),
-        (ThemeRole::MeterLow, palette.success),
-        (ThemeRole::MeterHigh, palette.danger),
-        (ThemeRole::Outline, palette.border),
-        (ThemeRole::Shadow, palette.background_strong),
-        (ThemeRole::Highlight, palette.text),
-    ] {
-        theme.set_color(role, srgb(rgb));
-    }
-    theme.shapes = ShapeTheme {
-        radius_small: visual.metrics.radius_sm,
-        radius_large: visual.metrics.radius_lg,
-        outline_width: 1.0,
-    };
-    theme.materials = MaterialTheme {
-        // Parity first: the established clock uses flat fills. Richer material
-        // treatment remains a theme decision, not clock-specific decoration.
-        gloss: 0.0,
-        grain: 0.0,
-        emission: 0.0,
-    };
+    theme.shapes.outline_width = 1.0;
     theme.motion = MotionTheme {
         meter_decay: 1.8,
         control_smoothing_ms: 80.0,
     };
-    theme
-}
-
-fn srgb(rgb: [u8; 3]) -> Color {
-    Color::from_srgb8(rgb[0], rgb[1], rgb[2], 255)
+    super::gfx_theme::apply(visual, &mut theme)?;
+    Ok(theme)
 }
 
 impl<Message> shader::Program<Message> for Program {
@@ -186,13 +152,14 @@ impl shader::Primitive for Primitive {
         bounds: &Rectangle,
         viewport: &shader::Viewport,
     ) {
-        let retained = pipeline.renderers.entry(self.ticket).or_insert_with(|| {
-            RetainedRenderer {
+        let retained = pipeline
+            .renderers
+            .entry(self.ticket)
+            .or_insert_with(|| RetainedRenderer {
                 renderer: Renderer::new(device, RendererConfig::new(pipeline.format)),
                 generation: pipeline.generation,
                 prepared: false,
-            }
-        });
+            });
         retained.generation = pipeline.generation;
         let mut scene = Scene::with_capacity(65);
         self.clock
@@ -231,19 +198,40 @@ impl shader::Primitive for Primitive {
 mod tests {
     use super::*;
     use canvas_core::{ThemeMode, ThemeSelection};
+    use fpl_gfx::{Color, ThemeRole};
+
+    fn srgb(rgb: [u8; 3]) -> Color {
+        Color::from_srgb8(rgb[0], rgb[1], rgb[2], 255)
+    }
 
     #[test]
     fn canvas_theme_maps_every_gfx_role_and_validates() {
-        let visual = ThemeSelection::coherence(
-            ThemeMode::Dark,
-            canvas_core::Accent::Brand,
-        )
-        .visual_theme();
-        let theme = theme_from_canvas(&visual);
+        let visual =
+            ThemeSelection::coherence(ThemeMode::Dark, canvas_core::Accent::Brand).visual_theme();
+        let theme = theme_from_canvas(&visual).unwrap();
 
-        assert_eq!(theme.color(ThemeRole::Primary), srgb(visual.palette.primary));
+        assert_eq!(
+            theme.color(ThemeRole::Primary),
+            srgb(visual.palette.primary)
+        );
         assert_eq!(theme.color(ThemeRole::Text), srgb(visual.palette.text));
+        assert_eq!(
+            theme.color(ThemeRole::Surface),
+            srgb(visual.palette.surface)
+        );
+        assert_eq!(
+            theme.color(ThemeRole::TextMuted),
+            srgb(visual.palette.text_muted)
+        );
         assert_eq!(theme.shapes.radius_large, visual.metrics.radius_lg);
         assert!(theme.validate().is_ok());
+        let mut scene = Scene::with_capacity(65);
+        AnalogClock {
+            hour: 10,
+            minute: 9,
+            second: 30.5,
+        }
+        .append(&mut scene, Rect::new(0.0, 0.0, 300.0, 300.0));
+        assert_eq!(scene.len(), 65, "face, sixty ticks, three hands and hub");
     }
 }

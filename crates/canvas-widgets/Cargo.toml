@@ -8,6 +8,7 @@ serde.workspace = true
 serde_json.workspace = true
 canvas-core.workspace = true
 fpl-gfx.workspace = true
+coherence-native = { workspace = true, optional = true }
 iced = { version = "0.14", default-features = false, features = ["wgpu", "canvas", "image-without-codecs", "tokio"], optional = true }
 # Only for callers that publish these types over a schema-carrying protocol (MCP).
 schemars = { version = "1", optional = true }
@@ -25,5 +26,5 @@ wasm-bindgen = "0.2"
 
 [features]
 default = []
-live = ["dep:iced", "dep:libc"]
+live = ["dep:iced", "dep:libc", "dep:coherence-native"]
 schema = ["dep:schemars"]

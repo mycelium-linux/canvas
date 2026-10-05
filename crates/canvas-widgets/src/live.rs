@@ -30,6 +30,7 @@ use iced::{Color, ContentFit, Element, Length, Point, Rectangle, Renderer, Size,
 pub mod app_chrome;
 mod clock;
 mod gfx_clock;
+pub mod gfx_theme;
 mod primitives;
 mod quality;
 mod quant;

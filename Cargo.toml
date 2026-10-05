@@ -1,7 +1,7 @@
 [workspace]
 members = ["crates/canvas-browser-host", "crates/canvas-feeds", "crates/canvas-alfalfa", "crates/canvas-bifrost", "crates/canvas-eval", "crates/canvas-fab", "crates/canvas-shroud", "crates/canvas-frigate", "crates/canvas-media-edge", "crates/canvas-model-host", "crates/canvas-model-viewer", "crates/canvas-metrics", "crates/canvas-sse", "crates/canvas", "crates/canvas-core", "crates/canvas-linux", "crates/canvas-mac", "crates/canvas-control", "crates/canvas-web", "crates/canvas-widgets", "crates/canvas-survey", "crates/canvas-agents", "crates/canvas-agent-bridge", ]
 default-members = ["crates/canvas-core", "crates/canvas-linux", "crates/canvas-mac"]
-exclude = ["vendor/coherence-tokens"]
+exclude = ["vendor/coherence-tokens", "vendor/coherence-native"]
 resolver = "2"
 
 [workspace.package]
@@ -15,7 +15,8 @@ serde_json = "1"
 schemars = "1"
 canvas-core = { path = "crates/canvas-core" }
 canvas = { path = "crates/canvas" }
-fpl-gfx = { git = "https://github.com/ajmwagar/gfx.git", rev = "a37cc03" }
+fpl-gfx = { git = "https://github.com/ajmwagar/gfx.git", rev = "ba980e8251ec65d3fc25bcd9cfa3b882ca0e1034" }
+coherence-native = { path = "vendor/coherence-native", default-features = false, features = ["gfx"] }
 anyhow = "1"
 tempfile = "3"
 coherence-tokens = { path = "vendor/coherence-tokens" }
