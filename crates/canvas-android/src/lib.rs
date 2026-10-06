@@ -1,6 +1,48 @@
 //! Android platform shell. Rust owns command admission; Java owns the surface.
 use std::net::IpAddr;
 
+#[cfg(feature = "shared-workspaces")]
+pub mod geometry;
+#[cfg(feature = "shared-workspaces")]
+pub mod workspaces;
+
+#[cfg(all(target_os = "android", feature = "android-native-video"))]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeVideoFrame(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    width: jni::sys::jint,
+    height: jni::sys::jint,
+    windowed: jni::sys::jboolean,
+) -> jni::sys::jintArray {
+    let frame = match (u32::try_from(width), u32::try_from(height)) {
+        (Ok(width), Ok(height)) => geometry::video_frame(width, height, windowed != 0),
+        _ => Err("Invalid output extent".into()),
+    };
+    let frame = match frame {
+        Ok(frame) => frame,
+        Err(error) => {
+            let _ = env.throw_new("java/lang/IllegalArgumentException", error);
+            return std::ptr::null_mut();
+        }
+    };
+    let array = match env.new_int_array(4) {
+        Ok(array) => array,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    if env
+        .set_int_array_region(
+            &array,
+            0,
+            &[frame.x, frame.y, frame.width as i32, frame.height as i32],
+        )
+        .is_err()
+    {
+        return std::ptr::null_mut();
+    }
+    array.into_raw()
+}
+
 /// Source-local audio gain; this never changes Android's master/media volume.
 pub fn surface_gain(muted: bool) -> f32 {
     if muted { 0.0 } else { 1.0 }
@@ -61,7 +103,7 @@ pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeValidate(
 ) -> jni::sys::jstring {
     let result = env
         .get_string(&input)
-        .map(|s| String::from(s))
+        .map(String::from)
         .map_err(|_| "Could not read stream URL")
         .and_then(|s| validate_stream(&s));
     match env.new_string(result.err().unwrap_or("")) {

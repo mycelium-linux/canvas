@@ -21,6 +21,7 @@ public final class TvActivity extends Activity {
     private static native String nativeValidate(String url);
     private static native float nativeSetMuted(boolean muted);
     private static native boolean nativeIsMuted();
+    private static native int[] nativeVideoFrame(int width, int height, boolean windowed);
     private VideoView video;
     private TextView status;
     private FrameLayout frame;
@@ -80,7 +81,7 @@ public final class TvActivity extends Activity {
         video.stopPlayback();
         if (intent.hasExtra("muted")) setSurfaceMuted(intent.getBooleanExtra("muted", false));
         String url = intent.getStringExtra("stream_url");
-        if (url == null) { showStatus("Canvas TV — select a stream"); return; }
+        if (url == null) { showStatus("fungOS Fire TV — select a stream"); return; }
         String error = nativeValidate(url);
         if (error == null || !error.isEmpty()) {
             showStatus(error == null ? "Command validation failed" : error);
@@ -97,24 +98,21 @@ public final class TvActivity extends Activity {
         muteButton.setContentDescription(muted ? "Unmute KOMO audio" : "Mute KOMO audio");
     }
 
-    // Transitional surface placement only, not a second workspace/tiling engine.
-    // Android's measured container is the geometry authority; VideoView retains
-    // the decoded video's aspect ratio within these bounds.
+    // Rust's shared Canvas layout solver owns geometry. Android only applies
+    // pixel bounds and preserves decoded video aspect ratio within them.
     private void applySurfaceGeometry() {
         boolean windowed = getIntent().getBooleanExtra("windowed", false);
         int width = frame.getWidth();
         int height = frame.getHeight();
         if (width <= 0 || height <= 0) return;
-        FrameLayout.LayoutParams geometry;
-        if (windowed) {
-            int paneWidth = Math.max(1, width * 55 / 100);
-            int paneHeight = Math.min(height * 65 / 100, paneWidth * 9 / 16);
-            geometry = new FrameLayout.LayoutParams(paneWidth, paneHeight, Gravity.TOP | Gravity.LEFT);
-            geometry.leftMargin = width * 4 / 100;
-            geometry.topMargin = height * 12 / 100;
-        } else {
-            geometry = new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER);
+        int[] bounds = nativeVideoFrame(width, height, windowed);
+        if (bounds == null || bounds.length != 4) {
+            showStatus("Surface layout failed");
+            return;
         }
+        FrameLayout.LayoutParams geometry = new FrameLayout.LayoutParams(bounds[2], bounds[3], Gravity.TOP | Gravity.LEFT);
+        geometry.leftMargin = bounds[0];
+        geometry.topMargin = bounds[1];
         video.setLayoutParams(geometry);
         FrameLayout.LayoutParams chrome = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.LEFT);
         chrome.leftMargin = width * 4 / 100;

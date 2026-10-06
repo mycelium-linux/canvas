@@ -1,4 +1,35 @@
-# Canvas Android platform shell
+# fungOS Fire TV
+
+The Fire TV client of fungOS, powered by Canvas's shared Rust core. The existing
+`dev.fpl.canvas.tv` application ID and signing identity are preserved so this
+is an in-place upgrade, not a second installed app.
+
+## Shared ownership
+
+`canvas-core::workspace_layout` owns durable layout types and validation;
+`canvas-core::layout_tree` owns the BSP solver and mutations. Desktop's old
+`canvas::layout_tree` import is a compatibility re-export, not a fork. Android
+applies the pixel rectangles returned by that same solver; Java contains no
+video sizing/tiling policy.
+
+`canvas-core::workspace_navigation` owns bounded MRU history. Both desktop
+`WorkspaceStore` and the Android adapter call it. Android's optional
+`shared-workspaces` adapter also invokes the existing core Catalog and
+WorkspaceState admission/control policy. `android-native-video` enables this
+shared dependency, so the installed video shell uses it for geometry.
+
+This is a first consolidation slice, not complete cross-platform workspace
+support: WorkspaceDocument, scene/widget projection and persistence are still
+in the desktop crate. The TV has no live selector or authenticated control
+endpoint yet. Do not use a bundled Neo catalog to stand in for the TV's owner
+catalog, or infer presentation success from metadata selection alone.
+
+Apple TV feasibility: the shared core type-checks for `aarch64-apple-tvos`, and
+the Mac has the tvOS SDK. A future client can reuse the same core with native
+AVPlayer/Metal presentation and platform focus/input. This does not constitute
+a tvOS app, signing/provisioning, physical-device install or playback test.
+See [Rust tvOS support](https://doc.rust-lang.org/rustc/platform-support/apple-tvos.html)
+and [Apple tvOS development](https://developer.apple.com/tvos/get-started/).
 
 This is an independent Android package, not a compositor dependency. The
 `android-native-video` Cargo feature is **off by default** and exports the JNI
@@ -97,9 +128,8 @@ its mute state. This does not change TV master volume. The TV master mute is
 also currently enabled at the user's request, so unmuting the surface alone
 will not override that. This initial client has one audio surface; general
 per-surface IDs, workspace projection and tiling are not implemented yet.
-Windowed mode is a transitional native viewport placement, not a second
-workspace layout engine. It derives bounds from the measured Android frame,
-and the decoder preserves aspect ratio inside those bounds.
+Windowed mode uses Canvas's shared layout solver with the measured Android
+frame, and the decoder preserves aspect ratio inside those bounds.
 
 This is an ADB-authorized local operation, **not** an authenticated Canvas
 network control endpoint. Pairing, workspace projection and `canvasctl`
