@@ -91,6 +91,16 @@ adb -s 192.168.2.97:5555 shell am start \
   --es stream_url http://192.168.2.67:18089/komo4.m3u8
 ```
 
+Add `--ez windowed true --ez muted true` for the smaller, initially muted
+KOMO surface. The visible button toggles the player's own gain; Rust owns
+its mute state. This does not change TV master volume. The TV master mute is
+also currently enabled at the user's request, so unmuting the surface alone
+will not override that. This initial client has one audio surface; general
+per-surface IDs, workspace projection and tiling are not implemented yet.
+Windowed mode is a transitional native viewport placement, not a second
+workspace layout engine. It derives bounds from the measured Android frame,
+and the decoder preserves aspect ratio inside those bounds.
+
 This is an ADB-authorized local operation, **not** an authenticated Canvas
 network control endpoint. Pairing, workspace projection and `canvasctl`
 integration are not implemented by this shim. Never copy an owner-local DCP

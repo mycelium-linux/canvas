@@ -1,6 +1,35 @@
 //! Android platform shell. Rust owns command admission; Java owns the surface.
 use std::net::IpAddr;
 
+/// Source-local audio gain; this never changes Android's master/media volume.
+pub fn surface_gain(muted: bool) -> f32 {
+    if muted { 0.0 } else { 1.0 }
+}
+
+#[cfg(all(target_os = "android", feature = "android-native-video"))]
+static SURFACE_MUTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(all(target_os = "android", feature = "android-native-video"))]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeSetMuted(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    muted: jni::sys::jboolean,
+) -> jni::sys::jfloat {
+    let muted = muted != 0;
+    SURFACE_MUTED.store(muted, std::sync::atomic::Ordering::Relaxed);
+    surface_gain(muted)
+}
+
+#[cfg(all(target_os = "android", feature = "android-native-video"))]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeIsMuted(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+) -> jni::sys::jboolean {
+    SURFACE_MUTED.load(std::sync::atomic::Ordering::Relaxed) as jni::sys::jboolean
+}
+
 /// Initial playback accepts explicit private-LAN HTTP endpoints only. This is
 /// not discovery, pairing, or permission to expose an owner control token.
 pub fn validate_stream(input: &str) -> Result<(), &'static str> {
@@ -44,6 +73,11 @@ pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeValidate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mute_is_source_local_and_reversible() {
+        assert_eq!(surface_gain(true), 0.0);
+        assert_eq!(surface_gain(false), 1.0);
+    }
     #[test]
     fn accepts_explicit_lan_stream() {
         assert!(validate_stream("http://192.168.2.74:5004/auto/v4.1").is_ok());
