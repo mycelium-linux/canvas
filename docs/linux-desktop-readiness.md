@@ -367,9 +367,11 @@ move/directional resize shapes and restore the default at completion. Input
 release preserves the logical pointer position instead of mistaking normalized
 remote coordinates for screen pixels.
 
-Cursor surfaces get frame callbacks on hardware frame submission; the pending
-frame retains the cursor actually queued, so a later cursor request cannot
-receive the previous image's presentation callback. Seat resume discards pending
+Cursor surfaces get frame callbacks when hardware completes the queued frame;
+the pending frame retains its cursor surface, rather than targeting a different
+surface selected afterward. These are animation-pacing callbacks, not
+commit-specific presentation receipts (`wp_presentation` is separate work).
+Seat resume discards pending
 cursor presentation state with the reset swapchain. Headless protocol fixtures
 use an explicit synthetic frame clock, not a hardware presentation claim.
 
