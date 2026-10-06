@@ -8196,7 +8196,8 @@ impl App {
                         icon, control.icon_size, color(if control.enabled { visual.palette.text } else { visual.palette.text_muted }))))
                         .width(control.icon_size.min(width - 8.0).max(8.0))
                         .height(control.icon_size.min(height - 8.0).max(8.0))
-                        .center(Length::Shrink).into();
+                        .align_x(iced::alignment::Horizontal::Center)
+                        .align_y(iced::alignment::Vertical::Center).into();
                     let content = if control.icon_caption {
                         let mut caption: String = control.label.chars().take(10).collect();
                         if control.label.chars().count() > 10 { caption.push('…'); }
