@@ -25,7 +25,10 @@ use smithay::{
     backend::input::{ButtonState, KeyState, Keycode},
     delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output, delegate_seat,
     delegate_shm, delegate_xdg_shell,
-    desktop::utils::send_frames_surface_tree,
+    desktop::{
+        PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab, PopupUngrabStrategy, Window,
+        WindowSurfaceType, find_popup_root_surface, get_popup_toplevel_coords,
+    },
     input::{
         Seat, SeatHandler, SeatState,
         keyboard::{FilterResult, KeyboardHandle},
@@ -70,10 +73,7 @@ use smithay::backend::{
     egl::{EGLContext, EGLDisplay},
     renderer::{
         Color32F, ImportDma,
-        element::{
-            Kind,
-            surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
-        },
+        element::{AsRenderElements, surface::WaylandSurfaceRenderElement},
         gles::GlesRenderer,
     },
 };
@@ -297,6 +297,10 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
         seat_active: true,
         switcher: crate::window_switcher::WindowSwitcher::default(),
         toplevel_map: Vec::new(),
+        native_windows: Default::default(),
+        popups: PopupManager::default(),
+        last_key_press: None,
+        last_pointer_button: None,
         next_id: 0u64,
         window_count: 0,
         state_path: path,
@@ -320,9 +324,8 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
     // compositor loop via the channel above. The loop drains cmd_rx and applies
     // commands to its (single-threaded) CanvasCompositor.
     let control_worker = std::thread::spawn(move || {
-        let result = crate::launcher::serve_control(listener, cmd_tx, control_wake.clone());
-        control_wake.ping(); // Report worker death even while the desktop is idle.
-        result
+        let _exit_wake = crate::runtime_loop::WakeOnDrop(control_wake.clone());
+        crate::launcher::serve_control(listener, cmd_tx, control_wake)
     });
 
     let wayland_display = "wayland-5".to_string();
@@ -420,13 +423,18 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
             let _ = reply_tx.send(resp);
         }
         state.expire_remote_input();
-        if let Some(input) = &mut physical_input
-            && state.seat_active
-        {
+        if let Some(input) = &mut physical_input {
             input
                 .dispatch()
                 .map_err(|error| format!("physical input dispatch: {error}"))?;
+            let mut handled = 0;
             for event in input.by_ref().take(128) {
+                handled += 1;
+                // Suspend can enqueue device removals. Drain without forwarding
+                // while inactive so readiness cannot become a permanent wakeup.
+                if !state.seat_active {
+                    continue;
+                }
                 use input::event::keyboard::KeyboardEventTrait;
                 use input::event::{KeyboardEvent, PointerEvent};
                 let mut position = state.remote_input.pointer;
@@ -519,6 +527,11 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
                 }
                 state.local_input(&physical_keys, physical_buttons, position);
             }
+            // Libinput's userspace queue can outlive fd readiness. Continue a
+            // full bounded batch immediately rather than strand queued events.
+            if handled == 128 {
+                runtime.wake().ping();
+            }
         }
 
         let count = state
@@ -537,6 +550,7 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
         }
 
         state.configure_all();
+        state.popups.cleanup();
         if let Some(drm) = &mut state.drm {
             // Drain readiness even while paused, without submitting a frame.
             drm.pump_events()?;
@@ -544,11 +558,16 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
         if let Some(drm) = &mut state.drm
             && state.seat_active
         {
-            let mut toplevels: Vec<(WlSurface, String)> = state
+            let mut toplevels: Vec<(Window, String)> = state
                 .toplevel_map
                 .iter()
                 .filter(|(_, id)| !state.canvas.is_shell_overlay(id) || state.switcher.active())
-                .map(|(t, id)| (t.wl_surface().clone(), id.clone()))
+                .filter_map(|(_, id)| {
+                    state
+                        .native_windows
+                        .get(id)
+                        .map(|window| (window.clone(), id.clone()))
+                })
                 .collect();
             toplevels.sort_by_key(|(_, id)| !state.canvas.is_shell_overlay(id));
             let canvas = &mut state.canvas;
@@ -557,9 +576,8 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
         if let Some(output) = &state.virtual_output
             && Instant::now() >= headless_frame_at
         {
-            for (surface, _) in &state.toplevel_map {
-                send_frames_surface_tree(
-                    surface.wl_surface(),
+            for window in state.native_windows.values() {
+                window.send_frame(
                     output,
                     started.elapsed(),
                     Some(Duration::from_millis(16)),
@@ -812,7 +830,7 @@ impl DrmRender {
             .map_err(|e| format!("DRM dispatch: {e}"))
     }
 
-    fn redraw(&mut self, surfaces: &[(WlSurface, String)], canvas: &mut CanvasCompositor) {
+    fn redraw(&mut self, surfaces: &[(Window, String)], canvas: &mut CanvasCompositor) {
         // Only retire a pending frame after its actual vblank event. Calling
         // frame_submitted on every polling iteration releases the swapchain
         // buffer before KMS is done with it and causes EBUSY retry storms.
@@ -825,9 +843,8 @@ impl DrmRender {
                 Ok(Some(())) => {
                     self.flip_pending = false;
                     let elapsed = self.started_at.elapsed();
-                    for (surface, _) in surfaces {
-                        send_frames_surface_tree(
-                            surface,
+                    for (window, _) in surfaces {
+                        window.send_frame(
                             &self.output,
                             elapsed,
                             Some(Duration::from_millis(16)),
@@ -848,8 +865,8 @@ impl DrmRender {
 
         let mut elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
         let snapshot = canvas.snapshot().ok();
-        for (surface, id) in surfaces {
-            if !<WlSurface as smithay::reexports::wayland_server::Resource>::is_alive(surface) {
+        for (window, id) in surfaces {
+            if !smithay::utils::IsAlive::alive(window) {
                 continue;
             }
             let frame = snapshot
@@ -862,15 +879,15 @@ impl DrmRender {
                     width: self.size.w.max(0) as u32,
                     height: self.size.h.max(0) as u32,
                 });
-            let location: Point<i32, smithay::utils::Physical> = (frame.x, frame.y).into();
-            elements.extend(render_elements_from_surface_tree(
-                &mut self.renderer,
-                surface,
-                location,
-                1.0,
-                1.0,
-                Kind::Unspecified,
-            ));
+            let location = window_origin(window, frame).to_physical_precise_round(1.0);
+            elements.extend(
+                window.render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
+                    &mut self.renderer,
+                    location,
+                    1.0.into(),
+                    1.0,
+                ),
+            );
         }
 
         match self.compositor.render_frame(
@@ -916,6 +933,11 @@ struct App {
     /// Toplevel handle -> canvas window id, for resolving focus/destroy,
     /// configure sync, and the per-frame render element walk.
     toplevel_map: Vec<(ToplevelSurface, String)>,
+    // Protocol/surface helpers, not a second layout authority.
+    native_windows: std::collections::BTreeMap<String, Window>,
+    popups: PopupManager,
+    last_key_press: Option<(Serial, WlSurface)>,
+    last_pointer_button: Option<(Serial, WlSurface)>,
     next_id: u64,
     window_count: u32,
     state_path: PathBuf,
@@ -930,7 +952,59 @@ struct App {
 }
 
 impl App {
+    fn dismiss_popup_grabs(&mut self) {
+        if let Some(id) = self.canvas.focused() {
+            if let Some((top, _)) = self.toplevel_map.iter().find(|(_, window)| window == id) {
+                let root = top.wl_surface();
+                let popups: Vec<_> = PopupManager::popups_for_surface(root)
+                    .map(|(popup, _)| popup)
+                    .collect();
+                for popup in popups {
+                    if let Err(error) = PopupManager::dismiss_popup(root, &popup) {
+                        eprintln!("popup dismissal: {error}");
+                    }
+                }
+            }
+        }
+        let pointer = self.pointer.clone();
+        pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), monotonic_ms());
+        let keyboard = self.keyboard.clone();
+        keyboard.unset_grab(self);
+    }
+    fn unconstrain_popup(&mut self, popup: &PopupSurface) {
+        let kind = PopupKind::Xdg(popup.clone());
+        let Ok(root) = find_popup_root_surface(&kind) else {
+            return;
+        };
+        let Some((_, id)) = self
+            .toplevel_map
+            .iter()
+            .find(|(top, _)| top.wl_surface() == &root)
+        else {
+            return;
+        };
+        let Some(output) = self.canvas.displays().first().map(|output| output.frame) else {
+            return;
+        };
+        let Ok(snapshot) = self.canvas.snapshot() else {
+            return;
+        };
+        let Some(window) = snapshot.windows.iter().find(|window| &window.id == id) else {
+            return;
+        };
+        let mut target = smithay::utils::Rectangle::new(
+            (output.x, output.y).into(),
+            (output.width as i32, output.height as i32).into(),
+        );
+        target.loc -= get_popup_toplevel_coords(&kind);
+        target.loc -= Point::from((window.frame.x, window.frame.y));
+        popup.with_pending_state(|state| {
+            state.geometry = state.positioner.get_unconstrained_geometry(target);
+        });
+    }
     fn release_input(&mut self) {
+        self.last_key_press = None;
+        self.last_pointer_button = None;
         self.inject_keys(&[]);
         let (x, y) = self.remote_input.pointer;
         self.inject_pointer(x, y, 0);
@@ -940,6 +1014,7 @@ impl App {
             ..Default::default()
         };
         self.switcher.finish();
+        self.dismiss_popup_grabs();
         let keyboard = self.keyboard.clone();
         keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
         let pointer = self.pointer.clone();
@@ -968,6 +1043,8 @@ impl App {
             .find(|(_, window)| window == id)
             .ok_or_else(|| format!("unknown native window {id}"))?;
         let surface = surface.wl_surface().clone();
+        self.last_key_press = None;
+        self.last_pointer_button = None;
         self.inject_keys(&[]);
         let pointer = self.pointer.clone();
         for (bit, code) in [(1, 0x110), (2, 0x111), (4, 0x112), (8, 0x116), (16, 0x115)] {
@@ -985,6 +1062,7 @@ impl App {
         }
         pointer.frame(self);
         self.remote_input.buttons = 0;
+        self.dismiss_popup_grabs();
         let keyboard = self.keyboard.clone();
         keyboard.set_focus(self, Some(surface.clone()), SERIAL_COUNTER.next_serial());
         if keyboard.current_focus().as_ref() != Some(&surface) {
@@ -1229,11 +1307,13 @@ impl App {
         }
         for usage in keys.iter().filter(|usage| !previous.contains(usage)) {
             if let Some(code) = hid_to_evdev(*usage) {
+                let serial = SERIAL_COUNTER.next_serial();
+                self.last_key_press = keyboard.current_focus().map(|focus| (serial, focus));
                 keyboard.input(
                     self,
                     Keycode::from(code + 8),
                     KeyState::Pressed,
-                    SERIAL_COUNTER.next_serial(),
+                    serial,
                     monotonic_ms(),
                     |_, _, _| FilterResult::<()>::Forward,
                 );
@@ -1260,26 +1340,26 @@ impl App {
             + f64::from(y) * f64::from(display.height.saturating_sub(1)) / f64::from(u16::MAX);
         let location: Point<f64, Logical> = (px, py).into();
         let snapshot = self.canvas.snapshot().ok();
-        let focus = self.toplevel_map.iter().find_map(|(surface, id)| {
+        let focus = self.toplevel_map.iter().find_map(|(_, id)| {
             if self.canvas.is_shell_overlay(id) {
                 return None;
             }
             let window = snapshot.as_ref()?.windows.iter().find(|w| &w.id == id)?;
-            (px >= f64::from(window.frame.x)
-                && py >= f64::from(window.frame.y)
-                && px < f64::from(window.frame.x) + f64::from(window.frame.width)
-                && py < f64::from(window.frame.y) + f64::from(window.frame.height))
-            .then(|| {
-                (
-                    surface.wl_surface().clone(),
-                    (f64::from(window.frame.x), f64::from(window.frame.y)).into(),
+            let native = self.native_windows.get(id)?;
+            let origin = window_origin(native, window.frame);
+            native
+                .surface_under(
+                    (px - f64::from(origin.x), py - f64::from(origin.y)),
+                    WindowSurfaceType::ALL,
                 )
-            })
+                .map(|(surface, offset)| (surface, (origin + offset).to_f64(), id.clone()))
         });
         let pointer = self.pointer.clone();
         pointer.motion(
             self,
-            focus.clone(),
+            focus
+                .as_ref()
+                .map(|(surface, offset, _)| (surface.clone(), *offset)),
             &MotionEvent {
                 location,
                 serial: SERIAL_COUNTER.next_serial(),
@@ -1287,15 +1367,11 @@ impl App {
             },
         );
         if buttons & !self.remote_input.buttons != 0
-            && let Some((surface, _)) = focus
+            && !pointer.is_grabbed()
+            && let Some((_, _, id)) = focus
         {
-            if let Some(id) = self
-                .toplevel_map
-                .iter()
-                .find(|(top, _)| *top.wl_surface() == surface)
-                .map(|(_, id)| id.clone())
-            {
-                self.switcher.finish();
+            self.switcher.finish();
+            if self.canvas.focused() != Some(id.as_str()) {
                 if let Err(error) = self.focus_native(&id) {
                     eprintln!("pointer focus: {error}");
                 }
@@ -1304,10 +1380,12 @@ impl App {
         let previous = self.remote_input.buttons;
         for (bit, code) in [(1, 0x110), (2, 0x111), (4, 0x112), (8, 0x116), (16, 0x115)] {
             if previous & bit != buttons & bit {
+                let serial = SERIAL_COUNTER.next_serial();
+                self.last_pointer_button = pointer.current_focus().map(|focus| (serial, focus));
                 pointer.button(
                     self,
                     &ButtonEvent {
-                        serial: SERIAL_COUNTER.next_serial(),
+                        serial,
                         time: monotonic_ms(),
                         button: code,
                         state: if buttons & bit != 0 {
@@ -1340,6 +1418,8 @@ impl App {
             self.remote_input.gesture_cancelled = false;
             self.remote_input.cycling = false;
             self.switcher.finish();
+            self.last_key_press = None;
+            self.last_pointer_button = None;
         }
     }
     /// Push each window's frame rect to its client via xdg configure. The
@@ -1420,6 +1500,16 @@ fn monotonic_ms() -> u32 {
     use std::sync::OnceLock;
     static START: OnceLock<Instant> = OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_millis() as u32
+}
+
+/// Canvas frames describe window geometry, not the buffer's shadow/margin origin.
+fn window_origin(window: &Window, frame: Rect) -> Point<i32, Logical> {
+    let geometry = window.geometry();
+    (
+        frame.x.saturating_sub(geometry.loc.x),
+        frame.y.saturating_sub(geometry.loc.y),
+    )
+        .into()
 }
 
 fn hid_to_evdev(usage: u16) -> Option<u32> {
@@ -1542,6 +1632,10 @@ mod input_tests {
             seat_active: true,
             switcher: crate::window_switcher::WindowSwitcher::default(),
             toplevel_map: Vec::new(),
+            native_windows: Default::default(),
+            popups: PopupManager::default(),
+            last_key_press: None,
+            last_pointer_button: None,
             next_id: 0,
             window_count: 0,
             state_path: PathBuf::new(),
@@ -1643,6 +1737,8 @@ impl XdgShellHandler for App {
         // Stable window identity is separate from mutable client app_id/title.
         let id = format!("surface-{}", self.next_id);
         self.next_id += 1;
+        self.native_windows
+            .insert(id.clone(), Window::new_wayland_window(surface.clone()));
         self.toplevel_map.push((surface.clone(), id.clone()));
         if let Some(output) = &self.virtual_output {
             output.enter(surface.wl_surface());
@@ -1672,14 +1768,91 @@ impl XdgShellHandler for App {
         self.configure_all();
     }
 
-    fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {}
-    fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
+    fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
+        self.unconstrain_popup(&surface);
+        if let Err(error) = self.popups.track_popup(PopupKind::Xdg(surface)) {
+            eprintln!("popup tracking: {error}");
+        }
+    }
+    fn grab(&mut self, surface: PopupSurface, seat: wl_seat::WlSeat, serial: Serial) {
+        use smithay::reexports::wayland_server::Resource;
+        let Some(seat) = Seat::<App>::from_resource(&seat) else {
+            return;
+        };
+        if !self.seat_active || seat != self.seat {
+            return;
+        }
+        let kind = PopupKind::Xdg(surface);
+        let Ok(root) = find_popup_root_surface(&kind) else {
+            return;
+        };
+        if !self
+            .toplevel_map
+            .iter()
+            .any(|(top, id)| top.wl_surface() == &root && !self.canvas.is_shell_overlay(id))
+        {
+            return;
+        }
+        let pointer = self.pointer.clone();
+        let valid_pointer = (pointer.has_grab(serial)
+            && pointer
+                .grab_start_data()
+                .and_then(|data| data.focus)
+                .is_some_and(|(focus, _)| focus.id().same_client_as(&root.id())))
+            || self
+                .last_pointer_button
+                .as_ref()
+                .is_some_and(|(event, focus)| {
+                    *event == serial
+                        && focus.id().same_client_as(&root.id())
+                        && pointer.current_focus().as_ref() == Some(focus)
+                });
+        let valid_keyboard = self.last_key_press.as_ref().is_some_and(|(event, focus)| {
+            *event == serial
+                && focus.id().same_client_as(&root.id())
+                && self.keyboard.current_focus().as_ref() == Some(focus)
+        });
+        if !valid_pointer && !valid_keyboard {
+            // Unproven serials must not grant keyboard/pointer ownership.
+            if let Err(error) = PopupManager::dismiss_popup(&root, &kind) {
+                eprintln!("popup rejection: {error}");
+            }
+            return;
+        }
+        let Ok(mut grab) = self.popups.grab_popup(root, kind, &seat, serial) else {
+            return;
+        };
+        self.last_key_press = None;
+        self.last_pointer_button = None;
+        let keyboard = self.keyboard.clone();
+        let previous = grab.previous_serial().unwrap_or(serial);
+        if (keyboard.is_grabbed() && !keyboard.has_grab(serial) && !keyboard.has_grab(previous))
+            || (pointer.is_grabbed() && !pointer.has_grab(serial) && !pointer.has_grab(previous))
+        {
+            grab.ungrab(PopupUngrabStrategy::All);
+            return;
+        }
+        keyboard.set_focus(self, grab.current_grab(), serial);
+        keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
+        pointer.set_grab(
+            self,
+            PopupPointerGrab::new(&grab),
+            serial,
+            smithay::input::pointer::Focus::Keep,
+        );
+    }
     fn reposition_request(
         &mut self,
-        _surface: PopupSurface,
-        _positioner: PositionerState,
-        _token: u32,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
     ) {
+        surface.with_pending_state(|state| {
+            state.geometry = positioner.get_geometry();
+            state.positioner = positioner;
+        });
+        self.unconstrain_popup(&surface);
+        surface.send_repositioned(token);
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
@@ -1690,6 +1863,7 @@ impl XdgShellHandler for App {
             .position(|(s, _)| *s.wl_surface() == *wl)
         {
             let id = self.toplevel_map.remove(pos).1;
+            self.native_windows.remove(&id);
             self.canvas.close_window(&id);
             if self.canvas.focused().is_none() {
                 if let Some(next) = self.canvas.mru().first().cloned() {
@@ -1718,6 +1892,29 @@ impl CompositorHandler for App {
 
     fn commit(&mut self, surface: &WlSurface) {
         smithay::backend::renderer::utils::on_commit_buffer_handler::<App>(surface);
+        self.popups.commit(surface);
+        if !smithay::wayland::compositor::is_sync_subsurface(surface) {
+            let mut root = surface.clone();
+            while let Some(parent) = smithay::wayland::compositor::get_parent(&root) {
+                root = parent;
+            }
+            if let Some((_, id)) = self
+                .toplevel_map
+                .iter()
+                .find(|(top, _)| top.wl_surface() == &root)
+            {
+                if let Some(window) = self.native_windows.get(id) {
+                    window.on_commit();
+                }
+            }
+        }
+        if let Some(PopupKind::Xdg(popup)) = self.popups.find_popup(surface) {
+            if !popup.is_initial_configure_sent() {
+                if let Err(error) = popup.send_configure() {
+                    eprintln!("popup configure: {error}");
+                }
+            }
+        }
         if let Some(id) = self
             .toplevel_map
             .iter()

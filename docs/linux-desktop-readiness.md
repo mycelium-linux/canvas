@@ -253,3 +253,32 @@ an invalid-unlock protocol error. Integration therefore needs an explicit
 ownership/confirmation guard before forwarding that request. Restart recovery,
 locker authentication and physical-output presentation must all be verified
 before calling this a secure lock screen (`dock-yjt.10`).
+
+## Native popup and surface mechanics
+
+Smithay `Window` helpers now provide committed surface geometry, input-region
+and subsurface hit-testing, popup-aware rendering, and frame callbacks. Canvas
+frames remain the layout authority: both rendering and input derive the surface
+origin from the frame minus the client's window-geometry offset. Native helpers
+do not own a second layout or workspace model.
+
+`PopupManager` tracks popup commits, configures after initial commit, constrains
+positioners to the output and acknowledges reposition tokens. Popup keyboard
+and pointer grabs require a recent matching input serial and client ownership;
+invalid serials are dismissed. Focus changes and seat pause dismiss grabs.
+Clicks within the already-focused window no longer tear down its popup state.
+
+The opt-in Rust protocol fixture exercises pointer- and keyboard-opened popups,
+initial configure, frame callbacks, repositioning, pointer targeting with a
+nonzero parent window-geometry offset, outside-click dismissal, explicit focus
+recovery, and invalid-serial rejection. It runs on an isolated headless server:
+
+```sh
+CANVAS_COMPOSITOR_TEST_BIN=/path/to/matching/canvas-linux \
+  cargo test -p canvas-linux --no-default-features --features compositor \
+  real_popup_configures_repositions_receives_input_and_dismisses -- --ignored --nocapture
+```
+
+This is protocol/input evidence, not physical rendering or a full GTK desktop
+certification. Interactive move/resize, complete mapping/unmapping semantics,
+multi-output lifecycle and hardware visual validation remain separate work.

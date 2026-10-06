@@ -88,6 +88,15 @@ fn native_focus_close_and_alt_tab_reach_real_clients() {
         request(&socket, json!({"command":"list"}))["focused_window"],
         ids[2]
     );
+    // Creation precedes the client's committed app identity; wait for that
+    // protocol state, not for a scheduler delay to make it likely.
+    wait_for(|| {
+        request(&socket, json!({"command":"list"}))["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|w| w["title"] == "Canvas native proof" && w["app"] == "foot")
+    });
     let inventory = request(&socket, json!({"command":"list"}));
     assert!(
         inventory["windows"]

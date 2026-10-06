@@ -10,6 +10,13 @@ pub struct RuntimeLoop {
     events: EventLoop<'static, ()>,
     wake: Ping,
 }
+/// A worker exit (including unwind) must wake an otherwise idle compositor.
+pub struct WakeOnDrop(pub Ping);
+impl Drop for WakeOnDrop {
+    fn drop(&mut self) {
+        self.0.ping();
+    }
+}
 impl RuntimeLoop {
     pub fn new() -> Result<Self, String> {
         let events = EventLoop::try_new().map_err(|e| format!("runtime loop: {e}"))?;
@@ -46,6 +53,39 @@ impl RuntimeLoop {
 mod tests {
     use super::*;
     use std::time::Duration;
+    #[test]
+    fn worker_unwind_signals_the_idle_runtime() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let mut runtime = RuntimeLoop::new().unwrap();
+        let (wake, source) = make_ping().unwrap();
+        let seen = Arc::new(AtomicBool::new(false));
+        let observer = seen.clone();
+        runtime
+            .events
+            .handle()
+            .insert_source(source, move |_, _, _| {
+                observer.store(true, Ordering::SeqCst);
+            })
+            .unwrap();
+        let worker = std::thread::spawn(move || {
+            std::panic::catch_unwind(|| {
+                let _exit = WakeOnDrop(wake);
+                panic!("owned worker fixture");
+            })
+            .unwrap_err();
+        });
+        runtime
+            .wait(Some(Instant::now() + Duration::from_secs(1)))
+            .unwrap();
+        worker.join().unwrap();
+        assert!(
+            seen.load(Ordering::SeqCst),
+            "worker unwind did not wake the runtime"
+        );
+    }
     use std::{
         io::{Read, Write},
         os::unix::net::UnixStream,
