@@ -178,6 +178,36 @@ fn native_focus_close_and_alt_tab_reach_real_clients() {
                 line.contains("wl_keyboard") && line.contains(".key(") && line.ends_with(", 30, 1)")
             })
     });
+    // Escape cancels preview focus. Releasing Alt first must not leak Escape,
+    // and a fresh Tab press while cancelled must wait for a new Alt gesture.
+    request(&socket, input(10, vec![43, 226]));
+    assert_ne!(
+        request(&socket, json!({"command":"list"}))["focused_window"],
+        ids[1]
+    );
+    request(&socket, input(11, vec![41, 43, 226]));
+    let cancelled = request(&socket, json!({"command":"list"}));
+    assert_eq!(cancelled["focused_window"], ids[1]);
+    assert_eq!(cancelled["switcher"]["active"], false);
+    request(&socket, input(12, vec![41, 226]));
+    request(&socket, input(13, vec![41, 43, 226]));
+    assert_eq!(
+        request(&socket, json!({"command":"list"}))["focused_window"],
+        ids[1]
+    );
+    request(&socket, input(14, vec![41, 43]));
+    request(&socket, input(15, vec![]));
+    request(&socket, input(16, vec![43, 226]));
+    assert_eq!(
+        request(&socket, json!({"command":"list"}))["switcher"]["active"],
+        true
+    );
+    request(&socket, input(17, vec![41, 226]));
+    request(&socket, input(18, vec![]));
+    assert_eq!(
+        request(&socket, json!({"command":"list"}))["focused_window"],
+        ids[1]
+    );
     let close = request(&socket, json!({"command":"close","window":ids[1]}));
     assert_eq!(close["close_requested"], true);
     assert_eq!(close["closed"], false);
@@ -205,13 +235,37 @@ fn native_focus_close_and_alt_tab_reach_real_clients() {
                 && line.ends_with(", 15, 1)")),
             "Alt-Tab leaked a Tab press to client {index}"
         );
+        assert!(
+            !log.lines().any(|line| line.contains("wl_keyboard")
+                && line.contains(".key(")
+                && line.ends_with(", 1, 1)")),
+            "switcher cancellation leaked Escape to client {index}"
+        );
     }
     assert!(
         std::fs::read_to_string(directory.join("client-1.log"))
             .unwrap()
             .contains(".close(")
     );
+    // Ownership ends on key release: ordinary Escape still belongs to the app.
+    request(&socket, input(19, vec![41]));
+    request(&socket, input(20, vec![]));
+    wait_for(|| {
+        std::fs::read_to_string(directory.join("client-0.log"))
+            .unwrap()
+            .lines()
+            .any(|line| {
+                line.contains("wl_keyboard") && line.contains(".key(") && line.ends_with(", 1, 1)")
+            })
+    });
     for index in [0, 2] {
+        if index == 2 {
+            request(&socket, input(21, vec![43, 226]));
+            let single = request(&socket, json!({"command":"list"}));
+            assert_eq!(single["focused_window"], ids[2]);
+            assert_eq!(single["switcher"]["active"], false);
+            request(&socket, input(22, vec![]));
+        }
         request(&socket, json!({"command":"close","window":ids[index]}));
         wait_for(|| clients[index].0.try_wait().unwrap().is_some());
     }

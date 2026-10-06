@@ -3,6 +3,7 @@
 pub struct WindowSwitcher {
     order: Vec<String>,
     selected: Option<String>,
+    origin: Option<String>,
 }
 impl WindowSwitcher {
     pub fn active(&self) -> bool {
@@ -19,6 +20,13 @@ impl WindowSwitcher {
     pub fn finish(&mut self) {
         self.order.clear();
         self.selected = None;
+        self.origin = None;
+    }
+    /// Cancel only to the original, still-live window; never guess a replacement.
+    pub fn cancel(&mut self, live_mru: &[String]) -> Option<String> {
+        let origin = self.origin.take().filter(|id| live_mru.contains(id));
+        self.finish();
+        origin
     }
     pub fn reconcile(&mut self, live_mru: &[String], focused: Option<&str>) {
         if !self.active() {
@@ -49,6 +57,7 @@ impl WindowSwitcher {
         if self.order.is_empty() {
             self.order = live_mru.to_vec();
             self.selected = focused.map(str::to_owned);
+            self.origin = self.selected.clone();
         }
         self.order.retain(|id| live_mru.contains(id));
         if self.order.is_empty() {
@@ -66,6 +75,10 @@ impl WindowSwitcher {
             None => 0,
         };
         let id = self.order[next].clone();
+        if self.order.len() == 1 {
+            self.finish();
+            return Some(id);
+        }
         self.selected = Some(id.clone());
         Some(id)
     }
@@ -121,6 +134,24 @@ mod tests {
         assert_eq!(s.snapshot()["windows"], serde_json::json!(["a", "c"]));
         assert_eq!(s.snapshot()["selected_window"], "a");
         s.reconcile(&[], None);
+        assert!(!s.active());
+    }
+    #[test]
+    fn cancel_restores_origin_not_preview_and_never_targets_a_closed_origin() {
+        let mut s = WindowSwitcher::default();
+        s.next(&ids(&["a", "b", "c"]), Some("a"), false);
+        s.next(&ids(&["b", "a", "c"]), Some("b"), false);
+        assert_eq!(s.cancel(&ids(&["c", "b", "a"])).as_deref(), Some("a"));
+        assert!(!s.active());
+        assert!(s.cancel(&ids(&["a", "b"])).is_none());
+        s.next(&ids(&["a", "b"]), Some("a"), false);
+        assert!(s.cancel(&ids(&["b"])).is_none());
+        assert!(!s.active());
+    }
+    #[test]
+    fn one_window_has_no_overlay() {
+        let mut s = WindowSwitcher::default();
+        assert_eq!(s.next(&ids(&["a"]), Some("a"), false).as_deref(), Some("a"));
         assert!(!s.active());
     }
 }

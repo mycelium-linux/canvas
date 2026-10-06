@@ -64,6 +64,12 @@ Alt-Tab and Alt-Shift-Tab are handled by the existing leased HID snapshot path.
 The window order freezes for one held Alt gesture; closed windows are skipped,
 new windows join the next gesture, and Tab is consumed rather than sent into
 the selected app. Alt release or input-lease expiry finishes the gesture.
+Escape cancels an active preview and restores its original window if still
+present. Further Tab presses wait for Alt release before starting a fresh
+gesture. Consumed Escape/Tab stay suppressed until their own key release;
+ordinary Escape outside the gesture is forwarded. With one window, Alt-Tab
+keeps it focused without opening the overlay. Cancelling never resurrects a
+closed original window or substitutes a different one.
 Socket clients may use `{"command":"cycle","reverse":false}` repeatedly and
 `{"command":"cycle_finish"}` to finish the same native switching session.
 `list.result.switcher` exposes `active`, the frozen `windows` order,

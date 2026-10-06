@@ -1052,6 +1052,8 @@ impl App {
             self.switcher.finish();
             self.remote_input.tab_down = false;
             self.remote_input.shortcut_tab_owned = false;
+            self.remote_input.shortcut_escape_owned = false;
+            self.remote_input.gesture_cancelled = false;
             self.remote_input.cycling = false;
         }
         let mut keys = keys.to_vec();
@@ -1125,7 +1127,21 @@ impl App {
         self.inject_pointer(x, y, buttons);
         let alt = keys.contains(&0xe2) || keys.contains(&0xe6);
         let tab = keys.contains(&0x2b);
-        if alt && tab && !self.remote_input.tab_down {
+        let escape = keys.contains(&0x29);
+        if escape && self.switcher.active() {
+            self.remote_input.shortcut_escape_owned = true;
+            self.remote_input.gesture_cancelled = true;
+            self.remote_input.cycling = false;
+            if let Some(origin) = self.switcher.cancel(self.canvas.mru()) {
+                if let Err(error) = self.focus_native(&origin) {
+                    return json!({"ok":false,"error":error});
+                }
+            }
+        }
+        if self.remote_input.gesture_cancelled && tab {
+            self.remote_input.shortcut_tab_owned = true;
+        }
+        if alt && tab && !self.remote_input.tab_down && !self.remote_input.gesture_cancelled {
             self.remote_input.cycling = true;
             self.remote_input.shortcut_tab_owned = true;
             if let Err(error) = self.cycle_native(keys.contains(&0xe1) || keys.contains(&0xe5)) {
@@ -1136,17 +1152,22 @@ impl App {
         if !alt {
             self.remote_input.cycling = false;
             self.switcher.finish();
+            self.remote_input.gesture_cancelled = false;
         }
         if !tab {
             self.remote_input.shortcut_tab_owned = false;
         }
-        if self.remote_input.cycling {
+        if !escape {
+            self.remote_input.shortcut_escape_owned = false;
+        }
+        if self.remote_input.cycling || self.remote_input.gesture_cancelled {
             self.inject_keys(&[]);
         } else {
             let forwarded: Vec<_> = keys
                 .iter()
                 .copied()
                 .filter(|key| *key != 0x2b || !self.remote_input.shortcut_tab_owned)
+                .filter(|key| *key != 0x29 || !self.remote_input.shortcut_escape_owned)
                 .collect();
             self.inject_keys(&forwarded);
         }
@@ -1278,6 +1299,8 @@ impl App {
             self.remote_input.deadline = None;
             self.remote_input.tab_down = false;
             self.remote_input.shortcut_tab_owned = false;
+            self.remote_input.shortcut_escape_owned = false;
+            self.remote_input.gesture_cancelled = false;
             self.remote_input.cycling = false;
             self.switcher.finish();
         }
@@ -1345,6 +1368,8 @@ struct RemoteInput {
     local_owner: bool,
     local_held: bool,
     shortcut_tab_owned: bool,
+    shortcut_escape_owned: bool,
+    gesture_cancelled: bool,
     tab_down: bool,
     cycling: bool,
     sequence: u64,
