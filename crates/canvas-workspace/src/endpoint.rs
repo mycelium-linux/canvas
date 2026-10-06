@@ -70,12 +70,28 @@ impl Endpoint {
     }
 
     pub fn snapshot(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut snapshot = serde_json::json!({
             "owner":self.owner, "revision":self.revision,
             "catalog":self.session.as_ref().map(Workspaces::selector_projection),
             "palette":self.session.as_ref().and_then(|session| session.palette().ok().flatten()),
             "document":self.session.as_ref().and_then(Workspaces::document)
-        })
+        });
+        if let Some(surfaces) = snapshot["document"]["surfaces"].as_array_mut() {
+            for surface in surfaces {
+                if surface["content"]["spec"]["kind"] != "status_list" {
+                    continue;
+                }
+                if let Some(value) = surface["id"]
+                    .as_str()
+                    .and_then(|id| self.surface_snapshot(id))
+                {
+                    surface["content"]["spec"]["title"] = value["frame"]["title"].clone();
+                    surface["content"]["spec"]["nodes"] = value["frame"]["nodes"].clone();
+                    surface["content"]["spec"]["data"] = value["data"].clone();
+                }
+            }
+        }
+        snapshot
     }
 
     pub fn checkpoint(&self) -> serde_json::Value {
@@ -83,7 +99,7 @@ impl Endpoint {
             "projection":self.session.as_ref().map(Workspaces::retained_projection)})
     }
 
-    /// Latest transient frame for a currently declared signal surface. The
+    /// Latest transient frame for a declared signal or status surface. The
     /// receiver's monotonic clock owns staleness; frames never survive restart.
     pub fn surface_snapshot(&self, surface_id: &str) -> Option<serde_json::Value> {
         let document = self.session.as_ref()?.document()?;
@@ -91,11 +107,15 @@ impl Endpoint {
         let crate::SurfaceContent::Widget { spec } = &surface.content else {
             return None;
         };
-        let canvas_widgets::WidgetKind::SignalView { frame, .. } = &spec.kind else {
-            return None;
+        let declared = match &spec.kind {
+            canvas_widgets::WidgetKind::SignalView { frame, .. } => frame.clone(),
+            canvas_widgets::WidgetKind::StatusList { title, nodes } => {
+                serde_json::json!({"title":title,"nodes":nodes})
+            }
+            _ => return None,
         };
         let (frame, mut data) = self.frames.get(surface_id).map_or_else(
-            || (frame.clone(), spec.data.clone()),
+            || (declared, spec.data.clone()),
             |(frame, data, received)| {
                 let mut data = data.clone();
                 if received.elapsed() > std::time::Duration::from_secs(3) {
@@ -194,13 +214,29 @@ impl Endpoint {
                 let crate::SurfaceContent::Widget { spec } = &surface.content else {
                     return Err("Snapshot surface is not a widget".into());
                 };
-                let canvas_widgets::WidgetKind::SignalView { title, .. } = &spec.kind else {
-                    return Err("Snapshot surface is not a signal view".into());
-                };
                 let mut next = (*spec).clone();
-                next.kind = canvas_widgets::WidgetKind::SignalView {
-                    title: title.clone(),
-                    frame: frame.clone(),
+                next.kind = match &spec.kind {
+                    canvas_widgets::WidgetKind::SignalView { title, .. } => {
+                        canvas_widgets::WidgetKind::SignalView {
+                            title: title.clone(),
+                            frame: frame.clone(),
+                        }
+                    }
+                    canvas_widgets::WidgetKind::StatusList { .. } => {
+                        #[derive(Deserialize)]
+                        #[serde(deny_unknown_fields)]
+                        struct StatusFrame {
+                            title: String,
+                            nodes: Vec<canvas_widgets::NodeSummaryItem>,
+                        }
+                        let status: StatusFrame = serde_json::from_value(frame.clone())
+                            .map_err(|_| "Invalid status snapshot")?;
+                        canvas_widgets::WidgetKind::StatusList {
+                            title: status.title,
+                            nodes: status.nodes,
+                        }
+                    }
+                    _ => return Err("Snapshot surface is not a supported live view".into()),
                 };
                 next.data = data.clone();
                 next.validate().map_err(|e| e.to_string())?;
@@ -289,6 +325,58 @@ impl Endpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn status_snapshots_are_live_not_saved_and_expire() {
+        let mut endpoint = Endpoint::new("firetv-omni");
+        let mut request: Request = serde_json::from_str(include_str!(
+            "../../../config/deploy/firetv/workspaces.json"
+        ))
+        .unwrap();
+        let Command::Install { documents, .. } = &mut request.command else {
+            panic!()
+        };
+        documents[0].surfaces[1].content = crate::SurfaceContent::Widget {
+            spec: canvas_widgets::WidgetSpec::from_json(br#"{"schema_version":2,"id":"status","kind":"status_list","title":"Studio","nodes":[]}"#).unwrap()
+        };
+        endpoint.execute(request).unwrap();
+        let saved = endpoint.checkpoint();
+        let frame = serde_json::json!({"title":"Output","nodes":[{"label":"Main","state":"good","detail":"Connected"}]});
+        endpoint
+            .execute(Request {
+                schema_version: 1,
+                request_id: "status".into(),
+                expected_revision: Some(2),
+                command: Command::SurfaceSnapshot {
+                    workspace_id: "tv-television".into(),
+                    surface_id: "clock".into(),
+                    frame: frame.clone(),
+                    data: Default::default(),
+                },
+            })
+            .unwrap();
+        assert_eq!(endpoint.checkpoint(), saved);
+        assert_eq!(
+            endpoint.snapshot()["document"]["surfaces"][1]["content"]["spec"]["nodes"],
+            frame["nodes"]
+        );
+        endpoint.frames.get_mut("clock").unwrap().2 =
+            std::time::Instant::now() - std::time::Duration::from_secs(4);
+        assert_eq!(
+            endpoint.snapshot()["document"]["surfaces"][1]["content"]["spec"]["data"]["state"],
+            "stale"
+        );
+        let restored = Endpoint::restore("firetv-omni", &saved.to_string()).unwrap();
+        assert_eq!(
+            restored.surface_snapshot("clock").unwrap()["data"]["state"],
+            "no_data"
+        );
+        assert!(
+            restored.surface_snapshot("clock").unwrap()["frame"]["nodes"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
     #[test]
     fn transient_frames_do_not_rewrite_documents_or_survive_restart() {
         let mut endpoint = Endpoint::new("firetv-omni");

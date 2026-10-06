@@ -173,41 +173,110 @@ fn stream_at(
     let mut revision = observed["revision"]
         .as_u64()
         .ok_or("Missing target revision")?;
-    let mut input = std::io::stdin().lock();
-    loop {
-        let mut line = Vec::new();
-        if input
-            .by_ref()
-            .take(512 * 1024 + 1)
-            .read_until(b'\n', &mut line)?
-            == 0
-        {
-            break;
-        }
-        if line.len() > 512 * 1024 || line.last() != Some(&b'\n') {
-            return Err("Invalid bounded snapshot line".into());
-        }
-        let value: serde_json::Value = serde_json::from_slice(&line)?;
-        let request = Request {
-            schema_version: 1,
-            request_id: "signal-stream".into(),
-            expected_revision: Some(revision),
-            command: PresentationCommand::SurfaceSnapshot {
-                workspace_id: workspace_id.into(),
-                surface_id: value["surface_id"]
+    // Latest value per surface: a slow or hidden TV must not queue old meters.
+    #[derive(Default)]
+    struct Pending {
+        frames: std::collections::BTreeMap<String, serde_json::Value>,
+        done: bool,
+        error: Option<String>,
+    }
+    let pending = std::sync::Arc::new((
+        std::sync::Mutex::new(Pending::default()),
+        std::sync::Condvar::new(),
+    ));
+    let reader_pending = pending.clone();
+    std::thread::spawn(move || {
+        let result = (|| -> Result<(), String> {
+            let mut input = std::io::stdin().lock();
+            loop {
+                let mut line = Vec::new();
+                if input
+                    .by_ref()
+                    .take(512 * 1024 + 1)
+                    .read_until(b'\n', &mut line)
+                    .map_err(|e| e.to_string())?
+                    == 0
+                {
+                    return Ok(());
+                }
+                if line.len() > 512 * 1024 || line.last() != Some(&b'\n') {
+                    return Err("Invalid bounded snapshot line".into());
+                }
+                let value: serde_json::Value =
+                    serde_json::from_slice(&line).map_err(|e| e.to_string())?;
+                let id = value["surface_id"]
                     .as_str()
-                    .ok_or("Missing surface_id")?
-                    .into(),
-                frame: value["frame"].clone(),
-                data: serde_json::from_value(value["data"].clone())?,
-            },
+                    .filter(|id| !id.is_empty() && id.len() <= 128)
+                    .ok_or("Invalid surface_id")?
+                    .to_owned();
+                let mut queue = reader_pending
+                    .0
+                    .lock()
+                    .map_err(|_| "Snapshot mailbox poisoned")?;
+                if queue.frames.len() >= 64 && !queue.frames.contains_key(&id) {
+                    return Err("Too many snapshot surfaces".into());
+                }
+                queue.frames.insert(id, value);
+                reader_pending.1.notify_one();
+            }
+        })();
+        if let Ok(mut queue) = reader_pending.0.lock() {
+            queue.error = result.err();
+            queue.done = true;
+            reader_pending.1.notify_one();
+        }
+    });
+    let mut last_wait_log = std::time::Instant::now() - std::time::Duration::from_secs(10);
+    loop {
+        let batch = {
+            let mut queue = pending.0.lock().map_err(|_| "Snapshot mailbox poisoned")?;
+            while queue.frames.is_empty() && !queue.done {
+                queue = pending
+                    .1
+                    .wait(queue)
+                    .map_err(|_| "Snapshot mailbox poisoned")?;
+            }
+            if let Some(error) = queue.error.take() {
+                return Err(error.into());
+            }
+            if queue.frames.is_empty() && queue.done {
+                break;
+            }
+            std::mem::take(&mut queue.frames)
         };
-        let receipt = exchange(port, token, &request)?;
-        revision = receipt["revision"]
-            .as_u64()
-            .ok_or("Missing target revision")?;
-        if receipt["ok"] != true {
-            eprintln!("canvas-tvctl: snapshot rejected: {}", receipt["error"]);
+        for value in batch.into_values() {
+            let request = Request {
+                schema_version: 1,
+                request_id: "signal-stream".into(),
+                expected_revision: Some(revision),
+                command: PresentationCommand::SurfaceSnapshot {
+                    workspace_id: workspace_id.into(),
+                    surface_id: value["surface_id"]
+                        .as_str()
+                        .ok_or("Missing surface_id")?
+                        .into(),
+                    frame: value["frame"].clone(),
+                    data: serde_json::from_value(value["data"].clone())?,
+                },
+            };
+            let receipt = exchange(port, token, &request)?;
+            revision = receipt["revision"]
+                .as_u64()
+                .ok_or("Missing target revision")?;
+            if receipt["ok"] != true {
+                let error = receipt["error"].as_str().unwrap_or("Invalid target error");
+                if error == "Snapshot target is not active" {
+                    if last_wait_log.elapsed() >= std::time::Duration::from_secs(5) {
+                        eprintln!("canvas-tvctl: waiting for target workspace");
+                        last_wait_log = std::time::Instant::now();
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    break;
+                }
+                if error != "Stale or missing endpoint revision; inspect this target first" {
+                    return Err(format!("Snapshot rejected: {error}").into());
+                }
+            }
         }
     }
     Ok(())
