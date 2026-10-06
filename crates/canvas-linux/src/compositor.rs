@@ -43,6 +43,7 @@ pub trait WindowLifecycle {
     fn window_mapped(&mut self, _window: &WindowSurface) {}
     fn window_focused(&mut self, _window_id: &str) {}
     fn window_closed(&mut self, _window_id: &str) {}
+    fn window_unmapped(&mut self, _window_id: &str) {}
 }
 
 pub struct NoOpLifecycle;
@@ -133,6 +134,42 @@ impl CanvasCompositor {
     pub fn is_shell_overlay(&self, id: &str) -> bool {
         self.shell_overlays.contains(id)
     }
+    pub fn window(&self, id: &str) -> Option<&WindowSurface> {
+        self.windows.get(id).map(|entry| &entry.surface)
+    }
+    pub fn is_mapped(&self, id: &str) -> bool {
+        self.windows.get(id).is_some_and(|entry| entry.mapped)
+    }
+    /// Protocol identity/layout may exist before a buffer is committed.
+    pub fn register_window(&mut self, id: String, surface: WindowSurface) {
+        self.windows.entry(id).or_insert(WindowEntry {
+            surface,
+            mapped: false,
+        });
+    }
+    pub fn set_mapped(&mut self, id: &str, mapped: bool) -> Result<bool, String> {
+        let entry = self
+            .windows
+            .get_mut(id)
+            .ok_or_else(|| format!("unknown window {id}"))?;
+        if entry.mapped == mapped {
+            return Ok(false);
+        }
+        entry.mapped = mapped;
+        if mapped {
+            if !self.shell_overlays.contains(id) {
+                self.mru.push(id.to_owned());
+            }
+            self.lifecycle.window_mapped(&entry.surface);
+        } else {
+            self.mru.retain(|window| window != id);
+            if self.focused.as_deref() == Some(id) {
+                self.focused = None;
+            }
+            self.lifecycle.window_unmapped(id);
+        }
+        Ok(true)
+    }
 
     /// Presentation-only surfaces never become app-switching destinations.
     pub fn mark_shell_overlay(&mut self, id: &str) -> Result<(), String> {
@@ -166,18 +203,12 @@ impl CanvasCompositor {
 
     /// The server reports a toplevel has mapped; insert it and notify lifecycle.
     pub fn map_window(&mut self, id: String, surface: WindowSurface) {
-        let already_mapped = self.windows.get(&id).is_some_and(|e| e.mapped);
-        self.windows.insert(
-            id.clone(),
-            WindowEntry {
-                surface: surface.clone(),
-                mapped: true,
-            },
-        );
-        if !already_mapped {
-            self.mru.push(id.clone());
-            self.lifecycle.window_mapped(&surface);
-        }
+        self.register_window(id.clone(), surface.clone());
+        self.windows
+            .get_mut(&id)
+            .expect("registered window")
+            .surface = surface;
+        self.set_mapped(&id, true).expect("registered window");
     }
 
     /// The server reports focus changed; track it and notify lifecycle.
@@ -185,7 +216,7 @@ impl CanvasCompositor {
         if self.is_shell_overlay(id) {
             return Err("shell overlay cannot take keyboard focus".into());
         }
-        if !self.windows.contains_key(id) {
+        if !self.is_mapped(id) {
             return Err(format!("unknown window {id}"));
         }
         if self.focused.as_deref() != Some(id) {
@@ -383,6 +414,9 @@ impl WindowLifecycle for StreamLifecycle {
     }
     fn window_closed(&mut self, id: &str) {
         let _ = self.post("closed", id, "", "");
+    }
+    fn window_unmapped(&mut self, id: &str) {
+        let _ = self.post("unmapped", id, "", "");
     }
 }
 
@@ -615,6 +649,60 @@ mod tests {
         fn window_closed(&mut self, id: &str) {
             self.0.lock().unwrap().push(("closed".into(), id.into()));
         }
+        fn window_unmapped(&mut self, id: &str) {
+            self.0.lock().unwrap().push(("unmapped".into(), id.into()));
+        }
+    }
+    #[test]
+    fn registered_windows_are_not_focusable_and_remap_retains_identity_and_layout() {
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut c = CanvasCompositor::with_lifecycle([], Box::new(Recorder(events.clone())));
+        c.register_window("app".into(), window("app", "pending"));
+        assert!(c.snapshot().unwrap().windows.is_empty());
+        assert!(c.mru().is_empty());
+        assert!(c.focus_window("app").is_err());
+        c.update_identity("app", Some("foot".into()), Some("ready".into()));
+        let frame = Rect {
+            x: 20,
+            y: 30,
+            width: 640,
+            height: 480,
+        };
+        c.place_window("app", frame).unwrap();
+        assert!(c.set_mapped("app", true).unwrap());
+        assert!(!c.set_mapped("app", true).unwrap());
+        c.focus_window("app").unwrap();
+        assert!(c.set_mapped("app", false).unwrap());
+        assert!(!c.set_mapped("app", false).unwrap());
+        assert!(c.snapshot().unwrap().windows.is_empty());
+        assert!(c.focused().is_none());
+        assert!(c.mru().is_empty());
+        assert!(c.set_mapped("app", true).unwrap());
+        let snap = c.snapshot().unwrap();
+        assert_eq!(snap.windows[0].id, "app");
+        assert_eq!(snap.windows[0].app, "foot");
+        assert_eq!(snap.windows[0].frame, frame);
+        assert_eq!(c.mru(), &["app"]);
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                ("mapped".into(), "app".into()),
+                ("focused".into(), "app".into()),
+                ("unmapped".into(), "app".into()),
+                ("mapped".into(), "app".into())
+            ]
+        );
+    }
+    #[test]
+    fn a_pending_shell_overlay_never_enters_mru_on_map_or_remap() {
+        let mut c = CanvasCompositor::default();
+        c.register_window("overlay".into(), window("overlay", "shell"));
+        c.mark_shell_overlay("overlay").unwrap();
+        c.set_mapped("overlay", true).unwrap();
+        c.set_mapped("overlay", false).unwrap();
+        c.set_mapped("overlay", true).unwrap();
+        assert!(c.mru().is_empty());
+        assert!(c.focus_window("overlay").is_err());
     }
 
     #[test]

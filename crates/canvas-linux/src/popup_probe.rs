@@ -31,6 +31,7 @@ struct Probe {
     key_serial: Option<u32>,
     keyboard_surface: Option<wl_surface::WlSurface>,
     popup_configures: usize,
+    toplevel_configures: usize,
     repositioned: bool,
     frame: bool,
     done: bool,
@@ -189,11 +190,25 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Probe {
                 ..
             } => state.key_serial = Some(serial),
             wl_keyboard::Event::Enter { surface, .. } => state.keyboard_surface = Some(surface),
+            wl_keyboard::Event::Leave { .. } => state.keyboard_surface = None,
             _ => {}
         }
     }
 }
-delegate_noop!(Probe: ignore xdg_toplevel::XdgToplevel);
+impl Dispatch<xdg_toplevel::XdgToplevel, ()> for Probe {
+    fn event(
+        state: &mut Self,
+        _: &xdg_toplevel::XdgToplevel,
+        event: xdg_toplevel::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if matches!(event, xdg_toplevel::Event::Configure { .. }) {
+            state.toplevel_configures += 1;
+        }
+    }
+}
 delegate_noop!(Probe: ignore xdg_positioner::XdgPositioner);
 
 struct OwnedServer(std::process::Child);
@@ -237,12 +252,38 @@ fn real_popup_configures_repositions_receives_input_and_dismisses() {
     queue.roundtrip(&mut state).unwrap();
     let compositor = state.compositor.clone().unwrap();
     let wm = state.wm.clone().unwrap();
+    let socket = dir.join("native-control/compositor-control.sock");
+    let request = |value| {
+        let reply = crate::launcher::send_command(&socket, &value).unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(reply["ok"], true, "{reply}");
+        reply["result"].clone()
+    };
     let root = compositor.create_surface(&qh, ());
     let root_xdg = wm.get_xdg_surface(&root, &qh, ());
     let top = root_xdg.get_toplevel(&qh, ());
     top.set_app_id("canvas-popup-proof".into());
+    queue.roundtrip(&mut state).unwrap();
+    assert_eq!(
+        state.toplevel_configures, 0,
+        "configure preceded initial commit"
+    );
+    assert!(
+        request(json!({"command":"list"}))["windows"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     root.commit();
     queue.roundtrip(&mut state).unwrap();
+    assert_eq!(state.toplevel_configures, 1);
+    assert!(
+        request(json!({"command":"list"}))["windows"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "bufferless surface entered the catalog"
+    );
     let pixels = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -260,13 +301,6 @@ fn real_popup_configures_repositions_receives_input_and_dismisses() {
     root.attach(Some(&root_buffer), 0, 0);
     root.commit();
     queue.roundtrip(&mut state).unwrap();
-    let socket = dir.join("native-control/compositor-control.sock");
-    let request = |value| {
-        let reply = crate::launcher::send_command(&socket, &value).unwrap();
-        let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
-        assert_eq!(reply["ok"], true, "{reply}");
-        reply["result"].clone()
-    };
     let id = request(json!({"command":"list"}))["windows"][0]["id"]
         .as_str()
         .unwrap()
@@ -349,4 +383,98 @@ fn real_popup_configures_repositions_receives_input_and_dismisses() {
     queue.roundtrip(&mut state).unwrap();
     assert!(state.done, "explicit focus did not dismiss popup grab");
     assert_eq!(state.keyboard_surface.as_ref(), Some(&root));
+    key_popup.destroy();
+    key_xdg.destroy();
+    key_surface.destroy();
+    queue.roundtrip(&mut state).unwrap();
+    // A second mapped window gives unmap a real focus-recovery destination.
+    let other = compositor.create_surface(&qh, ());
+    let other_xdg = wm.get_xdg_surface(&other, &qh, ());
+    let other_top = other_xdg.get_toplevel(&qh, ());
+    other_top.set_app_id("canvas-background-proof".into());
+    other.commit();
+    queue.roundtrip(&mut state).unwrap();
+    other.attach(Some(&root_buffer), 0, 0);
+    other.commit();
+    queue.roundtrip(&mut state).unwrap();
+    let before = request(json!({"command":"list"}));
+    assert_eq!(before["windows"].as_array().unwrap().len(), 2);
+    let other_id = before["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|window| window["id"] != id)
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let original_frame = before["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|window| window["id"] == id)
+        .unwrap()["frame"]
+        .clone();
+    request(json!({"command":"focus","window":id}));
+    root.attach(None, 0, 0);
+    root.commit();
+    queue.roundtrip(&mut state).unwrap();
+    let hidden = request(json!({"command":"list"}));
+    assert_eq!(hidden["windows"].as_array().unwrap().len(), 1);
+    assert_eq!(hidden["focused_window"], other_id);
+    assert!(
+        !hidden["mru"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|window| window == &id)
+    );
+    let denied: serde_json::Value = serde_json::from_str(
+        &crate::launcher::send_command(&socket, &json!({"command":"focus","window":id})).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(denied["ok"], false);
+    let configurations = state.toplevel_configures;
+    root.commit();
+    queue.roundtrip(&mut state).unwrap();
+    assert!(
+        state.toplevel_configures > configurations,
+        "remap did not receive a fresh initial configure"
+    );
+    root_xdg.set_window_geometry(10, 20, 300, 200);
+    root.attach(Some(&root_buffer), 0, 0);
+    root.commit();
+    queue.roundtrip(&mut state).unwrap();
+    let remapped = request(json!({"command":"list"}));
+    assert_eq!(remapped["windows"].as_array().unwrap().len(), 2);
+    let restored = remapped["windows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|window| window["id"] == id)
+        .unwrap();
+    assert_eq!(restored["frame"], original_frame);
+    assert_eq!(
+        remapped["mru"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|window| *window == &id)
+            .count(),
+        1
+    );
+    other.attach(None, 0, 0);
+    other.commit();
+    root.attach(None, 0, 0);
+    root.commit();
+    queue.roundtrip(&mut state).unwrap();
+    let empty = request(json!({"command":"list"}));
+    assert!(empty["windows"].as_array().unwrap().is_empty());
+    assert!(empty["mru"].as_array().unwrap().is_empty());
+    assert!(empty["focused_window"].is_null());
+    assert_eq!(empty["input_owner"], "local");
+    assert!(
+        state.keyboard_surface.is_none(),
+        "last unmap stranded keyboard focus"
+    );
 }

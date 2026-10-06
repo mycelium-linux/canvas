@@ -282,3 +282,19 @@ CANVAS_COMPOSITOR_TEST_BIN=/path/to/matching/canvas-linux \
 This is protocol/input evidence, not physical rendering or a full GTK desktop
 certification. Interactive move/resize, complete mapping/unmapping semantics,
 multi-output lifecycle and hardware visual validation remain separate work.
+
+## Native mapping lifecycle
+
+Creating a toplevel registers its stable identity and intended frame, but does
+not expose it in the app catalog or MRU. The initial configure is sent after
+the client's first surface commit. A committed buffer makes the window mapped;
+detaching the buffer removes it from the catalog, rendering and focus eligibility.
+Mapped means displayable, not necessarily unobscured by another window.
+
+Unmap restores a remaining mapped window's focus and reconciles the switcher.
+When no app remains, Canvas releases held input, clears focus and revokes remote
+takeover. Remap requires a fresh initial configure handshake and retains the
+Canvas window ID and intended layout. Lifecycle publishers emit `unmapped`
+separately from `closed`; consumers should refresh the retained catalog rather
+than treat unmap as process termination. The isolated popup protocol fixture
+also verifies bufferless creation, unmap, focus restoration and remap.

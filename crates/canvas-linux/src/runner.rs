@@ -561,7 +561,10 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
             let mut toplevels: Vec<(Window, String)> = state
                 .toplevel_map
                 .iter()
-                .filter(|(_, id)| !state.canvas.is_shell_overlay(id) || state.switcher.active())
+                .filter(|(_, id)| {
+                    state.canvas.is_mapped(id)
+                        && (!state.canvas.is_shell_overlay(id) || state.switcher.active())
+                })
                 .filter_map(|(_, id)| {
                     state
                         .native_windows
@@ -576,7 +579,10 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
         if let Some(output) = &state.virtual_output
             && Instant::now() >= headless_frame_at
         {
-            for window in state.native_windows.values() {
+            for (id, window) in &state.native_windows {
+                if !state.canvas.is_mapped(id) {
+                    continue;
+                }
                 window.send_frame(
                     output,
                     started.elapsed(),
@@ -591,7 +597,14 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
             .remote_input
             .deadline
             .into_iter()
-            .chain((headless && !state.toplevel_map.is_empty()).then_some(headless_frame_at))
+            .chain(
+                (headless
+                    && state
+                        .toplevel_map
+                        .iter()
+                        .any(|(_, id)| state.canvas.is_mapped(id)))
+                .then_some(headless_frame_at),
+            )
             .min();
         runtime.wait(deadline)?;
     }
@@ -952,6 +965,25 @@ struct App {
 }
 
 impl App {
+    fn restore_mapped_focus(&mut self) {
+        if self.canvas.focused().is_none() {
+            let next = self
+                .canvas
+                .mru()
+                .first()
+                .cloned()
+                .filter(|_| self.seat_active);
+            if let Some(next) = next {
+                if let Err(error) = self.focus_native(&next) {
+                    eprintln!("restore mapped focus: {error}");
+                }
+            } else {
+                self.release_input();
+            }
+        }
+        self.switcher
+            .reconcile(self.canvas.mru(), self.canvas.focused());
+    }
     fn dismiss_popup_grabs(&mut self) {
         if let Some(id) = self.canvas.focused() {
             if let Some((top, _)) = self.toplevel_map.iter().find(|(_, window)| window == id) {
@@ -1036,6 +1068,9 @@ impl App {
         }
         if self.canvas.is_shell_overlay(id) {
             return Err("shell overlay cannot take keyboard focus".into());
+        }
+        if !self.canvas.is_mapped(id) {
+            return Err(format!("native window {id} is not mapped"));
         }
         let (surface, _) = self
             .toplevel_map
@@ -1440,33 +1475,34 @@ impl App {
                 }
             }
         }
-        let frames: Vec<(String, Rect)> = self
-            .canvas
-            .snapshot()
-            .map(|s| s.windows.into_iter().map(|w| (w.id, w.frame)).collect())
-            .unwrap_or_default();
         for (toplevel, id) in &self.toplevel_map {
-            let Some(frame) = frames.iter().find(|(f_id, _)| f_id == id).map(|(_, f)| *f) else {
+            if !toplevel.is_initial_configure_sent() {
                 continue;
-            };
-            let wanted: smithay::utils::Size<i32, smithay::utils::Logical> =
-                (frame.width as i32, frame.height as i32).into();
-            let activated = self.canvas.focused() == Some(id.as_str());
-            let changed = toplevel.with_pending_state(|state| {
-                use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
-                let changed = state.size != Some(wanted)
-                    || state.states.contains(State::Activated) != activated;
-                state.size = Some(wanted);
-                if activated {
-                    state.states.set(State::Activated);
-                } else {
-                    state.states.unset(State::Activated);
-                }
-                changed
-            });
-            if changed {
-                toplevel.send_configure();
             }
+            self.configure_toplevel(toplevel, id);
+        }
+    }
+    fn configure_toplevel(&self, toplevel: &ToplevelSurface, id: &str) {
+        let Some(frame) = self.canvas.window(id).map(|window| window.frame) else {
+            return;
+        };
+        let wanted: smithay::utils::Size<i32, smithay::utils::Logical> =
+            (frame.width as i32, frame.height as i32).into();
+        let activated = self.canvas.focused() == Some(id);
+        let changed = toplevel.with_pending_state(|state| {
+            use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+            let changed =
+                state.size != Some(wanted) || state.states.contains(State::Activated) != activated;
+            state.size = Some(wanted);
+            if activated {
+                state.states.set(State::Activated);
+            } else {
+                state.states.unset(State::Activated);
+            }
+            changed
+        });
+        if changed || !toplevel.is_initial_configure_sent() {
+            toplevel.send_configure();
         }
     }
 
@@ -1740,9 +1776,6 @@ impl XdgShellHandler for App {
         self.native_windows
             .insert(id.clone(), Window::new_wayland_window(surface.clone()));
         self.toplevel_map.push((surface.clone(), id.clone()));
-        if let Some(output) = &self.virtual_output {
-            output.enter(surface.wl_surface());
-        }
         let display_frame = self
             .canvas
             .displays()
@@ -1763,7 +1796,7 @@ impl XdgShellHandler for App {
             movable: true,
             resizable: true,
         };
-        self.canvas.map_window(id, win);
+        self.canvas.register_window(id, win);
         self.write_state(Some(&std::env::var("WAYLAND_DISPLAY").unwrap_or_default()));
         self.configure_all();
     }
@@ -1865,16 +1898,7 @@ impl XdgShellHandler for App {
             let id = self.toplevel_map.remove(pos).1;
             self.native_windows.remove(&id);
             self.canvas.close_window(&id);
-            if self.canvas.focused().is_none() {
-                if let Some(next) = self.canvas.mru().first().cloned() {
-                    if let Err(error) = self.focus_native(&next) {
-                        eprintln!("restore focus after close: {error}");
-                    }
-                } else {
-                    let keyboard = self.keyboard.clone();
-                    keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
-                }
-            }
+            self.restore_mapped_focus();
             self.write_state(Some(&std::env::var("WAYLAND_DISPLAY").unwrap_or_default()));
             self.switcher
                 .reconcile(self.canvas.mru(), self.canvas.focused());
@@ -1937,6 +1961,44 @@ impl CompositorHandler for App {
                         eprintln!("switcher role rejected: {error}");
                     }
                 }
+            }
+            let toplevel = self
+                .toplevel_map
+                .iter()
+                .find(|(_, window)| window == &id)
+                .map(|(top, _)| top.clone())
+                .expect("known toplevel");
+            let mapped =
+                smithay::backend::renderer::utils::with_renderer_surface_state(surface, |state| {
+                    state.buffer().is_some()
+                })
+                .unwrap_or(false);
+            if self.canvas.is_mapped(&id) && !mapped {
+                if self.canvas.focused() == Some(id.as_str()) {
+                    self.dismiss_popup_grabs();
+                }
+                toplevel.reset_initial_configure_sent();
+            } else {
+                self.configure_toplevel(&toplevel, &id);
+            }
+            match self.canvas.set_mapped(&id, mapped) {
+                Ok(true) => {
+                    let output = self
+                        .virtual_output
+                        .as_ref()
+                        .or_else(|| self.drm.as_ref().map(|drm| &drm.output));
+                    if let Some(output) = output {
+                        if mapped {
+                            output.enter(surface);
+                        } else {
+                            output.leave(surface);
+                        }
+                    }
+                    self.restore_mapped_focus();
+                    self.write_state(Some(&std::env::var("WAYLAND_DISPLAY").unwrap_or_default()));
+                }
+                Ok(false) => {}
+                Err(error) => eprintln!("native map transition: {error}"),
             }
         }
     }
