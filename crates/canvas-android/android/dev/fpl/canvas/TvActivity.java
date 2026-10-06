@@ -17,6 +17,15 @@ import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.TextClock;
+import android.widget.ImageView;
+import android.graphics.Bitmap;
+import android.graphics.pdf.PdfRenderer;
+import android.os.ParcelFileDescriptor;
+import java.io.File;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.Future;
 import android.os.Handler;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
@@ -36,6 +45,7 @@ public final class TvActivity extends Activity {
     private static native String nativeStartControl(String directory);
     private static native String nativeProjection(int width, int height);
     private static native String nativeSelectWorkspace(String project);
+    private static native String nativePdfAsset(String asset);
     private VideoView video;
     private TextView status;
     private FrameLayout frame;
@@ -49,6 +59,109 @@ public final class TvActivity extends Activity {
     private String surfaceTitle = "KOMO";
     private boolean workspaceMode;
     private final ArrayList<View> widgets = new ArrayList<>();
+    private final ThreadPoolExecutor pdfJobs = new ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS,
+        new ArrayBlockingQueue<Runnable>(8));
+
+    /** Platform raster adapter only; source identity and geometry come from Rust. */
+    private final class PdfSurface extends LinearLayout {
+        private final ImageView image;
+        private final TextView label;
+        private final Button previous, next;
+        private final String asset;
+        private final String title;
+        private final int rasterWidth, rasterHeight;
+        private int pageIndex, pageCount, generation;
+        private boolean disposed, busy;
+        private Bitmap bitmap;
+        private Future<?> pending;
+
+        PdfSurface(JSONObject source, String title, JSONObject palette, int width, int height) throws Exception {
+            super(TvActivity.this);
+            this.asset = source.toString(); this.title = title;
+            rasterWidth = Math.max(1, Math.min(width, 1920));
+            rasterHeight = Math.max(1, Math.min(height - barHeight(), 1080));
+            setOrientation(VERTICAL);
+            setBackgroundColor(Color.parseColor(palette.getString("surface")));
+            image = new ImageView(TvActivity.this);
+            image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            addView(image, new LinearLayout.LayoutParams(-1, 0, 1));
+            LinearLayout controls = new LinearLayout(TvActivity.this);
+            controls.setGravity(Gravity.CENTER_VERTICAL);
+            previous = new Button(TvActivity.this); previous.setText("‹");
+            next = new Button(TvActivity.this); next.setText("›");
+            styleControl(previous, palette, false); styleControl(next, palette, false);
+            label = new TextView(TvActivity.this); label.setTextSize(12);
+            label.setGravity(Gravity.CENTER);
+            label.setTextColor(Color.parseColor(palette.getString("text")));
+            controls.addView(previous, new LinearLayout.LayoutParams(80, -1));
+            controls.addView(label, new LinearLayout.LayoutParams(0, -1, 1));
+            controls.addView(next, new LinearLayout.LayoutParams(80, -1));
+            addView(controls, new LinearLayout.LayoutParams(-1, barHeight()));
+            previous.setOnClickListener(v -> render(pageIndex - 1));
+            next.setOnClickListener(v -> render(pageIndex + 1));
+            render(0);
+        }
+
+        private void render(int requested) {
+            if (disposed || busy || requested < 0 || (pageCount > 0 && requested >= pageCount)) return;
+            busy = true;
+            final int ticket = ++generation;
+            label.setText(title + " · Loading…");
+            try {
+                pending = pdfJobs.submit(() -> {
+                    Bitmap result = null;
+                    try {
+                        JSONObject verified = new JSONObject(nativePdfAsset(asset));
+                        if (verified.has("error")) throw new IllegalArgumentException(verified.getString("error"));
+                        try (ParcelFileDescriptor file = ParcelFileDescriptor.open(new File(verified.getString("path")), ParcelFileDescriptor.MODE_READ_ONLY);
+                             PdfRenderer renderer = new PdfRenderer(file)) {
+                            final int count = renderer.getPageCount();
+                            if (requested >= count) throw new IllegalArgumentException("Page out of range");
+                            try (PdfRenderer.Page page = renderer.openPage(requested)) {
+                                float scale = Math.min((float)rasterWidth / page.getWidth(), (float)rasterHeight / page.getHeight());
+                                result = Bitmap.createBitmap(Math.max(1, (int)(page.getWidth() * scale)),
+                                    Math.max(1, (int)(page.getHeight() * scale)), Bitmap.Config.ARGB_8888);
+                                result.eraseColor(Color.WHITE);
+                                page.render(result, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
+                            }
+                            final Bitmap ready = result;
+                            runOnUiThread(() -> {
+                                if (disposed || generation != ticket) { ready.recycle(); return; }
+                                image.setImageBitmap(ready);
+                                if (bitmap != null) bitmap.recycle();
+                                bitmap = ready; pageIndex = requested; pageCount = count; busy = false;
+                                label.setText(title + " · " + (requested + 1) + " / " + count);
+                                previous.setEnabled(requested > 0); next.setEnabled(requested + 1 < count);
+                            });
+                        }
+                    } catch (Exception error) {
+                        if (result != null) result.recycle();
+                        runOnUiThread(() -> {
+                            if (!disposed && generation == ticket) {
+                                busy = false; label.setText(title + " · PDF error: " + error.getMessage());
+                            }
+                        });
+                    }
+                });
+            } catch (java.util.concurrent.RejectedExecutionException error) {
+                busy = false; label.setText(title + " · PDF renderer busy");
+            }
+        }
+
+        void dispose() {
+            disposed = true; generation++;
+            if (pending != null) pending.cancel(false);
+            pdfJobs.purge();
+            image.setImageDrawable(null);
+            if (bitmap != null) { bitmap.recycle(); bitmap = null; }
+        }
+    }
+
+    @Override public void onDestroy() {
+        for (View widget : widgets) if (widget instanceof PdfSurface) ((PdfSurface)widget).dispose();
+        pdfJobs.shutdownNow();
+        super.onDestroy();
+    }
     private final Runnable refresh = new Runnable() {
         @Override public void run() {
             if (!resumed) return;
@@ -262,7 +375,10 @@ public final class TvActivity extends Activity {
                 selector.addView(button, item);
                 if (projectId.equals(focusedProject)) button.requestFocus();
             }
-            for (View widget : widgets) frame.removeView(widget);
+            for (View widget : widgets) {
+                if (widget instanceof PdfSurface) ((PdfSurface)widget).dispose();
+                frame.removeView(widget);
+            }
             widgets.clear();
             JSONArray tiles = projection.getJSONArray("tiles");
             boolean hasVideo = false;
@@ -290,6 +406,10 @@ public final class TvActivity extends Activity {
                         showStatus("Connecting…");
                         video.setVideoURI(Uri.parse(url));
                     }
+                } else if (content.getString("kind").equals("asset")
+                    && content.getJSONObject("asset").getString("media_type").equals("application/pdf")) {
+                    PdfSurface pdf = new PdfSurface(content.getJSONObject("asset"), surface.getString("title"), palette, w, h);
+                    frame.addView(pdf, geometry); widgets.add(pdf);
                 } else {
                     TextView widget;
                     String kind = content.getString("kind");

@@ -6,6 +6,8 @@ pub const CONTROL_PORT: u16 = 27841;
 pub mod geometry;
 #[cfg(feature = "shared-workspaces")]
 pub mod workspaces;
+#[cfg(feature = "shared-workspaces")]
+pub mod assets;
 #[cfg(all(target_os = "android", feature = "android-native-video"))]
 mod native_control;
 

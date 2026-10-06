@@ -13,7 +13,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 android-native-video = ["dep:jni", "shared-workspaces", "dep:getrandom", "dep:subtle"]
-shared-workspaces = ["dep:canvas-core", "dep:canvas-workspace", "dep:serde_json"]
+shared-workspaces = ["dep:canvas-core", "dep:canvas-workspace", "dep:serde_json", "dep:sha2"]
 
 [dependencies]
 url = "2"
@@ -22,6 +22,7 @@ canvas-workspace = { path = "../canvas-workspace", optional = true }
 serde_json = { version = "1", optional = true }
 getrandom = { version = "0.3", optional = true }
 subtle = { version = "2", optional = true }
+sha2 = { version = "0.10", optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.21", optional = true }

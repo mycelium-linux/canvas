@@ -69,7 +69,8 @@ fn start(directory: &str) -> Result<(), String> {
         return Ok(());
     }
     use std::os::unix::fs::OpenOptionsExt;
-    let listener = TcpListener::bind(("127.0.0.1", crate::CONTROL_PORT)).map_err(|e| e.to_string())?;
+    let listener =
+        TcpListener::bind(("127.0.0.1", crate::CONTROL_PORT)).map_err(|e| e.to_string())?;
     let mut entropy = [0u8; 32];
     getrandom::fill(&mut entropy).map_err(|_| "Credential generation failed")?;
     let token: String = entropy.iter().map(|b| format!("{b:02x}")).collect();
@@ -134,6 +135,29 @@ fn string(env: &mut jni::JNIEnv, value: String) -> jni::sys::jstring {
     env.new_string(value)
         .map(|s| s.into_raw())
         .unwrap_or(std::ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativePdfAsset(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    raw: jni::objects::JString,
+) -> jni::sys::jstring {
+    let result = (|| -> Result<String, String> {
+        let raw: String = env.get_string(&raw).map_err(|e| e.to_string())?.into();
+        let asset =
+            serde_json::from_str::<canvas_workspace::AssetRef>(&raw).map_err(|e| e.to_string())?;
+        let root = STORE
+            .get()
+            .and_then(|path| path.parent())
+            .ok_or("App asset store unavailable")?;
+        crate::assets::verified_pdf(root, &asset).map(|path| path.to_string_lossy().into_owned())
+    })();
+    let reply = match result {
+        Ok(path) => serde_json::json!({"path":path}),
+        Err(error) => serde_json::json!({"error":error}),
+    };
+    string(&mut env, reply.to_string())
 }
 
 #[unsafe(no_mangle)]

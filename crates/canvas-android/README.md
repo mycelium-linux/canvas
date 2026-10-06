@@ -4,6 +4,33 @@ The Fire TV client of fungOS, powered by Canvas's shared Rust core. The existing
 `dev.fpl.canvas.tv` application ID and signing identity are preserved so this
 is an in-place upgrade, not a second installed app.
 
+## IPFS PDF workspace
+
+The `PDFs` project in `config/deploy/firetv/workspaces.json` contains the same
+Attention and Stanford HMM PDFs used on Home-Pi. Their source CIDs are recorded
+in Unibus's `docs/ipfs-adapter.md`. Retrieve approved documents through the
+existing `unibus-ipfs fetch`/`download` interface; provision the returned bytes
+over authorized ADB into the app-private `files/assets/SHA256` directory.
+Do not expose Kubo RPC to the TV or treat a UnixFS CID as the file SHA256.
+
+These are existing shared `AssetRef` surfaces, not a separate Android document
+schema. Rust validates MIME, size (at most 64 MiB), regular-file type and SHA256
+before the native Android PdfRenderer opens a document. Cached assets are
+immutable and named only by the validated digest; no arbitrary paths or URLs.
+The Android shim rasterizes off the UI thread with one worker and a bounded
+queue, fits the page into the Rust-solved tile, and releases raster resources
+when switching workspaces. The controls inherit the shared Canvas palette.
+
+Use the remote's D-pad and OK to focus/click the previous/next page controls.
+Page cursors currently belong to the local PDF renderer: they are **not** yet
+persisted in the shared view or synchronized across screens. Workspace selection
+is retained; returning to the PDF workspace starts each document at page one.
+The TV uses verified local copies after provisioning, not continuous IPFS I/O.
+
+```sh
+printf 'workspace switch ipfs-reading\n' | canvas-tvctl 192.168.2.97:5555
+```
+
 ## Shared ownership
 
 `canvas-core::workspace_layout` owns durable layout types and validation;
@@ -87,7 +114,7 @@ mkdir -p "$tv_package/classes" "$tv_package/dex"
   -d "$tv_package/classes" android/dev/fpl/canvas/TvActivity.java
 "$tv_sdk/build-tools/33.0.2/d8" --min-api 24 \
   --lib "$tv_sdk/platforms/android-33/android.jar" \
-  --output "$tv_package/dex" "$tv_package/classes/dev/fpl/canvas/TvActivity.class"
+  --output "$tv_package/dex" "$tv_package/classes/dev/fpl/canvas/"*.class
 "$tv_sdk/build-tools/33.0.2/aapt2" link \
   --manifest android/AndroidManifest.xml \
   -I "$tv_sdk/platforms/android-33/android.jar" \
@@ -173,8 +200,8 @@ independent of ADB. The Android remote and controller drive that same session.
 Workspace documents are atomically checkpointed in the app's private storage;
 invalid imports/patches retain the previous document. MENU focuses the selector;
 D-pad/OK switches between retained workspaces. Only the active workspace is
-presented. Supported initially: one hardware stream, digital clock and text
-scene summaries. Other kinds display explicit unsupported placeholders; this
+presented. Supported: one hardware stream, digital clock, local PDF assets and
+text scene summaries. Other kinds display explicit unsupported placeholders; this
 is not the full desktop GPU widget renderer.
 
 The endpoint's response confirms accepted presentation state, not completed
