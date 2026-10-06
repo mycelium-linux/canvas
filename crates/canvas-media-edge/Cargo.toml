@@ -24,6 +24,10 @@ name = "canvas_media_edge"
 path = "src/lib.rs"
 
 [[bin]]
+name = "canvas-tv"
+path = "src/bin/tv.rs"
+
+[[bin]]
 name = "canvas-media-edge"
 path = "src/main.rs"
 
