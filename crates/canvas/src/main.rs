@@ -750,6 +750,8 @@ struct App {
     dock_pins: ::canvas::shell_dock::Pins,
     dock_apps: Vec<::canvas::shell_launcher::Entry>,
     dock_icons: BTreeMap<String, iced::widget::image::Handle>,
+    dock_icon_failures: BTreeSet<String>,
+    dock_icon_worker: Option<std::sync::mpsc::Receiver<(Vec<String>, Vec<(String, Result<Option<iced::widget::image::Handle>, String>)>)>>,
     #[cfg(feature = "lua-scenes")]
     desktop_bar: ::canvas::shell_presentation::Presentation,
     #[cfg(feature = "lua-scenes")]
@@ -1172,6 +1174,8 @@ impl App {
             dock_pins: ::canvas::shell_dock::Pins::load().map_err(|e| format!("Dock pins: {e}"))?,
             dock_apps: ::canvas::shell_launcher::applications(),
             dock_icons: BTreeMap::new(),
+            dock_icon_failures: BTreeSet::new(),
+            dock_icon_worker: None,
             #[cfg(feature = "lua-scenes")]
             desktop_bar: Default::default(),
             #[cfg(feature = "lua-scenes")]
@@ -3867,6 +3871,7 @@ impl App {
 
     #[cfg(feature = "lua-scenes")]
     fn refresh_desktop_bar(&mut self, poll_files: bool) {
+        self.cache_dock_icons();
         use ::canvas::lua_module::{ModuleInputSnapshot, ModuleInputValue as Value, ModuleThemeTokens};
         let visual = self.presented_visual_theme();
         let accent = self.effective_theme(&self.document).accent();
@@ -3928,15 +3933,48 @@ impl App {
 
     fn cache_dock_icons(&mut self) {
         self.dock_icons.retain(|id, _| self.dock_pins.0.contains(id));
-        for entry in &self.dock_apps {
-            if self.dock_pins.0.contains(&entry.id) && !self.dock_icons.contains_key(&entry.id) {
-                match ::canvas::shell_dock::icon(entry) {
-                    Ok(Some(icon)) => { self.dock_icons.insert(entry.id.clone(), icon); }
-                    Ok(None) => (),
-                    Err(error) => eprintln!("Dock icon unavailable for {}: {error}", entry.title),
+        self.dock_icon_failures.retain(|id| self.dock_pins.0.contains(id));
+        if let Some(worker) = &self.dock_icon_worker {
+            match worker.try_recv() {
+                Ok((pins, results)) => {
+                    self.dock_icon_worker = None;
+                    // A pin edit while lookup was running invalidates that job.
+                    if pins == self.dock_pins.0 {
+                        for (id, result) in results {
+                            match result {
+                                Ok(Some(icon)) => { self.dock_icons.insert(id, icon); }
+                                Ok(None) => { self.dock_icon_failures.insert(id); }
+                                Err(error) => {
+                                    eprintln!("Dock icon unavailable for {id}: {error}");
+                                    self.dock_icon_failures.insert(id);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.dock_icon_worker = None;
+                    self.dock_icon_failures.extend(self.dock_pins.0.iter().cloned());
+                    self.status = "Dock icon worker stopped; semantic icons retained".into();
                 }
             }
         }
+        let jobs: Vec<_> = self.dock_apps.iter().filter(|entry| self.dock_pins.0.contains(&entry.id)
+            && !self.dock_icons.contains_key(&entry.id) && !self.dock_icon_failures.contains(&entry.id)).cloned().collect();
+        if jobs.is_empty() { return; }
+        let pins = self.dock_pins.0.clone();
+        let (send, receive) = std::sync::mpsc::channel();
+        self.dock_icon_worker = Some(receive);
+        // Exactly one lookup job may be outstanding. No AppKit or decoding work
+        // runs in the update/view thread; failed lookups are negatively cached.
+        std::thread::spawn(move || {
+            let results = jobs.into_iter().map(|entry| {
+                let result = ::canvas::shell_dock::icon(&entry);
+                (entry.id, result)
+            }).collect();
+            let _ = send.send((pins, results));
+        });
     }
 
     fn set_dock_pin(&mut self, id: &str, pinned: bool, entries: &[::canvas::shell_launcher::Entry]) -> Result<(), String> {

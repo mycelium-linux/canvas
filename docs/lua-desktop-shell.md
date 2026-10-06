@@ -14,7 +14,9 @@ attachment or input forwarding; those remain separate capabilities.
 Pins are ordered and saved under `shell/dock-pins.json` in the local runtime root,
 not copied to other machines. The first slice permits four pins and retains the
 existing responsive six-item dock limit. Native macOS icons come from read-only
-AppKit lookup and are decoded once into bounded cached images. Lua cannot name
+AppKit lookup and are decoded once into bounded cached images. A single background
+worker owns lookup and encoding; stale pin generations are discarded and failures
+are negatively cached, so icon work cannot hold the shell update thread. Lua cannot name
 an image file. Captured windows still use their existing live textures, and an app
 pin does not receive a fabricated running indicator.
 
