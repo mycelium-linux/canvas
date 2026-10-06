@@ -32,6 +32,7 @@ struct Probe {
     keyboard_surface: Option<wl_surface::WlSurface>,
     popup_configures: usize,
     toplevel_configures: usize,
+    toplevel_state: Option<(i32, i32, Vec<u32>)>,
     repositioned: bool,
     frame: bool,
     done: bool,
@@ -204,8 +205,21 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for Probe {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if matches!(event, xdg_toplevel::Event::Configure { .. }) {
+        if let xdg_toplevel::Event::Configure {
+            width,
+            height,
+            states,
+        } = event
+        {
             state.toplevel_configures += 1;
+            state.toplevel_state = Some((
+                width,
+                height,
+                states
+                    .chunks_exact(4)
+                    .map(|bytes| u32::from_ne_bytes(bytes.try_into().unwrap()))
+                    .collect(),
+            ));
         }
     }
 }
@@ -306,6 +320,26 @@ fn real_popup_configures_repositions_receives_input_and_dismisses() {
         .unwrap()
         .to_owned();
     request(json!({"command":"focus","window":id}));
+    queue.roundtrip(&mut state).unwrap();
+    let normal = state.toplevel_state.clone().unwrap();
+    top.set_maximized();
+    queue.roundtrip(&mut state).unwrap();
+    let max = state.toplevel_state.as_ref().unwrap();
+    assert_eq!((max.0, max.1), (1280, 720));
+    assert!(max.2.contains(&(xdg_toplevel::State::Maximized as u32)));
+    top.set_fullscreen(None);
+    queue.roundtrip(&mut state).unwrap();
+    let full = state.toplevel_state.as_ref().unwrap();
+    assert!(full.2.contains(&(xdg_toplevel::State::Fullscreen as u32)));
+    assert!(full.2.contains(&(xdg_toplevel::State::Maximized as u32)));
+    top.unset_fullscreen();
+    queue.roundtrip(&mut state).unwrap();
+    let max = state.toplevel_state.as_ref().unwrap();
+    assert!(!max.2.contains(&(xdg_toplevel::State::Fullscreen as u32)));
+    assert!(max.2.contains(&(xdg_toplevel::State::Maximized as u32)));
+    top.unset_maximized();
+    queue.roundtrip(&mut state).unwrap();
+    assert_eq!(state.toplevel_state.as_ref().unwrap(), &normal);
     let input = |sequence, x, y, buttons| json!({"command":"input","sequence":sequence,"keys":[],"lease_ms":500,"pointer_x":x,"pointer_y":y,"pointer_buttons":buttons});
     request(input(1, 1025, 2735, 1)); // Approx (20, 30) in geometry-local coordinates.
     queue.roundtrip(&mut state).unwrap();

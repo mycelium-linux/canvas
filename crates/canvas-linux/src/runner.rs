@@ -39,6 +39,7 @@ use smithay::{
         Client, Display, DisplayHandle, ListeningSocket,
         backend::{ClientData, ClientId, DisconnectReason},
         protocol::wl_buffer,
+        protocol::wl_output,
         protocol::wl_seat,
         protocol::wl_surface::WlSurface,
     },
@@ -965,6 +966,34 @@ struct App {
 }
 
 impl App {
+    fn set_toplevel_state(
+        &mut self,
+        surface: &ToplevelSurface,
+        maximized: Option<bool>,
+        fullscreen: Option<bool>,
+        output: Option<&str>,
+    ) {
+        let Some(id) = self
+            .toplevel_map
+            .iter()
+            .find(|(top, _)| top.wl_surface() == surface.wl_surface())
+            .map(|(_, id)| id.clone())
+        else {
+            return;
+        };
+        if let Err(error) = self
+            .canvas
+            .set_window_state(&id, maximized, fullscreen, output)
+        {
+            eprintln!("native window state: {error}");
+        }
+        // Never send a configure before the initial surface commit. A denied
+        // request still receives the current state once the handshake exists.
+        if surface.is_initial_configure_sent() && !self.configure_toplevel(surface, &id) {
+            surface.send_configure();
+        }
+    }
+
     fn restore_mapped_focus(&mut self) {
         if self.canvas.focused().is_none() {
             let next = self
@@ -1482,28 +1511,39 @@ impl App {
             self.configure_toplevel(toplevel, id);
         }
     }
-    fn configure_toplevel(&self, toplevel: &ToplevelSurface, id: &str) {
+    fn configure_toplevel(&self, toplevel: &ToplevelSurface, id: &str) -> bool {
         let Some(frame) = self.canvas.window(id).map(|window| window.frame) else {
-            return;
+            return false;
         };
         let wanted: smithay::utils::Size<i32, smithay::utils::Logical> =
             (frame.width as i32, frame.height as i32).into();
         let activated = self.canvas.focused() == Some(id);
+        let (maximized, fullscreen) = self.canvas.window_states(id).unwrap_or_default();
         let changed = toplevel.with_pending_state(|state| {
             use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
-            let changed =
-                state.size != Some(wanted) || state.states.contains(State::Activated) != activated;
+            let changed = state.size != Some(wanted)
+                || state.states.contains(State::Activated) != activated
+                || state.states.contains(State::Maximized) != maximized
+                || state.states.contains(State::Fullscreen) != fullscreen;
             state.size = Some(wanted);
-            if activated {
-                state.states.set(State::Activated);
-            } else {
-                state.states.unset(State::Activated);
+            for (flag, enabled) in [
+                (State::Activated, activated),
+                (State::Maximized, maximized),
+                (State::Fullscreen, fullscreen),
+            ] {
+                if enabled {
+                    state.states.set(flag);
+                } else {
+                    state.states.unset(flag);
+                }
             }
             changed
         });
         if changed || !toplevel.is_initial_configure_sent() {
             toplevel.send_configure();
+            return true;
         }
+        false
     }
 
     fn write_state(&mut self, display: Option<&str>) {
@@ -1767,6 +1807,38 @@ impl DmabufHandler for App {
 impl XdgShellHandler for App {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.xdg_shell_state
+    }
+
+    fn maximize_request(&mut self, surface: ToplevelSurface) {
+        self.set_toplevel_state(&surface, Some(true), None, None);
+    }
+    fn unmaximize_request(&mut self, surface: ToplevelSurface) {
+        self.set_toplevel_state(&surface, Some(false), None, None);
+    }
+    fn fullscreen_request(
+        &mut self,
+        surface: ToplevelSurface,
+        output: Option<wl_output::WlOutput>,
+    ) {
+        // The runtime currently owns one output. Reject stale/foreign output
+        // resources instead of silently redirecting an explicit request.
+        if let Some(requested) = output {
+            let owned = self
+                .virtual_output
+                .as_ref()
+                .or_else(|| self.drm.as_ref().map(|drm| &drm.output));
+            if Output::from_resource(&requested).as_ref() != owned {
+                eprintln!("fullscreen request rejected: unknown output");
+                if surface.is_initial_configure_sent() {
+                    surface.send_configure();
+                }
+                return;
+            }
+        }
+        self.set_toplevel_state(&surface, None, Some(true), None);
+    }
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        self.set_toplevel_state(&surface, None, Some(false), None);
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {

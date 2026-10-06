@@ -298,3 +298,23 @@ Canvas window ID and intended layout. Lifecycle publishers emit `unmapped`
 separately from `closed`; consumers should refresh the retained catalog rather
 than treat unmap as process termination. The isolated popup protocol fixture
 also verifies bufferless creation, unmap, focus restoration and remap.
+
+## Native expanded window states
+
+Client fullscreen and maximize requests now update the Canvas window model and
+emit matching xdg-toplevel configure sizes/states. Fullscreen uses the output
+frame; maximization uses its work area. Fullscreen temporarily overrides a
+maximized window, and clearing it returns to the maximized work area. Clearing
+both restores the normal layout rectangle. Layout changes while expanded update
+that restoration rectangle without shrinking the active expanded window.
+
+Requests do not steal focus or add MRU entries. Unknown outputs and shell
+overlays are rejected without changing geometry. Unmap clears expanded states
+and restores normal geometry before the next initial configure. Configure is
+never sent before the initial surface commit.
+
+The isolated popup client fixture also checks maximize/fullscreen configure
+flags and restoration. This does not certify hardware rendering, client buffer
+resize behavior or multi-output deployment. Interactive move/resize remains
+open under Marbles `canvas-native-window-ops`; the broader daily-driver gates
+are tracked by `canvas-daily-driver`.

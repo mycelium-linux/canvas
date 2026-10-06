@@ -53,6 +53,21 @@ impl WindowLifecycle for NoOpLifecycle {}
 pub struct WindowEntry {
     pub surface: WindowSurface,
     pub mapped: bool,
+    normal_frame: Option<Rect>,
+    maximized: bool,
+    fullscreen: bool,
+}
+
+impl WindowEntry {
+    fn new(surface: WindowSurface, mapped: bool) -> Self {
+        Self {
+            surface,
+            mapped,
+            normal_frame: None,
+            maximized: false,
+            fullscreen: false,
+        }
+    }
 }
 
 /// The window/workspace/wallpaper state model for canvas-linux-as-compositor.
@@ -142,10 +157,9 @@ impl CanvasCompositor {
     }
     /// Protocol identity/layout may exist before a buffer is committed.
     pub fn register_window(&mut self, id: String, surface: WindowSurface) {
-        self.windows.entry(id).or_insert(WindowEntry {
-            surface,
-            mapped: false,
-        });
+        self.windows
+            .entry(id)
+            .or_insert_with(|| WindowEntry::new(surface, false));
     }
     pub fn set_mapped(&mut self, id: &str, mapped: bool) -> Result<bool, String> {
         let entry = self
@@ -162,6 +176,11 @@ impl CanvasCompositor {
             }
             self.lifecycle.window_mapped(&entry.surface);
         } else {
+            if let Some(frame) = entry.normal_frame.take() {
+                entry.surface.frame = frame;
+            }
+            entry.maximized = false;
+            entry.fullscreen = false;
             self.mru.retain(|window| window != id);
             if self.focused.as_deref() == Some(id) {
                 self.focused = None;
@@ -192,7 +211,84 @@ impl CanvasCompositor {
             .windows
             .get_mut(id)
             .ok_or_else(|| format!("unknown window {id}"))?;
-        entry.surface.frame = frame;
+        if entry.maximized || entry.fullscreen {
+            entry.normal_frame = Some(frame);
+        } else {
+            entry.surface.frame = frame;
+        }
+        Ok(())
+    }
+
+    pub fn window_states(&self, id: &str) -> Option<(bool, bool)> {
+        self.windows
+            .get(id)
+            .map(|entry| (entry.maximized, entry.fullscreen))
+    }
+
+    /// Expanded geometry is derived from the owning output, never a second
+    /// layout plan. Fullscreen temporarily overrides maximization; leaving it
+    /// restores the maximized work area or the latest normal layout rectangle.
+    pub fn set_window_state(
+        &mut self,
+        id: &str,
+        maximized: Option<bool>,
+        fullscreen: Option<bool>,
+        output_id: Option<&str>,
+    ) -> Result<(), String> {
+        if self.is_shell_overlay(id) {
+            return Err("shell overlay cannot change desktop window state".into());
+        }
+        let entry = self
+            .windows
+            .get(id)
+            .ok_or_else(|| format!("unknown window {id}"))?;
+        let max = maximized.unwrap_or(entry.maximized);
+        let full = fullscreen.unwrap_or(entry.fullscreen);
+        let output = if max || full {
+            let display = match output_id {
+                Some(output_id) => self.displays.iter().find(|display| display.id == output_id),
+                None => self
+                    .displays
+                    .iter()
+                    .find(|display| {
+                        let frame = entry.surface.frame;
+                        let center_x = i64::from(frame.x) + i64::from(frame.width) / 2;
+                        let center_y = i64::from(frame.y) + i64::from(frame.height) / 2;
+                        let area = display.frame;
+                        center_x >= i64::from(area.x)
+                            && center_y >= i64::from(area.y)
+                            && center_x < i64::from(area.x) + i64::from(area.width)
+                            && center_y < i64::from(area.y) + i64::from(area.height)
+                    })
+                    .or_else(|| self.displays.iter().find(|display| display.primary))
+                    .or_else(|| self.displays.first()),
+            }
+            .ok_or("window state requires a known output")?;
+            let frame = if full {
+                display.frame
+            } else {
+                display.work_area
+            };
+            if frame.width == 0
+                || frame.height == 0
+                || frame.width > i32::MAX as u32
+                || frame.height > i32::MAX as u32
+            {
+                return Err("output has invalid window dimensions".into());
+            }
+            Some(frame)
+        } else {
+            None
+        };
+        let entry = self.windows.get_mut(id).expect("validated window");
+        if let Some(frame) = output {
+            entry.normal_frame.get_or_insert(entry.surface.frame);
+            entry.surface.frame = frame;
+        } else if let Some(frame) = entry.normal_frame.take() {
+            entry.surface.frame = frame;
+        }
+        entry.maximized = max;
+        entry.fullscreen = full;
         Ok(())
     }
 
@@ -263,8 +359,8 @@ impl WindowBackend for CanvasCompositor {
     fn apply_layout(&mut self, plan: &LayoutPlan) -> Result<LayoutReceipt, Self::Error> {
         let mut placed = 0usize;
         for placement in &plan.placements {
-            if let Some(entry) = self.windows.get_mut(&placement.id) {
-                entry.surface.frame = placement.frame;
+            if self.windows.contains_key(&placement.id) {
+                self.place_window(&placement.id, placement.frame)?;
                 placed += 1;
             }
         }
@@ -482,6 +578,111 @@ fn status() -> Result<Value, String> {
 mod tests {
     use super::*;
     use canvas_core::layout::{PaneRole, Placement, Rect};
+
+    #[test]
+    fn expanded_states_restore_latest_layout_and_keep_focus() {
+        let mut output = display("eDP-1", 1280, 720);
+        output.work_area = rect(0, 30, 1280, 690);
+        let mut canvas = CanvasCompositor::new([output]);
+        canvas.map_window("app".into(), window("app", "foot"));
+        canvas.focus_window("app").unwrap();
+        let original = canvas.window("app").unwrap().frame;
+        canvas
+            .set_window_state("app", Some(true), None, None)
+            .unwrap();
+        assert_eq!(canvas.window("app").unwrap().frame, rect(0, 30, 1280, 690));
+        canvas
+            .set_window_state("app", None, Some(true), None)
+            .unwrap();
+        assert_eq!(canvas.window("app").unwrap().frame, rect(0, 0, 1280, 720));
+        canvas
+            .set_window_state("app", None, Some(true), None)
+            .unwrap();
+        canvas
+            .set_window_state("app", None, Some(false), None)
+            .unwrap();
+        assert_eq!(canvas.window("app").unwrap().frame, rect(0, 30, 1280, 690));
+        canvas
+            .set_window_state("app", Some(false), None, None)
+            .unwrap();
+        assert_eq!(canvas.window("app").unwrap().frame, original);
+        canvas
+            .set_window_state("app", None, Some(true), None)
+            .unwrap();
+        let latest = rect(80, 60, 640, 480);
+        canvas.place_window("app", latest).unwrap();
+        assert_eq!(canvas.window("app").unwrap().frame, rect(0, 0, 1280, 720));
+        canvas
+            .set_window_state("app", None, Some(false), None)
+            .unwrap();
+        assert_eq!(canvas.window("app").unwrap().frame, latest);
+        assert_eq!(canvas.focused(), Some("app"));
+        assert_eq!(canvas.mru(), &["app".to_owned()]);
+    }
+
+    #[test]
+    fn expanded_state_rejection_is_atomic_and_unmap_resets_state() {
+        let mut canvas = CanvasCompositor::new([display("eDP-1", 1280, 720)]);
+        canvas.map_window("app".into(), window("app", "foot"));
+        let original = canvas.window("app").unwrap().frame;
+        assert!(
+            canvas
+                .set_window_state("missing", Some(true), None, None)
+                .is_err()
+        );
+        assert!(
+            canvas
+                .set_window_state("app", None, Some(true), Some("missing"))
+                .is_err()
+        );
+        assert_eq!(canvas.window_states("app"), Some((false, false)));
+        assert_eq!(canvas.window("app").unwrap().frame, original);
+        canvas
+            .set_window_state("app", Some(true), Some(true), None)
+            .unwrap();
+        canvas.set_mapped("app", false).unwrap();
+        assert_eq!(canvas.window_states("app"), Some((false, false)));
+        assert_eq!(canvas.window("app").unwrap().frame, original);
+        canvas.set_mapped("app", true).unwrap();
+        canvas.map_window("overlay".into(), window("overlay", "shell"));
+        canvas.mark_shell_overlay("overlay").unwrap();
+        assert!(
+            canvas
+                .set_window_state("overlay", Some(true), None, None)
+                .is_err()
+        );
+        canvas.set_outputs(vec![]);
+        assert!(
+            canvas
+                .set_window_state("app", Some(true), None, None)
+                .is_err()
+        );
+        assert_eq!(canvas.window_states("app"), Some((false, false)));
+    }
+
+    #[test]
+    fn expanded_state_uses_window_output_or_explicit_output() {
+        let first = display("eDP-1", 1280, 720);
+        let mut second = display("HDMI-1", 1920, 1080);
+        second.frame.x = 1280;
+        second.work_area = rect(1280, 40, 1920, 1040);
+        let mut canvas = CanvasCompositor::new([first, second]);
+        canvas.map_window("app".into(), window("app", "foot"));
+        canvas
+            .place_window("app", rect(1400, 100, 400, 300))
+            .unwrap();
+        canvas
+            .set_window_state("app", Some(true), None, None)
+            .unwrap();
+        assert_eq!(
+            canvas.window("app").unwrap().frame,
+            rect(1280, 40, 1920, 1040)
+        );
+        canvas
+            .set_window_state("app", None, Some(true), Some("eDP-1"))
+            .unwrap();
+        assert_eq!(canvas.window("app").unwrap().frame, rect(0, 0, 1280, 720));
+    }
 
     #[test]
     fn shell_overlay_is_observed_but_never_a_focus_or_mru_candidate() {
@@ -867,17 +1068,11 @@ mod tests {
         let mut reference = FakeBackend::new(vec![display("eDP-1", 1920, 1080)]);
         reference.windows.insert(
             "web".into(),
-            WindowEntry {
-                surface: window("web", "firefox"),
-                mapped: true,
-            },
+            WindowEntry::new(window("web", "firefox"), true),
         );
         reference.windows.insert(
             "term".into(),
-            WindowEntry {
-                surface: window("term", "foot"),
-                mapped: true,
-            },
+            WindowEntry::new(window("term", "foot"), true),
         );
         seed(&mut canvas);
         seed(&mut reference);
@@ -926,10 +1121,7 @@ mod tests {
         let mut reference = FakeBackend::new(vec![display("eDP-1", 1024, 768)]);
         reference.windows.insert(
             "tool".into(),
-            WindowEntry {
-                surface: window("tool", "foot"),
-                mapped: true,
-            },
+            WindowEntry::new(window("tool", "foot"), true),
         );
 
         let canvas_focus = canvas.focus("tool").unwrap();
