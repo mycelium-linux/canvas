@@ -7,7 +7,7 @@ edition.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 canvas-core.workspace = true
-fpl-gfx.workspace = true
+fpl-gfx = { workspace = true, optional = true }
 coherence-native = { workspace = true, optional = true }
 iced = { version = "0.14", default-features = false, features = ["wgpu", "canvas", "image-without-codecs", "tokio"], optional = true }
 # Only for callers that publish these types over a schema-carrying protocol (MCP).
@@ -18,8 +18,8 @@ libc = { version = "0.2", optional = true }
 # WASM runtime for kroak CDG renderer
 wasmtime = { version = "24", optional = true, features = ["component-model"] }
 # Iced wgpu for hyperspace shader rendering
-iced_wgpu = "0.14"
-bytemuck = "1"
+iced_wgpu = { version = "0.14", optional = true }
+bytemuck = { version = "1", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
@@ -27,7 +27,7 @@ wasm-bindgen = "0.2"
 
 [features]
 default = []
-live = ["dep:iced", "dep:libc", "dep:coherence-native"]
+live = ["dep:iced", "dep:libc", "dep:coherence-native", "dep:fpl-gfx", "dep:iced_wgpu", "dep:bytemuck"]
 schema = ["dep:schemars"]
 
 [dev-dependencies]

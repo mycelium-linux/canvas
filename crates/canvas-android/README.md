@@ -18,9 +18,15 @@ video sizing/tiling policy.
 WorkspaceState admission/control policy. `android-native-video` enables this
 shared dependency, so the installed video shell uses it for geometry.
 
-This is a first consolidation slice, not complete cross-platform workspace
-support: WorkspaceDocument, scene/widget projection and persistence are still
-in the desktop crate. The TV has no live selector or authenticated control
+Full documents, scene intent, charts, surfaces, theme references, page switching,
+validation and revision-bound patches now live in renderer-neutral
+`canvas-workspace`. Desktop's former type and chart paths re-export that model.
+The Android workspace adapter re-exports the same owner-bound session, including
+complete-document retention and transactional patches. Widget GPU dependencies
+are enabled only by `canvas-widgets/live`, not document parsing.
+
+Desktop filesystem storage, GPU resources and Android playback remain platform
+adapters. The TV has no live selector or authenticated control
 endpoint yet. Do not use a bundled Neo catalog to stand in for the TV's owner
 catalog, or infer presentation success from metadata selection alone.
 

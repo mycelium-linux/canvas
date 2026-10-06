@@ -7,9 +7,10 @@ license.workspace = true
 [features]
 default = []
 lua-scenes = ["dep:mlua", "dep:unibus-sdk"]
-mcp = ["dep:rmcp", "dep:schemars", "dep:tokio", "dep:axum", "dep:reqwest", "canvas-widgets/schema"]
+mcp = ["dep:rmcp", "dep:schemars", "dep:tokio", "dep:axum", "dep:reqwest", "canvas-widgets/schema", "canvas-workspace/schema"]
 
 [dependencies]
+canvas-workspace = { path = "../canvas-workspace" }
 base64 = "0.22"
 csv = "1.4"
 canvas-control = { path = "../canvas-control" }

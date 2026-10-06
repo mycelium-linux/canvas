@@ -457,6 +457,7 @@ dependencies = [
  "canvas-model-viewer",
  "canvas-shroud",
  "canvas-widgets",
+ "canvas-workspace",
  "csv",
  "iced",
  "image",
@@ -780,6 +781,18 @@ dependencies = [
  "serde_json",
  "wasm-bindgen",
  "wasmtime",
+]
+
+[[package]]
+name = "canvas-workspace"
+version = "0.1.0"
+dependencies = [
+ "canvas-core",
+ "canvas-widgets",
+ "csv",
+ "schemars",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
