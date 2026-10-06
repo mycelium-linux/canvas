@@ -22,6 +22,8 @@ mod opencode;
 mod physical_input;
 #[cfg(all(feature = "compositor", target_os = "linux"))]
 mod runner;
+#[cfg(all(feature = "compositor", target_os = "linux"))]
+mod seat_access;
 #[cfg(any(test, all(feature = "compositor", target_os = "linux")))]
 mod window_switcher;
 

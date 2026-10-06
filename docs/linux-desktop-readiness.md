@@ -189,3 +189,52 @@ The GPU and input-to-presentation fields remain null until instrumented.
 This is a diagnostic foundation, not a completed Linux desktop certification.
 Native app integration and true presentation latency still require Linux
 hardware validation. The staged work is tracked in Beads under `dock-yjt`.
+
+## Brokered Linux seat access
+
+The native compositor acquires DRM and libinput devices through Smithay's
+libseat session backend. There is no direct-open fallback. A hardware launch
+without an active seat or usable DRM output fails visibly; headless mode is
+explicit and never acquires a physical seat.
+
+On seat pause, Canvas releases held input, revokes remote takeover, dismisses
+the switcher, clears keyboard/pointer focus, suspends libinput, and pauses DRM.
+Control remains readable (`list.result.seat_active`), but mutations are rejected.
+On resume, Canvas reactivates DRM, resets compositor state, resumes libinput,
+and restores application focus. Remote takeover requires a new explicit grant.
+
+Deployment prerequisites and manual runbook:
+
+1. Install the distribution's libseat runtime and build against its development
+   package (alongside libinput, libudev, GBM/EGL and xkbcommon development files).
+2. Launch from a local PAM/logind login session bound to the intended seat/VT,
+   or a deliberately configured seatd broker. An SSH login without a seat is
+   not a replacement. Do not run Canvas as root or widen device permissions.
+3. Confirm the local session with `loginctl session-status` and select the
+   intended libseat backend according to host policy.
+4. Start `canvas-linux desktop-compositor start` from that local session. Check
+   startup errors and query the native control socket's `list` response.
+5. Hold input, switch away from the VT, and verify app input releases and
+   `seat_active: false`. Return and verify fresh input and rendering; an old
+   remote lease must not resume automatically.
+
+Linux compilation, unit tests and isolated headless Wayland proofs do not
+replace this hardware test. The existing Home Pi system service is not yet a
+seat-bound PAM launch; do not replace its live compositor until the runtime,
+launch session and rollback binary have been prepared.
+
+### Secure lock-screen follow-up (not implemented)
+
+Use `ext-session-lock-v1` with an OS-authenticated locker, not a Lua unlock
+panel. Only a compositor-launched locker on a private Wayland socket should
+receive the lock capability. Reject remote input and app mutation while locked,
+render only opaque lock content, and acknowledge locking only after a protected
+frame is actually presented. Locker death must leave the session protected.
+Unlock authorization must be tied to the accepted, confirmed lock object;
+neither the owner control socket nor Lua may bypass authentication.
+
+The pinned Smithay handler forwards `unlock_and_destroy` even after posting
+an invalid-unlock protocol error. Integration therefore needs an explicit
+ownership/confirmation guard before forwarding that request. Restart recovery,
+locker authentication and physical-output presentation must all be verified
+before calling this a secure lock screen (`dock-yjt.10`).

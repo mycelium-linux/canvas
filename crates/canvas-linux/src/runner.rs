@@ -203,10 +203,21 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
     );
     let launcher = crate::launcher::Launcher::new();
 
+    let mut seat_access = if headless {
+        None
+    } else {
+        Some(crate::seat_access::SeatAccess::open()?)
+    };
     let drm = if headless {
         None
     } else {
-        DrmRender::try_new(&dh)
+        Some(
+            DrmRender::try_new(
+                &dh,
+                &mut seat_access.as_mut().expect("hardware seat").session,
+            )
+            .ok_or("seat acquired but no usable DRM output; refusing invisible hardware desktop")?,
+        )
     };
     let mut dmabuf_state = DmabufState::new();
     let dmabuf_global = drm.as_ref().and_then(|drm| {
@@ -284,6 +295,7 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
         keyboard,
         pointer,
         remote_input: RemoteInput::default(),
+        seat_active: true,
         switcher: crate::window_switcher::WindowSwitcher::default(),
         toplevel_map: Vec::new(),
         next_id: 0u64,
@@ -318,12 +330,51 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
     let mut physical_input = if headless {
         None
     } else {
-        Some(crate::physical_input::open()?)
+        Some(crate::physical_input::open(
+            seat_access.as_ref().expect("hardware seat").session.clone(),
+        )?)
     };
     let mut physical_keys = Vec::<u16>::new();
     let mut physical_buttons = 0u8;
 
     loop {
+        if let Some(access) = &mut seat_access {
+            for event in access.dispatch()? {
+                use smithay::backend::session::Event;
+                match event {
+                    Event::PauseSession => {
+                        state.release_input();
+                        state.seat_active = false;
+                        physical_keys.clear();
+                        physical_buttons = 0;
+                        if let Some(input) = &mut physical_input {
+                            input.suspend();
+                        }
+                        if let Some(drm) = &mut state.drm {
+                            drm.device.pause();
+                        }
+                    }
+                    Event::ActivateSession => {
+                        if let Some(drm) = &mut state.drm {
+                            drm.device
+                                .activate(false)
+                                .map_err(|error| format!("DRM seat resume: {error}"))?;
+                            drm.compositor
+                                .reset_state()
+                                .map_err(|error| format!("DRM resume state: {error}"))?;
+                            drm.flip_pending = false;
+                        }
+                        if let Some(input) = &mut physical_input {
+                            input.resume().map_err(|()| "libinput seat resume failed")?;
+                        }
+                        state.seat_active = true;
+                        if let Some(id) = state.canvas.focused().map(str::to_owned) {
+                            state.focus_native(&id)?;
+                        }
+                    }
+                }
+            }
+        }
         if control_worker.is_finished() {
             return Err("control worker stopped; refusing to run an uncontrollable desktop".into());
         }
@@ -350,7 +401,9 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
             let _ = reply_tx.send(resp);
         }
         state.expire_remote_input();
-        if let Some(input) = &mut physical_input {
+        if let Some(input) = &mut physical_input
+            && state.seat_active
+        {
             input
                 .dispatch()
                 .map_err(|error| format!("physical input dispatch: {error}"))?;
@@ -465,7 +518,9 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
         }
 
         state.configure_all();
-        if let Some(drm) = &mut state.drm {
+        if let Some(drm) = &mut state.drm
+            && state.seat_active
+        {
             let mut toplevels: Vec<(WlSurface, String)> = state
                 .toplevel_map
                 .iter()
@@ -512,22 +567,34 @@ struct DrmRender {
     size: Size<i32, Physical>,
     render_node: DrmNode,
     started_at: std::time::Instant,
+    // Last: all DRM/renderer wrappers drop before the broker descriptor closes.
+    _seat_device: crate::seat_access::SeatDevice,
 }
 
 impl DrmRender {
-    fn try_new(dh: &DisplayHandle) -> Option<Self> {
-        use std::fs::OpenOptions;
-        use std::os::fd::OwnedFd;
-
+    fn try_new(
+        dh: &DisplayHandle,
+        session: &mut smithay::backend::session::libseat::LibSeatSession,
+    ) -> Option<Self> {
         let mut failed_last: Option<String> = None;
         for card in 0..8u32 {
             let path = format!("/dev/dri/card{card}");
-            let file = match OpenOptions::new().read(true).write(true).open(&path) {
-                Ok(f) => f,
-                Err(_) => continue,
+            let device = match crate::seat_access::SeatDevice::open(session, Path::new(&path)) {
+                Ok(device) => device,
+                Err(error) => {
+                    eprintln!("{error}");
+                    continue;
+                }
             };
-            let fd = DrmDeviceFd::new(SmsDeviceFd::from(OwnedFd::from(file)));
-            match Self::bring_up(dh, fd, &path) {
+            let duplicate = match device.duplicate() {
+                Ok(fd) => fd,
+                Err(error) => {
+                    eprintln!("DRM descriptor: {error}");
+                    continue;
+                }
+            };
+            let fd = DrmDeviceFd::new(SmsDeviceFd::from(duplicate));
+            match Self::bring_up(dh, fd, &path, device) {
                 Ok(Some(out)) => {
                     eprintln!(
                         "canvas-linux: DRM output active on {path} {}x{}",
@@ -548,7 +615,12 @@ impl DrmRender {
         None
     }
 
-    fn bring_up(dh: &DisplayHandle, fd: DrmDeviceFd, path: &str) -> Result<Option<Self>, String> {
+    fn bring_up(
+        dh: &DisplayHandle,
+        fd: DrmDeviceFd,
+        path: &str,
+        seat_device: crate::seat_access::SeatDevice,
+    ) -> Result<Option<Self>, String> {
         let (mut device, notifier) =
             DrmDevice::new(fd.clone(), true).map_err(|e| format!("DrmDevice: {e}"))?;
         // Dedicated loop pumping the notifier source so pageflip completions
@@ -694,6 +766,7 @@ impl DrmRender {
                 flip_pending: true,
                 render_node,
                 started_at: std::time::Instant::now(),
+                _seat_device: seat_device,
             }));
         }
         Err(last_err)
@@ -801,6 +874,7 @@ struct App {
     keyboard: KeyboardHandle<App>,
     pointer: PointerHandle<App>,
     remote_input: RemoteInput,
+    seat_active: bool,
     switcher: crate::window_switcher::WindowSwitcher,
     /// Toplevel handle -> canvas window id, for resolving focus/destroy,
     /// configure sync, and the per-frame render element walk.
@@ -819,7 +893,35 @@ struct App {
 }
 
 impl App {
+    fn release_input(&mut self) {
+        self.inject_keys(&[]);
+        let (x, y) = self.remote_input.pointer;
+        self.inject_pointer(x, y, 0);
+        self.remote_input = RemoteInput {
+            local_owner: true,
+            pointer: (x, y),
+            ..Default::default()
+        };
+        self.switcher.finish();
+        let keyboard = self.keyboard.clone();
+        keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
+        let pointer = self.pointer.clone();
+        pointer.motion(
+            self,
+            None,
+            &smithay::input::pointer::MotionEvent {
+                location: (x as f64, y as f64).into(),
+                serial: SERIAL_COUNTER.next_serial(),
+                time: 0,
+            },
+        );
+        pointer.frame(self);
+    }
+
     fn focus_native(&mut self, id: &str) -> Result<Value, String> {
+        if !self.seat_active {
+            return Err("Linux seat is inactive".into());
+        }
         if self.canvas.is_shell_overlay(id) {
             return Err("shell overlay cannot take keyboard focus".into());
         }
@@ -874,10 +976,14 @@ impl App {
     }
 
     fn control(&mut self, command: &Value) -> Value {
+        if !self.seat_active && command["command"] != "list" {
+            return json!({"ok":false,"error":"Linux seat is inactive"});
+        }
         let result = match command["command"].as_str().unwrap_or("") {
             "list" => {
                 let mut response = crate::launcher::handle_command(command, &mut self.canvas, &self.launcher);
                 response["result"]["switcher"] = self.switcher.snapshot();
+                response["result"]["seat_active"] = json!(self.seat_active);
                 if let Some(display) = self.canvas.displays().first() {
                     response["result"]["switcher"]["frame"] = json!(crate::control_transport::switcher_frame(display.work_area));
                 }
@@ -1371,6 +1477,7 @@ mod input_tests {
             data_device_state: DataDeviceState::new::<App>(&dh),
             output_manager: OutputManagerState::new_with_xdg_output::<App>(&dh),
             remote_input: RemoteInput::default(),
+            seat_active: true,
             switcher: crate::window_switcher::WindowSwitcher::default(),
             toplevel_map: Vec::new(),
             next_id: 0,
@@ -1394,6 +1501,32 @@ mod input_tests {
             false
         );
         app.local_input(&[], 0, (10, 20));
+        assert_eq!(app.control(&remote)["ok"], false);
+        assert_eq!(
+            app.control(&json!({"command":"input_takeover"}))["ok"],
+            true
+        );
+        assert_eq!(app.control(&remote)["ok"], true);
+        app.release_input();
+        app.seat_active = false;
+        assert!(app.remote_input.keys.is_empty());
+        assert_eq!(app.remote_input.buttons, 0);
+        assert!(app.remote_input.deadline.is_none());
+        assert_eq!(app.control(&remote)["ok"], false);
+        assert_eq!(
+            app.control(&json!({"command":"input_takeover"}))["ok"],
+            false
+        );
+        assert_eq!(
+            app.control(&json!({"command":"list"}))["result"]["seat_active"],
+            false
+        );
+        assert!(
+            app.focus_native("missing")
+                .unwrap_err()
+                .contains("inactive")
+        );
+        app.seat_active = true;
         assert_eq!(app.control(&remote)["ok"], false);
         assert_eq!(
             app.control(&json!({"command":"input_takeover"}))["ok"],
