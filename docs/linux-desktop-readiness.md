@@ -198,6 +198,15 @@ hardware validation. The staged work is tracked in Beads under `dock-yjt`.
 
 ## Brokered Linux seat access
 
+The runtime now waits on a central calloop readiness dispatcher for Wayland
+clients/listener, control-worker wakeups, libinput and the seat/DRM adapter event
+descriptors. Adapters retain ownership of their data and device handling. The
+bounded control queue still applies commands on the compositor thread. Lease
+expiry and headless frame callbacks have explicit deadlines; hardware pageflip
+completion is readiness-driven rather than checked after a fixed 16 ms sleep.
+This removes a polling boundary, not a measured performance guarantee. DRM
+damage scheduling and physical-output timing still need their own validation.
+
 The native compositor acquires DRM and libinput devices through Smithay's
 libseat session backend. There is no direct-open fallback. A hardware launch
 without an active seat or usable DRM output fails visibly; headless mode is

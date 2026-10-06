@@ -14,6 +14,9 @@ pub struct SeatAccess {
     events: EventLoop<'static, Vec<Event>>,
 }
 impl SeatAccess {
+    pub fn poll_fd(&self) -> impl std::os::fd::AsFd + '_ {
+        &self.events
+    }
     pub fn open() -> Result<Self, String> {
         let (session, notifier) = LibSeatSession::new().map_err(|error| {
             format!("seat broker: {error}; start Canvas in a local seat-bound login session")

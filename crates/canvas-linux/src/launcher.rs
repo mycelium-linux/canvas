@@ -287,6 +287,7 @@ pub fn handle_one(
 pub fn serve_control(
     listener: std::os::unix::net::UnixListener,
     sender: std::sync::mpsc::SyncSender<(Value, std::sync::mpsc::Sender<Value>)>,
+    wake: smithay::reexports::calloop::ping::Ping,
 ) -> std::io::Result<()> {
     use crate::control_transport::{TIMEOUT, read_frame, write_frame};
     for accepted in listener.incoming() {
@@ -301,6 +302,7 @@ pub fn serve_control(
             sender
                 .try_send((command, reply_tx))
                 .map_err(|e| format!("control queue unavailable: {e}"))?;
+            wake.ping();
             reply_rx
                 .recv_timeout(TIMEOUT)
                 .map_err(|e| format!("command outcome unknown: {e}; refresh state before retrying"))

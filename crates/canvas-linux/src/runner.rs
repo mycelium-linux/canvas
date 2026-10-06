@@ -8,11 +8,10 @@
 //!
 //! KMS/DRM output: when a DRM card with a connected connector is available,
 //! an EGL/GLES renderer on a GBM swapchain drives the first CRTC through a
-//! `DrmCompositor` (self-managing device; pageflip completion is drained via
-//! `frame_submitted` on the same 16ms tick). Mapped xdg toplevels composite
+//! `DrmCompositor` (pageflip completion is drained on readiness). Mapped xdg toplevels composite
 //! at their [`CanvasCompositor`] frame rectangles. Keyboard and pointer state
-//! can be injected through the owner-only control socket. Without a usable DRM card the compositor runs headless
-//! (control socket only), unchanged from the previous behavior.
+//! can be injected through the owner-only control socket. Hardware startup
+//! requires a brokered seat and usable output; headless mode is explicit.
 
 use crate::compositor::CanvasCompositor;
 use canvas_core::desktop::{Display as CanvasDisplay, WindowBackend, WindowSurface};
@@ -308,11 +307,23 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
         dmabuf_global,
     };
 
+    let mut runtime = crate::runtime_loop::RuntimeLoop::new()?;
+    runtime.watch(&display)?;
+    if let Some(access) = &seat_access {
+        runtime.watch(access.poll_fd())?;
+    }
+    if let Some(drm) = &state.drm {
+        runtime.watch(&drm.drm_loop)?;
+    }
+    let control_wake = runtime.wake();
     // Worker thread: accept control-socket clients and forward commands to the
     // compositor loop via the channel above. The loop drains cmd_rx and applies
     // commands to its (single-threaded) CanvasCompositor.
-    let control_worker =
-        std::thread::spawn(move || crate::launcher::serve_control(listener, cmd_tx));
+    let control_worker = std::thread::spawn(move || {
+        let result = crate::launcher::serve_control(listener, cmd_tx, control_wake.clone());
+        control_wake.ping(); // Report worker death even while the desktop is idle.
+        result
+    });
 
     let wayland_display = "wayland-5".to_string();
     unsafe { std::env::set_var("WAYLAND_DISPLAY", &wayland_display) };
@@ -325,6 +336,7 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
 
     let listener =
         ListeningSocket::bind(&wayland_display).map_err(|e| format!("bind wayland socket: {e}"))?;
+    runtime.watch(&listener)?;
     let mut clients = Vec::new();
     // Headless tests must never read the workstation's physical seat.
     let mut physical_input = if headless {
@@ -336,6 +348,10 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
     };
     let mut physical_keys = Vec::<u16>::new();
     let mut physical_buttons = 0u8;
+    if let Some(input) = &physical_input {
+        runtime.watch(input)?;
+    }
+    let mut headless_frame_at = Instant::now();
 
     loop {
         if let Some(access) = &mut seat_access {
@@ -378,11 +394,14 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
         if control_worker.is_finished() {
             return Err("control worker stopped; refusing to run an uncontrollable desktop".into());
         }
-        if let Ok(Some(stream)) = listener.accept()
-            && let Ok(client) = display
+        while let Some(stream) = listener
+            .accept()
+            .map_err(|e| format!("Wayland accept: {e}"))?
+        {
+            let client = display
                 .handle()
                 .insert_client(stream, Arc::new(ClientState::default()))
-        {
+                .map_err(|e| format!("Wayland client: {e}"))?;
             clients.push(client);
         }
 
@@ -518,6 +537,10 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
         }
 
         state.configure_all();
+        if let Some(drm) = &mut state.drm {
+            // Drain readiness even while paused, without submitting a frame.
+            drm.pump_events()?;
+        }
         if let Some(drm) = &mut state.drm
             && state.seat_active
         {
@@ -531,7 +554,9 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
             let canvas = &mut state.canvas;
             drm.redraw(&toplevels, canvas);
         }
-        if let Some(output) = &state.virtual_output {
+        if let Some(output) = &state.virtual_output
+            && Instant::now() >= headless_frame_at
+        {
             for (surface, _) in &state.toplevel_map {
                 send_frames_surface_tree(
                     surface.wl_surface(),
@@ -541,9 +566,16 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
                     |_, _| Some(output.clone()),
                 );
             }
+            headless_frame_at = Instant::now() + Duration::from_millis(16);
         }
-
-        std::thread::sleep(Duration::from_millis(16));
+        display.flush_clients().map_err(|e| format!("flush: {e}"))?;
+        let deadline = state
+            .remote_input
+            .deadline
+            .into_iter()
+            .chain((headless && !state.toplevel_map.is_empty()).then_some(headless_frame_at))
+            .min();
+        runtime.wait(deadline)?;
     }
 }
 
@@ -555,6 +587,7 @@ struct DrmRender {
     device: DrmDevice,
     drm_loop: DrmEventLoop<'static, bool>,
     flip_pending: bool,
+    vblank_ready: bool,
     compositor: DrmCompositor<
         GbmAllocator<DrmDeviceFd>,
         GbmFramebufferExporter<DrmDeviceFd>,
@@ -764,6 +797,7 @@ impl DrmRender {
                 output,
                 size: wl_mode.size,
                 flip_pending: true,
+                vblank_ready: false,
                 render_node,
                 started_at: std::time::Instant::now(),
                 _seat_device: seat_device,
@@ -772,14 +806,17 @@ impl DrmRender {
         Err(last_err)
     }
 
+    fn pump_events(&mut self) -> Result<(), String> {
+        self.drm_loop
+            .dispatch(Some(Duration::ZERO), &mut self.vblank_ready)
+            .map_err(|e| format!("DRM dispatch: {e}"))
+    }
+
     fn redraw(&mut self, surfaces: &[(WlSurface, String)], canvas: &mut CanvasCompositor) {
         // Only retire a pending frame after its actual vblank event. Calling
         // frame_submitted on every polling iteration releases the swapchain
         // buffer before KMS is done with it and causes EBUSY retry storms.
-        let mut vblank = false;
-        let _ = self
-            .drm_loop
-            .dispatch(Some(std::time::Duration::ZERO), &mut vblank);
+        let vblank = std::mem::take(&mut self.vblank_ready);
         if self.flip_pending {
             if !vblank {
                 return;
