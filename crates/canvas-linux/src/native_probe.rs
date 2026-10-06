@@ -99,6 +99,10 @@ fn native_focus_close_and_alt_tab_reach_real_clients() {
     // One held Alt gesture: multiple Tab press/release snapshots, no pointer click.
     let input = |sequence, keys| json!({"command":"input","sequence":sequence,"lease_ms":500,"keys":keys,"pointer_x":0,"pointer_y":0,"pointer_buttons":0});
     request(&socket, input(1, vec![43, 226]));
+    let switcher = request(&socket, json!({"command":"list"}))["switcher"].clone();
+    assert_eq!(switcher["active"], true);
+    assert_eq!(switcher["selected_window"], ids[1]);
+    assert_eq!(switcher["windows"], json!([ids[2], ids[1], ids[0]]));
     assert_eq!(
         request(&socket, json!({"command":"list"}))["focused_window"],
         ids[1]
@@ -118,6 +122,20 @@ fn native_focus_close_and_alt_tab_reach_real_clients() {
     // Releasing Alt before Tab must not type Tab into the chosen app.
     request(&socket, input(6, vec![43]));
     request(&socket, input(7, vec![]));
+    assert_eq!(
+        request(&socket, json!({"command":"list"}))["switcher"]["active"],
+        false
+    );
+    request(&socket, input(8, vec![4])); // HID A -> evdev 30 -> XKB 38.
+    request(&socket, input(9, vec![]));
+    wait_for(|| {
+        std::fs::read_to_string(directory.join("client-1.log"))
+            .unwrap()
+            .lines()
+            .any(|line| {
+                line.contains("wl_keyboard") && line.contains(".key(") && line.ends_with(", 30, 1)")
+            })
+    });
     let close = request(&socket, json!({"command":"close","window":ids[1]}));
     assert_eq!(close["close_requested"], true);
     assert_eq!(close["closed"], false);

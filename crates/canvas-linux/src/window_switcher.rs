@@ -5,6 +5,14 @@ pub struct WindowSwitcher {
     selected: Option<String>,
 }
 impl WindowSwitcher {
+    /// Presentation reads the frozen gesture order, never the changing live MRU.
+    pub fn snapshot(&self) -> serde_json::Value {
+        serde_json::json!({
+            "active": self.selected.is_some(),
+            "windows": self.order,
+            "selected_window": self.selected,
+        })
+    }
     pub fn finish(&mut self) {
         self.order.clear();
         self.selected = None;
@@ -57,11 +65,15 @@ mod tests {
             s.next(&ids(&["b", "a", "c"]), Some("b"), false).as_deref(),
             Some("c")
         );
+        assert_eq!(s.snapshot()["windows"], serde_json::json!(["a", "b", "c"]));
+        assert_eq!(s.snapshot()["selected_window"], "c");
         assert_eq!(
             s.next(&ids(&["c", "b", "a"]), Some("c"), true).as_deref(),
             Some("b")
         );
         s.finish();
+        assert_eq!(s.snapshot()["active"], false);
+        assert!(s.snapshot()["selected_window"].is_null());
         assert_eq!(
             s.next(&ids(&["b", "c", "a"]), Some("b"), false).as_deref(),
             Some("c")

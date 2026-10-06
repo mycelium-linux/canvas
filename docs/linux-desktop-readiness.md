@@ -66,7 +66,28 @@ new windows join the next gesture, and Tab is consumed rather than sent into
 the selected app. Alt release or input-lease expiry finishes the gesture.
 Socket clients may use `{"command":"cycle","reverse":false}` repeatedly and
 `{"command":"cycle_finish"}` to finish the same native switching session.
-This does not add physical libinput handling or a Lua switcher overlay.
+`list.result.switcher` exposes `active`, the frozen `windows` order and
+`selected_window` for shell presentation. A visible Lua switcher overlay is
+still pending; this projection does not put a panel above native apps.
+
+The native compositor now opens libinput's udev `seat0` context in hardware
+mode. It handles accelerated relative/absolute pointer motion, five mouse
+buttons, wheel scrolling and the existing HID keyboard vocabulary through the
+same focus/Alt-Tab policy. Device removal releases held state. Headless mode
+never opens physical input. Touch, gestures, touchpad scrolling and unsupported
+keyboard usages are not implemented yet.
+
+Physical activity releases remote held keys/buttons and revokes its lease.
+`list.result.input_owner` then reports `local`; remote snapshots are rejected
+until an owner-socket client explicitly sends `{"command":"input_takeover"}`.
+Takeover is rejected while local keys/buttons are held. Physical keys do not
+expire merely because the user holds them without generating another event.
+
+No device permissions are changed by the compositor. On Home Pi, the current
+`ajm` service account cannot read `/dev/input/event*`; proper active-session
+device access is a rollout prerequisite, not a reason to run the shell as root
+or grant world-readable input devices. This source has not replaced the TV's
+installed compositor yet.
 
 The opt-in native-client proof runs three real Foot processes on an isolated
 headless Wayland server, verifies keyboard-enter/close protocol logs and

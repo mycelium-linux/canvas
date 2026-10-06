@@ -314,6 +314,14 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
     let listener =
         ListeningSocket::bind(&wayland_display).map_err(|e| format!("bind wayland socket: {e}"))?;
     let mut clients = Vec::new();
+    // Headless tests must never read the workstation's physical seat.
+    let mut physical_input = if headless {
+        None
+    } else {
+        Some(crate::physical_input::open()?)
+    };
+    let mut physical_keys = Vec::<u16>::new();
+    let mut physical_buttons = 0u8;
 
     loop {
         if control_worker.is_finished() {
@@ -342,6 +350,104 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
             let _ = reply_tx.send(resp);
         }
         state.expire_remote_input();
+        if let Some(input) = &mut physical_input {
+            input
+                .dispatch()
+                .map_err(|error| format!("physical input dispatch: {error}"))?;
+            for event in input.by_ref().take(128) {
+                use input::event::keyboard::KeyboardEventTrait;
+                use input::event::{KeyboardEvent, PointerEvent};
+                let mut position = state.remote_input.pointer;
+                match event {
+                    input::Event::Device(input::event::DeviceEvent::Removed(_)) => {
+                        // Never strand held state when a keyboard or mouse disappears.
+                        physical_keys.clear();
+                        physical_buttons = 0;
+                        if !state.remote_input.local_owner {
+                            continue;
+                        }
+                    }
+                    input::Event::Keyboard(KeyboardEvent::Key(event)) => {
+                        let Some(usage) =
+                            (0..=255).find(|usage| hid_to_evdev(*usage) == Some(event.key()))
+                        else {
+                            eprintln!("physical input: unsupported evdev key {}", event.key());
+                            continue;
+                        };
+                        if event.key_state() == input::event::keyboard::KeyState::Pressed {
+                            if !physical_keys.contains(&usage) {
+                                physical_keys.push(usage);
+                            }
+                        } else {
+                            physical_keys.retain(|key| *key != usage);
+                        }
+                    }
+                    input::Event::Pointer(PointerEvent::Motion(event)) => {
+                        let area = state
+                            .canvas
+                            .displays()
+                            .first()
+                            .map(|display| display.work_area);
+                        let Some(area) = area else {
+                            continue;
+                        };
+                        position.0 = (f64::from(position.0)
+                            + event.dx() * 65535.0 / f64::from(area.width.max(1)))
+                        .clamp(0.0, 65535.0) as u16;
+                        position.1 = (f64::from(position.1)
+                            + event.dy() * 65535.0 / f64::from(area.height.max(1)))
+                        .clamp(0.0, 65535.0) as u16;
+                    }
+                    input::Event::Pointer(PointerEvent::MotionAbsolute(event)) => {
+                        position = (
+                            event.absolute_x_transformed(65535).clamp(0.0, 65535.0) as u16,
+                            event.absolute_y_transformed(65535).clamp(0.0, 65535.0) as u16,
+                        );
+                    }
+                    input::Event::Pointer(PointerEvent::ScrollWheel(event)) => {
+                        use input::event::pointer::PointerScrollEvent;
+                        state.local_input(&physical_keys, physical_buttons, position);
+                        let pointer = state.pointer.clone();
+                        let mut frame = smithay::input::pointer::AxisFrame::new(monotonic_ms())
+                            .source(smithay::backend::input::AxisSource::Wheel);
+                        for (axis, target) in [
+                            (
+                                input::event::pointer::Axis::Vertical,
+                                smithay::backend::input::Axis::Vertical,
+                            ),
+                            (
+                                input::event::pointer::Axis::Horizontal,
+                                smithay::backend::input::Axis::Horizontal,
+                            ),
+                        ] {
+                            if event.has_axis(axis) {
+                                frame = frame.value(target, event.scroll_value(axis));
+                            }
+                        }
+                        pointer.axis(&mut state, frame);
+                        pointer.frame(&mut state);
+                        continue;
+                    }
+                    input::Event::Pointer(PointerEvent::Button(event)) => {
+                        let bit = match event.button() {
+                            0x110 => 1,
+                            0x111 => 2,
+                            0x112 => 4,
+                            0x116 => 8,
+                            0x115 => 16,
+                            _ => continue,
+                        };
+                        if event.button_state() == input::event::pointer::ButtonState::Pressed {
+                            physical_buttons |= bit;
+                        } else {
+                            physical_buttons &= !bit;
+                        }
+                    }
+                    _ => continue,
+                }
+                state.local_input(&physical_keys, physical_buttons, position);
+            }
+        }
 
         let count = state
             .canvas
@@ -764,7 +870,20 @@ impl App {
 
     fn control(&mut self, command: &Value) -> Value {
         let result = match command["command"].as_str().unwrap_or("") {
+            "list" => {
+                let mut response = crate::launcher::handle_command(command, &mut self.canvas, &self.launcher);
+                response["result"]["switcher"] = self.switcher.snapshot();
+                response["result"]["input_owner"] = json!(if self.remote_input.local_owner { "local" } else { "remote" });
+                return response;
+            }
             "input" => return self.apply_remote_input(command),
+            "input_takeover" => {
+                if self.remote_input.local_held {
+                    return json!({"ok":false,"error":"release local held keys/buttons before remote takeover"});
+                }
+                self.remote_input.local_owner = false;
+                Ok(json!({"owner":"remote"}))
+            }
             "launch" => Err("native app spawning is not implemented; use the host launcher and observe mapped windows".into()),
             "cycle_finish" => {
                 self.switcher.finish();
@@ -806,7 +925,36 @@ impl App {
         }
     }
 
+    fn local_input(&mut self, keys: &[u16], buttons: u8, position: (u16, u16)) {
+        if !self.remote_input.local_owner {
+            self.inject_keys(&[]);
+            let (x, y) = self.remote_input.pointer;
+            self.inject_pointer(x, y, 0);
+            self.switcher.finish();
+            self.remote_input.tab_down = false;
+            self.remote_input.shortcut_tab_owned = false;
+            self.remote_input.cycling = false;
+        }
+        let mut keys = keys.to_vec();
+        keys.sort_unstable();
+        self.remote_input.local_owner = false;
+        self.remote_input.deadline = None;
+        let response = self.apply_remote_input(&json!({
+            "sequence":0,"lease_ms":500,"keys":keys,
+            "pointer_buttons":buttons,"pointer_x":position.0,"pointer_y":position.1,
+        }));
+        self.remote_input.deadline = None;
+        self.remote_input.local_owner = true;
+        self.remote_input.local_held = !keys.is_empty() || buttons != 0;
+        if response["ok"] != true {
+            eprintln!("physical input rejected: {response}");
+        }
+    }
+
     fn apply_remote_input(&mut self, command: &Value) -> Value {
+        if self.remote_input.local_owner {
+            return json!({"ok":false,"error":"physical seat owns input; explicit input_takeover required"});
+        }
         let lease_active = self
             .remote_input
             .deadline
@@ -893,7 +1041,8 @@ impl App {
             if let Some(code) = hid_to_evdev(*usage) {
                 keyboard.input(
                     self,
-                    Keycode::from(code),
+                    // Smithay accepts XKB keycodes, not Linux evdev codes.
+                    Keycode::from(code + 8),
                     KeyState::Released,
                     SERIAL_COUNTER.next_serial(),
                     monotonic_ms(),
@@ -905,7 +1054,7 @@ impl App {
             if let Some(code) = hid_to_evdev(*usage) {
                 keyboard.input(
                     self,
-                    Keycode::from(code),
+                    Keycode::from(code + 8),
                     KeyState::Pressed,
                     SERIAL_COUNTER.next_serial(),
                     monotonic_ms(),
@@ -1056,6 +1205,8 @@ impl App {
 
 #[derive(Default)]
 struct RemoteInput {
+    local_owner: bool,
+    local_held: bool,
     shortcut_tab_owned: bool,
     tab_down: bool,
     cycling: bool,
@@ -1161,6 +1312,64 @@ fn hid_to_evdev(usage: u16) -> Option<u32> {
     TABLE
         .iter()
         .find_map(|(hid, code)| (*hid == usage).then_some(*code))
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+
+    #[test]
+    fn local_activity_revokes_remote_lease_and_requires_explicit_takeover() {
+        let display = Display::<App>::new().unwrap();
+        let dh = display.handle();
+        let mut seat_state = SeatState::new();
+        let mut seat = seat_state.new_wl_seat(&dh, "test");
+        let keyboard = seat.add_keyboard(Default::default(), 200, 200).unwrap();
+        let pointer = seat.add_pointer();
+        let (_, cmd_rx) = std::sync::mpsc::channel();
+        let mut app = App {
+            virtual_output: None,
+            canvas: CanvasCompositor::new(Vec::<CanvasDisplay>::new()),
+            compositor_state: CompositorState::new::<App>(&dh),
+            xdg_shell_state: XdgShellState::new::<App>(&dh),
+            shm_state: ShmState::new::<App>(&dh, Vec::new()),
+            seat_state,
+            seat,
+            keyboard,
+            pointer,
+            data_device_state: DataDeviceState::new::<App>(&dh),
+            output_manager: OutputManagerState::new_with_xdg_output::<App>(&dh),
+            remote_input: RemoteInput::default(),
+            switcher: crate::window_switcher::WindowSwitcher::default(),
+            toplevel_map: Vec::new(),
+            next_id: 0,
+            window_count: 0,
+            state_path: PathBuf::new(),
+            cmd_rx,
+            launcher: crate::launcher::Launcher::new(),
+            drm: None,
+            dmabuf_state: DmabufState::new(),
+            dmabuf_global: None,
+        };
+        let remote = json!({"command":"input","sequence":1,"keys":[4],"pointer_x":0,"pointer_y":0,"pointer_buttons":1});
+        assert_eq!(app.control(&remote)["ok"], true);
+        app.local_input(&[5], 0, (10, 20));
+        assert_eq!(app.remote_input.keys, vec![5]);
+        assert_eq!(app.remote_input.buttons, 0);
+        assert!(app.remote_input.deadline.is_none());
+        assert_eq!(app.control(&remote)["ok"], false);
+        assert_eq!(
+            app.control(&json!({"command":"input_takeover"}))["ok"],
+            false
+        );
+        app.local_input(&[], 0, (10, 20));
+        assert_eq!(app.control(&remote)["ok"], false);
+        assert_eq!(
+            app.control(&json!({"command":"input_takeover"}))["ok"],
+            true
+        );
+        assert_eq!(app.control(&remote)["ok"], true);
+    }
 }
 
 impl BufferHandler for App {

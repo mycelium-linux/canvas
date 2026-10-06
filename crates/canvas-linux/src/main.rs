@@ -19,6 +19,8 @@ mod native_probe;
 #[cfg(feature = "opencode")]
 mod opencode;
 #[cfg(all(feature = "compositor", target_os = "linux"))]
+mod physical_input;
+#[cfg(all(feature = "compositor", target_os = "linux"))]
 mod runner;
 #[cfg(any(test, all(feature = "compositor", target_os = "linux")))]
 mod window_switcher;
