@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 android-native-video = ["dep:jni", "shared-workspaces", "dep:getrandom", "dep:subtle", "dep:fpl-gfx", "dep:naga"]
+android-tuner-control = ["dep:jni", "dep:serde_json"]
 shared-workspaces = ["dep:canvas-core", "dep:canvas-workspace", "dep:serde_json", "dep:sha2"]
 
 [dependencies]

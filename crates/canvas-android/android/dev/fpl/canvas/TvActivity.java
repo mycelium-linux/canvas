@@ -51,7 +51,14 @@ import java.util.ArrayList;
 
 /** Optional platform-only shim: no discovery, credentials, or workspace policy. */
 public final class TvActivity extends Activity {
-    static { System.loadLibrary("canvas_android"); }
+    private static final boolean TUNER_CONTROL_AVAILABLE;
+    static {
+        System.loadLibrary("canvas_android");
+        boolean available;
+        try { System.loadLibrary("canvas_tuner"); available=true; }
+        catch(UnsatisfiedLinkError error) { available=false; android.util.Log.i("CanvasTuner","Tuner control feature not packaged"); }
+        TUNER_CONTROL_AVAILABLE=available;
+    }
     private static native String nativeValidate(String url);
     private static native float nativeSetMuted(boolean muted);
     private static native boolean nativeIsMuted();
@@ -65,6 +72,13 @@ public final class TvActivity extends Activity {
     private static native String nativeSignalSnapshot(String id);
     private static native float[] nativeSignalFrame(int width, int height, String frame);
     private static native String nativeSignalLabels(int width, int height, String frame);
+    private static native String nativeTunerControl(String base, String channel, String surface, String directory);
+    private String tunerEndpoint = "", videoSurfaceId = "";
+    private Button channelButton;
+    private boolean tunerBusy;
+    private LinearLayout channelScreen;
+    private String channelScreenSurface = "";
+    private String currentWorkspaceId = "", channelScreenWorkspace = "";
     private GpuBackground background;
     private VideoView video;
     private TextView status;
@@ -75,10 +89,12 @@ public final class TvActivity extends Activity {
     private LinearLayout selector;
     private final Handler updates = new Handler();
     private String lastProjection = "";
+    private String lastStructure = "";
     private String currentUrl = "";
     private String surfaceTitle = "KOMO";
     private boolean workspaceMode;
     private final ArrayList<View> widgets = new ArrayList<>();
+    private final java.util.HashMap<String, StatusListView> statusLists = new java.util.HashMap<>();
     private final ThreadPoolExecutor pdfJobs = new ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS,
         new ArrayBlockingQueue<Runnable>(8));
 
@@ -296,6 +312,7 @@ public final class TvActivity extends Activity {
         }
     }
 
+
     /** Platform raster adapter only; source identity and geometry come from Rust. */
     private final class PdfSurface extends LinearLayout {
         private final ImageView image;
@@ -469,6 +486,17 @@ public final class TvActivity extends Activity {
         muteButton.setOnClickListener(v -> setSurfaceMuted(!nativeIsMuted()));
         frame.addView(muteButton, new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.LEFT));
         setSurfaceMuted(getIntent().getBooleanExtra("muted", false));
+        tunerEndpoint = getIntent().getStringExtra("tuner_endpoint");
+        if (tunerEndpoint != null) getPreferences(0).edit().putString("tuner_endpoint", tunerEndpoint).apply();
+        else tunerEndpoint = getPreferences(0).getString("tuner_endpoint", "");
+        if(!TUNER_CONTROL_AVAILABLE) tunerEndpoint="";
+        channelButton = new Button(this);
+        channelButton.setText("Channels"); channelButton.setTextSize(14);
+        channelButton.setOnClickListener(v -> showChannels());
+        FrameLayout.LayoutParams channelChrome = new FrameLayout.LayoutParams(-2,-2,Gravity.TOP|Gravity.LEFT);
+        channelChrome.topMargin = barHeight();
+        frame.addView(channelButton, channelChrome);
+        channelButton.setVisibility(tunerEndpoint.isEmpty() ? View.GONE : View.VISIBLE);
         setContentView(frame);
         selector = new LinearLayout(this);
         selector.setOrientation(LinearLayout.HORIZONTAL);
@@ -502,6 +530,101 @@ public final class TvActivity extends Activity {
     private void showStatus(String text) {
         status.setText(text);
         status.setVisibility(View.VISIBLE);
+    }
+
+    private void showChannels() {
+        if (tunerBusy || videoSurfaceId.isEmpty()) return;
+        tunerBusy = true; channelButton.setEnabled(false);
+        final String surface = videoSurfaceId;
+        final String workspace = currentWorkspaceId;
+        new Thread(() -> {
+            String raw = nativeTunerControl(tunerEndpoint, "", surface, getFilesDir().getAbsolutePath());
+            updates.post(() -> {
+                tunerBusy = false; channelButton.setEnabled(true);
+                try {
+                    JSONObject reply = new JSONObject(raw);
+                    if (reply.has("error")) throw new IllegalArgumentException(reply.getString("error"));
+                    JSONArray channels = reply.getJSONArray("channels");
+                    if (channels.length() > 1024) throw new IllegalArgumentException("Channel catalog too large");
+                    if (!resumed || !surface.equals(videoSurfaceId) || !workspace.equals(currentWorkspaceId)) return;
+                    renderChannels(channels, surface);
+                } catch (Exception e) { android.util.Log.e("CanvasTuner", "Channel browser failed", e); showStatus("Channels unavailable: "+e.getMessage()); }
+            });
+        },"canvas-tuner-catalog").start();
+    }
+
+    private void closeChannels() {
+        if (channelScreen != null) frame.removeView(channelScreen);
+        channelScreen=null; channelScreenSurface=""; channelScreenWorkspace="";
+        if (!videoSurfaceId.isEmpty()) video.setVisibility(View.VISIBLE);
+        if (channelButton != null && channelButton.getVisibility()==View.VISIBLE) channelButton.requestFocus();
+    }
+
+    // This replaces the video tile in-place; it is not an Android dialog/window.
+    private void renderChannels(JSONArray channels, String surface) throws Exception {
+        closeChannels();
+        JSONObject palette=new JSONObject(nativeProjection(frame.getWidth(),frame.getHeight())).getJSONObject("palette");
+        int foreground=Color.parseColor(palette.getString("text")), muted=Color.parseColor(palette.getString("text_muted"));
+        channelScreen=new LinearLayout(this); channelScreen.setOrientation(LinearLayout.VERTICAL);
+        channelScreen.setBackgroundColor(Color.parseColor(palette.getString("background")));
+        channelScreen.setPadding(dp(20),dp(14),dp(20),dp(14)); channelScreenSurface=surface; channelScreenWorkspace=currentWorkspaceId;
+        LinearLayout heading=new LinearLayout(this); heading.setGravity(Gravity.CENTER_VERTICAL);
+        TextView title=new TextView(this); title.setText("LIVE TV  /  CHANNELS"); title.setTextColor(foreground); title.setTextSize(20);
+        heading.addView(title,new LinearLayout.LayoutParams(0,-2,1));
+        Button back=new Button(this); back.setId(View.generateViewId()); back.setText("Back to TV"); back.setTextSize(12); styleControl(back,palette,false);
+        back.setOnClickListener(v -> closeChannels()); heading.addView(back,new LinearLayout.LayoutParams(-2,dp(44)));
+        channelScreen.addView(heading,new LinearLayout.LayoutParams(-1,dp(50)));
+        TextView preview=new TextView(this); preview.setText(surfaceTitle); preview.setTextColor(foreground); preview.setTextSize(30);
+        preview.setPadding(0,dp(8),0,dp(4)); channelScreen.addView(preview,new LinearLayout.LayoutParams(-1,-2));
+        TextView instructions=new TextView(this); instructions.setText(channels.length()+" channels  ·  ↑ ↓ browse  ·  Select to watch  ·  Back returns to TV");
+        instructions.setTextColor(muted); instructions.setTextSize(12); instructions.setPadding(0,0,0,dp(14));
+        channelScreen.addView(instructions,new LinearLayout.LayoutParams(-1,-2));
+        ScrollView scroll=new ScrollView(this); LinearLayout rows=new LinearLayout(this); rows.setOrientation(LinearLayout.VERTICAL);
+        scroll.addView(rows); channelScreen.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
+        Button initial=null, previousRow=null;
+        for(int i=0;i<channels.length();i++) {
+            JSONObject item=channels.getJSONObject(i); final String number=item.getString("channel"), name=item.getString("name");
+            boolean selected=surfaceTitle.startsWith(number+" · ");
+            Button row=new Button(this); row.setId(View.generateViewId()); row.setFocusableInTouchMode(true);
+            row.setNextFocusRightId(back.getId());
+            if(previousRow!=null) { previousRow.setNextFocusDownId(row.getId()); row.setNextFocusUpId(previousRow.getId()); }
+            else row.setNextFocusUpId(back.getId());
+            previousRow=row;
+            row.setText(number+"     "+name+"    "+(selected?"● Playing":"›"));
+            row.setGravity(Gravity.CENTER_VERTICAL|Gravity.LEFT); row.setTextSize(18); row.setPadding(dp(16),0,dp(16),0);
+            row.setAllCaps(false); styleControl(row,palette,selected);
+            row.setContentDescription("Watch "+name+", channel "+number);
+            row.setOnFocusChangeListener((v,focused) -> { if(focused) preview.setText(number+"  ·  "+name); });
+            row.setOnClickListener(v -> { closeChannels(); tuneChannel(number,surface); });
+            LinearLayout.LayoutParams bounds=new LinearLayout.LayoutParams(-1,dp(54)); bounds.bottomMargin=dp(4); rows.addView(row,bounds);
+            if(initial==null || selected) initial=row;
+        }
+        FrameLayout.LayoutParams bounds=new FrameLayout.LayoutParams((FrameLayout.LayoutParams)video.getLayoutParams());
+        video.setVisibility(View.INVISIBLE); status.setVisibility(View.GONE);
+        frame.addView(channelScreen,bounds); channelScreen.bringToFront();
+        if(initial!=null) { back.setNextFocusDownId(initial.getId()); back.setNextFocusLeftId(initial.getId()); initial.requestFocus(); }
+        else back.requestFocus();
+    }
+
+    @Override public void onBackPressed() {
+        if(channelScreen!=null) { closeChannels(); return; }
+        super.onBackPressed();
+    }
+
+    private void tuneChannel(String channel, String surface) {
+        if (tunerBusy) return;
+        tunerBusy=true; channelButton.setEnabled(false); showStatus("Tuning "+channel+"…");
+        new Thread(() -> {
+            String raw=nativeTunerControl(tunerEndpoint,channel,surface,getFilesDir().getAbsolutePath());
+            updates.post(() -> {
+                tunerBusy=false; channelButton.setEnabled(true);
+                try {
+                    JSONObject reply=new JSONObject(raw);
+                    if (reply.has("error")) throw new IllegalArgumentException(reply.getString("error"));
+                    lastProjection=""; refreshWorkspace();
+                } catch(Exception e) { showStatus("Tuning failed: "+e.getMessage()); }
+            });
+        },"canvas-tuner-select").start();
     }
 
     private void applyIntent(Intent intent) {
@@ -644,11 +767,168 @@ public final class TvActivity extends Activity {
         }
     }
 
+    /** Generic themed primitive; providers and state interpretation stay in Lua. */
+    private final class StatusListView extends LinearLayout {
+        private final TextView heading, health;
+        private final LinearLayout rows;
+        private JSONObject data;
+        private long observedAt;
+        private long staleAfter = 30000;
+        private final int normal, warning;
+        private final Runnable freshness = new Runnable() {
+            @Override public void run() {
+                if (!resumed || !isAttachedToWindow()) return;
+                updateHealth(); updates.postDelayed(this, 1000);
+            }
+        };
+        StatusListView(JSONObject spec, JSONObject palette) throws Exception {
+            super(TvActivity.this);
+            setOrientation(VERTICAL); setPadding(dp(18), dp(14), dp(18), dp(14));
+            normal = Color.parseColor(palette.getString("text_muted"));
+            warning = Color.parseColor(palette.getString("warning"));
+            GradientDrawable shape = new GradientDrawable();
+            shape.setColor(Color.parseColor(palette.getString("surface")));
+            shape.setCornerRadius(dp(12));
+            shape.setStroke(dp(1), Color.parseColor(palette.getString("border")));
+            setBackground(shape);
+            heading = new TextView(TvActivity.this); heading.setTextSize(20);
+            heading.setTextColor(Color.parseColor(palette.getString("text")));
+            addView(heading, new LinearLayout.LayoutParams(-1, -2));
+            rows = new LinearLayout(TvActivity.this); rows.setOrientation(VERTICAL);
+            addView(rows, new LinearLayout.LayoutParams(-1, 0, 1));
+            health = new TextView(TvActivity.this); health.setTextSize(12);
+            addView(health, new LinearLayout.LayoutParams(-1, -2));
+            update(spec, palette);
+        }
+        void update(JSONObject spec, JSONObject palette) throws Exception {
+            heading.setText(spec.optString("title", "Status"));
+            data = spec.optJSONObject("data"); observedAt = 0;
+            staleAfter = Math.max(30000, Math.min(300000, spec.optLong("refresh_ms", 10000) * 3));
+            if (data != null && !data.isNull("observed_at")) {
+                java.text.SimpleDateFormat parser = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.ROOT);
+                parser.setTimeZone(java.util.TimeZone.getTimeZone("UTC")); parser.setLenient(false);
+                try { observedAt = parser.parse(data.getString("observed_at")).getTime(); }
+                catch (java.text.ParseException error) { android.util.Log.w("CanvasStatus", "Invalid observation timestamp"); }
+            }
+            rows.removeAllViews();
+            if (spec.optString("kind").equals("time_series")) {
+                rows.addView(new TrendView(spec, palette), new LinearLayout.LayoutParams(-1, -1));
+                updateHealth(); return;
+            }
+            JSONArray nodes = spec.getJSONArray("nodes");
+            for (int i = 0; i < nodes.length(); i++) {
+                JSONObject node = nodes.getJSONObject(i);
+                LinearLayout row = new LinearLayout(TvActivity.this); row.setGravity(Gravity.CENTER_VERTICAL);
+                TextView label = new TextView(TvActivity.this); label.setTextSize(17);
+                label.setTextColor(Color.parseColor(palette.getString("text_muted")));
+                label.setText(node.getString("label"));
+                row.addView(label, new LinearLayout.LayoutParams(0, -2, 0.38f));
+                TextView value = new TextView(TvActivity.this);
+                String level = node.optString("state", "neutral");
+                value.setTextColor(Color.parseColor(palette.getString(level.equals("good") ? "success"
+                    : level.equals("warning") ? "warning" : level.equals("critical") ? "danger" : "text")));
+                String detail = node.isNull("detail") ? "—" : node.optString("detail", "—");
+                value.setTextSize(detail.length() > 20 ? 16 : 24);
+                value.setText(detail); value.setMaxLines(3);
+                value.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                row.addView(value, new LinearLayout.LayoutParams(0, -2, 0.62f));
+                rows.addView(row, new LinearLayout.LayoutParams(-1, 0, 1));
+            }
+            updateHealth();
+        }
+        private void updateHealth() {
+            String state = data == null ? "loading" : data.optString("state", "loading");
+            long age = System.currentTimeMillis() - observedAt;
+            boolean stale = observedAt <= 0 || age < -5000 || age > staleAfter;
+            String label = state.equals("ready") || state.equals("partial")
+                ? (stale ? "Stale" : "Live") : state;
+            String detail = data == null ? "" : data.optString("detail", "");
+            health.setText(label + (detail.isEmpty() ? "" : " · " + detail));
+            health.setTextColor(label.equals("Live") ? normal : warning);
+            rows.setAlpha(label.equals("Live") ? 1f : 0.5f);
+        }
+        @Override protected void onAttachedToWindow() { super.onAttachedToWindow(); updates.post(freshness); }
+        @Override protected void onDetachedFromWindow() { updates.removeCallbacks(freshness); super.onDetachedFromWindow(); }
+    }
+
+    /** Retained generic time-series primitive, using the shared spec and palette. */
+    private final class TrendView extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final JSONArray series;
+        private final String unit;
+        private final int foreground, muted, primary, border;
+        private double minX = Double.POSITIVE_INFINITY, maxX = Double.NEGATIVE_INFINITY;
+        private double minY = 0, maxY = 1, latestX = Double.NEGATIVE_INFINITY, latestY;
+        TrendView(JSONObject spec, JSONObject palette) throws Exception {
+            super(TvActivity.this); series = spec.getJSONArray("series"); unit = spec.optString("unit", "");
+            foreground = Color.parseColor(palette.getString("text")); muted = Color.parseColor(palette.getString("text_muted"));
+            primary = Color.parseColor(palette.getString("primary")); border = Color.parseColor(palette.getString("border"));
+            for (int s = 0; s < series.length(); s++) {
+                JSONArray points = series.getJSONObject(s).getJSONArray("points");
+                for (int p = 0; p < points.length(); p++) {
+                    JSONObject point = points.getJSONObject(p); double x = point.getDouble("x"), y = point.getDouble("y");
+                    minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+                    if (x >= latestX) { latestX = x; latestY = y; }
+                }
+            }
+            if (maxX == minX) { minX -= 1; maxX += 1; }
+            maxY += (maxY - minY) * 0.08;
+        }
+        @Override protected void onDraw(android.graphics.Canvas canvas) {
+            super.onDraw(canvas);
+            if (!Double.isFinite(minX) || getWidth() <= 0 || getHeight() <= 0) return;
+            float left = dp(20), right = getWidth() - dp(12), top = dp(48), bottom = getHeight() - dp(16);
+            if (bottom <= top || right <= left) return;
+            paint.setColor(foreground); paint.setStyle(Paint.Style.FILL); paint.setTextSize(dp(26));
+            canvas.drawText(String.format(java.util.Locale.ROOT, "%.0f %s", latestY, unit), 0, dp(32), paint);
+            paint.setColor(border); paint.setStrokeWidth(dp(1));
+            for (int i = 0; i < 3; i++) {
+                float y = top + (bottom - top) * i / 2f;
+                canvas.drawLine(left, y, right, y, paint);
+            }
+            paint.setColor(muted); paint.setTextSize(dp(10));
+            canvas.drawText("0", 0, bottom, paint);
+            paint.setColor(primary); paint.setStrokeWidth(dp(2));
+            for (int s = 0; s < series.length(); s++) {
+                JSONArray points = series.optJSONObject(s).optJSONArray("points");
+                android.graphics.Path path = new android.graphics.Path();
+                for (int p = 0; p < points.length(); p++) {
+                    JSONObject point = points.optJSONObject(p);
+                    float x = left + (float)((point.optDouble("x") - minX) / (maxX - minX)) * (right - left);
+                    float y = bottom - (float)((point.optDouble("y") - minY) / (maxY - minY)) * (bottom - top);
+                    if (p == 0) path.moveTo(x, y); else path.lineTo(x, y);
+                    paint.setStyle(Paint.Style.FILL); canvas.drawCircle(x, y, dp(3), paint);
+                }
+                paint.setStyle(Paint.Style.STROKE); canvas.drawPath(path, paint);
+            }
+            paint.setStyle(Paint.Style.FILL);
+        }
+    }
+
+    /** Dynamic primitive values are not geometry: don't re-rasterize PDFs per tick. */
+    private void stripStatusValues(JSONObject surface) throws Exception {
+        JSONObject content = surface.getJSONObject("content");
+        if (!content.optString("kind").equals("widget")) return;
+        JSONObject spec = content.getJSONObject("spec");
+        if (!spec.optString("kind").equals("status_list") && !spec.optString("kind").equals("time_series")) return;
+        spec.remove("nodes"); spec.remove("series"); spec.remove("unit"); spec.remove("data"); spec.remove("title");
+    }
+    private String structuralProjection(JSONObject projection) throws Exception {
+        JSONObject copy = new JSONObject(projection.toString()); copy.remove("revision");
+        JSONObject document = copy.getJSONObject("document"); document.remove("revision");
+        JSONArray surfaces = document.getJSONArray("surfaces");
+        for (int i = 0; i < surfaces.length(); i++) stripStatusValues(surfaces.getJSONObject(i));
+        JSONArray tiles = copy.getJSONArray("tiles");
+        for (int i = 0; i < tiles.length(); i++) stripStatusValues(tiles.getJSONObject(i).getJSONObject("surface"));
+        return copy.toString();
+    }
+
     @Override protected void onResume() {
         super.onResume();
         resumed = true;
         background.setActive(true);
         lastProjection = "";
+        lastStructure = "";
         if (workspaceMode) currentUrl = "";
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         video.start();
@@ -712,12 +992,26 @@ public final class TvActivity extends Activity {
             JSONObject projection = new JSONObject(raw);
             if (projection.has("error")) { showStatus(projection.getString("error")); return; }
             if (projection.isNull("document")) return;
+            currentWorkspaceId=projection.getJSONObject("document").getString("id");
+            if(channelScreen!=null && !currentWorkspaceId.equals(channelScreenWorkspace)) closeChannels();
             workspaceMode = true;
             JSONObject palette = projection.getJSONObject("palette");
+            String structure = structuralProjection(projection);
+            if (structure.equals(lastStructure)) {
+                JSONArray tiles = projection.getJSONArray("tiles");
+                for (int i = 0; i < tiles.length(); i++) {
+                    JSONObject surface = tiles.getJSONObject(i).getJSONObject("surface");
+                    StatusListView view = statusLists.get(surface.getString("id"));
+                    if (view != null) view.update(surface.getJSONObject("content").getJSONObject("spec"), palette);
+                }
+                lastProjection = raw;
+                return;
+            }
             frame.setBackgroundColor(Color.parseColor(palette.getString("background")));
             background.configure(projection.getJSONObject("document"), palette);
             selector.setBackgroundColor(Color.parseColor(palette.getString("surface")));
             styleControl(muteButton, palette, false);
+            styleControl(channelButton, palette, false);
             JSONObject catalog = projection.getJSONObject("catalog");
             JSONArray projects = catalog.getJSONArray("projects");
             String focusedProject = "";
@@ -748,6 +1042,7 @@ public final class TvActivity extends Activity {
                 frame.removeView(widget);
             }
             widgets.clear();
+            statusLists.clear();
             JSONArray tiles = projection.getJSONArray("tiles");
             boolean hasVideo = false;
             for (int i = 0; i < tiles.length(); i++) {
@@ -763,9 +1058,12 @@ public final class TvActivity extends Activity {
                     String error = nativeValidate(url);
                     if (error == null || !error.isEmpty()) throw new IllegalArgumentException("Stream rejected: " + error);
                     hasVideo = true;
-                    video.setVisibility(View.VISIBLE);
+                    if (channelScreen!=null && !surface.getString("id").equals(channelScreenSurface)) closeChannels();
+                    video.setVisibility(channelScreen==null?View.VISIBLE:View.INVISIBLE);
                     video.setLayoutParams(geometry);
+                    if(channelScreen!=null) channelScreen.setLayoutParams(new FrameLayout.LayoutParams(geometry));
                     surfaceTitle = surface.getString("title");
+                    videoSurfaceId = surface.getString("id");
                     setSurfaceMuted(nativeIsMuted());
                     if (!url.equals(currentUrl)) {
                         preparedPlayer = null;
@@ -774,6 +1072,11 @@ public final class TvActivity extends Activity {
                         showStatus("Connecting…");
                         video.setVideoURI(Uri.parse(url));
                     }
+                } else if (content.getString("kind").equals("widget")
+                    && (content.getJSONObject("spec").getString("kind").equals("status_list")
+                        || content.getJSONObject("spec").getString("kind").equals("time_series"))) {
+                    StatusListView list = new StatusListView(content.getJSONObject("spec"), palette);
+                    frame.addView(list, geometry); widgets.add(list); statusLists.put(surface.getString("id"), list);
                 } else if (content.getString("kind").equals("widget")
                     && content.getJSONObject("spec").getString("kind").equals("signal_view")) {
                     SignalView signal = new SignalView(surface.getString("id"), content.getJSONObject("spec"), palette);
@@ -815,10 +1118,14 @@ public final class TvActivity extends Activity {
                 }
             }
             if (!hasVideo) {
+                closeChannels();
+                videoSurfaceId=""; channelButton.setVisibility(View.GONE);
                 video.stopPlayback(); preparedPlayer = null; currentUrl = "";
                 video.setVisibility(View.INVISIBLE); muteButton.setVisibility(View.GONE);
                 status.setVisibility(View.GONE);
             } else {
+                channelButton.setVisibility(tunerEndpoint.isEmpty() ? View.GONE : View.VISIBLE);
+                channelButton.bringToFront();
                 muteButton.setVisibility(View.VISIBLE);
                 FrameLayout.LayoutParams chrome = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.RIGHT);
                 chrome.topMargin = barHeight(); muteButton.setLayoutParams(chrome);
@@ -827,6 +1134,7 @@ public final class TvActivity extends Activity {
             }
             selector.getParent().requestLayout();
             lastProjection = raw;
+            lastStructure = structure;
         } catch (Exception error) { showStatus("Workspace presentation failed: " + error.getMessage()); }
     }
 
