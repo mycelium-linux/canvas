@@ -15,6 +15,13 @@ use canvas::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if arguments.first().is_some_and(|argument| argument == "--android") {
+        if arguments.len() != 2 { return Err("usage: canvasctl --android ADB_SERIAL < presentation-request.json".into()); }
+        let status = std::process::Command::new("canvas-tvctl").arg(&arguments[1]).status()?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    if !arguments.is_empty() { return Err("Unknown canvasctl target option".into()); }
     let mut input = String::new();
     io::stdin().lock().read_to_string(&mut input)?;
     let input = input.trim();

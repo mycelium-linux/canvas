@@ -1,10 +1,13 @@
 //! Android platform shell. Rust owns command admission; Java owns the surface.
 use std::net::IpAddr;
+pub const CONTROL_PORT: u16 = 27841;
 
 #[cfg(feature = "shared-workspaces")]
 pub mod geometry;
 #[cfg(feature = "shared-workspaces")]
 pub mod workspaces;
+#[cfg(all(target_os = "android", feature = "android-native-video"))]
+mod native_control;
 
 #[cfg(all(target_os = "android", feature = "android-native-video"))]
 #[unsafe(no_mangle)]

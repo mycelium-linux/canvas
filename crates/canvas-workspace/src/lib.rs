@@ -12,6 +12,7 @@ use std::{
 
 pub mod chart;
 pub mod session;
+pub mod endpoint;
 pub mod view;
 
 pub const SCHEMA_VERSION: u32 = 1;

@@ -26,8 +26,8 @@ complete-document retention and transactional patches. Widget GPU dependencies
 are enabled only by `canvas-widgets/live`, not document parsing.
 
 Desktop filesystem storage, GPU resources and Android playback remain platform
-adapters. The TV has no live selector or authenticated control
-endpoint yet. Do not use a bundled Neo catalog to stand in for the TV's owner
+adapters. The TV has a native remote-focusable workspace selector and an
+ADB-authorized, app-credential control path. Do not use a bundled Neo catalog to stand in for the TV's owner
 catalog, or infer presentation success from metadata selection alone.
 
 Apple TV feasibility: the shared core type-checks for `aarch64-apple-tvos`, and
@@ -133,14 +133,55 @@ KOMO surface. The visible button toggles the player's own gain; Rust owns
 its mute state. This does not change TV master volume. The TV master mute is
 also currently enabled at the user's request, so unmuting the surface alone
 will not override that. This initial client has one audio surface; general
-per-surface IDs, workspace projection and tiling are not implemented yet.
+per-surface audio IDs are not implemented yet. Workspace geometry now comes
+from the active shared document's layout.
 Windowed mode uses Canvas's shared layout solver with the measured Android
 frame, and the decoder preserves aspect ratio inside those bounds.
 
-This is an ADB-authorized local operation, **not** an authenticated Canvas
-network control endpoint. Pairing, workspace projection and `canvasctl`
-integration are not implemented by this shim. Never copy an owner-local DCP
-token onto the TV to substitute for pairing.
+This is an ADB-authorized development operation, **not** production LAN pairing.
+Never copy an owner-local DCP token onto the TV to substitute for pairing.
+
+## Workspace control
+
+The development APK enables `run-as` through `android:debuggable`. Rust generates
+a private 0600 app credential, listens only on 127.0.0.1:27841 and accepts bounded
+newline-framed presentation requests. `canvas-tvctl` obtains that credential
+through an already-authorized, explicitly addressed ADB connection; it neither
+prints the credential nor exports a LAN control listener. Ephemeral ADB forwards
+are removed on exit. Do not ship this development provisioning method as a
+production pairing solution.
+
+Build the controller with:
+
+```sh
+cargo build --manifest-path crates/canvas-android/Cargo.toml \
+  --bin canvas-tvctl --features shared-workspaces
+printf 'inspect\n' | canvas-tvctl 192.168.2.97:5555
+printf 'workspace install config/deploy/firetv/workspaces.json\n' | canvas-tvctl 192.168.2.97:5555
+printf 'workspace switch clock\n' | canvas-tvctl 192.168.2.97:5555
+printf 'workspace switch television\n' | canvas-tvctl 192.168.2.97:5555
+```
+
+The source `canvasctl --android ADB_SERIAL` delegates to this controller.
+Existing installed desktop CLIs must be upgraded before using that option;
+the standalone controller is installed on Neo and avoids any local-catalog
+fallback. Text mutations inspect the same explicit TV target first. JSON
+requests preserve their supplied expected revision and fail when stale.
+
+`canvas-workspace::endpoint` owns commands, validation, revisions and receipts,
+independent of ADB. The Android remote and controller drive that same session.
+Workspace documents are atomically checkpointed in the app's private storage;
+invalid imports/patches retain the previous document. MENU focuses the selector;
+D-pad/OK switches between retained workspaces. Only the active workspace is
+presented. Supported initially: one hardware stream, digital clock and text
+scene summaries. Other kinds display explicit unsupported placeholders; this
+is not the full desktop GPU widget renderer.
+
+The endpoint's response confirms accepted presentation state, not completed
+hardware presentation. Verify the visible surface separately. A future
+Unibus Canvas adapter should carry this narrow contract, not own application
+state or discover devices. Mycelium can advertise distinct display, media and
+control capabilities; advertisement must never grant control permission.
 
 URLs must use an explicit private IPv4 address and HTTP, without embedded
 credentials or fragments. Errors are displayed rather than silently replacing

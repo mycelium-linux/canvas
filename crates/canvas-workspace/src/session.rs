@@ -4,6 +4,7 @@
 //! discovery, network credentials, filesystem, or desktop renderer dependency.
 use canvas_core::{Action, Actor, Catalog, WorkspaceState};
 
+#[derive(Clone)]
 pub struct Workspaces {
     catalog: Catalog,
     state: WorkspaceState,
@@ -61,6 +62,26 @@ impl Workspaces {
 
     pub fn document(&self) -> Option<&crate::WorkspaceDocument> {
         self.documents.get(self.selected())
+    }
+
+    pub fn document_for(&self, project: &str) -> Option<&crate::WorkspaceDocument> {
+        self.documents.get(project)
+    }
+
+    pub fn palette(&self) -> Result<Option<canvas_core::ThemePalette>, String> {
+        self.document()
+            .map(|document| {
+                document
+                    .resolved_theme(&self.catalog)
+                    .map(|theme| theme.palette())
+                    .map_err(|error| error.to_string())
+            })
+            .transpose()
+    }
+
+    pub fn retained_projection(&self) -> serde_json::Value {
+        serde_json::json!({"catalog":self.catalog,
+            "documents":self.documents.values().collect::<Vec<_>>(), "selected":self.selected()})
     }
 
     /// Revision-bound patches are transactional: validation failure leaves the
