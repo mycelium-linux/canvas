@@ -25,6 +25,15 @@ when switching workspaces. The controls inherit the shared Canvas palette.
 Use the remote's D-pad to scroll the page and OK to click previous/next page controls.
 The workspace strip is 32 dp tall; the page toolbar is 28 dp. Full-width rendering
 avoids shrinking an entire portrait page to the TV's landscape height.
+Portrait-shaped tiles initially fit the complete page; landscape-shaped tiles
+initially use reading width. The `Read` / `Fit` control switches between these
+presentations using the cached raster, without another PDF decode. Thus a
+half-screen résumé can show its whole page while dense full-width documents
+remain scrollable. This sizing choice is local renderer state, like the page cursor.
+Single-page PDFs automatically hide the bottom toolbar, filename and `1 / 1`.
+Focus the document with the remote's D-pad; OK toggles Fit/Read without needing
+on-screen buttons. Up/down scrolls the enlarged reading view. Multi-page
+documents retain remote-focusable page controls.
 Page cursors currently belong to the local PDF renderer: they are **not** yet
 persisted in the shared view or synchronized across screens. Workspace selection
 is retained; returning to the PDF workspace starts each document at page one.
@@ -203,9 +212,13 @@ independent of ADB. The Android remote and controller drive that same session.
 Workspace documents are atomically checkpointed in the app's private storage;
 invalid imports/patches retain the previous document. MENU focuses the selector;
 D-pad/OK switches between retained workspaces. Only the active workspace is
-presented. Supported: one hardware stream, digital clock, local PDF assets and
+presented. Supported: one hardware stream, digital or analog clock, local PDF assets and
 text scene summaries. Other kinds display explicit unsupported placeholders; this
 is not the full desktop GPU widget renderer.
+
+The analog clock reuses `fpl-gfx::AnalogClock` geometry and semantic theme roles.
+Android paints the shared primitives using its native Canvas, refreshing at
+25 Hz while visible; it does not maintain a separate clock design.
 
 The endpoint's response confirms accepted presentation state, not completed
 hardware presentation. Verify the visible surface separately. A future

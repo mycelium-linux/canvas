@@ -20,6 +20,8 @@ import android.widget.TextClock;
 import android.widget.ImageView;
 import android.widget.ScrollView;
 import android.graphics.Bitmap;
+import android.graphics.Paint;
+import java.util.Calendar;
 import android.graphics.pdf.PdfRenderer;
 import android.os.ParcelFileDescriptor;
 import java.io.File;
@@ -47,6 +49,7 @@ public final class TvActivity extends Activity {
     private static native String nativeProjection(int width, int height);
     private static native String nativeSelectWorkspace(String project);
     private static native String nativePdfAsset(String asset);
+    private static native float[] nativeClockFrame(int width, int height, int hour, int minute, float second);
     private VideoView video;
     private TextView status;
     private FrameLayout frame;
@@ -63,15 +66,60 @@ public final class TvActivity extends Activity {
     private final ThreadPoolExecutor pdfJobs = new ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS,
         new ArrayBlockingQueue<Runnable>(8));
 
+    /** Paints canonical gfx primitives; no duplicate clock geometry in Java. */
+    private final class AnalogClockView extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Calendar time = Calendar.getInstance();
+        private final int[] inks;
+        AnalogClockView(JSONObject palette) throws Exception {
+            super(TvActivity.this);
+            inks = new int[]{Color.parseColor(palette.getString("surface")),
+                Color.parseColor(palette.getString("text_muted")),
+                Color.parseColor(palette.getString("text")),
+                Color.parseColor(palette.getString("primary"))};
+            setBackgroundColor(Color.parseColor(palette.getString("background")));
+            setContentDescription("Analog clock");
+            paint.setStrokeCap(Paint.Cap.ROUND);
+        }
+        @Override protected void onDraw(android.graphics.Canvas target) {
+            super.onDraw(target);
+            if (!resumed || getWidth() == 0 || getHeight() == 0) return;
+            time.setTimeInMillis(System.currentTimeMillis());
+            float[] records = nativeClockFrame(getWidth(), getHeight(), time.get(Calendar.HOUR_OF_DAY),
+                time.get(Calendar.MINUTE), time.get(Calendar.SECOND) + time.get(Calendar.MILLISECOND) / 1000f);
+            if (records == null || records.length != 65 * 8) throw new IllegalStateException("Invalid clock primitives");
+            for (int i = 0; i < records.length; i += 8) {
+                paint.setColor(inks[(int)records[i + 6]]);
+                if (records[i] == 1f) {
+                    paint.setStyle(Paint.Style.FILL);
+                    target.drawCircle(records[i + 1], records[i + 2], records[i + 3], paint);
+                    if (records[i + 5] > 0) {
+                        paint.setStyle(Paint.Style.STROKE);
+                        paint.setStrokeWidth(records[i + 5]);
+                        paint.setColor(inks[(int)records[i + 7]]);
+                        target.drawCircle(records[i + 1], records[i + 2], records[i + 3], paint);
+                    }
+                } else if (records[i] == 5f) {
+                    paint.setStyle(Paint.Style.STROKE); paint.setStrokeWidth(records[i + 5]);
+                    target.drawLine(records[i + 1], records[i + 2], records[i + 3], records[i + 4], paint);
+                } else throw new IllegalStateException("Unsupported clock primitive");
+            }
+            postInvalidateDelayed(40);
+        }
+    }
+
     /** Platform raster adapter only; source identity and geometry come from Rust. */
     private final class PdfSurface extends LinearLayout {
         private final ImageView image;
         private final ScrollView scroll;
+        private final LinearLayout controls;
         private final TextView label;
-        private final Button previous, next;
+        private final Button previous, next, sizing;
         private final String asset;
         private final String title;
-        private final int rasterWidth, viewWidth;
+        private final int rasterWidth, viewWidth, tileHeight;
+        private int viewHeight;
+        private boolean fitPage;
         private int pageIndex, pageCount, generation;
         private boolean disposed, busy;
         private Bitmap bitmap;
@@ -81,31 +129,59 @@ public final class TvActivity extends Activity {
             super(TvActivity.this);
             this.asset = source.toString(); this.title = title;
             viewWidth = width;
+            tileHeight = height;
+            viewHeight = Math.max(1, height - dp(28));
+            fitPage = width < viewHeight;
             rasterWidth = Math.max(1, Math.min(width, 1920));
             setOrientation(VERTICAL);
             setBackgroundColor(Color.parseColor(palette.getString("surface")));
             image = new ImageView(TvActivity.this);
             image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            image.setAdjustViewBounds(true);
             scroll = new ScrollView(TvActivity.this);
             scroll.setFillViewport(false);
             scroll.setFocusable(true);
             scroll.addView(image, new ScrollView.LayoutParams(-1, -2));
             addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-            LinearLayout controls = new LinearLayout(TvActivity.this);
+            controls = new LinearLayout(TvActivity.this);
             controls.setGravity(Gravity.CENTER_VERTICAL);
             previous = new Button(TvActivity.this); previous.setText("‹");
             next = new Button(TvActivity.this); next.setText("›");
+            sizing = new Button(TvActivity.this); sizing.setTextSize(12);
+            sizing.setText(fitPage ? "Read" : "Fit");
             styleControl(previous, palette, false); styleControl(next, palette, false);
+            styleControl(sizing, palette, false);
             label = new TextView(TvActivity.this); label.setTextSize(12);
             label.setGravity(Gravity.CENTER);
             label.setTextColor(Color.parseColor(palette.getString("text")));
             controls.addView(previous, new LinearLayout.LayoutParams(80, -1));
             controls.addView(label, new LinearLayout.LayoutParams(0, -1, 1));
+            controls.addView(sizing, new LinearLayout.LayoutParams(dp(72), -1));
             controls.addView(next, new LinearLayout.LayoutParams(80, -1));
             addView(controls, new LinearLayout.LayoutParams(-1, dp(28)));
             previous.setOnClickListener(v -> render(pageIndex - 1));
             next.setOnClickListener(v -> render(pageIndex + 1));
+            sizing.setOnClickListener(v -> toggleSizing());
+            scroll.setOnKeyListener((v, key, event) -> {
+                if (key != KeyEvent.KEYCODE_DPAD_CENTER && key != KeyEvent.KEYCODE_ENTER) return false;
+                if (event.getAction() == KeyEvent.ACTION_UP) toggleSizing();
+                return true;
+            });
             render(0);
+        }
+
+        private void toggleSizing() {
+            fitPage = !fitPage;
+            sizing.setText(fitPage ? "Read" : "Fit");
+            if (bitmap != null) applyPageBounds(bitmap);
+        }
+
+        private void applyPageBounds(Bitmap page) {
+            image.setMaxWidth(viewWidth);
+            image.setMaxHeight(fitPage ? viewHeight : Integer.MAX_VALUE);
+            image.setLayoutParams(new ScrollView.LayoutParams(-1, fitPage ? viewHeight
+                : Math.max(1, (int)((float)page.getHeight() / page.getWidth() * viewWidth))));
+            scroll.scrollTo(0, 0);
         }
 
         private void render(int requested) {
@@ -133,10 +209,10 @@ public final class TvActivity extends Activity {
                             final Bitmap ready = result;
                             runOnUiThread(() -> {
                                 if (disposed || generation != ticket) { ready.recycle(); return; }
-                                image.setLayoutParams(new ScrollView.LayoutParams(-1,
-                                    Math.max(1, (int)((float)ready.getHeight() / ready.getWidth() * viewWidth))));
+                                controls.setVisibility(count == 1 ? View.GONE : View.VISIBLE);
+                                viewHeight = Math.max(1, tileHeight - (count == 1 ? 0 : dp(28)));
+                                applyPageBounds(ready);
                                 image.setImageBitmap(ready);
-                                scroll.scrollTo(0, 0);
                                 if (bitmap != null) bitmap.recycle();
                                 bitmap = ready; pageIndex = requested; pageCount = count; busy = false;
                                 label.setText(title + " · " + (requested + 1) + " / " + count);
@@ -420,6 +496,11 @@ public final class TvActivity extends Activity {
                     && content.getJSONObject("asset").getString("media_type").equals("application/pdf")) {
                     PdfSurface pdf = new PdfSurface(content.getJSONObject("asset"), surface.getString("title"), palette, w, h);
                     frame.addView(pdf, geometry); widgets.add(pdf);
+                } else if (content.getString("kind").equals("widget")
+                    && content.getJSONObject("spec").getString("kind").equals("clock")
+                    && content.getJSONObject("spec").optString("mode", "digital").equals("analog")) {
+                    AnalogClockView clock = new AnalogClockView(palette);
+                    frame.addView(clock, geometry); widgets.add(clock);
                 } else {
                     TextView widget;
                     String kind = content.getString("kind");

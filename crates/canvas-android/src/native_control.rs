@@ -138,6 +138,42 @@ fn string(env: &mut jni::JNIEnv, value: String) -> jni::sys::jstring {
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeClockFrame(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    width: jni::sys::jint,
+    height: jni::sys::jint,
+    hour: jni::sys::jint,
+    minute: jni::sys::jint,
+    second: jni::sys::jfloat,
+) -> jni::sys::jfloatArray {
+    let result = (|| -> Result<Vec<f32>, &'static str> {
+        crate::clock::paint_records(
+            u32::try_from(width).map_err(|_| "Invalid width")?,
+            u32::try_from(height).map_err(|_| "Invalid height")?,
+            u8::try_from(hour).map_err(|_| "Invalid hour")?,
+            u8::try_from(minute).map_err(|_| "Invalid minute")?,
+            second,
+        )
+    })();
+    match result {
+        Ok(records) => match env.new_float_array(records.len() as i32) {
+            Ok(array) => {
+                if env.set_float_array_region(&array, 0, &records).is_err() {
+                    return std::ptr::null_mut();
+                }
+                array.into_raw()
+            }
+            Err(_) => std::ptr::null_mut(),
+        },
+        Err(error) => {
+            let _ = env.throw_new("java/lang/IllegalArgumentException", error);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativePdfAsset(
     mut env: jni::JNIEnv,
     _class: jni::objects::JClass,

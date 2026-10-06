@@ -8,6 +8,8 @@ pub mod geometry;
 pub mod workspaces;
 #[cfg(feature = "shared-workspaces")]
 pub mod assets;
+#[cfg(feature = "android-native-video")]
+pub mod clock;
 #[cfg(all(target_os = "android", feature = "android-native-video"))]
 mod native_control;
 
