@@ -696,7 +696,7 @@ public final class TvActivity extends Activity {
             addView(title, new LinearLayout.LayoutParams(-1, -2));
             footer = new TextView(TvActivity.this); footer.setTextSize(13);
             footer.setTextColor(Color.parseColor(palette.getString("text_muted")));
-            final long interval = Math.max(100L, Math.min(5000L, spec.optLong("refresh_ms", 250L)));
+            final long interval = Math.max(33L, Math.min(5000L, spec.optLong("refresh_ms", 250L)));
             final int[] inks = new int[]{
                 Color.parseColor(palette.getString("background")), Color.parseColor(palette.getString("surface")),
                 Color.parseColor(palette.getString("surface_muted")), Color.parseColor(palette.getString("background")),
@@ -712,6 +712,8 @@ public final class TvActivity extends Activity {
                 float[] records;
                 JSONArray labels;
                 int oldWidth, oldHeight;
+                final java.util.HashMap<String, Float> needleLevels = new java.util.HashMap<>();
+                long lastNeedleFrame;
                 @Override protected void onDraw(android.graphics.Canvas target) {
                     super.onDraw(target);
                     if (!resumed || getWidth() < 2 || getHeight() < 2) return;
@@ -722,16 +724,47 @@ public final class TvActivity extends Activity {
                         String state = data.getString("state");
                         String label = state + " · " + data.optString("detail", "");
                         if (!footer.getText().toString().equals(label)) footer.setText(label);
-                        String raw = snapshot.getJSONObject("frame").toString();
-                        if (!raw.equals(previous) || oldWidth != getWidth() || oldHeight != getHeight()) {
-                            records = nativeSignalFrame(getWidth(), getHeight(), raw);
+                        JSONObject frame = snapshot.getJSONObject("frame");
+                        String raw = frame.toString();
+                        String paintRaw = raw;
+                        int[] frameInks = inks;
+                        boolean needleAnimation = false;
+                        if (frame.optString("view").equals("console")) {
+                            JSONObject meter = frame.getJSONObject("panel").getJSONObject("meter");
+                            if (meter.optString("face").equals("highlight")) {
+                                frameInks = inks.clone();
+                                frameInks[15] = Color.parseColor(palette.optString("meter_face", "#eadfbd"));
+                                frameInks[14] = Color.parseColor(palette.optString("meter_ink", "#302a21"));
+                            }
+                            int smoothing = meter.optInt("smoothing_ms", 0);
+                            if (smoothing > 0 && meter.optString("style").equals("needle") && state.equals("ready")) {
+                                long now = android.os.SystemClock.elapsedRealtime();
+                                float blend = lastNeedleFrame == 0 ? 1f : (float)(1 - Math.exp(-Math.min(250, now-lastNeedleFrame)/(double)smoothing));
+                                lastNeedleFrame = now;
+                                JSONObject animated = new JSONObject(raw);
+                                JSONArray strips = animated.getJSONObject("panel").getJSONArray("strips");
+                                for (int n=0; n<strips.length(); n++) {
+                                    JSONObject strip = strips.getJSONObject(n);
+                                    String key = strip.getString("name");
+                                    if (strip.isNull("peak_dbfs")) { needleLevels.remove(key); continue; }
+                                    float goal = (float)strip.getDouble("peak_dbfs");
+                                    float old = needleLevels.containsKey(key) ? needleLevels.get(key) : goal;
+                                    float shown = old + (goal-old)*blend;
+                                    needleLevels.put(key, shown); strip.put("peak_dbfs", shown);
+                                }
+                                paintRaw = animated.toString(); needleAnimation = true;
+                            }
+                        }
+                        if (needleAnimation || !raw.equals(previous) || oldWidth != getWidth() || oldHeight != getHeight()) {
+                            records = nativeSignalFrame(getWidth(), getHeight(), paintRaw);
+                            if (!raw.equals(previous) || oldWidth != getWidth() || oldHeight != getHeight())
                             labels = new JSONArray(nativeSignalLabels(getWidth(), getHeight(), raw));
                             if (records == null || records.length % 8 != 0) throw new IllegalStateException("Invalid signal paint records");
                             previous = raw; oldWidth = getWidth(); oldHeight = getHeight();
                         }
                         ink.setAlpha(state.equals("ready") ? 255 : 100);
                         for (int i = 0; i < records.length; i += 8) {
-                            ink.setColor(inks[(int)records[i+6]]);
+                            ink.setColor(frameInks[(int)records[i+6]]);
                             ink.setAlpha(state.equals("ready") ? 255 : 100);
                             if (records[i] == 0f) {
                                 ink.setStyle(Paint.Style.FILL);
@@ -749,7 +782,7 @@ public final class TvActivity extends Activity {
                             float x = (float)box.getDouble("x"), y = (float)box.getDouble("y");
                             float width = (float)box.getDouble("width"), height = (float)box.getDouble("height");
                             ink.setTextSize(Math.max(10f, Math.min(26f, height * 0.8f)));
-                            ink.setColor(inks[text.getInt("role")]); ink.setAlpha(state.equals("ready") ? 255 : 100);
+                            ink.setColor(frameInks[text.getInt("role")]); ink.setAlpha(state.equals("ready") ? 255 : 100);
                             String value = text.getString("text");
                             if (ink.measureText(value) > width) {
                                 int count = ink.breakText(value, true, Math.max(0f, width-ink.measureText("…")), null);

@@ -69,6 +69,36 @@ pub fn paint_records(width: u32, height: u32, raw: &str) -> Result<Vec<f32>, Str
 mod tests {
     use super::*;
     #[test]
+    fn console_meter_records_use_shared_needle_and_led_geometry() {
+        for style in [
+            fpl_gfx::console::MeterStyle::Needle,
+            fpl_gfx::console::MeterStyle::Led,
+        ] {
+            let frame = SignalFrame::Console {
+                panel: fpl_gfx::console::Console {
+                    strips: vec![fpl_gfx::console::Strip {
+                        show_meter: true,
+                        name: "L".into(),
+                        detail: "Monitor output".into(),
+                        state: fpl_gfx::topology::State::Connected,
+                        peak_dbfs: Some(-12.0),
+                        gain_db: None,
+                    }],
+                    columns: true,
+                    meter: fpl_gfx::console::MeterConfig {
+                        style,
+                        ..Default::default()
+                    },
+                },
+            };
+            let raw = serde_json::to_string(&frame).unwrap();
+            let records = paint_records(400, 240, &raw).unwrap();
+            assert_eq!(records.len() % 8, 0);
+            assert!(records.len() < 800);
+            assert!(label_records(400, 240, &raw).unwrap().contains("dBFS"));
+        }
+    }
+    #[test]
     fn topology_uses_shared_cards_cables_and_label_anchors() {
         let raw = r#"{"view":"topology","graph":{"nodes":[{"id":"a","label":"Keys","lane":0,"state":"connected","level":null},{"id":"b","label":"Synth","lane":1,"state":"configured","level":0.5}],"edges":[{"source":"a","target":"b","state":"configured"}]}}"#;
         let records = paint_records(800, 400, raw).unwrap();
