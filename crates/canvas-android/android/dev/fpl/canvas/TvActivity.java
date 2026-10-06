@@ -62,6 +62,8 @@ public final class TvActivity extends Activity {
     private static native String nativePdfAsset(String asset);
     private static native float[] nativeClockFrame(int width, int height, int hour, int minute, float second);
     private static native String nativeBackgroundProgram(String id);
+    private static native String nativeSignalSnapshot(String id);
+    private static native float[] nativeSignalFrame(int width, int height, String frame);
     private GpuBackground background;
     private VideoView video;
     private TextView status;
@@ -555,6 +557,75 @@ public final class TvActivity extends Activity {
         applyIntent(intent);
     }
 
+    /** Paints bounded gfx signal records; owns no MIDI, FFT or waveform reduction. */
+    private final class SignalView extends LinearLayout {
+        private final TextView footer;
+        SignalView(String id, JSONObject spec, JSONObject palette) throws Exception {
+            super(TvActivity.this);
+            setOrientation(VERTICAL);
+            setBackgroundColor(Color.parseColor(palette.getString("surface")));
+            int pad = Math.round(16 * getResources().getDisplayMetrics().density);
+            setPadding(pad, pad, pad, pad);
+            TextView title = new TextView(TvActivity.this);
+            title.setText(spec.getString("title")); title.setTextSize(20);
+            title.setTextColor(Color.parseColor(palette.getString("text")));
+            addView(title, new LinearLayout.LayoutParams(-1, -2));
+            footer = new TextView(TvActivity.this); footer.setTextSize(13);
+            footer.setTextColor(Color.parseColor(palette.getString("text_muted")));
+            final long interval = Math.max(100L, Math.min(5000L, spec.optLong("refresh_ms", 250L)));
+            final int[] inks = new int[]{
+                Color.parseColor(palette.getString("background")), Color.parseColor(palette.getString("surface")),
+                Color.parseColor(palette.getString("surface_muted")), Color.parseColor(palette.getString("background")),
+                Color.parseColor(palette.getString("text")), Color.parseColor(palette.getString("text_muted")),
+                Color.parseColor(palette.getString("primary")), Color.parseColor(palette.getString("info")),
+                Color.parseColor(palette.getString("success")), Color.parseColor(palette.getString("warning")),
+                Color.parseColor(palette.getString("danger")), Color.parseColor(palette.getString("success")),
+                Color.parseColor(palette.getString("warning")), Color.parseColor(palette.getString("border")),
+                Color.BLACK, Color.parseColor(palette.getString("text"))};
+            View plot = new View(TvActivity.this) {
+                final Paint ink = new Paint(Paint.ANTI_ALIAS_FLAG);
+                String previous = "";
+                float[] records;
+                int oldWidth, oldHeight;
+                @Override protected void onDraw(android.graphics.Canvas target) {
+                    super.onDraw(target);
+                    if (!resumed || getWidth() < 2 || getHeight() < 2) return;
+                    try {
+                        JSONObject snapshot = new JSONObject(nativeSignalSnapshot(id));
+                        if (snapshot.has("error")) throw new IllegalStateException(snapshot.getString("error"));
+                        JSONObject data = snapshot.getJSONObject("data");
+                        String state = data.getString("state");
+                        String label = state + " · " + data.optString("detail", "");
+                        if (!footer.getText().toString().equals(label)) footer.setText(label);
+                        String raw = snapshot.getJSONObject("frame").toString();
+                        if (!raw.equals(previous) || oldWidth != getWidth() || oldHeight != getHeight()) {
+                            records = nativeSignalFrame(getWidth(), getHeight(), raw);
+                            if (records == null || records.length % 8 != 0) throw new IllegalStateException("Invalid signal paint records");
+                            previous = raw; oldWidth = getWidth(); oldHeight = getHeight();
+                        }
+                        ink.setAlpha(state.equals("ready") ? 255 : 100);
+                        for (int i = 0; i < records.length; i += 8) {
+                            ink.setColor(inks[(int)records[i+6]]);
+                            ink.setAlpha(state.equals("ready") ? 255 : 100);
+                            if (records[i] == 0f) {
+                                ink.setStyle(Paint.Style.FILL);
+                                target.drawRoundRect(records[i+1], records[i+2], records[i+1]+records[i+3],
+                                    records[i+2]+records[i+4], records[i+5], records[i+5], ink);
+                            } else if (records[i] == 5f) {
+                                ink.setStyle(Paint.Style.STROKE); ink.setStrokeCap(Paint.Cap.ROUND);
+                                ink.setStrokeWidth(records[i+5]);
+                                target.drawLine(records[i+1], records[i+2], records[i+3], records[i+4], ink);
+                            } else throw new IllegalStateException("Unsupported signal primitive");
+                        }
+                    } catch (Exception error) { footer.setText("Signal unavailable: " + error.getMessage()); }
+                    postInvalidateDelayed(interval);
+                }
+            };
+            addView(plot, new LinearLayout.LayoutParams(-1, 0, 1f));
+            addView(footer, new LinearLayout.LayoutParams(-1, -2));
+        }
+    }
+
     @Override protected void onResume() {
         super.onResume();
         resumed = true;
@@ -685,6 +756,10 @@ public final class TvActivity extends Activity {
                         showStatus("Connecting…");
                         video.setVideoURI(Uri.parse(url));
                     }
+                } else if (content.getString("kind").equals("widget")
+                    && content.getJSONObject("spec").getString("kind").equals("signal_view")) {
+                    SignalView signal = new SignalView(surface.getString("id"), content.getJSONObject("spec"), palette);
+                    frame.addView(signal, geometry); widgets.add(signal);
                 } else if (content.getString("kind").equals("asset")
                     && content.getJSONObject("asset").getString("media_type").equals("application/pdf")) {
                     PdfSurface pdf = new PdfSurface(content.getJSONObject("asset"), surface.getString("title"), palette, w, h);

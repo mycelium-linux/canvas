@@ -8,6 +8,8 @@ pub mod assets;
 pub mod background;
 #[cfg(feature = "android-native-video")]
 pub mod clock;
+#[cfg(feature = "android-native-video")]
+pub mod signals;
 #[cfg(feature = "shared-workspaces")]
 pub mod geometry;
 #[cfg(all(target_os = "android", feature = "android-native-video"))]

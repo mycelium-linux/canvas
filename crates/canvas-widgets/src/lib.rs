@@ -192,6 +192,7 @@ fn default_schema_version() -> u32 {
 /// Adding a variant to [`WidgetKind`] means adding its tag here;
 /// `every_known_widget_kind_is_listed` fails if they drift apart.
 pub const KNOWN_WIDGET_KINDS: &[&str] = &[
+    "signal_view",
     "quant",
     "stat",
     "time_series",
@@ -251,6 +252,9 @@ pub fn is_known_widget_kind(tag: &str) -> bool {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum WidgetKind {
+    /// Bounded renderer-neutral signal snapshot; gfx owns its typed validation
+    /// and geometry. WidgetData owns source identity, units and freshness.
+    SignalView { title: String, frame: serde_json::Value },
     /// Domain-owned quantitative visualizations sharing the common widget shell.
     Quant { widget: quant::QuantWidget },
     /// Prometheus-style single value with optional trend and retained history.
@@ -3185,6 +3189,12 @@ impl WidgetSpec {
                 !format.is_empty() && format.len() <= 64,
                 "clock format must be 1-64 characters",
             )?,
+            WidgetKind::SignalView { title, frame } => {
+                check(!title.is_empty() && title.len() <= 128, "signal title must be 1-128 bytes")?;
+                let frame: fpl_gfx::signals::SignalFrame = serde_json::from_value(frame.clone())
+                    .map_err(|error| Error(format!("invalid signal frame: {error}")))?;
+                frame.validate().map_err(|error| Error(error.to_string()))?;
+            }
             WidgetKind::Status { .. } => {}
             WidgetKind::Module { module, inputs } => {
                 check(
@@ -3502,6 +3512,7 @@ pub fn size_hint(kind: &WidgetKind, metrics: &canvas_core::ThemeMetrics) -> Size
     let hero = metrics.hero;
     let digit = 0.6;
     match kind {
+        WidgetKind::SignalView { .. } => SizeHint::new(240.0, 140.0, 640.0, 320.0, 2.0),
         // A number and its label. Gains nothing from height, so comfortable is
         // close to min; extra room here is room a chart could have used.
         WidgetKind::Stat { .. } => SizeHint::new(

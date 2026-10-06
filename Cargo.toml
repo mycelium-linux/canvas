@@ -7,6 +7,10 @@ resolver = "2"
 [patch.crates-io]
 iced_wgpu = { path = "vendor/iced_wgpu" }
 
+# Local ecosystem development: one gfx identity for widgets and Coherence.
+[patch."https://github.com/ajmwagar/gfx.git"]
+fpl-gfx = { path = "../gfx" }
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"

@@ -43,8 +43,10 @@ fn dispatch(raw: &str) -> String {
                 if let Err(error) = saved {
                     return serde_json::json!({"ok":false,"error":format!("Checkpoint failed: {error}")}).to_string();
                 }
-                *endpoint = next;
             }
+            // Transient display frames intentionally leave the checkpoint
+            // unchanged, but must still become the live renderer's state.
+            *endpoint = next;
             reply
         }
         Err(_) => r#"{"ok":false,"error":"Presentation state unavailable"}"#.into(),
@@ -135,6 +137,57 @@ fn string(env: &mut jni::JNIEnv, value: String) -> jni::sys::jstring {
     env.new_string(value)
         .map(|s| s.into_raw())
         .unwrap_or(std::ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeSignalSnapshot(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    id: jni::objects::JString,
+) -> jni::sys::jstring {
+    let snapshot = env
+        .get_string(&id)
+        .ok()
+        .and_then(|s| endpoint().lock().ok()?.surface_snapshot(&String::from(s)));
+    string(
+        &mut env,
+        snapshot
+            .unwrap_or_else(|| serde_json::json!({"error":"Signal snapshot unavailable"}))
+            .to_string(),
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeSignalFrame(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    width: jni::sys::jint,
+    height: jni::sys::jint,
+    raw: jni::objects::JString,
+) -> jni::sys::jfloatArray {
+    let result = (|| -> Result<Vec<f32>, String> {
+        let raw: String = env.get_string(&raw).map_err(|e| e.to_string())?.into();
+        crate::signals::paint_records(
+            u32::try_from(width).map_err(|_| "Invalid width")?,
+            u32::try_from(height).map_err(|_| "Invalid height")?,
+            &raw,
+        )
+    })();
+    match result {
+        Ok(records) => match env.new_float_array(records.len() as i32) {
+            Ok(array) => {
+                if env.set_float_array_region(&array, 0, &records).is_err() {
+                    return std::ptr::null_mut();
+                }
+                array.into_raw()
+            }
+            Err(_) => std::ptr::null_mut(),
+        },
+        Err(error) => {
+            let _ = env.throw_new("java/lang/IllegalArgumentException", error);
+            std::ptr::null_mut()
+        }
+    }
 }
 
 #[unsafe(no_mangle)]

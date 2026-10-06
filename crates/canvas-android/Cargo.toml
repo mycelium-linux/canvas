@@ -24,7 +24,7 @@ serde_json = { version = "1", optional = true }
 getrandom = { version = "0.3", optional = true }
 subtle = { version = "2", optional = true }
 sha2 = { version = "0.10", optional = true }
-fpl-gfx = { git = "https://github.com/ajmwagar/gfx.git", rev = "6e4b5a8e4cfe9a229086c906fa741f147a34e4c6", default-features = false, optional = true }
+fpl-gfx = { path = "../../../gfx", default-features = false, optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.21", optional = true }

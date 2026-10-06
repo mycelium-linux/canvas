@@ -19,6 +19,13 @@ pub struct Request {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
+    /// Transient display data, not a document edit or a persisted checkpoint.
+    SurfaceSnapshot {
+        workspace_id: String,
+        surface_id: String,
+        frame: serde_json::Value,
+        data: canvas_widgets::WidgetData,
+    },
     Inspect,
     ReadDocument,
     Install {
@@ -42,6 +49,14 @@ pub struct Endpoint {
     owner: String,
     revision: u64,
     session: Option<Workspaces>,
+    frames: std::collections::BTreeMap<
+        String,
+        (
+            serde_json::Value,
+            canvas_widgets::WidgetData,
+            std::time::Instant,
+        ),
+    >,
 }
 
 impl Endpoint {
@@ -50,6 +65,7 @@ impl Endpoint {
             owner: owner.into(),
             revision: 1,
             session: None,
+            frames: Default::default(),
         }
     }
 
@@ -65,6 +81,33 @@ impl Endpoint {
     pub fn checkpoint(&self) -> serde_json::Value {
         serde_json::json!({"schema_version":1,"owner":self.owner,"revision":self.revision,
             "projection":self.session.as_ref().map(Workspaces::retained_projection)})
+    }
+
+    /// Latest transient frame for a currently declared signal surface. The
+    /// receiver's monotonic clock owns staleness; frames never survive restart.
+    pub fn surface_snapshot(&self, surface_id: &str) -> Option<serde_json::Value> {
+        let document = self.session.as_ref()?.document()?;
+        let surface = document.surfaces.iter().find(|s| s.id == surface_id)?;
+        let crate::SurfaceContent::Widget { spec } = &surface.content else {
+            return None;
+        };
+        let canvas_widgets::WidgetKind::SignalView { frame, .. } = &spec.kind else {
+            return None;
+        };
+        let (frame, mut data) = self.frames.get(surface_id).map_or_else(
+            || (frame.clone(), spec.data.clone()),
+            |(frame, data, received)| {
+                let mut data = data.clone();
+                if received.elapsed() > std::time::Duration::from_secs(3) {
+                    data.state = canvas_widgets::WidgetDataState::Stale;
+                }
+                (frame.clone(), data)
+            },
+        );
+        if !self.frames.contains_key(surface_id) {
+            data.state = canvas_widgets::WidgetDataState::NoData;
+        }
+        Some(serde_json::json!({"frame":frame, "data":data}))
     }
 
     pub fn restore(owner: &str, raw: &str) -> Result<Self, String> {
@@ -129,6 +172,42 @@ impl Endpoint {
             .checked_add(1)
             .ok_or("Endpoint revision exhausted")?;
         match request.command {
+            Command::SurfaceSnapshot {
+                workspace_id,
+                surface_id,
+                frame,
+                data,
+            } => {
+                let document = self
+                    .session
+                    .as_ref()
+                    .and_then(Workspaces::document)
+                    .ok_or("No active workspace")?;
+                if document.id != workspace_id {
+                    return Err("Snapshot target is not active".into());
+                }
+                let surface = document
+                    .surfaces
+                    .iter()
+                    .find(|s| s.id == surface_id)
+                    .ok_or("Snapshot surface is not declared")?;
+                let crate::SurfaceContent::Widget { spec } = &surface.content else {
+                    return Err("Snapshot surface is not a widget".into());
+                };
+                let canvas_widgets::WidgetKind::SignalView { title, .. } = &spec.kind else {
+                    return Err("Snapshot surface is not a signal view".into());
+                };
+                let mut next = (*spec).clone();
+                next.kind = canvas_widgets::WidgetKind::SignalView {
+                    title: title.clone(),
+                    frame: frame.clone(),
+                };
+                next.data = data.clone();
+                next.validate().map_err(|e| e.to_string())?;
+                self.frames
+                    .insert(surface_id, (frame, data, std::time::Instant::now()));
+                return Ok(serde_json::json!({"accepted":true}));
+            }
             Command::Inspect => {}
             Command::ReadDocument => {
                 return serde_json::to_value(self.session.as_ref().and_then(Workspaces::document))
@@ -164,6 +243,7 @@ impl Endpoint {
                     return Err("Selected project has no document".into());
                 }
                 self.session = Some(next);
+                self.frames.clear();
             }
             Command::WorkspaceSwitch { name } => {
                 let session = self.session.as_mut().ok_or("Endpoint has no catalog")?;
@@ -171,12 +251,14 @@ impl Endpoint {
                     return Err("Project has no retained document".into());
                 }
                 session.select(Actor::Human, &name)?;
+                self.frames.clear();
             }
             Command::ApplyPatch { patch } => {
                 self.session
                     .as_mut()
                     .ok_or("Endpoint has no catalog")?
                     .apply_document_patch(&patch)?;
+                self.frames.clear();
             }
         }
         if writes {
@@ -208,19 +290,95 @@ impl Endpoint {
 mod tests {
     use super::*;
     #[test]
+    fn transient_frames_do_not_rewrite_documents_or_survive_restart() {
+        let mut endpoint = Endpoint::new("firetv-omni");
+        let mut request: Request = serde_json::from_str(include_str!(
+            "../../../config/deploy/firetv/workspaces.json"
+        ))
+        .unwrap();
+        let Command::Install { documents, .. } = &mut request.command else {
+            panic!()
+        };
+        let surface = &mut documents[0].surfaces[1];
+        surface.content = crate::SurfaceContent::Widget { spec: canvas_widgets::WidgetSpec::from_json(
+            br#"{"schema_version":2,"id":"signal","kind":"signal_view","title":"Scope","frame":{"view":"scope","range":{"minimum":-1,"maximum":1},"samples":[]}}"#).unwrap() };
+        endpoint.execute(request).unwrap();
+        let before = endpoint.checkpoint();
+        let frame = serde_json::json!({"view":"scope","range":{"minimum":-1,"maximum":1},"samples":[0,1,0]});
+        endpoint
+            .execute(Request {
+                schema_version: 1,
+                request_id: "frame".into(),
+                expected_revision: Some(2),
+                command: Command::SurfaceSnapshot {
+                    workspace_id: "tv-television".into(),
+                    surface_id: "clock".into(),
+                    frame: frame.clone(),
+                    data: Default::default(),
+                },
+            })
+            .unwrap();
+        assert_eq!(endpoint.checkpoint(), before);
+        assert_eq!(endpoint.surface_snapshot("clock").unwrap()["frame"], frame);
+        endpoint.frames.get_mut("clock").unwrap().2 =
+            std::time::Instant::now() - std::time::Duration::from_secs(4);
+        assert_eq!(
+            endpoint.surface_snapshot("clock").unwrap()["data"]["state"],
+            "stale"
+        );
+        let restored = Endpoint::restore("firetv-omni", &before.to_string()).unwrap();
+        assert_eq!(
+            restored.surface_snapshot("clock").unwrap()["data"]["state"],
+            "no_data"
+        );
+        assert!(
+            endpoint
+                .execute(Request {
+                    schema_version: 1,
+                    request_id: "wrong".into(),
+                    expected_revision: Some(2),
+                    command: Command::SurfaceSnapshot {
+                        workspace_id: "other".into(),
+                        surface_id: "clock".into(),
+                        frame,
+                        data: Default::default()
+                    }
+                })
+                .is_err()
+        );
+        assert_eq!(endpoint.checkpoint(), before);
+    }
+    #[test]
     fn real_tv_install_switch_patch_and_restart_use_one_session() {
         let mut endpoint = Endpoint::new("firetv-omni");
         let raw = include_str!("../../../config/deploy/firetv/workspaces.json");
         let request: Request = serde_json::from_str(raw).unwrap();
         endpoint.execute(request).unwrap();
-        assert_eq!(endpoint.snapshot()["catalog"]["selected_project"], "television");
+        assert_eq!(
+            endpoint.snapshot()["catalog"]["selected_project"],
+            "television"
+        );
         let before = endpoint.checkpoint();
-        let stale = Request { schema_version:1,request_id:"stale".into(),expected_revision:Some(1),
-            command:Command::WorkspaceSwitch { name:"clock".into() } };
+        let stale = Request {
+            schema_version: 1,
+            request_id: "stale".into(),
+            expected_revision: Some(1),
+            command: Command::WorkspaceSwitch {
+                name: "clock".into(),
+            },
+        };
         assert!(endpoint.execute(stale).is_err());
         assert_eq!(endpoint.checkpoint(), before);
-        endpoint.execute(Request { schema_version:1,request_id:"switch".into(),expected_revision:Some(2),
-            command:Command::WorkspaceSwitch { name:"clock".into() } }).unwrap();
+        endpoint
+            .execute(Request {
+                schema_version: 1,
+                request_id: "switch".into(),
+                expected_revision: Some(2),
+                command: Command::WorkspaceSwitch {
+                    name: "clock".into(),
+                },
+            })
+            .unwrap();
         let saved = endpoint.checkpoint().to_string();
         let restored = Endpoint::restore("firetv-omni", &saved).unwrap();
         assert_eq!(restored.snapshot(), endpoint.snapshot());

@@ -29,6 +29,20 @@ impl Drop for Forward {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let arguments: Vec<String> = std::env::args().collect();
+    // Explicit loopback-only development tunnel. Credential remains operator-
+    // local; this never grants LAN access or bypasses the app's authentication.
+    if arguments.len() == 6 && arguments[1] == "--tunnel" && arguments[4] == "signal-stream" {
+        let port = arguments[2].parse::<u16>()?;
+        let token = std::fs::read(&arguments[3])?;
+        if token.len() != 64 || !token.iter().all(u8::is_ascii_hexdigit) {
+            return Err("Invalid private app credential".into());
+        }
+        return stream_at(port, &token, &arguments[5]);
+    }
+    if arguments.len() == 4 && arguments[2] == "signal-stream" {
+        return signal_stream(&arguments[1], &arguments[3]);
+    }
     let serial = std::env::args()
         .nth(1)
         .ok_or("usage: canvas-tvctl ADB_SERIAL < request.json")?;
@@ -78,27 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         serde_json::from_str(&raw)?
     };
-    let token = adb(
-        &serial,
-        &[
-            "shell",
-            "run-as",
-            "dev.fpl.canvas.tv",
-            "cat",
-            "files/control-token",
-        ],
-    )?;
-    if token.len() != 64 || !token.iter().all(u8::is_ascii_hexdigit) {
-        return Err(
-            "Private TV credential unavailable; start the authorized development app".into(),
-        );
-    }
-    let forwarded = adb(&serial, &["forward", "tcp:0", &format!("tcp:{}", canvas_android::CONTROL_PORT)])?;
-    let port: u16 = String::from_utf8(forwarded)?.trim().parse()?;
-    let guard = Forward {
-        serial,
-        local: format!("tcp:{port}"),
-    };
+    let (port, token, guard) = connect(&serial)?;
     if text_mode
         && matches!(
             request.command,
@@ -122,6 +116,99 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(guard);
     if receipt["ok"] != true {
         return Err("TV rejected presentation request".into());
+    }
+    Ok(())
+}
+
+/// One authenticated connection/forward per feed, not one ADB process per note.
+fn connect(serial: &str) -> Result<(u16, Vec<u8>, Forward), Box<dyn std::error::Error>> {
+    let token = adb(
+        &serial,
+        &[
+            "shell",
+            "run-as",
+            "dev.fpl.canvas.tv",
+            "cat",
+            "files/control-token",
+        ],
+    )?;
+    if token.len() != 64 || !token.iter().all(u8::is_ascii_hexdigit) {
+        return Err(
+            "Private TV credential unavailable; start the authorized development app".into(),
+        );
+    }
+    let forwarded = adb(
+        &serial,
+        &[
+            "forward",
+            "tcp:0",
+            &format!("tcp:{}", canvas_android::CONTROL_PORT),
+        ],
+    )?;
+    let port: u16 = String::from_utf8(forwarded)?.trim().parse()?;
+    let guard = Forward {
+        serial: serial.into(),
+        local: format!("tcp:{port}"),
+    };
+    Ok((port, token, guard))
+}
+
+fn signal_stream(serial: &str, workspace_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let (port, token, _guard) = connect(serial)?;
+    stream_at(port, &token, workspace_id)
+}
+
+fn stream_at(
+    port: u16,
+    token: &[u8],
+    workspace_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let inspect = Request {
+        schema_version: 1,
+        request_id: "signal-stream-inspect".into(),
+        expected_revision: None,
+        command: PresentationCommand::Inspect,
+    };
+    let observed = exchange(port, token, &inspect)?;
+    let mut revision = observed["revision"]
+        .as_u64()
+        .ok_or("Missing target revision")?;
+    let mut input = std::io::stdin().lock();
+    loop {
+        let mut line = Vec::new();
+        if input
+            .by_ref()
+            .take(512 * 1024 + 1)
+            .read_until(b'\n', &mut line)?
+            == 0
+        {
+            break;
+        }
+        if line.len() > 512 * 1024 || line.last() != Some(&b'\n') {
+            return Err("Invalid bounded snapshot line".into());
+        }
+        let value: serde_json::Value = serde_json::from_slice(&line)?;
+        let request = Request {
+            schema_version: 1,
+            request_id: "signal-stream".into(),
+            expected_revision: Some(revision),
+            command: PresentationCommand::SurfaceSnapshot {
+                workspace_id: workspace_id.into(),
+                surface_id: value["surface_id"]
+                    .as_str()
+                    .ok_or("Missing surface_id")?
+                    .into(),
+                frame: value["frame"].clone(),
+                data: serde_json::from_value(value["data"].clone())?,
+            },
+        };
+        let receipt = exchange(port, token, &request)?;
+        revision = receipt["revision"]
+            .as_u64()
+            .ok_or("Missing target revision")?;
+        if receipt["ok"] != true {
+            eprintln!("canvas-tvctl: snapshot rejected: {}", receipt["error"]);
+        }
     }
     Ok(())
 }

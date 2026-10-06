@@ -36,6 +36,7 @@ mod primitives;
 mod quality;
 mod quant;
 mod signal_scene;
+mod gfx_signals;
 mod spectral_waterfall;
 mod wasm_cdg;
 mod wasm_hyperspace;
@@ -2011,6 +2012,7 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
             .into(),
             visual,
         ),
+        WidgetKind::SignalView { frame, .. } => panel(spec, gfx_signals::view(frame, visual), visual),
         WidgetKind::Chart { .. } => {
             // Live charts reuse the canvas ChartProgram; the widgets crate
             // delegates so there is one chart implementation (tenet 1).
