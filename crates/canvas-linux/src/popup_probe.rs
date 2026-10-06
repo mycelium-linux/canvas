@@ -37,6 +37,7 @@ struct Probe {
     frame: bool,
     done: bool,
     pointer_surface: Option<wl_surface::WlSurface>,
+    pointer_enter_serial: Option<u32>,
     pointer_motion_count: usize,
 }
 impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
@@ -131,7 +132,12 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Probe {
                 state: wayland_client::WEnum::Value(wl_pointer::ButtonState::Pressed),
                 ..
             } => state.pressed = Some(serial),
-            wl_pointer::Event::Enter { surface, .. } => state.pointer_surface = Some(surface),
+            wl_pointer::Event::Enter {
+                surface, serial, ..
+            } => {
+                state.pointer_surface = Some(surface);
+                state.pointer_enter_serial = Some(serial);
+            }
             wl_pointer::Event::Motion { .. } => state.pointer_motion_count += 1,
             _ => {}
         }
@@ -346,6 +352,76 @@ fn real_popup_configures_repositions_receives_input_and_dismisses() {
     request(input(1, 1025, 2735, 1)); // Approx (20, 30) in geometry-local coordinates.
     queue.roundtrip(&mut state).unwrap();
     let serial = state.pressed.expect("pointer click serial");
+    let cursor_surface = compositor.create_surface(&qh, ());
+    let cursor_buffer = pool.create_buffer(0, 16, 16, 16 * 4, wl_shm::Format::Argb8888, &qh, ());
+    let pointer = state.pointer.as_ref().unwrap().clone();
+    let enter = state.pointer_enter_serial.unwrap();
+    pointer.set_cursor(enter, Some(&cursor_surface), 4, 7);
+    cursor_surface.set_buffer_scale(2);
+    cursor_surface.attach(Some(&cursor_buffer), 0, 0);
+    state.frame = false;
+    cursor_surface.frame(&qh, ());
+    cursor_surface.commit();
+    queue.roundtrip(&mut state).unwrap();
+    let cursor = request(json!({"command":"list"}))["cursor"].clone();
+    assert_eq!(cursor["mode"], "surface");
+    assert_eq!(cursor["hotspot"], json!([4, 7]));
+    let position = cursor["position"].as_array().unwrap();
+    let origin = cursor["origin"].as_array().unwrap();
+    assert_eq!(
+        origin[0].as_f64().unwrap(),
+        position[0].as_f64().unwrap() - 4.0
+    );
+    assert_eq!(
+        origin[1].as_f64().unwrap(),
+        position[1].as_f64().unwrap() - 7.0
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !state.frame {
+        assert!(Instant::now() < deadline, "cursor frame callback missing");
+        std::thread::sleep(Duration::from_millis(5));
+        queue.roundtrip(&mut state).unwrap();
+    }
+    pointer.set_cursor(enter, Some(&cursor_surface), 2, 3);
+    queue.roundtrip(&mut state).unwrap();
+    assert_eq!(
+        request(json!({"command":"list"}))["cursor"]["hotspot"],
+        json!([2, 3])
+    );
+    pointer.set_cursor(enter, None, 0, 0);
+    queue.roundtrip(&mut state).unwrap();
+    assert_eq!(
+        request(json!({"command":"list"}))["cursor"]["mode"],
+        "hidden"
+    );
+    state.frame = false;
+    cursor_surface.frame(&qh, ());
+    cursor_surface.commit();
+    queue.roundtrip(&mut state).unwrap();
+    std::thread::sleep(Duration::from_millis(40));
+    queue.roundtrip(&mut state).unwrap();
+    assert!(
+        !state.frame,
+        "hidden cursor received visible-frame callback"
+    );
+    pointer.set_cursor(enter, Some(&cursor_surface), 2, 3);
+    queue.roundtrip(&mut state).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !state.frame {
+        assert!(
+            Instant::now() < deadline,
+            "restored cursor callback missing"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+        queue.roundtrip(&mut state).unwrap();
+    }
+    cursor_surface.destroy();
+    queue.roundtrip(&mut state).unwrap();
+    assert_eq!(
+        request(json!({"command":"list"}))["cursor"]["mode"],
+        "named"
+    );
+    state.frame = false;
     let positioner = wm.create_positioner(&qh, ());
     positioner.set_size(80, 50);
     positioner.set_anchor_rect(20, 20, 1, 1);
@@ -423,6 +499,23 @@ fn real_popup_configures_repositions_receives_input_and_dismisses() {
     key_xdg.destroy();
     key_surface.destroy();
     queue.roundtrip(&mut state).unwrap();
+    // Smithay deliberately allows the owning client to set a cursor during
+    // an implicit grab. Check stale serial rejection after all grabs end.
+    pointer.set_cursor(state.pointer_enter_serial.unwrap(), None, 0, 0);
+    queue.roundtrip(&mut state).unwrap();
+    assert_eq!(
+        request(json!({"command":"list"}))["cursor"]["mode"],
+        "hidden"
+    );
+    let stale_cursor = compositor.create_surface(&qh, ());
+    pointer.set_cursor(0, Some(&stale_cursor), 2, 3);
+    queue.roundtrip(&mut state).unwrap();
+    assert_eq!(
+        request(json!({"command":"list"}))["cursor"]["mode"],
+        "hidden",
+        "stale ungrabbed serial changed cursor"
+    );
+    stale_cursor.destroy();
     // A second mapped window gives unmap a real focus-recovery destination.
     let other = compositor.create_surface(&qh, ());
     let other_xdg = wm.get_xdg_surface(&other, &qh, ());

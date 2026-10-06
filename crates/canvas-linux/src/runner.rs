@@ -22,6 +22,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 mod window_grab;
 use window_grab::NativeWindowGrab;
+mod cursor;
+use cursor::{CursorState, NativeRenderElement, send_cursor_frame};
 
 use smithay::{
     backend::input::{ButtonState, KeyState, Keycode},
@@ -302,6 +304,7 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
         toplevel_map: Vec::new(),
         native_windows: Default::default(),
         popups: PopupManager::default(),
+        cursor: CursorState::new()?,
         interactive_window: None,
         last_key_press: None,
         last_pointer_button: None,
@@ -386,6 +389,7 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
                                 .reset_state()
                                 .map_err(|error| format!("DRM resume state: {error}"))?;
                             drm.flip_pending = false;
+                            drm.pending_cursor = None;
                         }
                         if let Some(input) = &mut physical_input {
                             input.resume().map_err(|()| "libinput seat resume failed")?;
@@ -559,6 +563,7 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
             // Drain readiness even while paused, without submitting a frame.
             drm.pump_events()?;
         }
+        state.cursor.refresh();
         if let Some(drm) = &mut state.drm
             && state.seat_active
         {
@@ -578,11 +583,19 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
                 .collect();
             toplevels.sort_by_key(|(_, id)| !state.canvas.is_shell_overlay(id));
             let canvas = &mut state.canvas;
-            drm.redraw(&toplevels, canvas);
+            drm.redraw(
+                &toplevels,
+                canvas,
+                &state.cursor,
+                state.pointer.current_location(),
+            )?;
         }
         if let Some(output) = &state.virtual_output
             && Instant::now() >= headless_frame_at
         {
+            if let Some(surface) = state.cursor.surface() {
+                send_cursor_frame(&surface, output, started.elapsed());
+            }
             for (id, window) in &state.native_windows {
                 if !state.canvas.is_mapped(id) {
                     continue;
@@ -603,10 +616,11 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
             .into_iter()
             .chain(
                 (headless
-                    && state
-                        .toplevel_map
-                        .iter()
-                        .any(|(_, id)| state.canvas.is_mapped(id)))
+                    && (state.cursor.surface().is_some()
+                        || state
+                            .toplevel_map
+                            .iter()
+                            .any(|(_, id)| state.canvas.is_mapped(id))))
                 .then_some(headless_frame_at),
             )
             .min();
@@ -617,6 +631,8 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
 /// One static DRM output: renderer + swapchain compositor. The DrmDevice is
 /// self-managing, so flip completion is polled through `frame_submitted`.
 struct DrmRender {
+    /// The cursor actually queued with the pending frame, not a newer request.
+    pending_cursor: Option<WlSurface>,
     renderer: GlesRenderer,
     #[allow(dead_code)]
     device: DrmDevice,
@@ -825,6 +841,7 @@ impl DrmRender {
             }
 
             return Ok(Some(Self {
+                pending_cursor: None,
                 renderer,
                 device,
                 drm_loop,
@@ -847,19 +864,28 @@ impl DrmRender {
             .map_err(|e| format!("DRM dispatch: {e}"))
     }
 
-    fn redraw(&mut self, surfaces: &[(Window, String)], canvas: &mut CanvasCompositor) {
+    fn redraw(
+        &mut self,
+        surfaces: &[(Window, String)],
+        canvas: &mut CanvasCompositor,
+        cursor: &CursorState,
+        pointer: Point<f64, Logical>,
+    ) -> Result<(), String> {
         // Only retire a pending frame after its actual vblank event. Calling
         // frame_submitted on every polling iteration releases the swapchain
         // buffer before KMS is done with it and causes EBUSY retry storms.
         let vblank = std::mem::take(&mut self.vblank_ready);
         if self.flip_pending {
             if !vblank {
-                return;
+                return Ok(());
             }
             match self.compositor.frame_submitted() {
                 Ok(Some(())) => {
                     self.flip_pending = false;
                     let elapsed = self.started_at.elapsed();
+                    if let Some(surface) = self.pending_cursor.take() {
+                        send_cursor_frame(&surface, &self.output, elapsed);
+                    }
                     for (window, _) in surfaces {
                         window.send_frame(
                             &self.output,
@@ -873,14 +899,18 @@ impl DrmRender {
                 Err(e) => {
                     eprintln!("canvas-linux: frame_submitted: {e}");
                     self.flip_pending = false;
+                    self.pending_cursor = None;
                 }
             }
             if self.flip_pending {
-                return;
+                return Ok(());
             }
         }
 
-        let mut elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
+        // Smithay composites front-to-back: cursors must precede windows and
+        // shell overlays. Retained memory elements reuse the uploaded texture.
+        let mut elements: Vec<NativeRenderElement> =
+            cursor.elements(&mut self.renderer, pointer)?;
         let snapshot = canvas.snapshot().ok();
         for (window, id) in surfaces {
             if !smithay::utils::IsAlive::alive(window) {
@@ -897,14 +927,12 @@ impl DrmRender {
                     height: self.size.h.max(0) as u32,
                 });
             let location = window_origin(window, frame).to_physical_precise_round(1.0);
-            elements.extend(
-                window.render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
-                    &mut self.renderer,
-                    location,
-                    1.0.into(),
-                    1.0,
-                ),
-            );
+            elements.extend(window.render_elements::<NativeRenderElement>(
+                &mut self.renderer,
+                location,
+                1.0.into(),
+                1.0,
+            ));
         }
 
         match self.compositor.render_frame(
@@ -914,7 +942,10 @@ impl DrmRender {
             FrameFlags::empty(),
         ) {
             Ok(_) => match self.compositor.queue_frame(()) {
-                Ok(()) => self.flip_pending = true,
+                Ok(()) => {
+                    self.flip_pending = true;
+                    self.pending_cursor = cursor.surface();
+                }
                 Err(e) => {
                     let msg = format!("{e}");
                     if !msg.contains("No frame has been prepared") {
@@ -925,6 +956,7 @@ impl DrmRender {
             },
             Err(e) => eprintln!("canvas-linux: render_frame: {e:?}"),
         }
+        Ok(())
     }
 }
 
@@ -953,6 +985,7 @@ struct App {
     // Protocol/surface helpers, not a second layout authority.
     native_windows: std::collections::BTreeMap<String, Window>,
     popups: PopupManager,
+    cursor: CursorState,
     /// Window identity and resize flag only; geometry remains in Canvas.
     interactive_window: Option<(String, bool)>,
     last_key_press: Option<(Serial, WlSurface)>,
@@ -971,6 +1004,13 @@ struct App {
 }
 
 impl App {
+    fn set_cursor_image(&mut self, image: smithay::input::pointer::CursorImageStatus) {
+        let output = self
+            .virtual_output
+            .as_ref()
+            .or_else(|| self.drm.as_ref().map(|drm| &drm.output));
+        self.cursor.set(image, output);
+    }
     fn cancel_native_interaction(&mut self) {
         if self.interactive_window.is_some() {
             let pointer = self.pointer.clone();
@@ -985,6 +1025,7 @@ impl App {
             .is_some_and(|(window, _)| window == id)
         {
             self.interactive_window = None;
+            self.set_cursor_image(smithay::input::pointer::CursorImageStatus::default_named());
             if let Some((top, _)) = self.toplevel_map.iter().find(|(_, window)| window == id) {
                 self.configure_toplevel(top, id);
             }
@@ -1065,6 +1106,18 @@ impl App {
             smithay::input::pointer::Focus::Clear,
         );
         self.interactive_window = Some((id.clone(), edges.is_some()));
+        use crate::window_drag::Edge;
+        use smithay::input::pointer::{CursorIcon, CursorImageStatus};
+        let icon = match edges {
+            None => CursorIcon::Move,
+            Some(edges) => match (edges.horizontal, edges.vertical) {
+                (Edge::None, _) => CursorIcon::NsResize,
+                (_, Edge::None) => CursorIcon::EwResize,
+                (Edge::Low, Edge::Low) | (Edge::High, Edge::High) => CursorIcon::NwseResize,
+                _ => CursorIcon::NeswResize,
+            },
+        };
+        self.set_cursor_image(CursorImageStatus::Named(icon));
         self.configure_toplevel(&surface, &id);
     }
 
@@ -1189,11 +1242,12 @@ impl App {
         let keyboard = self.keyboard.clone();
         keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
         let pointer = self.pointer.clone();
+        let location = pointer.current_location();
         pointer.motion(
             self,
             None,
             &smithay::input::pointer::MotionEvent {
-                location: (x as f64, y as f64).into(),
+                location,
                 serial: SERIAL_COUNTER.next_serial(),
                 time: 0,
             },
@@ -1274,6 +1328,7 @@ impl App {
                 let mut response = crate::launcher::handle_command(command, &mut self.canvas, &self.launcher);
                 response["result"]["switcher"] = self.switcher.snapshot();
                 response["result"]["seat_active"] = json!(self.seat_active);
+                response["result"]["cursor"] = self.cursor.snapshot(self.pointer.current_location(), self.seat_active);
                 response["result"]["interaction"] = self.interactive_window.as_ref()
                     .map_or(Value::Null, |(id, resize)| json!({"window_id": id,
                         "kind": if *resize { "resize" } else { "move" }}));
@@ -1836,6 +1891,7 @@ mod input_tests {
             toplevel_map: Vec::new(),
             native_windows: Default::default(),
             popups: PopupManager::default(),
+            cursor: CursorState::new().unwrap(),
             interactive_window: None,
             last_key_press: None,
             last_pointer_button: None,
@@ -2318,8 +2374,9 @@ impl SeatHandler for App {
     fn cursor_image(
         &mut self,
         _seat: &Seat<Self>,
-        _image: smithay::input::pointer::CursorImageStatus,
+        image: smithay::input::pointer::CursorImageStatus,
     ) {
+        self.set_cursor_image(image);
     }
 }
 

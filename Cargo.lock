@@ -557,6 +557,7 @@ dependencies = [
  "url",
  "wayland-client",
  "wayland-protocols-wlr",
+ "xcursor",
 ]
 
 [[package]]

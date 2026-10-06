@@ -349,3 +349,44 @@ Verify the opposite edge stays fixed as new buffers arrive, pointer focus
 returns, ordinary app clicks still work, and Alt-Tab or VT switching during a
 drag does not leave an active grab. Repeat using Neo remote takeover. Preserve
 the fallback session until this and cursor rendering are verified on hardware.
+
+## Native cursor rendering
+
+The cursor composites above app and shell surfaces through Smithay's render
+elements. The default image comes from the installed Xcursor theme, respecting
+`XCURSOR_THEME` and `XCURSOR_SIZE` (1–256; default 24). A missing default cursor
+fails startup explicitly. Named theme images are retained and their GPU uploads
+are cached, not rebuilt during pointer motion. Theme decoding has file, table
+and dimension admission bounds; a missing non-default shape warns and uses the
+default theme image. Named theme animation is not implemented in this slice.
+
+Client cursor surfaces retain alpha, buffer scale/transform, subsurfaces and
+logical hotspots through Smithay's surface-tree renderer. A null cursor stays
+hidden. Destruction returns to the default image. Move/resize grabs show themed
+move/directional resize shapes and restore the default at completion. Input
+release preserves the logical pointer position instead of mistaking normalized
+remote coordinates for screen pixels.
+
+Cursor surfaces get frame callbacks on hardware frame submission; the pending
+frame retains the cursor actually queued, so a later cursor request cannot
+receive the previous image's presentation callback. Seat resume discards pending
+cursor presentation state with the reset swapchain. Headless protocol fixtures
+use an explicit synthetic frame clock, not a hardware presentation claim.
+
+`list.cursor` reports mode, named shape, logical position, hotspot and draw
+origin. The real client fixture checks custom cursor lifecycle, scale-2 buffers,
+hotspot updates, hide/restore callbacks, destroyed surfaces and invalid serials
+when no grab exists. Smithay intentionally authorizes the owning client during
+an implicit grab without requiring the enter serial again.
+
+An opt-in EGL test renders a premultiplied-alpha cursor into a private offscreen
+GPU texture and verifies downloaded color/blending pixels, hotspot geometry and
+the hidden path. It never acquires a DRM seat or changes a live desktop:
+
+```sh
+cargo test -p canvas-linux --no-default-features --features compositor \
+  offscreen_cursor_pixels_preserve_alpha_color_and_hotspot -- --ignored --nocapture
+```
+
+Physical cursor scanout, scaled/multiple outputs, GTK/Qt interaction and seat
+switching remain hardware acceptance gates under `canvas-native-cursor`.
