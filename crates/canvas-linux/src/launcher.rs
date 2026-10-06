@@ -126,7 +126,8 @@ pub fn handle_command(
                     .map(|s| {
                         s.windows
                             .iter()
-                            .map(|w| json!({ "id": w.id, "app": w.app, "title": w.title }))
+                            .map(|w| json!({ "id": w.id, "app": w.app, "title": w.title,
+                                "frame": w.frame }))
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default(),
@@ -172,7 +173,10 @@ pub fn handle_command(
                 );
                 match parsed {
                     (Some(x), Some(y), Some(width), Some(height))
-                        if width <= u32::MAX as u64 && height <= u32::MAX as u64 =>
+                        if width <= i32::MAX as u64
+                            && height <= i32::MAX as u64
+                            && i32::try_from(x).is_ok()
+                            && i32::try_from(y).is_ok() =>
                     {
                         let rect = canvas_core::layout::Rect {
                             x: x as i32,
@@ -469,6 +473,26 @@ mod tests {
         let snapshot = canvas.snapshot().unwrap();
         assert_eq!(snapshot.windows[0].frame.width, 960);
         assert_eq!(snapshot.windows[0].frame.height, 720);
+        let observed = handle_command(&json!({"command":"list"}), &mut canvas, &Launcher::new());
+        assert_eq!(
+            observed["result"]["windows"][0]["frame"],
+            json!({"x":0,"y":0,"width":960,"height":720})
+        );
+        for frame in [
+            json!({"x":i64::MAX,"y":0,"width":10,"height":10}),
+            json!({"x":0,"y":0,"width":u32::MAX,"height":10}),
+        ] {
+            let response = handle_command(
+                &json!({"command":"place","window":"camera","frame":frame}),
+                &mut canvas,
+                &Launcher::new(),
+            );
+            assert_eq!(response["ok"], false);
+        }
+        assert_eq!(
+            canvas.window("camera").unwrap().frame,
+            snapshot.windows[0].frame
+        );
     }
 
     #[test]

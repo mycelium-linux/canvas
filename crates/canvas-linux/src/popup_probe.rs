@@ -37,6 +37,7 @@ struct Probe {
     frame: bool,
     done: bool,
     pointer_surface: Option<wl_surface::WlSurface>,
+    pointer_motion_count: usize,
 }
 impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
     fn event(
@@ -131,6 +132,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for Probe {
                 ..
             } => state.pressed = Some(serial),
             wl_pointer::Event::Enter { surface, .. } => state.pointer_surface = Some(surface),
+            wl_pointer::Event::Motion { .. } => state.pointer_motion_count += 1,
             _ => {}
         }
     }
@@ -442,6 +444,106 @@ fn real_popup_configures_repositions_receives_input_and_dismisses() {
         .as_str()
         .unwrap()
         .to_owned();
+    let window_frame = |window: &str| {
+        request(json!({"command":"list"}))["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == window)
+            .unwrap()["frame"]
+            .clone()
+    };
+    let interaction = || request(json!({"command":"list"}))["interaction"].clone();
+    request(json!({"command":"focus","window":id}));
+    request(input(8, 1025, 2735, 1));
+    queue.roundtrip(&mut state).unwrap();
+    let move_serial = state.pressed.unwrap();
+    let seat = state.seat.as_ref().unwrap().clone();
+    // A serial from another window is invalid even within the same client.
+    other_top._move(&seat, move_serial);
+    top._move(&seat, 0);
+    queue.roundtrip(&mut state).unwrap();
+    assert!(interaction().is_null());
+    top._move(&seat, move_serial);
+    queue.roundtrip(&mut state).unwrap();
+    assert_eq!(interaction()["kind"], "move");
+    let client_motions = state.pointer_motion_count;
+    request(input(9, 6150, 7292, 1)); // Approximately +100,+50 from the initiating click.
+    queue.roundtrip(&mut state).unwrap();
+    let moved = window_frame(&id);
+    assert_eq!(
+        (moved["x"].as_i64(), moved["y"].as_i64()),
+        (Some(100), Some(50))
+    );
+    assert_eq!(
+        state.pointer_motion_count, client_motions,
+        "drag motion leaked to app"
+    );
+    request(input(10, 6150, 7292, 0));
+    queue.roundtrip(&mut state).unwrap();
+    assert!(interaction().is_null());
+    top._move(&seat, move_serial);
+    queue.roundtrip(&mut state).unwrap();
+    assert!(interaction().is_null(), "released click was replayed");
+
+    top.set_min_size(200, 150);
+    top.set_max_size(500, 350);
+    root.commit();
+    queue.roundtrip(&mut state).unwrap();
+    request(input(11, 6150, 7292, 1));
+    queue.roundtrip(&mut state).unwrap();
+    let resize_serial = state.pressed.unwrap();
+    top.resize(&seat, resize_serial, xdg_toplevel::ResizeEdge::None);
+    queue.roundtrip(&mut state).unwrap();
+    assert!(interaction().is_null());
+    top.resize(&seat, resize_serial, xdg_toplevel::ResizeEdge::BottomRight);
+    queue.roundtrip(&mut state).unwrap();
+    assert_eq!(interaction()["kind"], "resize");
+    assert!(
+        state
+            .toplevel_state
+            .as_ref()
+            .unwrap()
+            .2
+            .contains(&(xdg_toplevel::State::Resizing as u32))
+    );
+    request(input(12, 10250, 11850, 1));
+    queue.roundtrip(&mut state).unwrap();
+    let resized = window_frame(&id);
+    assert_eq!(resized, json!({"x":100,"y":50,"width":500,"height":350}));
+    let configured = state.toplevel_state.as_ref().unwrap();
+    assert_eq!((configured.0, configured.1), (500, 350));
+    request(input(13, 10250, 11850, 0));
+    queue.roundtrip(&mut state).unwrap();
+    assert!(interaction().is_null());
+    assert!(
+        !state
+            .toplevel_state
+            .as_ref()
+            .unwrap()
+            .2
+            .contains(&(xdg_toplevel::State::Resizing as u32))
+    );
+    request(input(14, 20000, 20000, 0));
+    assert_eq!(window_frame(&id), resized, "release did not end resize");
+
+    request(input(15, 6150, 7292, 1));
+    queue.roundtrip(&mut state).unwrap();
+    top.resize(
+        &seat,
+        state.pressed.unwrap(),
+        xdg_toplevel::ResizeEdge::TopLeft,
+    );
+    queue.roundtrip(&mut state).unwrap();
+    request(input(16, 10250, 11850, 1));
+    queue.roundtrip(&mut state).unwrap();
+    let anchored = window_frame(&id);
+    assert_eq!(anchored, json!({"x":180,"y":100,"width":420,"height":300}));
+    request(input(17, 10250, 11850, 0));
+    queue.roundtrip(&mut state).unwrap();
+    assert!(interaction().is_null());
+
+    let before = request(json!({"command":"list"}));
     let original_frame = before["windows"]
         .as_array()
         .unwrap()
@@ -450,10 +552,23 @@ fn real_popup_configures_repositions_receives_input_and_dismisses() {
         .unwrap()["frame"]
         .clone();
     request(json!({"command":"focus","window":id}));
+    request(input(18, 10000, 10938, 1));
+    queue.roundtrip(&mut state).unwrap();
+    top.resize(
+        &seat,
+        state.pressed.unwrap(),
+        xdg_toplevel::ResizeEdge::Right,
+    );
+    queue.roundtrip(&mut state).unwrap();
+    assert_eq!(interaction()["kind"], "resize");
     root.attach(None, 0, 0);
     root.commit();
     queue.roundtrip(&mut state).unwrap();
     let hidden = request(json!({"command":"list"}));
+    assert!(
+        hidden["interaction"].is_null(),
+        "unmap left an active resize"
+    );
     assert_eq!(hidden["windows"].as_array().unwrap().len(), 1);
     assert_eq!(hidden["focused_window"], other_id);
     assert!(
@@ -496,6 +611,28 @@ fn real_popup_configures_repositions_receives_input_and_dismisses() {
             .filter(|window| *window == &id)
             .count(),
         1
+    );
+    request(json!({"command":"focus","window":id}));
+    request(input(19, 10000, 10938, 1));
+    queue.roundtrip(&mut state).unwrap();
+    top._move(&seat, state.pressed.unwrap());
+    queue.roundtrip(&mut state).unwrap();
+    assert_eq!(interaction()["kind"], "move");
+    request(json!({"command":"focus","window":other_id}));
+    queue.roundtrip(&mut state).unwrap();
+    assert!(
+        interaction().is_null(),
+        "explicit focus stranded a move grab"
+    );
+    request(input(20, 15000, 15000, 0));
+    assert_eq!(
+        window_frame(&id),
+        original_frame,
+        "cancelled move kept changing geometry"
+    );
+    assert_eq!(
+        request(json!({"command":"list"}))["focused_window"],
+        other_id
     );
     other.attach(None, 0, 0);
     other.commit();

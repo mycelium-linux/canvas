@@ -280,7 +280,7 @@ CANVAS_COMPOSITOR_TEST_BIN=/path/to/matching/canvas-linux \
 ```
 
 This is protocol/input evidence, not physical rendering or a full GTK desktop
-certification. Interactive move/resize, complete mapping/unmapping semantics,
+certification. Mapping and interactive window operations are described below;
 multi-output lifecycle and hardware visual validation remain separate work.
 
 ## Native mapping lifecycle
@@ -315,6 +315,37 @@ never sent before the initial surface commit.
 
 The isolated popup client fixture also checks maximize/fullscreen configure
 flags and restoration. This does not certify hardware rendering, client buffer
-resize behavior or multi-output deployment. Interactive move/resize remains
-open under Marbles `canvas-native-window-ops`; the broader daily-driver gates
+resize behavior or multi-output deployment. Window-operation hardware acceptance
+remains open under Marbles `canvas-native-window-ops`; the broader daily-driver gates
 are tracked by `canvas-daily-driver`.
+
+## Native interactive move/resize
+
+Client titlebars and resize borders can initiate xdg-toplevel move/resize using
+the current seat's still-held pointer press. The serial must match the active
+implicit click grab and originate from that exact toplevel or its subsurfaces;
+a same-client serial from another window is insufficient. Unmapped windows,
+shell overlays, expanded windows, invalid edges and competing popup grabs are
+not eligible. Expanded-window drag-to-restore is not implemented.
+
+Smithay owns the explicit pointer grab. During the gesture, app pointer focus
+is cleared so motion does not also interact with page content. Canvas owns the
+resulting rectangle. Resize honors committed client min/max constraints and
+keeps opposite edges anchored; clients receive sizes and the `Resizing` flag.
+The initiating button's release removes the grab and clears that flag. Focus
+changes, placement commands, unmap, destruction, input lease expiry and seat
+pause also end the gesture. Local and remote input use this same path.
+
+The native control `list` response now includes actual Canvas frame rectangles
+and an `interaction` object (window ID and move/resize kind), or null when idle.
+The isolated protocol fixture verifies movement, anchored resizing, min/max
+limits, invalid and same-client cross-window serial rejection, release replay
+rejection, no app motion leakage and unmap cleanup. These are intended geometry
+and protocol checks, not physical rendering or client buffer-resize certification.
+
+For manual hardware acceptance, open a GTK and Qt app with client decorations;
+drag each titlebar and all borders/corners, hit its minimum size, and release.
+Verify the opposite edge stays fixed as new buffers arrive, pointer focus
+returns, ordinary app clicks still work, and Alt-Tab or VT switching during a
+drag does not leave an active grab. Repeat using Neo remote takeover. Preserve
+the fallback session until this and cursor rendering are verified on hardware.

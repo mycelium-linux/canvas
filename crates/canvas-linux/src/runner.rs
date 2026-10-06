@@ -20,6 +20,8 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+mod window_grab;
+use window_grab::NativeWindowGrab;
 
 use smithay::{
     backend::input::{ButtonState, KeyState, Keycode},
@@ -300,6 +302,7 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
         toplevel_map: Vec::new(),
         native_windows: Default::default(),
         popups: PopupManager::default(),
+        interactive_window: None,
         last_key_press: None,
         last_pointer_button: None,
         next_id: 0u64,
@@ -950,6 +953,8 @@ struct App {
     // Protocol/surface helpers, not a second layout authority.
     native_windows: std::collections::BTreeMap<String, Window>,
     popups: PopupManager,
+    /// Window identity and resize flag only; geometry remains in Canvas.
+    interactive_window: Option<(String, bool)>,
     last_key_press: Option<(Serial, WlSurface)>,
     last_pointer_button: Option<(Serial, WlSurface)>,
     next_id: u64,
@@ -966,6 +971,103 @@ struct App {
 }
 
 impl App {
+    fn cancel_native_interaction(&mut self) {
+        if self.interactive_window.is_some() {
+            let pointer = self.pointer.clone();
+            pointer.unset_grab(self, SERIAL_COUNTER.next_serial(), monotonic_ms());
+        }
+    }
+
+    fn finish_native_interaction(&mut self, id: &str) {
+        if self
+            .interactive_window
+            .as_ref()
+            .is_some_and(|(window, _)| window == id)
+        {
+            self.interactive_window = None;
+            if let Some((top, _)) = self.toplevel_map.iter().find(|(_, window)| window == id) {
+                self.configure_toplevel(top, id);
+            }
+        }
+    }
+
+    fn begin_native_interaction(
+        &mut self,
+        surface: ToplevelSurface,
+        seat: wl_seat::WlSeat,
+        serial: Serial,
+        edges: Option<crate::window_drag::ResizeEdges>,
+    ) {
+        if !self.seat_active
+            || Seat::<App>::from_resource(&seat).as_ref() != Some(&self.seat)
+            || self.interactive_window.is_some()
+            || self.keyboard.is_grabbed()
+        {
+            return;
+        }
+        let Some(id) = self
+            .toplevel_map
+            .iter()
+            .find(|(top, _)| top.wl_surface() == surface.wl_surface())
+            .map(|(_, id)| id.clone())
+        else {
+            return;
+        };
+        let Some(window) = self.canvas.window(&id) else {
+            return;
+        };
+        if !self.canvas.is_mapped(&id)
+            || self.canvas.is_shell_overlay(&id)
+            || (edges.is_some() && !window.resizable)
+            || (edges.is_none() && !window.movable)
+            || self.canvas.window_states(&id) != Some((false, false))
+        {
+            return;
+        }
+        let pointer = self.pointer.clone();
+        let Some(start_data) = pointer
+            .grab_start_data()
+            .filter(|_| pointer.has_grab(serial))
+        else {
+            return;
+        };
+        let Some((focus, _)) = &start_data.focus else {
+            return;
+        };
+        let mut root = focus.clone();
+        while let Some(parent) = smithay::wayland::compositor::get_parent(&root) {
+            root = parent;
+        }
+        // A same-client serial from another toplevel is not authorization.
+        if &root != surface.wl_surface()
+            || !self
+                .last_pointer_button
+                .as_ref()
+                .is_some_and(|(event, _)| *event == serial)
+        {
+            return;
+        }
+        let geometry = crate::window_drag::WindowDrag {
+            frame: window.frame,
+            start: (start_data.location.x, start_data.location.y),
+            edges,
+        };
+        self.last_pointer_button = None;
+        self.switcher.finish();
+        pointer.set_grab(
+            self,
+            NativeWindowGrab {
+                id: id.clone(),
+                start_data,
+                geometry,
+            },
+            serial,
+            smithay::input::pointer::Focus::Clear,
+        );
+        self.interactive_window = Some((id.clone(), edges.is_some()));
+        self.configure_toplevel(&surface, &id);
+    }
+
     fn set_toplevel_state(
         &mut self,
         surface: &ToplevelSurface,
@@ -981,6 +1083,13 @@ impl App {
         else {
             return;
         };
+        if self
+            .interactive_window
+            .as_ref()
+            .is_some_and(|(window, _)| window == &id)
+        {
+            self.cancel_native_interaction();
+        }
         if let Err(error) = self
             .canvas
             .set_window_state(&id, maximized, fullscreen, output)
@@ -1064,6 +1173,7 @@ impl App {
         });
     }
     fn release_input(&mut self) {
+        self.cancel_native_interaction();
         self.last_key_press = None;
         self.last_pointer_button = None;
         self.inject_keys(&[]);
@@ -1107,6 +1217,7 @@ impl App {
             .find(|(_, window)| window == id)
             .ok_or_else(|| format!("unknown native window {id}"))?;
         let surface = surface.wl_surface().clone();
+        self.cancel_native_interaction();
         self.last_key_press = None;
         self.last_pointer_button = None;
         self.inject_keys(&[]);
@@ -1163,6 +1274,9 @@ impl App {
                 let mut response = crate::launcher::handle_command(command, &mut self.canvas, &self.launcher);
                 response["result"]["switcher"] = self.switcher.snapshot();
                 response["result"]["seat_active"] = json!(self.seat_active);
+                response["result"]["interaction"] = self.interactive_window.as_ref()
+                    .map_or(Value::Null, |(id, resize)| json!({"window_id": id,
+                        "kind": if *resize { "resize" } else { "move" }}));
                 if let Some(display) = self.canvas.displays().first() {
                     response["result"]["switcher"]["frame"] = json!(crate::control_transport::switcher_frame(display.work_area));
                 }
@@ -1183,6 +1297,12 @@ impl App {
                 Ok(json!({"owner":"remote"}))
             }
             "launch" => Err("native app spawning is not implemented; use the host launcher and observe mapped windows".into()),
+            "place" => {
+                self.cancel_native_interaction();
+                let response = crate::launcher::handle_command(command, &mut self.canvas, &self.launcher);
+                if response["ok"] == true { self.configure_all(); }
+                return response;
+            }
             "cycle_finish" => {
                 self.switcher.finish();
                 Ok(json!({"finished":true}))
@@ -1519,17 +1639,23 @@ impl App {
             (frame.width as i32, frame.height as i32).into();
         let activated = self.canvas.focused() == Some(id);
         let (maximized, fullscreen) = self.canvas.window_states(id).unwrap_or_default();
+        let resizing = self
+            .interactive_window
+            .as_ref()
+            .is_some_and(|(window, resize)| window == id && *resize);
         let changed = toplevel.with_pending_state(|state| {
             use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
             let changed = state.size != Some(wanted)
                 || state.states.contains(State::Activated) != activated
                 || state.states.contains(State::Maximized) != maximized
-                || state.states.contains(State::Fullscreen) != fullscreen;
+                || state.states.contains(State::Fullscreen) != fullscreen
+                || state.states.contains(State::Resizing) != resizing;
             state.size = Some(wanted);
             for (flag, enabled) in [
                 (State::Activated, activated),
                 (State::Maximized, maximized),
                 (State::Fullscreen, fullscreen),
+                (State::Resizing, resizing),
             ] {
                 if enabled {
                     state.states.set(flag);
@@ -1710,6 +1836,7 @@ mod input_tests {
             toplevel_map: Vec::new(),
             native_windows: Default::default(),
             popups: PopupManager::default(),
+            interactive_window: None,
             last_key_press: None,
             last_pointer_button: None,
             next_id: 0,
@@ -1723,6 +1850,38 @@ mod input_tests {
         };
         let remote = json!({"command":"input","sequence":1,"keys":[4],"pointer_x":0,"pointer_y":0,"pointer_buttons":1});
         assert_eq!(app.control(&remote)["ok"], true);
+        // Seat pause / lease expiry use the same release path. Even a grab
+        // with no live client must be removed, not just lose held buttons.
+        let pointer = app.pointer.clone();
+        let frame = Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        pointer.set_grab(
+            &mut app,
+            NativeWindowGrab {
+                id: "test-drag".into(),
+                start_data: smithay::input::pointer::GrabStartData {
+                    focus: None,
+                    button: 0x110,
+                    location: (0.0, 0.0).into(),
+                },
+                geometry: crate::window_drag::WindowDrag {
+                    frame,
+                    start: (0.0, 0.0),
+                    edges: None,
+                },
+            },
+            SERIAL_COUNTER.next_serial(),
+            smithay::input::pointer::Focus::Clear,
+        );
+        app.interactive_window = Some(("test-drag".into(), false));
+        assert!(pointer.is_grabbed());
+        app.release_input();
+        assert!(!pointer.is_grabbed());
+        assert!(app.interactive_window.is_none());
         app.local_input(&[5], 0, (10, 20));
         assert_eq!(app.remote_input.keys, vec![5]);
         assert_eq!(app.remote_input.buttons, 0);
@@ -1809,6 +1968,44 @@ impl XdgShellHandler for App {
         &mut self.xdg_shell_state
     }
 
+    fn move_request(&mut self, surface: ToplevelSurface, seat: wl_seat::WlSeat, serial: Serial) {
+        self.begin_native_interaction(surface, seat, serial, None);
+    }
+
+    fn resize_request(
+        &mut self,
+        surface: ToplevelSurface,
+        seat: wl_seat::WlSeat,
+        serial: Serial,
+        edges: smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge,
+    ) {
+        use crate::window_drag::{
+            Edge::{High, Low, None as NoEdge},
+            ResizeEdges,
+        };
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge;
+        let (horizontal, vertical) = match edges {
+            ResizeEdge::Top => (NoEdge, Low),
+            ResizeEdge::Bottom => (NoEdge, High),
+            ResizeEdge::Left => (Low, NoEdge),
+            ResizeEdge::Right => (High, NoEdge),
+            ResizeEdge::TopLeft => (Low, Low),
+            ResizeEdge::BottomLeft => (Low, High),
+            ResizeEdge::TopRight => (High, Low),
+            ResizeEdge::BottomRight => (High, High),
+            _ => return,
+        };
+        self.begin_native_interaction(
+            surface,
+            seat,
+            serial,
+            Some(ResizeEdges {
+                horizontal,
+                vertical,
+            }),
+        );
+    }
+
     fn maximize_request(&mut self, surface: ToplevelSurface) {
         self.set_toplevel_state(&surface, Some(true), None, None);
     }
@@ -1884,7 +2081,7 @@ impl XdgShellHandler for App {
         let Some(seat) = Seat::<App>::from_resource(&seat) else {
             return;
         };
-        if !self.seat_active || seat != self.seat {
+        if !self.seat_active || seat != self.seat || self.interactive_window.is_some() {
             return;
         }
         let kind = PopupKind::Xdg(surface);
@@ -1968,6 +2165,13 @@ impl XdgShellHandler for App {
             .position(|(s, _)| *s.wl_surface() == *wl)
         {
             let id = self.toplevel_map.remove(pos).1;
+            if self
+                .interactive_window
+                .as_ref()
+                .is_some_and(|(window, _)| window == &id)
+            {
+                self.cancel_native_interaction();
+            }
             self.native_windows.remove(&id);
             self.canvas.close_window(&id);
             self.restore_mapped_focus();
@@ -2046,6 +2250,13 @@ impl CompositorHandler for App {
                 })
                 .unwrap_or(false);
             if self.canvas.is_mapped(&id) && !mapped {
+                if self
+                    .interactive_window
+                    .as_ref()
+                    .is_some_and(|(window, _)| window == &id)
+                {
+                    self.cancel_native_interaction();
+                }
                 if self.canvas.focused() == Some(id.as_str()) {
                     self.dismiss_popup_grabs();
                 }

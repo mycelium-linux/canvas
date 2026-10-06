@@ -204,8 +204,12 @@ impl CanvasCompositor {
     }
 
     pub fn place_window(&mut self, id: &str, frame: Rect) -> Result<(), String> {
-        if frame.width == 0 || frame.height == 0 {
-            return Err("window frame must have positive dimensions".into());
+        if frame.width == 0
+            || frame.height == 0
+            || frame.width > i32::MAX as u32
+            || frame.height > i32::MAX as u32
+        {
+            return Err("window frame dimensions must fit positive Wayland integers".into());
         }
         let entry = self
             .windows

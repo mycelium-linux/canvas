@@ -29,6 +29,8 @@ mod runtime_loop;
 #[cfg(all(feature = "compositor", target_os = "linux"))]
 mod seat_access;
 #[cfg(any(test, all(feature = "compositor", target_os = "linux")))]
+mod window_drag;
+#[cfg(any(test, all(feature = "compositor", target_os = "linux")))]
 mod window_switcher;
 
 fn unit(project: &str) -> Result<String, String> {
