@@ -82,7 +82,8 @@ mod tests {
     #[test]
     fn binding_never_overwrites_an_existing_endpoint() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!(
+        // macOS TMPDIR can itself consume most of sockaddr_un's 104 bytes.
+        let dir = std::path::PathBuf::from("/tmp").join(format!(
             "canvas-control-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
