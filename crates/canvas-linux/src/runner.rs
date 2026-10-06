@@ -466,11 +466,13 @@ fn run_with_output(headless: bool) -> Result<Value, String> {
 
         state.configure_all();
         if let Some(drm) = &mut state.drm {
-            let toplevels: Vec<(WlSurface, String)> = state
+            let mut toplevels: Vec<(WlSurface, String)> = state
                 .toplevel_map
                 .iter()
+                .filter(|(_, id)| !state.canvas.is_shell_overlay(id) || state.switcher.active())
                 .map(|(t, id)| (t.wl_surface().clone(), id.clone()))
                 .collect();
+            toplevels.sort_by_key(|(_, id)| !state.canvas.is_shell_overlay(id));
             let canvas = &mut state.canvas;
             drm.redraw(&toplevels, canvas);
         }
@@ -818,6 +820,9 @@ struct App {
 
 impl App {
     fn focus_native(&mut self, id: &str) -> Result<Value, String> {
+        if self.canvas.is_shell_overlay(id) {
+            return Err("shell overlay cannot take keyboard focus".into());
+        }
         let (surface, _) = self
             .toplevel_map
             .iter()
@@ -873,7 +878,15 @@ impl App {
             "list" => {
                 let mut response = crate::launcher::handle_command(command, &mut self.canvas, &self.launcher);
                 response["result"]["switcher"] = self.switcher.snapshot();
+                if let Some(display) = self.canvas.displays().first() {
+                    response["result"]["switcher"]["frame"] = json!(crate::control_transport::switcher_frame(display.work_area));
+                }
                 response["result"]["input_owner"] = json!(if self.remote_input.local_owner { "local" } else { "remote" });
+                response["result"]["shell_overlays"] = self.canvas.snapshot().map(|snapshot| snapshot.windows.into_iter()
+                    .filter(|window| self.canvas.is_shell_overlay(&window.id)).collect::<Vec<_>>()).map_or(json!([]), |windows| json!(windows));
+                if let Some(windows) = response["result"]["windows"].as_array_mut() {
+                    windows.retain(|window| !self.canvas.is_shell_overlay(window["id"].as_str().unwrap_or("")));
+                }
                 return response;
             }
             "input" => return self.apply_remote_input(command),
@@ -1084,6 +1097,9 @@ impl App {
         let location: Point<f64, Logical> = (px, py).into();
         let snapshot = self.canvas.snapshot().ok();
         let focus = self.toplevel_map.iter().find_map(|(surface, id)| {
+            if self.canvas.is_shell_overlay(id) {
+                return None;
+            }
             let window = snapshot.as_ref()?.windows.iter().find(|w| &w.id == id)?;
             (px >= f64::from(window.frame.x)
                 && py >= f64::from(window.frame.y)
@@ -1163,6 +1179,21 @@ impl App {
     /// Push each window's frame rect to its client via xdg configure. The
     /// canvas state model is the layout authority; sizes follow the frame.
     fn configure_all(&mut self) {
+        if let Some(area) = self
+            .canvas
+            .displays()
+            .first()
+            .map(|display| display.work_area)
+        {
+            let frame = crate::control_transport::switcher_frame(area);
+            for (_, id) in &self.toplevel_map {
+                if self.canvas.is_shell_overlay(id) {
+                    if let Err(error) = self.canvas.place_window(id, frame) {
+                        eprintln!("switcher placement: {error}");
+                    }
+                }
+            }
+        }
         let frames: Vec<(String, Rect)> = self
             .canvas
             .snapshot()
@@ -1476,6 +1507,8 @@ impl XdgShellHandler for App {
                 }
             }
             self.write_state(Some(&std::env::var("WAYLAND_DISPLAY").unwrap_or_default()));
+            self.switcher
+                .reconcile(self.canvas.mru(), self.canvas.focused());
         }
     }
 }
@@ -1504,7 +1537,14 @@ impl CompositorHandler for App {
                 Some((attributes.app_id.clone(), attributes.title.clone()))
             });
             if let Some((app, title)) = identity {
+                let switcher_overlay =
+                    app.as_deref() == Some(crate::control_transport::SWITCHER_APP_ID);
                 self.canvas.update_identity(&id, app, title);
+                if switcher_overlay && !self.canvas.is_shell_overlay(&id) {
+                    if let Err(error) = self.canvas.mark_shell_overlay(&id) {
+                        eprintln!("switcher role rejected: {error}");
+                    }
+                }
             }
         }
     }

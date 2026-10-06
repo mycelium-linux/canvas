@@ -483,6 +483,8 @@ enum Message {
         result: Result<Receipt, String>,
     },
     Tick,
+    #[cfg(all(unix, feature = "lua-scenes"))]
+    NativeSwitcherTick,
     #[cfg(feature = "lua-scenes")]
     ModuleActivate {
         surface_id: String,
@@ -754,6 +756,8 @@ struct App {
     dock_icon_worker: Option<std::sync::mpsc::Receiver<(Vec<String>, Vec<(String, Result<Option<iced::widget::image::Handle>, String>)>)>>,
     #[cfg(feature = "lua-scenes")]
     desktop_bar: ::canvas::shell_presentation::Presentation,
+    #[cfg(all(unix, feature = "lua-scenes"))]
+    native_switcher: Option<::canvas::native_switcher::Host>,
     #[cfg(feature = "lua-scenes")]
     desktop_dock: ::canvas::shell_presentation::Presentation,
     jarvis_visible: bool,
@@ -1178,6 +1182,8 @@ impl App {
             dock_icon_worker: None,
             #[cfg(feature = "lua-scenes")]
             desktop_bar: Default::default(),
+            #[cfg(all(unix, feature = "lua-scenes"))]
+            native_switcher: ::canvas::native_switcher::Host::from_environment(),
             #[cfg(feature = "lua-scenes")]
             desktop_dock: Default::default(),
             jarvis_visible: true,
@@ -1668,6 +1674,25 @@ impl App {
 
     fn update_inner(&mut self, message: Message) -> Task<Message> {
         match message {
+            #[cfg(all(unix, feature = "lua-scenes"))]
+            Message::NativeSwitcherTick => {
+                let visual = self.presented_visual_theme();
+                let theme = ::canvas::lua_module::ModuleThemeTokens::from_visual(&visual, self.effective_theme(&self.document).accent());
+                let Some(host) = &mut self.native_switcher else { return Task::none(); };
+                if let Err(error) = host.refresh(theme) { eprintln!("native switcher presentation: {error}"); }
+                if host.window.is_none() {
+                    if let Some(snapshot) = &host.snapshot {
+                        let mut settings = canvas_window_settings(snapshot.switcher.frame);
+                        settings.transparent = true;
+                        #[cfg(target_os = "linux")]
+                        { settings.platform_specific.application_id = canvas_core::native_control::SWITCHER_APP_ID.into(); }
+                        let (window, open) = iced::window::open(settings);
+                        host.window = Some(window);
+                        return open.map(|_| Message::NativeSwitcherTick);
+                    }
+                }
+                Task::none()
+            }
             Message::LauncherReply {
                 generation,
                 target_id,
@@ -2022,6 +2047,14 @@ impl App {
                     )
             }
             Message::WindowEvent(window, event) => {
+                #[cfg(all(unix, feature = "lua-scenes"))]
+                if self.native_switcher.as_ref().is_some_and(|host| host.window == Some(window)) {
+                    // Presentation-only overlay never participates in desktop focus bookkeeping.
+                    if matches!(event, iced::window::Event::Closed) {
+                        if let Some(host) = &mut self.native_switcher { host.window = None; }
+                    }
+                    return Task::none();
+                }
                 let mut metrics_changed = false;
                 match event {
                     iced::window::Event::Unfocused => {
@@ -9847,6 +9880,14 @@ impl App {
     }
 
     fn view(&self, window: iced::window::Id) -> Element<'_, Message> {
+        #[cfg(all(unix, feature = "lua-scenes"))]
+        if let Some(host) = self.native_switcher.as_ref().filter(|host| host.window == Some(window)) {
+            if let (Some(snapshot), Some(retained)) = (&host.snapshot, host.presentation.retained()) {
+                let frame = snapshot.switcher.frame;
+                return self.shell_scene_layer(&retained.scene, LogicalSize { width: f64::from(frame.width), height: f64::from(frame.height) });
+            }
+            return container(space::horizontal()).into();
+        }
         let viewport = self.windows.get(&window).copied().unwrap_or(self.frame);
         let viewport_x = f64::from(viewport.x - self.frame.x);
         let viewport_y = f64::from(viewport.y - self.frame.y);
@@ -12729,6 +12770,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             cadence
         };
         Subscription::batch([
+            #[cfg(all(unix, feature = "lua-scenes"))]
+            if app.native_switcher.is_some() { iced::time::every(Duration::from_millis(40)).map(|_| Message::NativeSwitcherTick) } else { Subscription::none() },
             iced::time::every(cadence).map(|_| Message::Tick),
             iced::event::listen_with(|event, status, window| match event {
                 iced::Event::Window(event) => Some(Message::WindowEvent(window, event)),

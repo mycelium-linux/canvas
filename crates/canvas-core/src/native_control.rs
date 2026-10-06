@@ -3,6 +3,39 @@ use std::io::{self, BufRead, Write};
 pub const MAX_FRAME: usize = 64 * 1024;
 pub const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 pub const QUEUE_CAPACITY: usize = 16;
+pub const SWITCHER_APP_ID: &str = "dev.fpl.canvas.switcher";
+
+/// One geometry source for the native output and its Lua presentation window.
+pub fn switcher_frame(area: crate::layout::Rect) -> crate::layout::Rect {
+    let width = area.width.saturating_sub(48).max(1).min(900);
+    let height = area.height.saturating_sub(48).max(1).min(180);
+    crate::layout::Rect {
+        x: area.x + ((area.width.saturating_sub(width)) / 2) as i32,
+        y: area.y + ((area.height.saturating_sub(height)) / 2) as i32,
+        width,
+        height,
+    }
+}
+
+/// One bounded owner-local request. A timed-out mutation has unknown outcome.
+pub fn send_command(
+    socket: &std::path::Path,
+    command: &serde_json::Value,
+) -> Result<String, String> {
+    let mut stream = std::os::unix::net::UnixStream::connect(socket)
+        .map_err(|e| format!("connect {}: {e}", socket.display()))?;
+    stream
+        .set_read_timeout(Some(TIMEOUT))
+        .map_err(|e| e.to_string())?;
+    stream
+        .set_write_timeout(Some(TIMEOUT))
+        .map_err(|e| e.to_string())?;
+    write_frame(&mut stream, command).map_err(|e| format!("write: {e}"))?;
+    let mut reader = std::io::BufReader::new(stream);
+    let buf = read_frame(&mut reader)
+        .map_err(|e| format!("outcome unknown: {e}; refresh before retry"))?;
+    Ok(buf.trim().to_owned())
+}
 
 pub fn read_frame(reader: &mut impl BufRead) -> io::Result<String> {
     let mut bytes = Vec::new();
@@ -79,6 +112,22 @@ pub fn bind(path: &std::path::Path) -> io::Result<std::os::unix::net::UnixListen
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn switcher_geometry_is_centered_and_contained_even_on_small_outputs() {
+        for (width, height) in [(1920, 1080), (1280, 720), (320, 120), (1, 1)] {
+            let area = crate::layout::Rect {
+                x: -100,
+                y: 50,
+                width,
+                height,
+            };
+            let frame = switcher_frame(area);
+            assert!(frame.width > 0 && frame.height > 0);
+            assert!(frame.x >= area.x && frame.y >= area.y);
+            assert!(frame.x + frame.width as i32 <= area.x + width as i32);
+            assert!(frame.y + frame.height as i32 <= area.y + height as i32);
+        }
+    }
     #[test]
     fn binding_never_overwrites_an_existing_endpoint() {
         use std::os::unix::fs::PermissionsExt;

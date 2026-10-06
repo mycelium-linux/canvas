@@ -263,20 +263,7 @@ pub fn handle_command_line(
 /// Client side: send one command to a running compositor control socket and
 /// return the response text.
 pub fn send_command(socket: &Path, command: &Value) -> Result<String, String> {
-    use crate::control_transport::{TIMEOUT, read_frame, write_frame};
-    let mut stream = std::os::unix::net::UnixStream::connect(socket)
-        .map_err(|e| format!("connect {}: {e}", socket.display()))?;
-    stream
-        .set_read_timeout(Some(TIMEOUT))
-        .map_err(|e| e.to_string())?;
-    stream
-        .set_write_timeout(Some(TIMEOUT))
-        .map_err(|e| e.to_string())?;
-    write_frame(&mut stream, command).map_err(|e| format!("write: {e}"))?;
-    let mut reader = std::io::BufReader::new(stream);
-    let buf = read_frame(&mut reader)
-        .map_err(|e| format!("outcome unknown: {e}; refresh before retry"))?;
-    Ok(buf.trim().to_string())
+    crate::control_transport::send_command(socket, command)
 }
 
 /// Serve one client connection on an accepted Unix stream: read a command line,

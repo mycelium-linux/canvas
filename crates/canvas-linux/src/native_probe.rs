@@ -96,6 +96,48 @@ fn native_focus_close_and_alt_tab_reach_real_clients() {
             .iter()
             .all(|w| w["title"] == "Canvas native proof" && w["app"] == "foot")
     );
+    let overlay_log = std::fs::File::create(directory.join("overlay.log")).unwrap();
+    let _overlay = OwnedChild(
+        Command::new("/usr/bin/foot")
+            .args([
+                "--app-id=dev.fpl.canvas.switcher",
+                "--title=Switcher role proof",
+                "/usr/bin/sleep",
+                "60",
+            ])
+            .env("XDG_RUNTIME_DIR", &directory)
+            .env("WAYLAND_DISPLAY", "wayland-5")
+            .env("WAYLAND_DEBUG", "1")
+            .stdout(Stdio::null())
+            .stderr(overlay_log)
+            .spawn()
+            .unwrap(),
+    );
+    wait_for(|| {
+        request(&socket, json!({"command":"list"}))["shell_overlays"]
+            .as_array()
+            .unwrap()
+            .len()
+            == 1
+    });
+    let with_overlay = request(&socket, json!({"command":"list"}));
+    assert_eq!(with_overlay["windows"].as_array().unwrap().len(), 3);
+    assert_eq!(with_overlay["focused_window"], ids[2]);
+    let overlay_id = with_overlay["shell_overlays"][0]["id"].as_str().unwrap();
+    assert!(
+        !with_overlay["mru"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id == overlay_id)
+    );
+    let rejected =
+        crate::launcher::send_command(&socket, &json!({"command":"focus","window":overlay_id}))
+            .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&rejected).unwrap()["ok"],
+        false
+    );
     // One held Alt gesture: multiple Tab press/release snapshots, no pointer click.
     let input = |sequence, keys| json!({"command":"input","sequence":sequence,"lease_ms":500,"keys":keys,"pointer_x":0,"pointer_y":0,"pointer_buttons":0});
     request(&socket, input(1, vec![43, 226]));

@@ -66,9 +66,40 @@ new windows join the next gesture, and Tab is consumed rather than sent into
 the selected app. Alt release or input-lease expiry finishes the gesture.
 Socket clients may use `{"command":"cycle","reverse":false}` repeatedly and
 `{"command":"cycle_finish"}` to finish the same native switching session.
-`list.result.switcher` exposes `active`, the frozen `windows` order and
-`selected_window` for shell presentation. A visible Lua switcher overlay is
-still pending; this projection does not put a panel above native apps.
+`list.result.switcher` exposes `active`, the frozen `windows` order,
+`selected_window` and the derived centered `frame` for shell presentation.
+The `canvas` Lua-scenes host now has a dedicated native switcher window:
+
+```sh
+CANVAS_NATIVE_CONTROL_SOCKET=/home/ajm/.local/state/dock/native-control/compositor-control.sock \
+  canvas
+```
+
+For isolated headless tests, use the test server's private
+`XDG_RUNTIME_DIR/native-control/compositor-control.sock` instead. This is explicit
+opt-in: ordinary Neo/macOS Canvas instances do not guess or connect to a Linux
+seat. The compositor's child Canvas process inherits this environment variable
+when it is configured on the compositor service.
+
+The window advertises the reserved `dev.fpl.canvas.switcher` Wayland app ID.
+The compositor recognizes it as a presentation-only shell overlay, centers and
+sizes it using the same geometry returned to the Lua host, renders it above
+apps only during a native switching gesture, excludes it from app inventory/MRU
+and refuses keyboard focus or pointer hit-testing for it. The app ID is a local
+role hint, not an authentication credential. `list.result.shell_overlays`
+provides its diagnostic inventory separately. This first panel is keyboard-only.
+
+`config/modules/native-switcher-v1.lua` controls the panel through the existing
+bounded primitives and Coherence theme tokens. It hot-reloads without rebuilding
+the shell, keeps the selected window visible across more than six apps, and
+shows disconnected state rather than inventing an updated selection. A single
+background worker observes the bounded owner socket; the GUI never waits on it.
+Only the latest observation is retained. Source reads occur at one-second
+cadence outside drawing; unchanged inputs reuse the retained Lua scene.
+
+Linux type-checks, Lua execution and isolated real Wayland-client role/focus
+proofs validate the source. Physical scanout/visual QA and ARM deployment remain
+before claiming the panel works on the TV's installed compositor.
 
 The native compositor now opens libinput's udev `seat0` context in hardware
 mode. It handles accelerated relative/absolute pointer motion, five mouse

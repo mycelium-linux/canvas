@@ -12,6 +12,8 @@ pub mod appearance;
 pub mod boot_budget;
 pub mod chunk;
 pub mod desktop;
+#[cfg(unix)]
+pub mod native_control;
 pub mod desktop_theme;
 pub mod display_watch;
 pub mod external_surface;

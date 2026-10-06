@@ -41,6 +41,8 @@ pub mod performance;
 pub mod project_picker;
 pub mod project_switcher;
 pub mod shell_launcher;
+#[cfg(all(unix, feature = "lua-scenes"))]
+pub mod native_switcher;
 pub mod shell_geometry;
 pub mod shell_dock;
 #[cfg(feature = "lua-scenes")]

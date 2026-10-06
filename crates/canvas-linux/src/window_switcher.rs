@@ -5,10 +5,13 @@ pub struct WindowSwitcher {
     selected: Option<String>,
 }
 impl WindowSwitcher {
+    pub fn active(&self) -> bool {
+        self.selected.is_some()
+    }
     /// Presentation reads the frozen gesture order, never the changing live MRU.
     pub fn snapshot(&self) -> serde_json::Value {
         serde_json::json!({
-            "active": self.selected.is_some(),
+            "active": self.active(),
             "windows": self.order,
             "selected_window": self.selected,
         })
@@ -16,6 +19,26 @@ impl WindowSwitcher {
     pub fn finish(&mut self) {
         self.order.clear();
         self.selected = None;
+    }
+    pub fn reconcile(&mut self, live_mru: &[String], focused: Option<&str>) {
+        if !self.active() {
+            return;
+        }
+        self.order.retain(|id| live_mru.contains(id));
+        if self.order.is_empty() {
+            self.finish();
+            return;
+        }
+        if !self
+            .selected
+            .as_ref()
+            .is_some_and(|id| self.order.contains(id))
+        {
+            self.selected = focused
+                .filter(|id| self.order.iter().any(|window| window == id))
+                .map(str::to_owned)
+                .or_else(|| self.order.first().cloned());
+        }
     }
     pub fn next(
         &mut self,
@@ -89,5 +112,15 @@ mod tests {
         );
         assert!(s.next(&[], None, false).is_none());
         assert_eq!(s.next(&ids(&["a"]), Some("a"), true).as_deref(), Some("a"));
+    }
+    #[test]
+    fn closing_the_preview_updates_presentation_without_another_tab_press() {
+        let mut s = WindowSwitcher::default();
+        s.next(&ids(&["a", "b", "c"]), Some("a"), false);
+        s.reconcile(&ids(&["a", "c", "new"]), Some("a"));
+        assert_eq!(s.snapshot()["windows"], serde_json::json!(["a", "c"]));
+        assert_eq!(s.snapshot()["selected_window"], "a");
+        s.reconcile(&[], None);
+        assert!(!s.active());
     }
 }

@@ -67,6 +67,7 @@ pub struct CanvasCompositor {
     windows: BTreeMap<String, WindowEntry>,
     focused: Option<String>,
     mru: Vec<String>,
+    shell_overlays: std::collections::BTreeSet<String>,
     workspace: Option<String>,
     wallpapers: BTreeMap<String, Wallpaper>,
     lifecycle: Box<dyn WindowLifecycle + Send>,
@@ -92,6 +93,7 @@ impl CanvasCompositor {
             windows: BTreeMap::new(),
             focused: None,
             mru: Vec::new(),
+            shell_overlays: Default::default(),
             workspace: None,
             wallpapers: BTreeMap::new(),
             lifecycle,
@@ -126,6 +128,23 @@ impl CanvasCompositor {
     }
     pub fn mru(&self) -> &[String] {
         &self.mru
+    }
+
+    pub fn is_shell_overlay(&self, id: &str) -> bool {
+        self.shell_overlays.contains(id)
+    }
+
+    /// Presentation-only surfaces never become app-switching destinations.
+    pub fn mark_shell_overlay(&mut self, id: &str) -> Result<(), String> {
+        if !self.windows.contains_key(id) {
+            return Err(format!("unknown window {id}"));
+        }
+        if self.focused() == Some(id) {
+            return Err("focused app cannot become a shell overlay".into());
+        }
+        self.shell_overlays.insert(id.to_owned());
+        self.mru.retain(|window| window != id);
+        Ok(())
     }
 
     pub fn place_window(&mut self, id: &str, frame: Rect) -> Result<(), String> {
@@ -163,6 +182,9 @@ impl CanvasCompositor {
 
     /// The server reports focus changed; track it and notify lifecycle.
     pub fn focus_window(&mut self, id: &str) -> Result<(), String> {
+        if self.is_shell_overlay(id) {
+            return Err("shell overlay cannot take keyboard focus".into());
+        }
         if !self.windows.contains_key(id) {
             return Err(format!("unknown window {id}"));
         }
@@ -178,6 +200,7 @@ impl CanvasCompositor {
     /// The server reports a toplevel closed; remove it and notify lifecycle.
     pub fn close_window(&mut self, id: &str) {
         if self.windows.remove(id).is_some() {
+            self.shell_overlays.remove(id);
             self.mru.retain(|v| v != id);
             self.lifecycle.window_closed(id);
             if self.focused.as_deref() == Some(id) {
@@ -425,6 +448,21 @@ fn status() -> Result<Value, String> {
 mod tests {
     use super::*;
     use canvas_core::layout::{PaneRole, Placement, Rect};
+
+    #[test]
+    fn shell_overlay_is_observed_but_never_a_focus_or_mru_candidate() {
+        let mut canvas = CanvasCompositor::new(vec![]);
+        canvas.map_window("app".into(), window("app", "foot"));
+        canvas.map_window("overlay".into(), window("overlay", "shell"));
+        canvas.focus_window("app").unwrap();
+        canvas.mark_shell_overlay("overlay").unwrap();
+        assert_eq!(canvas.mru(), &["app".to_owned()]);
+        assert!(canvas.focus_window("overlay").is_err());
+        assert_eq!(canvas.focused(), Some("app"));
+        assert!(canvas.mark_shell_overlay("app").is_err());
+        canvas.close_window("overlay");
+        assert!(!canvas.is_shell_overlay("overlay"));
+    }
 
     #[test]
     fn native_identity_is_bounded_and_does_not_change_window_id() {

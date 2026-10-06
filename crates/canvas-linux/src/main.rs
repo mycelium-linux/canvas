@@ -8,7 +8,7 @@ use std::{
 mod compositor;
 #[cfg(any(test, feature = "opencode"))]
 mod control;
-mod control_transport;
+use canvas_core::native_control as control_transport;
 mod desktop;
 mod hypr;
 mod launcher;
