@@ -4,6 +4,27 @@ Canvas owns native discovery, focus, input and actions. Lua owns presentation
 through the existing bounded `widget.panel`, `widget.label` and `widget.button`
 primitives and Coherence theme tokens. The analog clock is unchanged.
 
+## Local application pins
+
+Right-click a local application row in the launcher to pin/unpin it. Right-click
+a pinned dock icon to remove it. Clicking the icon invokes the same fresh,
+revision-bound native launch path as the launcher. Launching an app is not window
+attachment or input forwarding; those remain separate capabilities.
+
+Pins are ordered and saved under `shell/dock-pins.json` in the local runtime root,
+not copied to other machines. The first slice permits four pins and retains the
+existing responsive six-item dock limit. Native macOS icons come from read-only
+AppKit lookup and are decoded once into bounded cached images. Lua cannot name
+an image file. Captured windows still use their existing live textures, and an app
+pin does not receive a fabricated running indicator.
+
+The CLI supports `dock-pins`, `dock-pin <catalog-revision> <entry-id>`, and
+`dock-unpin <catalog-revision> <entry-id>`. Read `shell-catalog` on the intended
+host first. JSON equivalents are `shell_dock_pins` and `shell_dock_pin` with
+`catalog_revision`, `entry_id`, and `pinned`. A stale catalog fails explicitly;
+unknown applications cannot become executable pins. Uninstalling an application
+does not erase the saved pin; after reload it is shown disabled and can be removed.
+
 The desktop bar and launcher use the same retained presentation host. Identical
 source, manifest, inputs and theme reuse the previous output without executing
 Lua. A candidate replaces the output only after validation; invalid edits report

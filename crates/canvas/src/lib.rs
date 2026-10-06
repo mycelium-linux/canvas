@@ -42,6 +42,7 @@ pub mod project_picker;
 pub mod project_switcher;
 pub mod shell_launcher;
 pub mod shell_geometry;
+pub mod shell_dock;
 #[cfg(feature = "lua-scenes")]
 pub mod shell_presentation;
 pub mod reconcile;

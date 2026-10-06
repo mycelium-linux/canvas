@@ -4,6 +4,8 @@
 //! access. Reading the display inventory does not: see [`displays`].
 #[cfg(target_os = "macos")]
 pub mod displays;
+#[cfg(target_os = "macos")]
+pub mod app_icon;
 
 use serde::{Deserialize, Serialize};
 use std::{

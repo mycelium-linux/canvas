@@ -418,4 +418,21 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn pinned_apps_are_not_misrepresented_as_running_windows() {
+        use crate::lua_module::ModuleInputValue as V;
+        let mut s = snapshot();
+        s.values = std::collections::BTreeMap::from([
+            ("width".into(), V::Number(1408.0)), ("height".into(), V::Number(72.0)),
+            ("count".into(), V::Number(1.0)), ("item0-id".into(), V::Text("app:/Applications/App.app".into())),
+            ("item0-title".into(), V::Text("App".into())), ("item0-open".into(), V::Boolean(false)),
+            ("item0-available".into(), V::Boolean(false)),
+        ]);
+        let mut p = Presentation::default();
+        p.refresh(include_str!("../../../config/modules/desktop-dock-v1.json"), include_str!("../../../config/modules/desktop-dock-v1.lua"), s, theme()).unwrap();
+        let output = p.retained().unwrap();
+        assert!(!output.buttons.iter().find(|b| b.id == "item0").unwrap().enabled);
+        assert!(!output.scene.nodes.iter().any(|n| n.id == "item0-state"));
+    }
 }

@@ -492,6 +492,9 @@ enum Message {
     ShellForward,
     ShellProjects,
     ShellFocusSurface(String),
+    ShellDockActivate(String),
+    ShellDockReply(Result<Receipt, String>),
+    ShellPinToggle(String),
     ShellLauncherPick { generation: u64, revision: String, entry_id: String },
     ShellNewTask,
     /// A gesture on a model surface. Carries the stream rather than the
@@ -744,6 +747,9 @@ struct App {
     project_switcher: Option<::canvas::shell_launcher::Launcher>,
     window_cycle: ::canvas::window_cycle::WindowCycle,
     window_cycle_workspace: Option<String>,
+    dock_pins: ::canvas::shell_dock::Pins,
+    dock_apps: Vec<::canvas::shell_launcher::Entry>,
+    dock_icons: BTreeMap<String, iced::widget::image::Handle>,
     #[cfg(feature = "lua-scenes")]
     desktop_bar: ::canvas::shell_presentation::Presentation,
     #[cfg(feature = "lua-scenes")]
@@ -1163,6 +1169,9 @@ impl App {
             project_switcher: None,
             window_cycle: Default::default(),
             window_cycle_workspace: None,
+            dock_pins: ::canvas::shell_dock::Pins::load().map_err(|e| format!("Dock pins: {e}"))?,
+            dock_apps: ::canvas::shell_launcher::applications(),
+            dock_icons: BTreeMap::new(),
             #[cfg(feature = "lua-scenes")]
             desktop_bar: Default::default(),
             #[cfg(feature = "lua-scenes")]
@@ -1274,6 +1283,7 @@ impl App {
         app.publish_active_project();
         app.publish_wanted_video();
         app.ensure_scene_decoded();
+        app.cache_dock_icons();
         #[cfg(feature = "lua-scenes")]
         app.refresh_desktop_bar(true);
         app.reset_background_animation();
@@ -1736,6 +1746,33 @@ impl App {
                     self.project_switcher = None;
                 }
                 self.focus_shell_surface(&id);
+                Task::none()
+            }
+            Message::ShellDockActivate(id) => {
+                let catalog = self.launcher_catalog();
+                let command = Command::ShellActivate { catalog_revision: catalog.revision, entry_id: id };
+                let target = ::canvas::shell_launcher::Target { id: "local".into(), label: "This screen".into(), mycelium_peer: None, unix_user: None };
+                let (send, receive) = iced::futures::channel::oneshot::channel();
+                std::thread::spawn(move || { let _ = send.send(::canvas::shell_launcher::request(&target, command)); });
+                Task::perform(async move { receive.await.unwrap_or_else(|_| Err("Dock launch worker stopped".into())) }, Message::ShellDockReply)
+            }
+            Message::ShellDockReply(result) => {
+                self.status = match result {
+                    Ok(Receipt::ShellActivated { .. }) => "Native application opened; capture remains separate.".into(),
+                    Ok(_) => "Unexpected dock action receipt".into(),
+                    Err(error) => format!("Dock action failed: {error}"),
+                };
+                self.bump();
+                Task::none()
+            }
+            Message::ShellPinToggle(id) => {
+                let pinned = !self.dock_pins.0.contains(&id);
+                let catalog = self.launcher_catalog();
+                self.status = match self.set_dock_pin(&id, pinned, &catalog.entries) {
+                    Ok(()) => if pinned { "Application pinned to this machine's dock" } else { "Application unpinned" }.into(),
+                    Err(error) => format!("Dock pin failed: {error}"),
+                };
+                self.bump();
                 Task::none()
             }
             Message::ShellNewTask => {
@@ -3864,17 +3901,21 @@ impl App {
     #[cfg(feature = "lua-scenes")]
     fn refresh_desktop_dock(&mut self, poll_files: bool) {
         use ::canvas::lua_module::{ModuleInputSnapshot, ModuleInputValue as Value, ModuleThemeTokens};
+        let entries = self.dock_entries();
         let mut values = BTreeMap::from([
             ("width".into(), Value::Number(f64::from(self.frame.width.max(1)))),
             ("height".into(), Value::Number(f64::from(::canvas::shell_geometry::DOCK_HEIGHT))),
-            ("count".into(), Value::Number(::canvas::shell_presentation::dock_surfaces(&self.document).count() as f64)),
+            ("count".into(), Value::Number(entries.len() as f64)),
         ]);
-        for (n, surface) in ::canvas::shell_presentation::dock_surfaces(&self.document).take(6).enumerate() {
+        for (n, entry) in entries.iter().take(6).enumerate() {
             let key = format!("item{n}");
-            values.insert(format!("{key}-id"), Value::Text(surface.id.clone()));
-            values.insert(format!("{key}-title"), Value::Text(surface.title.chars().take(16).collect()));
-            values.insert(format!("{key}-focused"), Value::Boolean(!self.desktop_focused && self.document.focused_surface_id.as_ref() == Some(&surface.id)));
-            values.insert(format!("{key}-minimized"), Value::Boolean(self.minimized_surfaces.contains(&surface.id)));
+            let surface_id = entry.id.strip_prefix("surface:");
+            values.insert(format!("{key}-id"), Value::Text(entry.id.clone()));
+            values.insert(format!("{key}-title"), Value::Text(entry.title.chars().take(16).collect()));
+            values.insert(format!("{key}-focused"), Value::Boolean(!self.desktop_focused && surface_id.is_some_and(|id| self.document.focused_surface_id.as_deref() == Some(id))));
+            values.insert(format!("{key}-minimized"), Value::Boolean(surface_id.is_some_and(|id| self.minimized_surfaces.contains(id))));
+            values.insert(format!("{key}-available"), Value::Boolean(entry.available));
+            values.insert(format!("{key}-open"), Value::Boolean(surface_id.is_some()));
         }
         let visual = self.presented_visual_theme();
         let theme = ModuleThemeTokens::from_visual(&visual, self.effective_theme(&self.document).accent());
@@ -3883,6 +3924,41 @@ impl App {
         let result = if poll_files { self.desktop_dock.refresh_files(artifact, snapshot, theme) }
             else { self.desktop_dock.refresh_current(artifact, snapshot, theme) };
         if let Err(error) = result { self.status = format!("Desktop dock Lua error (last good retained): {error}"); }
+    }
+
+    fn cache_dock_icons(&mut self) {
+        self.dock_icons.retain(|id, _| self.dock_pins.0.contains(id));
+        for entry in &self.dock_apps {
+            if self.dock_pins.0.contains(&entry.id) && !self.dock_icons.contains_key(&entry.id) {
+                match ::canvas::shell_dock::icon(entry) {
+                    Ok(Some(icon)) => { self.dock_icons.insert(entry.id.clone(), icon); }
+                    Ok(None) => (),
+                    Err(error) => eprintln!("Dock icon unavailable for {}: {error}", entry.title),
+                }
+            }
+        }
+    }
+
+    fn set_dock_pin(&mut self, id: &str, pinned: bool, entries: &[::canvas::shell_launcher::Entry]) -> Result<(), String> {
+        let next = self.dock_pins.updated(id, pinned, entries)?;
+        next.save()?; // Durable write before visible mutation.
+        self.dock_pins = next;
+        self.dock_apps = entries.iter().filter(|e| matches!(e.choice, ::canvas::shell_launcher::Choice::Application { .. })).cloned().collect();
+        self.cache_dock_icons();
+        #[cfg(feature = "lua-scenes")]
+        self.refresh_desktop_dock(false);
+        Ok(())
+    }
+
+    fn dock_entries(&self) -> Vec<::canvas::shell_launcher::Entry> {
+        use ::canvas::shell_launcher::{Choice, Entry};
+        let mut entries: Vec<_> = self.dock_pins.0.iter().map(|id| self.dock_apps.iter().find(|e| &e.id == id).cloned()
+            .unwrap_or_else(|| Entry { id: id.clone(), title: "Missing application".into(), detail: "PIN · unavailable".into(), available: false,
+                choice: Choice::Application { path: id[4..].into() } })).collect();
+        entries.extend(::canvas::shell_launcher::dock_surfaces(&self.document).map(|s| Entry {
+            id: format!("surface:{}", s.id), title: s.title.clone(), detail: "WINDOW".into(), available: self.decoded.contains_key(&s.id), choice: Choice::Surface { id: s.id.clone() },
+        }));
+        entries
     }
 
     fn focus_shell_surface(&mut self, id: &str) {
@@ -4170,7 +4246,7 @@ impl App {
         }
         if !matches!(
             pending.request.command,
-            Command::Inspect | Command::ShellCatalog | Command::Performance | Command::ReadDocument
+            Command::Inspect | Command::ShellCatalog | Command::ShellDockPins | Command::Performance | Command::ReadDocument
         ) && pending
             .request
             .expected_revision
@@ -4200,6 +4276,24 @@ impl App {
                         receipt: Receipt::ShellCatalog { catalog },
                     },
                 );
+                Task::none()
+            }
+            Command::ShellDockPins => {
+                let pins = self.dock_pins.0.clone();
+                self.answer(pending, Outcome::Ok { receipt: Receipt::ShellDockPins { pins } });
+                Task::none()
+            }
+            Command::ShellDockPin { catalog_revision, entry_id, pinned } => {
+                let catalog = self.launcher_catalog();
+                if catalog.revision != catalog_revision {
+                    self.fail(pending, Failure { code: ErrorCode::Conflict, message: "Dock catalog changed; refresh this target before pinning.".into() });
+                } else if let Err(error) = self.set_dock_pin(&entry_id, pinned, &catalog.entries) {
+                    self.fail(pending, Failure::resource(error));
+                } else {
+                    self.bump();
+                    let pins = self.dock_pins.0.clone();
+                    self.answer(pending, Outcome::Ok { receipt: Receipt::ShellDockPins { pins } });
+                }
                 Task::none()
             }
             Command::ShellActivate {
@@ -8183,7 +8277,10 @@ impl App {
                         Some(Message::ShellLauncherPick { entry_id, .. }) => entry_id.strip_prefix("surface:"),
                         _ => None,
                     };
-                    let preview = id.and_then(|id| self.decoded.get(id)).and_then(|surface| {
+                    let preview = match &message {
+                        Some(Message::ShellDockActivate(id)) => self.dock_icons.get(id).map(|handle| image_widget(handle.clone()).content_fit(ContentFit::Contain).width(Length::Fill).height(Length::Fill).into()),
+                        _ => None,
+                    }.or_else(|| id.and_then(|id| self.decoded.get(id)).and_then(|surface| {
                         match &surface.source {
                             ContentSource::ExternalSurface { source_id } => self.external_surfaces.frame(source_id)
                                 .map(canvas_model_viewer::video::external_view),
@@ -8191,7 +8288,7 @@ impl App {
                                 .content_fit(ContentFit::Contain).width(Length::Fill).height(Length::Fill).into()),
                             _ => None,
                         }
-                    });
+                    }));
                     let picture: Element<'static, Message> = container(preview.unwrap_or_else(|| canvas_widgets::live::app_chrome::shell_icon(
                         icon, control.icon_size, color(if control.enabled { visual.palette.text } else { visual.palette.text_muted }))))
                         .width(control.icon_size.min(width - 8.0).max(8.0))
@@ -8211,17 +8308,23 @@ impl App {
                 let item = button(content)
                 .width(width)
                 .height(height)
-                .on_press_maybe(message)
+                .on_press_maybe(control.enabled.then(|| message.clone()).flatten())
                 .style(move |_, status| {
                     match appearance {
                         ::canvas::lua_module::ModuleButtonAppearance::Standard => canvas_widgets::live::app_chrome::cube_button_style(visual, selected, status),
                         ::canvas::lua_module::ModuleButtonAppearance::Quiet => canvas_widgets::live::app_chrome::quiet_button_style(visual, selected, status),
                     }
                 });
+                let pin_id = match &message {
+                    Some(Message::ShellDockActivate(id)) => Some(id.clone()),
+                    Some(Message::ShellLauncherPick { entry_id, .. }) if entry_id.starts_with("app:") && self.project_switcher.as_ref().is_some_and(|p| p.targets[p.target].id == "local") => Some(entry_id.clone()),
+                    _ => None,
+                };
                 let item: Element<'static, Message> = if control.icon.is_some() {
                     iced::widget::tooltip(item, text(control.label.clone()).size(visual.metrics.small),
                         iced::widget::tooltip::Position::Top).delay(Duration::from_millis(450)).into()
                 } else { item.into() };
+                let item = if let Some(id) = pin_id { iced::widget::mouse_area(item).on_right_press(Message::ShellPinToggle(id)).into() } else { item };
                 container(item)
                     .padding(iced::Padding {
                         top: y,
@@ -10351,18 +10454,20 @@ impl App {
             if let Some(presentation) = self.desktop_dock.retained() {
                 let dock_height = ::canvas::shell_geometry::DOCK_HEIGHT;
                 let size = LogicalSize { width: f64::from(viewport.width), height: f64::from(dock_height) };
+                let entries = self.dock_entries();
                 let controls = self.native_module_buttons_selected(&presentation.buttons, size, |control| {
-                    if !control.enabled { return None; }
                     match control.id.as_str() {
                         "launcher" => Some(Message::ShellProjects),
                         id => id.strip_prefix("item").and_then(|n| n.parse::<usize>().ok())
-                            .filter(|n| *n < 6).and_then(|n| ::canvas::shell_presentation::dock_surfaces(&self.document).nth(n))
-                            .filter(|surface| self.decoded.contains_key(&surface.id))
-                            .map(|surface| Message::ShellFocusSurface(surface.id.clone())),
+                            .filter(|n| *n < 6).and_then(|n| entries.get(n).cloned())
+                            .map(|entry| match entry.choice {
+                                ::canvas::shell_launcher::Choice::Surface { id } => Message::ShellFocusSurface(id),
+                                _ => Message::ShellDockActivate(entry.id),
+                            }),
                     }
                 }, |control| control.id.strip_prefix("item").and_then(|n| n.parse::<usize>().ok())
-                    .and_then(|n| ::canvas::shell_presentation::dock_surfaces(&self.document).nth(n))
-                    .is_some_and(|surface| !self.desktop_focused && self.document.focused_surface_id.as_ref() == Some(&surface.id)));
+                    .and_then(|n| entries.get(n))
+                    .is_some_and(|entry| !self.desktop_focused && entry.id.strip_prefix("surface:").is_some_and(|id| self.document.focused_surface_id.as_deref() == Some(id))));
                 let mut children = vec![self.shell_scene_layer(&presentation.scene, size)];
                 children.extend(controls);
                 layers.push(container(container(stack(children)).height(Length::Fixed(dock_height)))

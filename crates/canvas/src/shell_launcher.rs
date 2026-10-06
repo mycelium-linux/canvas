@@ -93,7 +93,7 @@ impl Catalog {
         Self { revision, entries }
     }
 }
-fn applications() -> Vec<Entry> {
+pub fn applications() -> Vec<Entry> {
     let mut roots = Vec::new();
     #[cfg(target_os = "macos")]
     {

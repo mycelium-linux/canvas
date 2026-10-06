@@ -15,6 +15,8 @@ for n=0,visible-1 do
   local key="item"..n
   local px=left+inset+tile+16+n*(tile+gap)
   local focused=i[key.."-focused"]==true
-  widget.icon_button({id=key,label=i[key.."-title"],icon="window",icon_size=32,action="focus",body={surface_id=i[key.."-id"]},x=p.x(px),y=p.y(8),width=p.w(tile),height=p.h(48)})
-  widget.panel({id=key.."-state",x=p.x(px+(tile-(focused and 16 or 4))/2),y=p.y(61),width=p.w(focused and 16 or 4),height=p.h(3),ink=focused and "primary" or "muted",opacity=i[key.."-minimized"] and 0.35 or 1,radius=2})
+  widget.icon_button({id=key,label=i[key.."-title"],icon="window",icon_size=32,action="focus",body={surface_id=i[key.."-id"]},x=p.x(px),y=p.y(8),width=p.w(tile),height=p.h(48),enabled=i[key.."-available"]~=false})
+  if i[key.."-open"]~=false then
+    widget.panel({id=key.."-state",x=p.x(px+(tile-(focused and 16 or 4))/2),y=p.y(61),width=p.w(focused and 16 or 4),height=p.h(3),ink=focused and "primary" or "muted",opacity=i[key.."-minimized"] and 0.35 or 1,radius=2})
+  end
 end
