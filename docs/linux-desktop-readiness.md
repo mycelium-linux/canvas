@@ -1,13 +1,37 @@
 # Canvas Linux desktop readiness
 
 Canvas owns surface composition, workspace intent, focus and presentation.
-The Linux adapter in this checkout uses Sway (`canvas-linux`). Home-Pi currently
-runs a newer deployed `canvas-linux desktop-compositor start` that owns the
-Wayland/KMS session and replaces Sway. Its source must be reconciled with this
-checkout before changing native compositor behavior. The iced Canvas
+The Linux compositor lives in `crates/canvas-linux/src/{compositor,runner,launcher}.rs`.
+Build `canvas-linux` on Linux with `--features compositor` for the Smithay
+Wayland/KMS server. The headless Sway adapter is retired; old project-scoped
+capture/input and terminal-attachment commands fail explicitly rather than
+silently reaching a different seat. The iced Canvas
 application itself is a Wayland client. Native application lifecycle,
 clipboard, portals and secure session locking belong to platform providers.
 Remote applications continue to own their application state.
+
+## Source recovery and deployment boundary
+
+The compositor was recovered from the original linked working copy
+`unibus/tmp/dock-launcher`, whose three source files matched Home-Pi's
+`/home/ajm/src/fpl/canvas-build/crates/canvas-linux/src` byte-for-byte before
+integration. That Pi directory is an unversioned build staging tree: its
+manifest and main entry point had been overwritten with the older adapter.
+Dock/Canvas is now the maintained source location, not that staging directory.
+The recovered runner SHA-256 is
+`5933c296afff2db6ac7d2876613d990c433472bf91974652b7ae4755ecaa7823`.
+Home-Pi's existing installed executable SHA-256 at recovery was
+`261866e35f2e362ff0fd50cf8415498be205d7e45d5c3af82c47faa49818ab7b`.
+Matching source files are evidence of provenance, not a reproducible-build
+proof for that installed executable. Recovery does not replace it or restart
+the live `canvas-compositor.service`.
+
+Commands use separate arguments: `desktop-compositor start` and
+`desktop-compositor status`. Native control uses
+`desktop-compositor-control SOCKET JSON` (for example `{"command":"list"}`).
+The recovered control protocol is not yet a secure replacement for the old
+project-scoped agent input API, and clipboard/portal/lock integration is not
+completed by this recovery. Validate the Linux feature build before installing.
 
 ## Input contract
 

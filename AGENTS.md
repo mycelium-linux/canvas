@@ -12,9 +12,12 @@ interface with `cargo run -p canvas-core --bin canvas-core-ctl -- --help`.
 upstream native token crate is vendored with checksums under `vendor/`.
 The earlier Python/TOML compiler is exploratory history, not an adopted runtime
 or a prerequisite. Do not extend it. Do not duplicate Coherence palettes.
-Agora One is the Ubuntu GPU desktop. The interactive project surface is an
-isolated headless Sway desktop with wayvnc over an SSH tunnel, independently of
-GNOME's lock state. The earlier nested Hyprland session remains exploratory.
+Agora One is the Ubuntu GPU desktop and Linux validation/build host. The native
+Wayland/KMS compositor source lives in `crates/canvas-linux` and is built on
+Linux with `--features compositor`. Home-Pi runs it directly. The earlier
+headless Sway adapter is retired; legacy project-scoped input/capture commands
+fail explicitly until their native replacement preserves ownership guarantees.
+The earlier nested Hyprland session remains exploratory.
 OpenCode owns persistent coding conversations; Canvas uses its supported API and
 attaches a visible terminal to the same session. Backend control gates serialize
 agent inputs and revoke them before aborting a session on human takeover.
@@ -22,7 +25,7 @@ Mac AX operations belong in the independently installed Dock Control helper;
 normal GUI rebuilds must not overwrite that permission-bearing app.
 Window, workspace, and wallpaper behavior implement the narrow traits in
 `canvas-core`; macOS and Windows use independently installed permission-bearing
-helpers, Sway implements them directly, and future compositors remain adapters.
+helpers; the Linux compositor implements them directly.
 Old Sway/dotfiles are inspiration, not a restoration target.
 Preserve the separation of presentation, orchestration,
 transport, compute, and agency in `docs/computing-mesh-design.md`.

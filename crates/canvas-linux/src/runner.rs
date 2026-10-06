@@ -1,0 +1,1139 @@
+//! Smithay Wayland server that makes canvas-linux the WM itself.
+//!
+//! Compiled only with the `compositor` feature. A server-side Wayland
+//! compositor: `wl_compositor` + `xdg-shell` + `wl_seat` + `wl_shm`, a dispatch
+//! loop, and a [`CanvasCompositor`] state model that raises [`WindowLifecycle`]
+//! events. `canvas-linux desktop-compositor start` runs it, replacing the
+//! headless-Sway desktop with Canvas owning the seat.
+//!
+//! KMS/DRM output: when a DRM card with a connected connector is available,
+//! an EGL/GLES renderer on a GBM swapchain drives the first CRTC through a
+//! `DrmCompositor` (self-managing device; pageflip completion is drained via
+//! `frame_submitted` on the same 16ms tick). Mapped xdg toplevels composite
+//! at their [`CanvasCompositor`] frame rectangles. Keyboard and pointer state
+//! can be injected through the owner-only control socket. Without a usable DRM card the compositor runs headless
+//! (control socket only), unchanged from the previous behavior.
+
+use crate::compositor::CanvasCompositor;
+use canvas_core::desktop::{Display as CanvasDisplay, WindowBackend, WindowSurface};
+use canvas_core::layout::Rect;
+use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use smithay::{
+    backend::input::{ButtonState, KeyState, Keycode},
+    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_output, delegate_seat,
+    delegate_shm, delegate_xdg_shell,
+    desktop::utils::send_frames_surface_tree,
+    input::{
+        Seat, SeatHandler, SeatState,
+        keyboard::{FilterResult, KeyboardHandle},
+        pointer::{ButtonEvent, MotionEvent, PointerHandle},
+    },
+    output::{Mode as WlMode, Output, PhysicalProperties, Subpixel},
+    reexports::wayland_server::{
+        Client, Display, DisplayHandle, ListeningSocket,
+        backend::{ClientData, ClientId, DisconnectReason},
+        protocol::wl_buffer,
+        protocol::wl_seat,
+        protocol::wl_surface::WlSurface,
+    },
+    utils::{Logical, Physical, Point, SERIAL_COUNTER, Serial, Size, Transform},
+    wayland::{
+        buffer::BufferHandler,
+        compositor::{CompositorClientState, CompositorHandler, CompositorState},
+        dmabuf::{DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
+        output::{OutputHandler, OutputManagerState},
+        selection::SelectionHandler,
+        selection::data_device::{
+            ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+        },
+        shell::xdg::{
+            PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+        },
+        shm::{ShmHandler, ShmState},
+    },
+};
+
+use smithay::backend::{
+    allocator::{
+        Format, Fourcc,
+        dmabuf::Dmabuf,
+        gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
+    },
+    drm::{
+        DrmDevice, DrmDeviceFd, DrmNode, NodeType,
+        compositor::{DrmCompositor, FrameFlags},
+        exporter::gbm::GbmFramebufferExporter,
+    },
+    egl::{EGLContext, EGLDisplay},
+    renderer::{
+        Color32F, ImportDma,
+        element::{
+            Kind,
+            surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
+        },
+        gles::GlesRenderer,
+    },
+};
+use smithay::reexports::calloop::EventLoop as DrmEventLoop;
+use smithay::reexports::drm::control::{Device as ControlDevice, ModeTypeFlags, connector, crtc};
+use smithay::utils::DeviceFd as SmsDeviceFd;
+
+pub struct RunnerStatus {
+    pub workspace: Option<String>,
+    pub window_count: u32,
+    pub wayland_display: Option<String>,
+}
+
+fn state_path() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(PathBuf::from(home).join(".local/state/dock/compositor.json"))
+}
+
+fn write_state(path: &PathBuf, workspace: Option<&str>, window_count: u32, display: Option<&str>) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(
+        path,
+        json!({
+            "workspace": workspace,
+            "window_count": window_count,
+            "wayland_display": display,
+        })
+        .to_string(),
+    );
+}
+
+pub fn status() -> Option<RunnerStatus> {
+    let path = state_path()?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    Some(RunnerStatus {
+        workspace: v["workspace"].as_str().map(|s| s.to_string()),
+        window_count: v["window_count"].as_u64().map(|n| n as u32).unwrap_or(0),
+        wayland_display: v["wayland_display"].as_str().map(|s| s.to_string()),
+    })
+}
+
+pub fn run() -> Result<Value, String> {
+    let path = state_path().ok_or("HOME not set; cannot locate compositor state file")?;
+    let mut display: Display<App> = Display::new().map_err(|e| format!("wayland Display: {e}"))?;
+    let dh = display.handle();
+
+    let compositor_state = CompositorState::new::<App>(&dh);
+    let shm_state = ShmState::new::<App>(&dh, Vec::new());
+    let mut seat_state = SeatState::new();
+    let mut seat = seat_state.new_wl_seat(&dh, "canvas");
+    let output_manager = OutputManagerState::new_with_xdg_output::<App>(&dh);
+    let data_device_state = DataDeviceState::new::<App>(&dh);
+
+    let displays = vec![CanvasDisplay {
+        id: "HEADLESS-1".into(),
+        name: "HEADLESS-1".into(),
+        frame: Rect {
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 720,
+        },
+        work_area: Rect {
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 720,
+        },
+        primary: true,
+    }];
+    // When DOCK_CANVAS_STREAM points at a stream.sock path, window
+    // map/focus/close events are published as datagrams for retained-Lua
+    // binders. Otherwise the compositor runs open-loop (no producer).
+    let mut canvas = match std::env::var("DOCK_CANVAS_STREAM") {
+        Ok(path) => CanvasCompositor::with_lifecycle(
+            displays,
+            Box::new(crate::compositor::StreamLifecycle::new(Some(
+                std::path::PathBuf::from(path),
+            ))),
+        ),
+        Err(_) => CanvasCompositor::new(displays),
+    };
+
+    let keyboard = seat
+        .add_keyboard(Default::default(), 200, 200)
+        .map_err(|e| format!("add_keyboard: {e}"))?;
+    let pointer = seat.add_pointer();
+
+    let control_socket = path
+        .parent()
+        .unwrap_or(Path::new("/tmp"))
+        .join("compositor-control.sock");
+    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<(Value, std::sync::mpsc::Sender<Value>)>();
+    let launcher = crate::launcher::Launcher::new();
+
+    let drm = DrmRender::try_new(&dh);
+    let mut dmabuf_state = DmabufState::new();
+    let dmabuf_global = drm.as_ref().and_then(|drm| {
+        let formats = drm.renderer.dmabuf_formats();
+        if formats.iter().next().is_none() {
+            eprintln!("canvas-linux: GLES renderer exposes no dmabuf formats; wl_shm only");
+            return None;
+        }
+        let feedback = match DmabufFeedbackBuilder::new(drm.render_node.dev_id(), formats).build() {
+            Ok(feedback) => feedback,
+            Err(error) => {
+                eprintln!("canvas-linux: cannot build dmabuf feedback: {error}");
+                return None;
+            }
+        };
+        let global = dmabuf_state.create_global_with_default_feedback::<App>(&dh, &feedback);
+        eprintln!("canvas-linux: linux-dmabuf enabled on {}", drm.render_node);
+        Some(global)
+    });
+    if let Some(d) = &drm {
+        // The canvas state model tracks the real panel geometry once known.
+        let size = d.size;
+        let frame = Rect {
+            x: 0,
+            y: 0,
+            width: size.w.max(0) as u32,
+            height: size.h.max(0) as u32,
+        };
+        canvas.set_outputs(vec![CanvasDisplay {
+            id: "HDMI-1".into(),
+            name: "HDMI-1".into(),
+            frame,
+            work_area: frame,
+            primary: true,
+        }]);
+    } else {
+        eprintln!("canvas-linux: no DRM output available; running headless");
+    }
+
+    let mut state = App {
+        canvas,
+        compositor_state,
+        xdg_shell_state: XdgShellState::new::<App>(&dh),
+        shm_state,
+        seat_state,
+        data_device_state,
+        output_manager,
+        seat,
+        keyboard,
+        pointer,
+        remote_input: RemoteInput::default(),
+        toplevel_map: Vec::new(),
+        next_id: 0u64,
+        window_count: 0,
+        state_path: path,
+        cmd_rx,
+        launcher,
+        drm,
+        dmabuf_state,
+        dmabuf_global,
+    };
+
+    // Worker thread: accept control-socket clients and forward commands to the
+    // compositor loop via the channel above. The loop drains cmd_rx and applies
+    // commands to its (single-threaded) CanvasCompositor.
+    let _ = std::thread::spawn(move || {
+        let _ = crate::launcher::serve_control(&control_socket, cmd_tx);
+    });
+
+    let wayland_display = "wayland-5".to_string();
+    unsafe { std::env::set_var("WAYLAND_DISPLAY", &wayland_display) };
+    write_state(
+        &state.state_path,
+        state.canvas.workspace(),
+        0,
+        Some(&wayland_display),
+    );
+
+    let listener =
+        ListeningSocket::bind(&wayland_display).map_err(|e| format!("bind wayland socket: {e}"))?;
+    let mut clients = Vec::new();
+
+    loop {
+        if let Ok(Some(stream)) = listener.accept()
+            && let Ok(client) = display
+                .handle()
+                .insert_client(stream, Arc::new(ClientState::default()))
+        {
+            clients.push(client);
+        }
+
+        display
+            .dispatch_clients(&mut state)
+            .map_err(|e| format!("dispatch: {e}"))?;
+        display.flush_clients().map_err(|e| format!("flush: {e}"))?;
+
+        // Drain control-socket commands from the accept-loop worker and apply
+        // them to this thread's CanvasCompositor. Single-threaded; no locking.
+        while let Ok((cmd, reply_tx)) = state.cmd_rx.try_recv() {
+            let resp = if cmd["command"] == "input" {
+                state.apply_remote_input(&cmd)
+            } else {
+                crate::launcher::handle_command(&cmd, &mut state.canvas, &state.launcher)
+            };
+            let _ = reply_tx.send(resp);
+        }
+        state.expire_remote_input();
+
+        let count = state
+            .canvas
+            .snapshot()
+            .map(|s| s.windows.len() as u32)
+            .unwrap_or(0);
+        if count != state.window_count {
+            state.window_count = count;
+            write_state(
+                &state.state_path,
+                state.canvas.workspace(),
+                count,
+                Some(&wayland_display),
+            );
+        }
+
+        state.configure_all();
+        if let Some(drm) = &mut state.drm {
+            let toplevels: Vec<(WlSurface, String)> = state
+                .toplevel_map
+                .iter()
+                .map(|(t, id)| (t.wl_surface().clone(), id.clone()))
+                .collect();
+            let canvas = &mut state.canvas;
+            drm.redraw(&toplevels, canvas);
+        }
+
+        std::thread::sleep(Duration::from_millis(16));
+    }
+}
+
+/// One static DRM output: renderer + swapchain compositor. The DrmDevice is
+/// self-managing, so flip completion is polled through `frame_submitted`.
+struct DrmRender {
+    renderer: GlesRenderer,
+    #[allow(dead_code)]
+    device: DrmDevice,
+    drm_loop: DrmEventLoop<'static, bool>,
+    flip_pending: bool,
+    compositor: DrmCompositor<
+        GbmAllocator<DrmDeviceFd>,
+        GbmFramebufferExporter<DrmDeviceFd>,
+        (),
+        DrmDeviceFd,
+    >,
+    /// Owned so the wl_output global and OutputModeSource stay alive.
+    #[allow(dead_code)]
+    output: Output,
+    size: Size<i32, Physical>,
+    render_node: DrmNode,
+    started_at: std::time::Instant,
+}
+
+impl DrmRender {
+    fn try_new(dh: &DisplayHandle) -> Option<Self> {
+        use std::fs::OpenOptions;
+        use std::os::fd::OwnedFd;
+
+        let mut failed_last: Option<String> = None;
+        for card in 0..8u32 {
+            let path = format!("/dev/dri/card{card}");
+            let file = match OpenOptions::new().read(true).write(true).open(&path) {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+            let fd = DrmDeviceFd::new(SmsDeviceFd::from(OwnedFd::from(file)));
+            match Self::bring_up(dh, fd, &path) {
+                Ok(Some(out)) => {
+                    eprintln!(
+                        "canvas-linux: DRM output active on {path} {}x{}",
+                        out.size.w, out.size.h
+                    );
+                    return Some(out);
+                }
+                Ok(None) => continue,
+                Err(e) => {
+                    failed_last = Some(format!("{path}: {e}"));
+                    continue;
+                }
+            }
+        }
+        if let Some(err) = failed_last {
+            eprintln!("canvas-linux: DRM init failed ({err})");
+        }
+        None
+    }
+
+    fn bring_up(dh: &DisplayHandle, fd: DrmDeviceFd, path: &str) -> Result<Option<Self>, String> {
+        let (mut device, notifier) =
+            DrmDevice::new(fd.clone(), true).map_err(|e| format!("DrmDevice: {e}"))?;
+        // Dedicated loop pumping the notifier source so pageflip completions
+        // reach DrmCompositor::frame_submitted; wayland traffic stays on the
+        // main polling loop.
+        let drm_loop: DrmEventLoop<'static, bool> =
+            DrmEventLoop::try_new().map_err(|e| format!("drm event loop: {e}"))?;
+        drm_loop
+            .handle()
+            .insert_source(notifier, |event, _meta, vblank| match event {
+                smithay::backend::drm::DrmEvent::VBlank(_) => *vblank = true,
+                smithay::backend::drm::DrmEvent::Error(err) => {
+                    eprintln!("canvas-linux: drm event error: {err}");
+                }
+            })
+            .map_err(|e| format!("insert notifier: {e}"))?;
+
+        let res = device
+            .resource_handles()
+            .map_err(|e| format!("resource_handles: {e}"))?;
+        // Candidate (connector, crtc, mode) pairs: every connected connector's
+        // preferred mode crossed with every crtc; the atomic commit in
+        // create_surface/DrmCompositor filters invalid pairings.
+        let mut candidates: Vec<(
+            connector::Handle,
+            crtc::Handle,
+            smithay::reexports::drm::control::Mode,
+        )> = Vec::new();
+        for conn in res.connectors() {
+            let info = match device.get_connector(*conn, true) {
+                Ok(i) => i,
+                Err(_) => continue,
+            };
+            if info.state() != connector::State::Connected || info.modes().is_empty() {
+                continue;
+            }
+            let idx = info
+                .modes()
+                .iter()
+                .position(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
+                .unwrap_or(0);
+            let mode = info.modes()[idx];
+            for crtc in res.crtcs() {
+                candidates.push((*conn, *crtc, mode));
+            }
+        }
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+
+        let gbm = GbmDevice::new(fd.clone()).map_err(|e| format!("gbm: {e}"))?;
+        let egl =
+            unsafe { EGLDisplay::new(gbm.clone()) }.map_err(|e| format!("EGLDisplay: {e}"))?;
+        let context = EGLContext::new(&egl).map_err(|e| format!("EGLContext: {e}"))?;
+        let mut renderer =
+            unsafe { GlesRenderer::new(context) }.map_err(|e| format!("GlesRenderer: {e}"))?;
+
+        let render_formats: Vec<Format> = egl.dmabuf_render_formats().iter().copied().collect();
+
+        let node = DrmNode::from_path(path).map_err(|e| format!("DRM node: {e}"))?;
+        let render_node = node
+            .node_with_type(NodeType::Render)
+            .and_then(Result::ok)
+            .unwrap_or(node);
+        let allocator = GbmAllocator::new(
+            gbm.clone(),
+            GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
+        );
+        let exporter = GbmFramebufferExporter::new(gbm.clone(), Some(node));
+
+        let mut last_err = String::from("no usable connector/crtc pairing");
+        for (conn, crtc, mode) in candidates {
+            let (w, h) = mode.size();
+            let wl_mode = WlMode {
+                size: (w as i32, h as i32).into(),
+                refresh: (mode.vrefresh() * 1000) as i32,
+            };
+            let output = Output::new(
+                "canvas-hdmi".to_string(),
+                PhysicalProperties {
+                    size: (0i32, 0i32).into(),
+                    subpixel: Subpixel::Unknown,
+                    make: "canvas-linux".into(),
+                    model: "HDMI".into(),
+                },
+            );
+            output.create_global::<App>(dh);
+            output.change_current_state(
+                Some(wl_mode),
+                Some(Transform::Normal),
+                None,
+                Some((0, 0).into()),
+            );
+
+            let surface = match device.create_surface(crtc, mode, &[conn]) {
+                Ok(s) => s,
+                Err(e) => {
+                    last_err = format!("create_surface: {e}");
+                    continue;
+                }
+            };
+            let mut compositor = match DrmCompositor::new(
+                &output,
+                surface,
+                None,
+                allocator.clone(),
+                exporter.clone(),
+                [Fourcc::Xrgb8888].into_iter(),
+                render_formats.iter().copied(),
+                device.cursor_size(),
+                Some(gbm.clone()),
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    last_err = format!("DrmCompositor: {e:?}");
+                    continue;
+                }
+            };
+            match compositor.render_frame(
+                &mut renderer,
+                &[] as &[WaylandSurfaceRenderElement<GlesRenderer>],
+                Color32F::new(0.02, 0.02, 0.03, 1.0),
+                FrameFlags::empty(),
+            ) {
+                Ok(_) => {}
+                Err(e) => {
+                    last_err = format!("first frame: {e:?}");
+                    continue;
+                }
+            }
+            if let Err(e) = compositor.queue_frame(()) {
+                last_err = format!("queue first frame: {e}");
+                continue;
+            }
+
+            return Ok(Some(Self {
+                renderer,
+                device,
+                drm_loop,
+                compositor,
+                output,
+                size: wl_mode.size,
+                flip_pending: true,
+                render_node,
+                started_at: std::time::Instant::now(),
+            }));
+        }
+        Err(last_err)
+    }
+
+    fn redraw(&mut self, surfaces: &[(WlSurface, String)], canvas: &mut CanvasCompositor) {
+        // Only retire a pending frame after its actual vblank event. Calling
+        // frame_submitted on every polling iteration releases the swapchain
+        // buffer before KMS is done with it and causes EBUSY retry storms.
+        let mut vblank = false;
+        let _ = self
+            .drm_loop
+            .dispatch(Some(std::time::Duration::ZERO), &mut vblank);
+        if self.flip_pending {
+            if !vblank {
+                return;
+            }
+            match self.compositor.frame_submitted() {
+                Ok(Some(())) => {
+                    self.flip_pending = false;
+                    let elapsed = self.started_at.elapsed();
+                    for (surface, _) in surfaces {
+                        send_frames_surface_tree(
+                            surface,
+                            &self.output,
+                            elapsed,
+                            Some(Duration::from_millis(16)),
+                            |_, _| Some(self.output.clone()),
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("canvas-linux: frame_submitted: {e}");
+                    self.flip_pending = false;
+                }
+            }
+            if self.flip_pending {
+                return;
+            }
+        }
+
+        let mut elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
+        let snapshot = canvas.snapshot().ok();
+        for (surface, id) in surfaces {
+            if !<WlSurface as smithay::reexports::wayland_server::Resource>::is_alive(surface) {
+                continue;
+            }
+            let frame = snapshot
+                .as_ref()
+                .and_then(|s| s.windows.iter().find(|w| w.id == *id))
+                .map(|w| w.frame)
+                .unwrap_or(Rect {
+                    x: 0,
+                    y: 0,
+                    width: self.size.w.max(0) as u32,
+                    height: self.size.h.max(0) as u32,
+                });
+            let location: Point<i32, smithay::utils::Physical> = (frame.x, frame.y).into();
+            elements.extend(render_elements_from_surface_tree(
+                &mut self.renderer,
+                surface,
+                location,
+                1.0,
+                1.0,
+                Kind::Unspecified,
+            ));
+        }
+
+        match self.compositor.render_frame(
+            &mut self.renderer,
+            &elements,
+            Color32F::new(0.20, 0.22, 0.28, 1.0),
+            FrameFlags::empty(),
+        ) {
+            Ok(_) => match self.compositor.queue_frame(()) {
+                Ok(()) => self.flip_pending = true,
+                Err(e) => {
+                    let msg = format!("{e}");
+                    if !msg.contains("No frame has been prepared") {
+                        eprintln!("canvas-linux: queue_frame: {e}");
+                    }
+                    self.flip_pending = false;
+                }
+            },
+            Err(e) => eprintln!("canvas-linux: render_frame: {e:?}"),
+        }
+    }
+}
+
+struct App {
+    canvas: CanvasCompositor,
+    compositor_state: CompositorState,
+    xdg_shell_state: XdgShellState,
+    shm_state: ShmState,
+    seat_state: SeatState<App>,
+    data_device_state: DataDeviceState,
+    /// Owns the wl_output global state registered on the display.
+    #[allow(dead_code)]
+    output_manager: OutputManagerState,
+    #[allow(dead_code)]
+    seat: Seat<App>,
+    #[allow(dead_code)]
+    keyboard: KeyboardHandle<App>,
+    pointer: PointerHandle<App>,
+    remote_input: RemoteInput,
+    /// Toplevel handle -> canvas window id, for resolving focus/destroy,
+    /// configure sync, and the per-frame render element walk.
+    toplevel_map: Vec<(ToplevelSurface, String)>,
+    next_id: u64,
+    window_count: u32,
+    state_path: PathBuf,
+    #[allow(dead_code)]
+    cmd_rx: std::sync::mpsc::Receiver<(Value, std::sync::mpsc::Sender<Value>)>,
+    launcher: crate::launcher::Launcher,
+    drm: Option<DrmRender>,
+    dmabuf_state: DmabufState,
+    /// Keeps the advertised linux-dmabuf global alive with the display.
+    #[allow(dead_code)]
+    dmabuf_global: Option<DmabufGlobal>,
+}
+
+impl App {
+    fn apply_remote_input(&mut self, command: &Value) -> Value {
+        let lease_active = self
+            .remote_input
+            .deadline
+            .is_some_and(|deadline| Instant::now() < deadline);
+        let sequence = match command["sequence"].as_u64() {
+            Some(value) if !lease_active || value > self.remote_input.sequence => value,
+            Some(_) => return json!({"ok": true, "result": {"ignored": "stale sequence"}}),
+            None => return json!({"ok": false, "error": "sequence required"}),
+        };
+        let lease_ms = command["lease_ms"].as_u64().unwrap_or(250);
+        if !(1..=500).contains(&lease_ms) {
+            return json!({"ok": false, "error": "lease_ms must be 1..=500"});
+        }
+        let Some(keys) = command["keys"].as_array().and_then(|values| {
+            values
+                .iter()
+                .map(|value| value.as_u64().and_then(|v| u16::try_from(v).ok()))
+                .collect::<Option<Vec<_>>>()
+        }) else {
+            return json!({"ok": false, "error": "keys must be an array of HID usages"});
+        };
+        if keys.len() > 32 || keys.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return json!({"ok": false, "error": "keys must be sorted and unique (at most 32)"});
+        }
+        let Some(x) = command["pointer_x"]
+            .as_u64()
+            .and_then(|v| u16::try_from(v).ok())
+        else {
+            return json!({"ok": false, "error": "pointer_x required"});
+        };
+        let Some(y) = command["pointer_y"]
+            .as_u64()
+            .and_then(|v| u16::try_from(v).ok())
+        else {
+            return json!({"ok": false, "error": "pointer_y required"});
+        };
+        let Some(buttons) = command["pointer_buttons"]
+            .as_u64()
+            .and_then(|v| u8::try_from(v).ok())
+        else {
+            return json!({"ok": false, "error": "pointer_buttons required"});
+        };
+        if buttons & !0x1f != 0 {
+            return json!({"ok": false, "error": "unknown pointer button"});
+        }
+
+        self.remote_input.sequence = sequence;
+        self.remote_input.deadline = Some(Instant::now() + Duration::from_millis(lease_ms));
+        self.inject_pointer(x, y, buttons);
+        self.inject_keys(&keys);
+        json!({"ok": true, "result": {"sequence": sequence}})
+    }
+
+    fn inject_keys(&mut self, keys: &[u16]) {
+        let previous = self.remote_input.keys.clone();
+        let keyboard = self.keyboard.clone();
+        for usage in previous.iter().filter(|usage| !keys.contains(usage)) {
+            if let Some(code) = hid_to_evdev(*usage) {
+                keyboard.input(
+                    self,
+                    Keycode::from(code),
+                    KeyState::Released,
+                    SERIAL_COUNTER.next_serial(),
+                    monotonic_ms(),
+                    |_, _, _| FilterResult::<()>::Forward,
+                );
+            }
+        }
+        for usage in keys.iter().filter(|usage| !previous.contains(usage)) {
+            if let Some(code) = hid_to_evdev(*usage) {
+                keyboard.input(
+                    self,
+                    Keycode::from(code),
+                    KeyState::Pressed,
+                    SERIAL_COUNTER.next_serial(),
+                    monotonic_ms(),
+                    |_, _, _| FilterResult::<()>::Forward,
+                );
+            }
+        }
+        self.remote_input.keys = keys.to_vec();
+    }
+
+    fn inject_pointer(&mut self, x: u16, y: u16, buttons: u8) {
+        let display = self
+            .canvas
+            .displays()
+            .first()
+            .map(|d| d.work_area)
+            .unwrap_or(Rect {
+                x: 0,
+                y: 0,
+                width: 1280,
+                height: 720,
+            });
+        let px = display.x as f64
+            + f64::from(x) * f64::from(display.width.saturating_sub(1)) / f64::from(u16::MAX);
+        let py = display.y as f64
+            + f64::from(y) * f64::from(display.height.saturating_sub(1)) / f64::from(u16::MAX);
+        let location: Point<f64, Logical> = (px, py).into();
+        let focus = self
+            .canvas
+            .snapshot()
+            .ok()
+            .and_then(|snapshot| {
+                snapshot.windows.into_iter().rev().find(|window| {
+                    px >= f64::from(window.frame.x)
+                        && py >= f64::from(window.frame.y)
+                        && px < f64::from(window.frame.x) + f64::from(window.frame.width)
+                        && py < f64::from(window.frame.y) + f64::from(window.frame.height)
+                })
+            })
+            .and_then(|window| {
+                self.toplevel_map
+                    .iter()
+                    .find(|(_, id)| *id == window.id)
+                    .map(|(surface, _)| {
+                        (
+                            surface.wl_surface().clone(),
+                            (f64::from(window.frame.x), f64::from(window.frame.y)).into(),
+                        )
+                    })
+            });
+        let pointer = self.pointer.clone();
+        pointer.motion(
+            self,
+            focus.clone(),
+            &MotionEvent {
+                location,
+                serial: SERIAL_COUNTER.next_serial(),
+                time: monotonic_ms(),
+            },
+        );
+        if let Some((surface, _)) = focus {
+            let keyboard = self.keyboard.clone();
+            keyboard.set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
+        }
+        let previous = self.remote_input.buttons;
+        for (bit, code) in [(1, 0x110), (2, 0x111), (4, 0x112), (8, 0x116), (16, 0x115)] {
+            if previous & bit != buttons & bit {
+                pointer.button(
+                    self,
+                    &ButtonEvent {
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time: monotonic_ms(),
+                        button: code,
+                        state: if buttons & bit != 0 {
+                            ButtonState::Pressed
+                        } else {
+                            ButtonState::Released
+                        },
+                    },
+                );
+            }
+        }
+        pointer.frame(self);
+        self.remote_input.buttons = buttons;
+        self.remote_input.pointer = (x, y);
+    }
+
+    fn expire_remote_input(&mut self) {
+        if self
+            .remote_input
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.inject_keys(&[]);
+            let (x, y) = self.remote_input.pointer;
+            self.inject_pointer(x, y, 0);
+            self.remote_input.deadline = None;
+        }
+    }
+    /// Push each window's frame rect to its client via xdg configure. The
+    /// canvas state model is the layout authority; sizes follow the frame.
+    fn configure_all(&mut self) {
+        let frames: Vec<(String, Rect)> = self
+            .canvas
+            .snapshot()
+            .map(|s| s.windows.into_iter().map(|w| (w.id, w.frame)).collect())
+            .unwrap_or_default();
+        for (toplevel, id) in &self.toplevel_map {
+            let Some(frame) = frames.iter().find(|(f_id, _)| f_id == id).map(|(_, f)| *f) else {
+                continue;
+            };
+            let current = toplevel.current_state().size;
+            let wanted: smithay::utils::Size<i32, smithay::utils::Logical> =
+                (frame.width as i32, frame.height as i32).into();
+            if current == Some(wanted) {
+                continue;
+            }
+            toplevel.with_pending_state(|state| {
+                state.size = Some(wanted);
+                state.states.set(
+                    smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated,
+                );
+            });
+            toplevel.send_configure();
+        }
+    }
+
+    fn write_state(&mut self, display: Option<&str>) {
+        let count = self
+            .canvas
+            .snapshot()
+            .map(|s| s.windows.len() as u32)
+            .unwrap_or(0);
+        write_state(&self.state_path, self.canvas.workspace(), count, display);
+    }
+}
+
+#[derive(Default)]
+struct RemoteInput {
+    sequence: u64,
+    deadline: Option<Instant>,
+    keys: Vec<u16>,
+    buttons: u8,
+    pointer: (u16, u16),
+}
+
+fn monotonic_ms() -> u32 {
+    use std::sync::OnceLock;
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u32
+}
+
+fn hid_to_evdev(usage: u16) -> Option<u32> {
+    const TABLE: &[(u16, u32)] = &[
+        (4, 30),
+        (5, 48),
+        (6, 46),
+        (7, 32),
+        (8, 18),
+        (9, 33),
+        (10, 34),
+        (11, 35),
+        (12, 23),
+        (13, 36),
+        (14, 37),
+        (15, 38),
+        (16, 50),
+        (17, 49),
+        (18, 24),
+        (19, 25),
+        (20, 16),
+        (21, 19),
+        (22, 31),
+        (23, 20),
+        (24, 22),
+        (25, 47),
+        (26, 17),
+        (27, 45),
+        (28, 21),
+        (29, 44),
+        (30, 2),
+        (31, 3),
+        (32, 4),
+        (33, 5),
+        (34, 6),
+        (35, 7),
+        (36, 8),
+        (37, 9),
+        (38, 10),
+        (39, 11),
+        (40, 28),
+        (41, 1),
+        (42, 14),
+        (43, 15),
+        (44, 57),
+        (45, 12),
+        (46, 13),
+        (47, 26),
+        (48, 27),
+        (49, 43),
+        (51, 39),
+        (52, 40),
+        (53, 41),
+        (54, 51),
+        (55, 52),
+        (56, 53),
+        (57, 58),
+        (58, 59),
+        (59, 60),
+        (60, 61),
+        (61, 62),
+        (62, 63),
+        (63, 64),
+        (64, 65),
+        (65, 66),
+        (66, 67),
+        (67, 68),
+        (68, 87),
+        (69, 88),
+        (73, 110),
+        (74, 102),
+        (75, 104),
+        (76, 111),
+        (77, 107),
+        (78, 109),
+        (79, 106),
+        (80, 105),
+        (81, 108),
+        (82, 103),
+        (224, 29),
+        (225, 42),
+        (226, 56),
+        (227, 125),
+        (228, 97),
+        (229, 54),
+        (230, 100),
+        (231, 126),
+    ];
+    TABLE
+        .iter()
+        .find_map(|(hid, code)| (*hid == usage).then_some(*code))
+}
+
+impl BufferHandler for App {
+    fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {}
+}
+
+impl DmabufHandler for App {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf_state
+    }
+
+    fn dmabuf_imported(
+        &mut self,
+        _global: &DmabufGlobal,
+        dmabuf: Dmabuf,
+        notifier: ImportNotifier,
+    ) {
+        let Some(drm) = self.drm.as_mut() else {
+            notifier.failed();
+            return;
+        };
+        match drm.renderer.import_dmabuf(&dmabuf, None) {
+            Ok(_) => {
+                if dmabuf.node().is_none() {
+                    dmabuf.set_node(drm.render_node);
+                }
+                if let Err(error) = notifier.successful::<App>() {
+                    eprintln!("canvas-linux: dmabuf client disappeared during import: {error}");
+                }
+            }
+            Err(error) => {
+                eprintln!("canvas-linux: rejected client dmabuf: {error}");
+                notifier.failed();
+            }
+        }
+    }
+}
+
+impl XdgShellHandler for App {
+    fn xdg_shell_state(&mut self) -> &mut XdgShellState {
+        &mut self.xdg_shell_state
+    }
+
+    fn new_toplevel(&mut self, surface: ToplevelSurface) {
+        // smithay 0.7.0 does not expose the client-set app_id/title
+        // server-side; kiosk clients address their canvas windows by the
+        // ids reported from the control socket "list" command.
+        let id = format!("surface-{}", self.next_id);
+        self.next_id += 1;
+        self.toplevel_map.push((surface.clone(), id.clone()));
+        let display_frame = self
+            .canvas
+            .displays()
+            .first()
+            .map(|d| d.work_area)
+            .unwrap_or(Rect {
+                x: 0,
+                y: 0,
+                width: 1280,
+                height: 720,
+            });
+        let win = WindowSurface {
+            id: id.clone(),
+            process_id: None,
+            app: "surface".into(),
+            title: String::new(),
+            frame: display_frame,
+            movable: true,
+            resizable: true,
+        };
+        self.canvas.map_window(id, win);
+        self.write_state(Some(&std::env::var("WAYLAND_DISPLAY").unwrap_or_default()));
+        self.configure_all();
+    }
+
+    fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {}
+    fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
+    fn reposition_request(
+        &mut self,
+        _surface: PopupSurface,
+        _positioner: PositionerState,
+        _token: u32,
+    ) {
+    }
+
+    fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        let wl = surface.wl_surface();
+        if let Some(pos) = self
+            .toplevel_map
+            .iter()
+            .position(|(s, _)| *s.wl_surface() == *wl)
+        {
+            let id = self.toplevel_map.remove(pos).1;
+            self.canvas.close_window(&id);
+            self.write_state(Some(&std::env::var("WAYLAND_DISPLAY").unwrap_or_default()));
+        }
+    }
+}
+
+impl CompositorHandler for App {
+    fn compositor_state(&mut self) -> &mut CompositorState {
+        &mut self.compositor_state
+    }
+    fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
+        &client.get_data::<ClientState>().unwrap().compositor_state
+    }
+
+    fn commit(&mut self, surface: &WlSurface) {
+        smithay::backend::renderer::utils::on_commit_buffer_handler::<App>(surface);
+    }
+}
+
+impl ShmHandler for App {
+    fn shm_state(&self) -> &ShmState {
+        &self.shm_state
+    }
+}
+
+impl OutputHandler for App {}
+
+impl SeatHandler for App {
+    type KeyboardFocus = WlSurface;
+    type PointerFocus = WlSurface;
+    type TouchFocus = WlSurface;
+
+    fn seat_state(&mut self) -> &mut SeatState<Self> {
+        &mut self.seat_state
+    }
+
+    fn focus_changed(&mut self, _seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        if let Some(srf) = focused
+            && let Some((_, id)) = self
+                .toplevel_map
+                .iter()
+                .find(|(s, _)| *s.wl_surface() == *srf)
+        {
+            let _ = self.canvas.focus_window(id);
+        }
+    }
+
+    fn cursor_image(
+        &mut self,
+        _seat: &Seat<Self>,
+        _image: smithay::input::pointer::CursorImageStatus,
+    ) {
+    }
+}
+
+impl SelectionHandler for App {
+    type SelectionUserData = ();
+}
+
+impl DataDeviceHandler for App {
+    fn data_device_state(&self) -> &DataDeviceState {
+        &self.data_device_state
+    }
+}
+
+impl ClientDndGrabHandler for App {}
+impl ServerDndGrabHandler for App {
+    fn send(&mut self, _mime_type: String, _fd: std::os::unix::io::OwnedFd, _seat: Seat<Self>) {}
+}
+
+impl AsMut<CompositorState> for App {
+    fn as_mut(&mut self) -> &mut CompositorState {
+        &mut self.compositor_state
+    }
+}
+
+#[derive(Default)]
+struct ClientState {
+    compositor_state: CompositorClientState,
+}
+
+impl ClientData for ClientState {
+    fn initialized(&self, _client_id: ClientId) {}
+    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
+}
+
+delegate_xdg_shell!(App);
+delegate_compositor!(App);
+delegate_shm!(App);
+delegate_dmabuf!(App);
+delegate_seat!(App);
+delegate_data_device!(App);
+delegate_output!(App);

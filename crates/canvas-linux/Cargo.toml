@@ -9,6 +9,7 @@ default = ["desktop", "mcp", "opencode"]
 desktop = []
 mcp = ["dep:rmcp", "dep:axum", "dep:tokio", "dep:subtle"]
 opencode = ["dep:reqwest"]
+compositor = ["dep:smithay"]
 
 [dependencies]
 canvas-core = { path = "../canvas-core" }
@@ -28,3 +29,6 @@ axum = { version = "0.8", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "signal"], optional = true }
 rmcp = { version = "3.2", default-features = false, features = ["server", "transport-streamable-http-server"], optional = true }
 subtle = { version = "2.6", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+smithay = { version = "0.7.0", optional = true, default-features = false, features = ["desktop", "wayland_frontend", "backend_drm", "backend_gbm", "backend_egl", "renderer_gl", "renderer_multi", "use_system_lib"] }

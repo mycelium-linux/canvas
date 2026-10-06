@@ -5,13 +5,18 @@ use std::{
     process::{Command, ExitCode},
 };
 
+mod compositor;
+#[cfg(any(test, feature = "opencode"))]
 mod control;
 mod desktop;
 mod hypr;
+mod launcher;
 #[cfg(feature = "mcp")]
 mod mcp;
 #[cfg(feature = "opencode")]
 mod opencode;
+#[cfg(all(feature = "compositor", target_os = "linux"))]
+mod runner;
 
 fn unit(project: &str) -> Result<String, String> {
     if project.is_empty()
@@ -85,6 +90,16 @@ fn execute(args: &[String]) -> Result<Value, String> {
             return Ok(json!({"stopped": true}));
         }
     }
+    if action == "desktop-compositor" {
+        return compositor::execute(args);
+    }
+    if action == "desktop-compositor-control" && args.len() == 3 {
+        let request = serde_json::from_str(&args[2])
+            .map_err(|e| format!("invalid compositor command: {e}"))?;
+        let response = launcher::send_command(Path::new(&args[1]), &request)?;
+        return serde_json::from_str(&response)
+            .map_err(|e| format!("invalid compositor response: {e}"));
+    }
     if action.starts_with("desktop-") {
         return desktop::execute(args);
     }
@@ -156,12 +171,12 @@ fn execute(args: &[String]) -> Result<Value, String> {
         let systemd = command("systemctl", &["--user", "show-environment"]);
         let sunshine = command("systemctl", &["--user", "is-active", "sunshine"]);
         let hyprland = hypr::execute(&["hypr-status".into()]).is_ok();
-        let desktop = desktop::execute(&["desktop-status".into(), "dock".into()]).is_ok();
         let mut result = json!({
             "platform":"linux", "systemd_user_available":systemd.is_ok(),
             "systemd_error":systemd.err(), "project_process_control":"systemd user units; freeze/thaw require cgroup v2",
             "desktop_window_control":hyprland, "desktop_window_control_scope":"registered Dock Hyprland instance only",
-            "computer_use":desktop, "computer_use_scope":"registered independent Sway desktop; agent input requires backend ownership",
+            "computer_use":false, "computer_use_scope":"legacy Sway capture/input retired; native control is explicit via desktop-compositor-control",
+            "native_compositor_compiled":cfg!(all(feature = "compositor", target_os = "linux")),
             "sunshine_running":sunshine.is_ok(),
             "pause_scope":"only processes launched in this project's unit; not the desktop or external sessions"
         });
