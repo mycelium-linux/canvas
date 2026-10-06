@@ -261,18 +261,19 @@ pub fn handle_command_line(
 /// Client side: send one command to a running compositor control socket and
 /// return the response text.
 pub fn send_command(socket: &Path, command: &Value) -> Result<String, String> {
-    use std::io::{BufRead, Write};
+    use crate::control_transport::{TIMEOUT, read_frame, write_frame};
     let mut stream = std::os::unix::net::UnixStream::connect(socket)
         .map_err(|e| format!("connect {}: {e}", socket.display()))?;
     stream
-        .write_all(format!("{command}\n").as_bytes())
-        .map_err(|e| format!("write: {e}"))?;
-    stream.flush().map_err(|e| format!("flush: {e}"))?;
+        .set_read_timeout(Some(TIMEOUT))
+        .map_err(|e| e.to_string())?;
+    stream
+        .set_write_timeout(Some(TIMEOUT))
+        .map_err(|e| e.to_string())?;
+    write_frame(&mut stream, command).map_err(|e| format!("write: {e}"))?;
     let mut reader = std::io::BufReader::new(stream);
-    let mut buf = String::new();
-    reader
-        .read_line(&mut buf)
-        .map_err(|e| format!("read: {e}"))?;
+    let buf = read_frame(&mut reader)
+        .map_err(|e| format!("outcome unknown: {e}; refresh before retry"))?;
     Ok(buf.trim().to_string())
 }
 
@@ -283,77 +284,44 @@ pub fn handle_one(
     canvas: &mut CanvasCompositor,
     launcher: &Launcher,
 ) -> std::io::Result<()> {
-    use std::io::{BufRead, Write};
-    let mut line = String::new();
-    let n = {
-        let mut reader = std::io::BufReader::new(&mut *stream);
-        reader.read_line(&mut line)?
-    };
-    if n == 0 {
-        let _ = stream.write_all(b"{\"ok\":false,\"error\":\"empty command\"}\n");
-        return Ok(());
-    }
+    use crate::control_transport::{TIMEOUT, read_frame, write_frame};
+    stream.set_read_timeout(Some(TIMEOUT))?;
+    stream.set_write_timeout(Some(TIMEOUT))?;
+    let line = read_frame(&mut std::io::BufReader::new(&mut *stream))?;
     let response = handle_command_line(&line, canvas, launcher);
-    stream.write_all(response.as_bytes())?;
-    stream.write_all(b"\n")?;
+    write_frame(stream, &serde_json::from_str(&response)?)?;
     Ok(())
 }
 
-/// Blocking accept loop for the control socket. Spawns a thread per client;
-/// each reads newline-delimited JSON commands, hands each one to the runner,
-/// and writes newline-delimited replies. The runner's
-/// compositor loop drains `sender` and applies commands to its (single-threaded)
-/// `CanvasCompositor`. Run on a worker thread by the Smithaw runner.
-#[cfg(feature = "compositor")]
+/// One bounded control worker. Clients use one request per connection.
+#[cfg(all(feature = "compositor", target_os = "linux"))]
 pub fn serve_control(
-    socket: impl AsRef<Path>,
-    sender: std::sync::mpsc::Sender<(Value, std::sync::mpsc::Sender<Value>)>,
+    listener: std::os::unix::net::UnixListener,
+    sender: std::sync::mpsc::SyncSender<(Value, std::sync::mpsc::Sender<Value>)>,
 ) -> std::io::Result<()> {
-    let path = socket.as_ref().to_path_buf();
-    let _ = std::fs::remove_file(&path);
-    let listener = std::os::unix::net::UnixListener::bind(&path)?;
-    while let Ok((mut stream, _)) = listener.accept() {
-        let tx = sender.clone();
-        std::thread::spawn(move || {
-            use std::io::{BufRead, Write};
-            let Ok(read_stream) = stream.try_clone() else {
-                return;
-            };
-            let mut reader = std::io::BufReader::new(read_stream);
-            loop {
-                let mut line = String::new();
-                match reader.read_line(&mut line) {
-                    Ok(0) | Err(_) => return,
-                    Ok(_) if line.trim().is_empty() => continue,
-                    Ok(_) => {}
-                }
-                let command: Value = match serde_json::from_str(line.trim()) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        let reply = json!({"ok": false, "error": format!("invalid JSON: {error}")});
-                        let _ = writeln!(stream, "{reply}");
-                        continue;
-                    }
-                };
-                let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-                if tx.send((command, reply_tx)).is_err() {
-                    let _ = writeln!(
-                        stream,
-                        "{}",
-                        json!({"ok": false, "error": "compositor shutting down"})
-                    );
-                    return;
-                }
-                let reply = reply_rx
-                    .recv()
-                    .unwrap_or_else(|_| json!({"ok": false, "error": "no reply from compositor"}));
-                if writeln!(stream, "{reply}").is_err() {
-                    return;
-                }
-            }
-        });
+    use crate::control_transport::{TIMEOUT, read_frame, write_frame};
+    for accepted in listener.incoming() {
+        let mut stream = accepted?;
+        stream.set_read_timeout(Some(TIMEOUT))?;
+        stream.set_write_timeout(Some(TIMEOUT))?;
+        let result = (|| -> Result<Value, String> {
+            let line =
+                read_frame(&mut std::io::BufReader::new(&mut stream)).map_err(|e| e.to_string())?;
+            let command = serde_json::from_str(&line).map_err(|e| format!("invalid JSON: {e}"))?;
+            let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+            sender
+                .try_send((command, reply_tx))
+                .map_err(|e| format!("control queue unavailable: {e}"))?;
+            reply_rx
+                .recv_timeout(TIMEOUT)
+                .map_err(|e| format!("command outcome unknown: {e}; refresh state before retrying"))
+        })();
+        let reply = result.unwrap_or_else(|error| json!({"ok":false,"error":error}));
+        if let Err(error) = write_frame(&mut stream, &reply) {
+            eprintln!("canvas-linux control reply: {error}");
+        }
     }
-    Ok(())
+    Err(std::io::Error::other("control listener ended"))
 }
 
 #[cfg(test)]

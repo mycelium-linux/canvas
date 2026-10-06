@@ -26,6 +26,19 @@ Matching source files are evidence of provenance, not a reproducible-build
 proof for that installed executable. Recovery does not replace it or restart
 the live `canvas-compositor.service`.
 
+The hardened native control endpoint is
+`~/.local/state/dock/native-control/compositor-control.sock`, in an owner-only
+directory with a mode-0600 socket. One connection carries one newline-terminated
+JSON request and response (maximum 64 KiB including newline). A single worker,
+two-second I/O/frame/reply deadlines and a 16-request queue bound resource use;
+the compositor handles at most 16 commands per iteration. A stalled client can
+delay other control clients but not the rendering thread. Bind/worker failures
+stop startup/session explicitly. Existing socket paths are never unlinked or
+stolen automatically; after a crash, verify the previous compositor is stopped
+before removing its stale endpoint. A timeout means the outcome is unknown:
+refresh inventory before retrying a mutation. This is same-user local control,
+not a remote-authentication or project-scoped authorization API.
+
 Commands use separate arguments: `desktop-compositor start` and
 `desktop-compositor status`. Native control uses
 `desktop-compositor-control SOCKET JSON` (for example `{"command":"list"}`).

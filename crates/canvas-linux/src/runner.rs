@@ -166,11 +166,25 @@ pub fn run() -> Result<Value, String> {
         .map_err(|e| format!("add_keyboard: {e}"))?;
     let pointer = seat.add_pointer();
 
-    let control_socket = path
+    let control_directory = path
         .parent()
         .unwrap_or(Path::new("/tmp"))
-        .join("compositor-control.sock");
-    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<(Value, std::sync::mpsc::Sender<Value>)>();
+        .join("native-control");
+    use std::os::unix::fs::DirBuilderExt;
+    match std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&control_directory)
+    {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(format!("create private control directory: {error}")),
+    }
+    let control_socket = control_directory.join("compositor-control.sock");
+    let listener = crate::control_transport::bind(&control_socket)
+        .map_err(|e| format!("bind control socket: {e}"))?;
+    let (cmd_tx, cmd_rx) = std::sync::mpsc::sync_channel::<(Value, std::sync::mpsc::Sender<Value>)>(
+        crate::control_transport::QUEUE_CAPACITY,
+    );
     let launcher = crate::launcher::Launcher::new();
 
     let drm = DrmRender::try_new(&dh);
@@ -238,9 +252,8 @@ pub fn run() -> Result<Value, String> {
     // Worker thread: accept control-socket clients and forward commands to the
     // compositor loop via the channel above. The loop drains cmd_rx and applies
     // commands to its (single-threaded) CanvasCompositor.
-    let _ = std::thread::spawn(move || {
-        let _ = crate::launcher::serve_control(&control_socket, cmd_tx);
-    });
+    let control_worker =
+        std::thread::spawn(move || crate::launcher::serve_control(listener, cmd_tx));
 
     let wayland_display = "wayland-5".to_string();
     unsafe { std::env::set_var("WAYLAND_DISPLAY", &wayland_display) };
@@ -256,6 +269,9 @@ pub fn run() -> Result<Value, String> {
     let mut clients = Vec::new();
 
     loop {
+        if control_worker.is_finished() {
+            return Err("control worker stopped; refusing to run an uncontrollable desktop".into());
+        }
         if let Ok(Some(stream)) = listener.accept()
             && let Ok(client) = display
                 .handle()
@@ -271,7 +287,10 @@ pub fn run() -> Result<Value, String> {
 
         // Drain control-socket commands from the accept-loop worker and apply
         // them to this thread's CanvasCompositor. Single-threaded; no locking.
-        while let Ok((cmd, reply_tx)) = state.cmd_rx.try_recv() {
+        for _ in 0..crate::control_transport::QUEUE_CAPACITY {
+            let Ok((cmd, reply_tx)) = state.cmd_rx.try_recv() else {
+                break;
+            };
             let resp = if cmd["command"] == "input" {
                 state.apply_remote_input(&cmd)
             } else {
