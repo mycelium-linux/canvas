@@ -46,6 +46,44 @@ The recovered control protocol is not yet a secure replacement for the old
 project-scoped agent input API, and clipboard/portal/lock integration is not
 completed by this recovery. Validate the Linux feature build before installing.
 
+## Native focus, close and switching
+
+`{"command":"focus","window":"surface-0"}` now sets and verifies keyboard-seat
+focus, raises the window in the compositor's front-to-back stack, and configures
+only that toplevel as activated. `list` includes `focused_window`, MRU ordering
+and client-provided app/title metadata. Pointer motion does not steal keyboard
+focus; pointer presses still focus the hit-tested window.
+
+`{"command":"close","window":"surface-0"}` sends `xdg_toplevel.close`. Its receipt
+says `close_requested:true, closed:false`, not that the app has exited. The
+window remains in inventory until its toplevel is destroyed; unsaved-work
+dialogs are not bypassed. Closing the focused window restores the remaining
+MRU window. No process kill is involved.
+
+Alt-Tab and Alt-Shift-Tab are handled by the existing leased HID snapshot path.
+The window order freezes for one held Alt gesture; closed windows are skipped,
+new windows join the next gesture, and Tab is consumed rather than sent into
+the selected app. Alt release or input-lease expiry finishes the gesture.
+Socket clients may use `{"command":"cycle","reverse":false}` repeatedly and
+`{"command":"cycle_finish"}` to finish the same native switching session.
+This does not add physical libinput handling or a Lua switcher overlay.
+
+The opt-in native-client proof runs three real Foot processes on an isolated
+headless Wayland server, verifies keyboard-enter/close protocol logs and
+forward/reverse switching, and never opens DRM devices or changes the live
+desktop. With a matching Linux binary built on Agora:
+
+```sh
+CANVAS_COMPOSITOR_TEST_BIN=/absolute/path/to/canvas-linux \
+  cargo test -p canvas-linux --no-default-features --features compositor \
+  native_focus_close_and_alt_tab_reach_real_clients -- --ignored --nocapture
+```
+
+The probe prints its retained `/tmp/canvas-seat-proof-*` evidence directory.
+`desktop-compositor headless` requires a private `XDG_RUNTIME_DIR`, publishes
+state inside that directory and never accesses physical output devices. It is
+protocol-test mode, not a performance or hardware-presentation benchmark.
+
 ## Input contract
 
 A surface opts into desktop input using an `input.desktop_state.v1` input port.

@@ -14,10 +14,14 @@ mod hypr;
 mod launcher;
 #[cfg(feature = "mcp")]
 mod mcp;
+#[cfg(all(test, feature = "compositor", target_os = "linux"))]
+mod native_probe;
 #[cfg(feature = "opencode")]
 mod opencode;
 #[cfg(all(feature = "compositor", target_os = "linux"))]
 mod runner;
+#[cfg(any(test, all(feature = "compositor", target_os = "linux")))]
+mod window_switcher;
 
 fn unit(project: &str) -> Result<String, String> {
     if project.is_empty()

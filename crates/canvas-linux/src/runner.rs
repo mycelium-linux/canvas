@@ -120,7 +120,23 @@ pub fn status() -> Option<RunnerStatus> {
 }
 
 pub fn run() -> Result<Value, String> {
-    let path = state_path().ok_or("HOME not set; cannot locate compositor state file")?;
+    run_with_output(false)
+}
+
+pub fn run_headless() -> Result<Value, String> {
+    run_with_output(true)
+}
+
+fn run_with_output(headless: bool) -> Result<Value, String> {
+    let path = if headless {
+        PathBuf::from(
+            std::env::var_os("XDG_RUNTIME_DIR")
+                .ok_or("headless mode requires a private XDG_RUNTIME_DIR")?,
+        )
+        .join("compositor.json")
+    } else {
+        state_path().ok_or("HOME not set; cannot locate compositor state file")?
+    };
     let mut display: Display<App> = Display::new().map_err(|e| format!("wayland Display: {e}"))?;
     let dh = display.handle();
 
@@ -187,7 +203,11 @@ pub fn run() -> Result<Value, String> {
     );
     let launcher = crate::launcher::Launcher::new();
 
-    let drm = DrmRender::try_new(&dh);
+    let drm = if headless {
+        None
+    } else {
+        DrmRender::try_new(&dh)
+    };
     let mut dmabuf_state = DmabufState::new();
     let dmabuf_global = drm.as_ref().and_then(|drm| {
         let formats = drm.renderer.dmabuf_formats();
@@ -226,7 +246,33 @@ pub fn run() -> Result<Value, String> {
         eprintln!("canvas-linux: no DRM output available; running headless");
     }
 
+    let virtual_output = if headless {
+        let output = Output::new(
+            "canvas-test-output".into(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "Canvas".into(),
+                model: "isolated protocol test".into(),
+            },
+        );
+        output.create_global::<App>(&dh);
+        output.change_current_state(
+            Some(WlMode {
+                size: (1280, 720).into(),
+                refresh: 60000,
+            }),
+            Some(Transform::Normal),
+            None,
+            Some((0, 0).into()),
+        );
+        Some(output)
+    } else {
+        None
+    };
+    let started = Instant::now();
     let mut state = App {
+        virtual_output,
         canvas,
         compositor_state,
         xdg_shell_state: XdgShellState::new::<App>(&dh),
@@ -238,6 +284,7 @@ pub fn run() -> Result<Value, String> {
         keyboard,
         pointer,
         remote_input: RemoteInput::default(),
+        switcher: crate::window_switcher::WindowSwitcher::default(),
         toplevel_map: Vec::new(),
         next_id: 0u64,
         window_count: 0,
@@ -291,11 +338,7 @@ pub fn run() -> Result<Value, String> {
             let Ok((cmd, reply_tx)) = state.cmd_rx.try_recv() else {
                 break;
             };
-            let resp = if cmd["command"] == "input" {
-                state.apply_remote_input(&cmd)
-            } else {
-                crate::launcher::handle_command(&cmd, &mut state.canvas, &state.launcher)
-            };
+            let resp = state.control(&cmd);
             let _ = reply_tx.send(resp);
         }
         state.expire_remote_input();
@@ -324,6 +367,17 @@ pub fn run() -> Result<Value, String> {
                 .collect();
             let canvas = &mut state.canvas;
             drm.redraw(&toplevels, canvas);
+        }
+        if let Some(output) = &state.virtual_output {
+            for (surface, _) in &state.toplevel_map {
+                send_frames_surface_tree(
+                    surface.wl_surface(),
+                    output,
+                    started.elapsed(),
+                    Some(Duration::from_millis(16)),
+                    |_, _| Some(output.clone()),
+                );
+            }
         }
 
         std::thread::sleep(Duration::from_millis(16));
@@ -623,6 +677,7 @@ impl DrmRender {
 }
 
 struct App {
+    virtual_output: Option<Output>,
     canvas: CanvasCompositor,
     compositor_state: CompositorState,
     xdg_shell_state: XdgShellState,
@@ -638,6 +693,7 @@ struct App {
     keyboard: KeyboardHandle<App>,
     pointer: PointerHandle<App>,
     remote_input: RemoteInput,
+    switcher: crate::window_switcher::WindowSwitcher,
     /// Toplevel handle -> canvas window id, for resolving focus/destroy,
     /// configure sync, and the per-frame render element walk.
     toplevel_map: Vec<(ToplevelSurface, String)>,
@@ -655,6 +711,101 @@ struct App {
 }
 
 impl App {
+    fn focus_native(&mut self, id: &str) -> Result<Value, String> {
+        let (surface, _) = self
+            .toplevel_map
+            .iter()
+            .find(|(_, window)| window == id)
+            .ok_or_else(|| format!("unknown native window {id}"))?;
+        let surface = surface.wl_surface().clone();
+        self.inject_keys(&[]);
+        let pointer = self.pointer.clone();
+        for (bit, code) in [(1, 0x110), (2, 0x111), (4, 0x112), (8, 0x116), (16, 0x115)] {
+            if self.remote_input.buttons & bit != 0 {
+                pointer.button(
+                    self,
+                    &ButtonEvent {
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time: monotonic_ms(),
+                        button: code,
+                        state: ButtonState::Released,
+                    },
+                );
+            }
+        }
+        pointer.frame(self);
+        self.remote_input.buttons = 0;
+        let keyboard = self.keyboard.clone();
+        keyboard.set_focus(self, Some(surface.clone()), SERIAL_COUNTER.next_serial());
+        if keyboard.current_focus().as_ref() != Some(&surface) {
+            return Err("keyboard seat did not acknowledge focus".into());
+        }
+        self.canvas.focus_window(id)?;
+        // Smithay render elements are front-to-back; list order also drives hit testing.
+        if let Some(index) = self
+            .toplevel_map
+            .iter()
+            .position(|(_, window)| window == id)
+        {
+            let entry = self.toplevel_map.remove(index);
+            self.toplevel_map.insert(0, entry);
+        }
+        self.configure_all();
+        Ok(json!({"window_id":id,"seat_focused":true}))
+    }
+
+    fn cycle_native(&mut self, reverse: bool) -> Result<Value, String> {
+        let id = self
+            .switcher
+            .next(self.canvas.mru(), self.canvas.focused(), reverse)
+            .ok_or("no native windows to switch")?;
+        self.focus_native(&id)
+    }
+
+    fn control(&mut self, command: &Value) -> Value {
+        let result = match command["command"].as_str().unwrap_or("") {
+            "input" => return self.apply_remote_input(command),
+            "launch" => Err("native app spawning is not implemented; use the host launcher and observe mapped windows".into()),
+            "cycle_finish" => {
+                self.switcher.finish();
+                Ok(json!({"finished":true}))
+            }
+            "cycle" => self.cycle_native(command["reverse"].as_bool().unwrap_or(false)),
+            "focus" | "switch" | "app" => {
+                self.switcher.finish();
+                let id = command["window"].as_str().map(str::to_owned).or_else(|| {
+                    let app = command["app"].as_str()?;
+                    self.canvas
+                        .snapshot()
+                        .ok()?
+                        .windows
+                        .into_iter()
+                        .find(|w| w.app == app)
+                        .map(|w| w.id)
+                });
+                match id {
+                    Some(id) => self.focus_native(&id),
+                    None => Err("known window or app required".into()),
+                }
+            }
+            "close" => {
+                let id = command["window"].as_str().unwrap_or("");
+                match self.toplevel_map.iter().find(|(_, window)| window == id) {
+                    Some((surface, _)) => {
+                        surface.send_close();
+                        Ok(json!({"window_id":id,"close_requested":true,"closed":false}))
+                    }
+                    None => Err(format!("unknown native window {id}")),
+                }
+            }
+            _ => return crate::launcher::handle_command(command, &mut self.canvas, &self.launcher),
+        };
+        match result {
+            Ok(result) => json!({"ok":true,"result":result}),
+            Err(error) => json!({"ok":false,"error":error}),
+        }
+    }
+
     fn apply_remote_input(&mut self, command: &Value) -> Value {
         let lease_active = self
             .remote_input
@@ -705,7 +856,33 @@ impl App {
         self.remote_input.sequence = sequence;
         self.remote_input.deadline = Some(Instant::now() + Duration::from_millis(lease_ms));
         self.inject_pointer(x, y, buttons);
-        self.inject_keys(&keys);
+        let alt = keys.contains(&0xe2) || keys.contains(&0xe6);
+        let tab = keys.contains(&0x2b);
+        if alt && tab && !self.remote_input.tab_down {
+            self.remote_input.cycling = true;
+            self.remote_input.shortcut_tab_owned = true;
+            if let Err(error) = self.cycle_native(keys.contains(&0xe1) || keys.contains(&0xe5)) {
+                return json!({"ok":false,"error":error});
+            }
+        }
+        self.remote_input.tab_down = tab;
+        if !alt {
+            self.remote_input.cycling = false;
+            self.switcher.finish();
+        }
+        if !tab {
+            self.remote_input.shortcut_tab_owned = false;
+        }
+        if self.remote_input.cycling {
+            self.inject_keys(&[]);
+        } else {
+            let forwarded: Vec<_> = keys
+                .iter()
+                .copied()
+                .filter(|key| *key != 0x2b || !self.remote_input.shortcut_tab_owned)
+                .collect();
+            self.inject_keys(&forwarded);
+        }
         json!({"ok": true, "result": {"sequence": sequence}})
     }
 
@@ -756,29 +933,20 @@ impl App {
         let py = display.y as f64
             + f64::from(y) * f64::from(display.height.saturating_sub(1)) / f64::from(u16::MAX);
         let location: Point<f64, Logical> = (px, py).into();
-        let focus = self
-            .canvas
-            .snapshot()
-            .ok()
-            .and_then(|snapshot| {
-                snapshot.windows.into_iter().rev().find(|window| {
-                    px >= f64::from(window.frame.x)
-                        && py >= f64::from(window.frame.y)
-                        && px < f64::from(window.frame.x) + f64::from(window.frame.width)
-                        && py < f64::from(window.frame.y) + f64::from(window.frame.height)
-                })
+        let snapshot = self.canvas.snapshot().ok();
+        let focus = self.toplevel_map.iter().find_map(|(surface, id)| {
+            let window = snapshot.as_ref()?.windows.iter().find(|w| &w.id == id)?;
+            (px >= f64::from(window.frame.x)
+                && py >= f64::from(window.frame.y)
+                && px < f64::from(window.frame.x) + f64::from(window.frame.width)
+                && py < f64::from(window.frame.y) + f64::from(window.frame.height))
+            .then(|| {
+                (
+                    surface.wl_surface().clone(),
+                    (f64::from(window.frame.x), f64::from(window.frame.y)).into(),
+                )
             })
-            .and_then(|window| {
-                self.toplevel_map
-                    .iter()
-                    .find(|(_, id)| *id == window.id)
-                    .map(|(surface, _)| {
-                        (
-                            surface.wl_surface().clone(),
-                            (f64::from(window.frame.x), f64::from(window.frame.y)).into(),
-                        )
-                    })
-            });
+        });
         let pointer = self.pointer.clone();
         pointer.motion(
             self,
@@ -789,9 +957,20 @@ impl App {
                 time: monotonic_ms(),
             },
         );
-        if let Some((surface, _)) = focus {
-            let keyboard = self.keyboard.clone();
-            keyboard.set_focus(self, Some(surface), SERIAL_COUNTER.next_serial());
+        if buttons & !self.remote_input.buttons != 0
+            && let Some((surface, _)) = focus
+        {
+            if let Some(id) = self
+                .toplevel_map
+                .iter()
+                .find(|(top, _)| *top.wl_surface() == surface)
+                .map(|(_, id)| id.clone())
+            {
+                self.switcher.finish();
+                if let Err(error) = self.focus_native(&id) {
+                    eprintln!("pointer focus: {error}");
+                }
+            }
         }
         let previous = self.remote_input.buttons;
         for (bit, code) in [(1, 0x110), (2, 0x111), (4, 0x112), (8, 0x116), (16, 0x115)] {
@@ -826,6 +1005,10 @@ impl App {
             let (x, y) = self.remote_input.pointer;
             self.inject_pointer(x, y, 0);
             self.remote_input.deadline = None;
+            self.remote_input.tab_down = false;
+            self.remote_input.shortcut_tab_owned = false;
+            self.remote_input.cycling = false;
+            self.switcher.finish();
         }
     }
     /// Push each window's frame rect to its client via xdg configure. The
@@ -840,19 +1023,24 @@ impl App {
             let Some(frame) = frames.iter().find(|(f_id, _)| f_id == id).map(|(_, f)| *f) else {
                 continue;
             };
-            let current = toplevel.current_state().size;
             let wanted: smithay::utils::Size<i32, smithay::utils::Logical> =
                 (frame.width as i32, frame.height as i32).into();
-            if current == Some(wanted) {
-                continue;
-            }
-            toplevel.with_pending_state(|state| {
+            let activated = self.canvas.focused() == Some(id.as_str());
+            let changed = toplevel.with_pending_state(|state| {
+                use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+                let changed = state.size != Some(wanted)
+                    || state.states.contains(State::Activated) != activated;
                 state.size = Some(wanted);
-                state.states.set(
-                    smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Activated,
-                );
+                if activated {
+                    state.states.set(State::Activated);
+                } else {
+                    state.states.unset(State::Activated);
+                }
+                changed
             });
-            toplevel.send_configure();
+            if changed {
+                toplevel.send_configure();
+            }
         }
     }
 
@@ -868,6 +1056,9 @@ impl App {
 
 #[derive(Default)]
 struct RemoteInput {
+    shortcut_tab_owned: bool,
+    tab_down: bool,
+    cycling: bool,
     sequence: u64,
     deadline: Option<Instant>,
     keys: Vec<u16>,
@@ -1014,12 +1205,13 @@ impl XdgShellHandler for App {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        // smithay 0.7.0 does not expose the client-set app_id/title
-        // server-side; kiosk clients address their canvas windows by the
-        // ids reported from the control socket "list" command.
+        // Stable window identity is separate from mutable client app_id/title.
         let id = format!("surface-{}", self.next_id);
         self.next_id += 1;
         self.toplevel_map.push((surface.clone(), id.clone()));
+        if let Some(output) = &self.virtual_output {
+            output.enter(surface.wl_surface());
+        }
         let display_frame = self
             .canvas
             .displays()
@@ -1064,6 +1256,16 @@ impl XdgShellHandler for App {
         {
             let id = self.toplevel_map.remove(pos).1;
             self.canvas.close_window(&id);
+            if self.canvas.focused().is_none() {
+                if let Some(next) = self.canvas.mru().first().cloned() {
+                    if let Err(error) = self.focus_native(&next) {
+                        eprintln!("restore focus after close: {error}");
+                    }
+                } else {
+                    let keyboard = self.keyboard.clone();
+                    keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
+                }
+            }
             self.write_state(Some(&std::env::var("WAYLAND_DISPLAY").unwrap_or_default()));
         }
     }
@@ -1079,6 +1281,23 @@ impl CompositorHandler for App {
 
     fn commit(&mut self, surface: &WlSurface) {
         smithay::backend::renderer::utils::on_commit_buffer_handler::<App>(surface);
+        if let Some(id) = self
+            .toplevel_map
+            .iter()
+            .find(|(top, _)| top.wl_surface() == surface)
+            .map(|(_, id)| id.clone())
+        {
+            let identity = smithay::wayland::compositor::with_states(surface, |states| {
+                let attributes = states
+                    .data_map
+                    .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()?;
+                let attributes = attributes.lock().ok()?;
+                Some((attributes.app_id.clone(), attributes.title.clone()))
+            });
+            if let Some((app, title)) = identity {
+                self.canvas.update_identity(&id, app, title);
+            }
+        }
     }
 }
 

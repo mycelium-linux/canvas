@@ -116,6 +116,8 @@ pub fn handle_command(
             "ok": true,
             "result": {
                 "workspace": canvas.workspace(),
+                "focused_window": canvas.focused(),
+                "mru": canvas.mru(),
                 "apps": launcher.apps().iter().map(|a| json!({
                     "id": a.id, "name": a.name, "exec": a.exec,
                 })).collect::<Vec<_>>(),

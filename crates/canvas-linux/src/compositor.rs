@@ -66,6 +66,7 @@ pub struct CanvasCompositor {
     displays: Vec<Display>,
     windows: BTreeMap<String, WindowEntry>,
     focused: Option<String>,
+    mru: Vec<String>,
     workspace: Option<String>,
     wallpapers: BTreeMap<String, Wallpaper>,
     lifecycle: Box<dyn WindowLifecycle + Send>,
@@ -90,6 +91,7 @@ impl CanvasCompositor {
             displays: displays.into_iter().collect(),
             windows: BTreeMap::new(),
             focused: None,
+            mru: Vec::new(),
             workspace: None,
             wallpapers: BTreeMap::new(),
             lifecycle,
@@ -102,6 +104,28 @@ impl CanvasCompositor {
 
     pub fn workspace(&self) -> Option<&str> {
         self.workspace.as_deref()
+    }
+
+    pub fn focused(&self) -> Option<&str> {
+        self.focused.as_deref()
+    }
+
+    pub fn update_identity(&mut self, id: &str, app: Option<String>, title: Option<String>) {
+        if let Some(entry) = self.windows.get_mut(id) {
+            if let Some(app) = app {
+                entry.surface.app = app.chars().filter(|c| !c.is_control()).take(256).collect();
+            }
+            if let Some(title) = title {
+                entry.surface.title = title
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(512)
+                    .collect();
+            }
+        }
+    }
+    pub fn mru(&self) -> &[String] {
+        &self.mru
     }
 
     pub fn place_window(&mut self, id: &str, frame: Rect) -> Result<(), String> {
@@ -132,6 +156,7 @@ impl CanvasCompositor {
             },
         );
         if !already_mapped {
+            self.mru.push(id.clone());
             self.lifecycle.window_mapped(&surface);
         }
     }
@@ -142,6 +167,8 @@ impl CanvasCompositor {
             return Err(format!("unknown window {id}"));
         }
         if self.focused.as_deref() != Some(id) {
+            self.mru.retain(|v| v != id);
+            self.mru.insert(0, id.to_owned());
             self.focused = Some(id.to_string());
             self.lifecycle.window_focused(id);
         }
@@ -151,6 +178,7 @@ impl CanvasCompositor {
     /// The server reports a toplevel closed; remove it and notify lifecycle.
     pub fn close_window(&mut self, id: &str) {
         if self.windows.remove(id).is_some() {
+            self.mru.retain(|v| v != id);
             self.lifecycle.window_closed(id);
             if self.focused.as_deref() == Some(id) {
                 self.focused = None;
@@ -343,6 +371,16 @@ pub fn execute(args: &[String]) -> Result<Value, String> {
     match (action, args.get(1).map(String::as_str), args.len()) {
         ("desktop-compositor", None | Some("start"), 1 | 2) => start(),
         ("desktop-compositor", Some("status"), 2) => status(),
+        ("desktop-compositor", Some("headless"), 2) => {
+            #[cfg(all(feature = "compositor", target_os = "linux"))]
+            {
+                crate::runner::run_headless()
+            }
+            #[cfg(not(all(feature = "compositor", target_os = "linux")))]
+            {
+                Err("headless compositor requires Linux and the compositor feature".into())
+            }
+        }
         _ => Err("usage: canvas-linux desktop-compositor [start|status]".into()),
     }
 }
@@ -387,6 +425,18 @@ fn status() -> Result<Value, String> {
 mod tests {
     use super::*;
     use canvas_core::layout::{PaneRole, Placement, Rect};
+
+    #[test]
+    fn native_identity_is_bounded_and_does_not_change_window_id() {
+        let mut canvas = CanvasCompositor::new(vec![]);
+        canvas.map_window("stable".into(), window("stable", "old"));
+        canvas.update_identity("stable", Some("a\n".repeat(300)), Some("t\t".repeat(600)));
+        let observed = canvas.snapshot().unwrap();
+        assert_eq!(observed.windows[0].id, "stable");
+        assert_eq!(observed.windows[0].app.len(), 256);
+        assert_eq!(observed.windows[0].title.len(), 512);
+        assert_eq!(canvas.mru(), &["stable".to_owned()]);
+    }
 
     #[test]
     fn cli_accepts_separate_status_argument_and_rejects_extra_arguments() {
