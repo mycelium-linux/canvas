@@ -63,7 +63,7 @@ pub mod window_cycle;
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const DESKTOP_BAR_HEIGHT: u32 = 44;
-const MAX_ITEMS: usize = 1_024;
+const MAX_ITEMS: usize = canvas_core::workspace_layout::MAX_ITEMS;
 const MAX_GRADIENT_STOPS: usize = 8;
 pub const MAX_CANVAS_PADDING: u16 = 96;
 pub const MAX_SURFACE_GAP: u16 = 48;
@@ -78,6 +78,12 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl From<canvas_core::Error> for Error {
+    fn from(error: canvas_core::Error) -> Self {
+        Self(error.0)
+    }
+}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -846,56 +852,7 @@ pub struct InputTarget {
     pub input_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
-pub enum Layout {
-    Empty,
-    Surface {
-        surface_id: String,
-    },
-    Split {
-        axis: Axis,
-        ratio: f32,
-        first: Box<Layout>,
-        second: Box<Layout>,
-    },
-    Stack {
-        surface_ids: Vec<String>,
-        active_surface_id: String,
-    },
-    Canvas {
-        placements: Vec<Placement>,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
-pub enum Axis {
-    Horizontal,
-    Vertical,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
-pub struct Placement {
-    pub surface_id: String,
-    pub bounds: NormalizedRect,
-    #[serde(default)]
-    pub layer: i32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-#[cfg_attr(feature = "mcp", derive(schemars::JsonSchema))]
-pub struct NormalizedRect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
+pub use canvas_core::workspace_layout::{Axis, Layout, NormalizedRect, Placement};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1605,90 +1562,6 @@ where
     }
 }
 
-impl Layout {
-    fn validate<'a>(
-        &'a self,
-        surface_ids: &BTreeSet<&'a str>,
-        placed: &mut BTreeSet<&'a str>,
-    ) -> Result<()> {
-        match self {
-            Self::Empty => Ok(()),
-            Self::Surface { surface_id } => place(surface_id, surface_ids, placed),
-            Self::Split {
-                ratio,
-                first,
-                second,
-                ..
-            } => {
-                check(
-                    ratio.is_finite() && (0.05..=0.95).contains(ratio),
-                    "Split ratio must be between 0.05 and 0.95",
-                )?;
-                first.validate(surface_ids, placed)?;
-                second.validate(surface_ids, placed)
-            }
-            Self::Stack {
-                surface_ids: stack,
-                active_surface_id,
-            } => {
-                check(!stack.is_empty(), "A stack must contain a surface")?;
-                check(
-                    stack.iter().any(|id| id == active_surface_id),
-                    "Stack active surface is not in the stack",
-                )?;
-                for surface_id in stack {
-                    place(surface_id, surface_ids, placed)?;
-                }
-                Ok(())
-            }
-            Self::Canvas { placements } => {
-                check(
-                    !placements.is_empty() && placements.len() <= MAX_ITEMS,
-                    "A Canvas layout must contain 1 to 1024 placements",
-                )?;
-                for placement in placements {
-                    placement.bounds.validate()?;
-                    place(&placement.surface_id, surface_ids, placed)?;
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
-fn place<'a>(
-    surface_id: &'a str,
-    surface_ids: &BTreeSet<&'a str>,
-    placed: &mut BTreeSet<&'a str>,
-) -> Result<()> {
-    check(
-        surface_ids.contains(surface_id),
-        format!("Layout references unknown surface: {surface_id}"),
-    )?;
-    check(
-        placed.insert(surface_id),
-        format!("Layout places a surface more than once: {surface_id}"),
-    )
-}
-
-impl NormalizedRect {
-    fn validate(self) -> Result<()> {
-        check(
-            [self.x, self.y, self.width, self.height]
-                .iter()
-                .all(|value| value.is_finite())
-                && self.y >= 0.0
-                && self.width > 0.0
-                && self.height > 0.0
-                && self.width <= 1.0
-                && self.height <= 1.0
-                && self.x < 1.0
-                && self.x + self.width > 0.0
-                && self.y < 1.0,
-            "Canvas bounds must be a positive, reachable rectangle in normalized workspace space",
-        )
-    }
-}
 
 #[cfg(test)]
 mod forward_compatibility_tests {

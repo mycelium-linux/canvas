@@ -26,7 +26,7 @@ const MAX_STORE_BYTES: u64 = 4 * 1024 * 1024;
 /// Bounded because the trail would otherwise grow with every switch for the life
 /// of the install, inside a store already capped at [`MAX_STORE_BYTES`]. Sixteen
 /// is well past the point where someone still remembers which one they meant.
-const MAX_RECENT_PROJECTS: usize = 16;
+use canvas_core::workspace_navigation::{MAX_RECENT_PROJECTS, record_switch, previous};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -150,15 +150,8 @@ impl WorkspaceStore {
         if self.active_project_id.as_deref() == Some(project_id) {
             return;
         }
-        if let Some(departed) = self.active_project_id.replace(project_id.to_string()) {
-            self.recent_project_ids.insert(0, departed);
-        }
-        // Where you are is never also somewhere to go back to, and a project
-        // appears once however many times it has been visited.
-        let mut seen = BTreeSet::new();
-        self.recent_project_ids
-            .retain(|id| id != project_id && seen.insert(id.clone()));
-        self.recent_project_ids.truncate(MAX_RECENT_PROJECTS);
+        let departed = self.active_project_id.replace(project_id.to_string());
+        record_switch(&mut self.recent_project_ids, departed.as_deref(), project_id);
     }
 
     /// Where "go back" goes, or `None` when there is nowhere to go.
@@ -167,10 +160,7 @@ impl WorkspaceStore {
     /// failing: a project deleted months ago must not make "go back" an error,
     /// and it must not silently become a switch to something that cannot load.
     pub fn previous_project_id(&self) -> Option<&str> {
-        self.recent_project_ids
-            .iter()
-            .map(String::as_str)
-            .find(|id| self.projects.contains_key(*id))
+        previous(&self.recent_project_ids, |id| self.projects.contains_key(id))
     }
 
     /// Bring an older store forward in place.
