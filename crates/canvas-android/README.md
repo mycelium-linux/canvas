@@ -220,6 +220,34 @@ The analog clock reuses `fpl-gfx::AnalogClock` geometry and semantic theme roles
 Android paints the shared primitives using its native Canvas, refreshing at
 25 Hz while visible; it does not maintain a separate clock design.
 
+### Native GPU backgrounds
+
+With `android-native-video`, the app renders `tidepool`, `aurora-drift`,
+`dusk-ember`, and `slow-ripple` backgrounds using OpenGL ES 3.1+. The canonical
+WGSL sources live in `canvas-workspace::background_shaders` and are also used
+by the desktop renderer; Naga translates them to GLES in Rust. Android owns
+only EGL resources, presentation, and lifecycle. Other shaders fail visibly;
+there is no downloaded shader execution.
+
+Use the existing revision-bound `apply_patch` endpoint with a `set_background`
+operation, for example `{"kind":"shader","shader_id":"tidepool","speed":1}`.
+The active Coherence background color tints the shader. Speed zero draws a
+stationary frame; switching to `{"kind":"theme"}` removes the GPU layer.
+
+The independent background surface sits below the hardware video surface and
+native widgets. Its buffer is aspect-preserving and bounded to 1280×720; PDFs
+and UI remain at the measured display resolution. PDF fit margins are transparent,
+so only the opaque paper covers the background. One frame completes before
+the next is paced, capped at approximately 30 FPS, with no CPU readback. The
+loop pauses offscreen and releases EGL resources when its surface disappears.
+`adb logcat -s CanvasBackground` reports the GPU, buffer extent, achieved FPS,
+and mean frame work (including completion wait, not a GPU timestamp query).
+
+For crisp PDFs on a 4K TV, inspect `adb shell wm size`: a forced 1920×1080
+override makes the entire app upscale. `adb shell wm size reset` restores the
+panel's native resolution; this is device-wide, not a Canvas setting. Restore
+the previous override with `adb shell wm size 1920x1080` if needed.
+
 The endpoint's response confirms accepted presentation state, not completed
 hardware presentation. Verify the visible surface separately. A future
 Unibus Canvas adapter should carry this narrow contract, not own application

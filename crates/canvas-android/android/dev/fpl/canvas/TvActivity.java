@@ -21,6 +21,17 @@ import android.widget.ImageView;
 import android.widget.ScrollView;
 import android.graphics.Bitmap;
 import android.graphics.Paint;
+import android.view.SurfaceView;
+import android.view.SurfaceHolder;
+import android.os.HandlerThread;
+import android.opengl.EGL14;
+import android.opengl.EGLDisplay;
+import android.opengl.EGLContext;
+import android.opengl.EGLSurface;
+import android.opengl.EGLConfig;
+import android.opengl.GLES30;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.Calendar;
 import android.graphics.pdf.PdfRenderer;
 import android.os.ParcelFileDescriptor;
@@ -50,6 +61,8 @@ public final class TvActivity extends Activity {
     private static native String nativeSelectWorkspace(String project);
     private static native String nativePdfAsset(String asset);
     private static native float[] nativeClockFrame(int width, int height, int hour, int minute, float second);
+    private static native String nativeBackgroundProgram(String id);
+    private GpuBackground background;
     private VideoView video;
     private TextView status;
     private FrameLayout frame;
@@ -66,6 +79,175 @@ public final class TvActivity extends Activity {
     private final ThreadPoolExecutor pdfJobs = new ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS,
         new ArrayBlockingQueue<Runnable>(8));
 
+    /** Independent 720p EGL surface; no CPU readback or 4K UI texture copy. */
+    private final class GpuBackground extends SurfaceView implements SurfaceHolder.Callback {
+        private final HandlerThread worker = new HandlerThread("canvas-background-gpu");
+        private final Handler gpu;
+        private EGLDisplay display = EGL14.EGL_NO_DISPLAY;
+        private EGLContext context = EGL14.EGL_NO_CONTEXT;
+        private EGLSurface output = EGL14.EGL_NO_SURFACE;
+        private int program, buffer, width, height;
+        private volatile boolean active;
+        private String key = "", vertex = "", fragment = "";
+        private float speed;
+        private final float[] theme = new float[4];
+        private final ByteBuffer uniforms = ByteBuffer.allocateDirect(48).order(ByteOrder.nativeOrder());
+        private final long epoch = System.nanoTime();
+        private long completedFrames, workNanos, sampleStart = System.nanoTime();
+        GpuBackground() {
+            super(TvActivity.this);
+            worker.start(); gpu = new Handler(worker.getLooper());
+            setFocusable(false); getHolder().addCallback(this);
+            setVisibility(View.GONE);
+        }
+        private void failure(Exception error) {
+            active = false;
+            android.util.Log.e("CanvasBackground", "GPU background failed", error);
+            runOnUiThread(() -> { setVisibility(View.GONE); showStatus("GPU background: " + error.getMessage()); });
+        }
+        void configure(JSONObject document, JSONObject palette) throws Exception {
+            JSONObject spec = document.optJSONObject("background");
+            if (spec == null || !spec.optString("kind").equals("shader")) {
+                active = false; setVisibility(View.GONE); gpu.removeCallbacks(draw); key = "";
+                gpu.post(this::releaseProgram);
+                return;
+            }
+            String next = spec.toString() + palette.getString("background");
+            if (next.equals(key)) return;
+            JSONObject source = new JSONObject(nativeBackgroundProgram(spec.getString("shader_id")));
+            if (source.has("error")) throw new IllegalArgumentException(source.getString("error"));
+            float rate = (float)spec.getDouble("speed");
+            if (!Float.isFinite(rate) || rate < 0 || rate > 4) throw new IllegalArgumentException("Invalid shader speed");
+            int color = Color.parseColor(palette.getString("background"));
+            final String vs = source.getString("vertex"), fs = source.getString("fragment");
+            key = next; setVisibility(View.VISIBLE); active = resumed;
+            gpu.post(() -> {
+                vertex = vs; fragment = fs; speed = rate;
+                theme[0] = Color.red(color) / 255f; theme[1] = Color.green(color) / 255f;
+                theme[2] = Color.blue(color) / 255f; theme[3] = 1;
+                try { if (context != EGL14.EGL_NO_CONTEXT) installProgram(); schedule(); }
+                catch (Exception error) { failure(error); }
+            });
+        }
+        void setActive(boolean visible) {
+            active = visible && getVisibility() == View.VISIBLE;
+            gpu.removeCallbacks(draw);
+            if (active) gpu.post(() -> {
+                completedFrames = 0; workNanos = 0; sampleStart = System.nanoTime(); schedule();
+            });
+        }
+        private int shader(int kind, String code) {
+            int shader = GLES30.glCreateShader(kind);
+            GLES30.glShaderSource(shader, code); GLES30.glCompileShader(shader);
+            int[] ok = new int[1]; GLES30.glGetShaderiv(shader, GLES30.GL_COMPILE_STATUS, ok, 0);
+            if (ok[0] == 0) {
+                String reason = GLES30.glGetShaderInfoLog(shader); GLES30.glDeleteShader(shader);
+                throw new IllegalStateException(reason);
+            }
+            return shader;
+        }
+        private void releaseProgram() {
+            if (program != 0) GLES30.glDeleteProgram(program);
+            if (buffer != 0) GLES30.glDeleteBuffers(1, new int[]{buffer}, 0);
+            program = 0; buffer = 0;
+        }
+        private void installProgram() {
+            releaseProgram();
+            int vs = shader(GLES30.GL_VERTEX_SHADER, vertex), fs = 0;
+            try {
+                fs = shader(GLES30.GL_FRAGMENT_SHADER, fragment);
+                program = GLES30.glCreateProgram(); GLES30.glAttachShader(program, vs); GLES30.glAttachShader(program, fs);
+                GLES30.glLinkProgram(program);
+                int[] ok = new int[1]; GLES30.glGetProgramiv(program, GLES30.GL_LINK_STATUS, ok, 0);
+                if (ok[0] == 0) throw new IllegalStateException(GLES30.glGetProgramInfoLog(program));
+                int[] buffers = new int[1]; GLES30.glGenBuffers(1, buffers, 0); buffer = buffers[0];
+                GLES30.glBindBuffer(GLES30.GL_UNIFORM_BUFFER, buffer);
+                GLES30.glBufferData(GLES30.GL_UNIFORM_BUFFER, 48, null, GLES30.GL_DYNAMIC_DRAW);
+                GLES30.glBindBufferBase(GLES30.GL_UNIFORM_BUFFER, 0, buffer);
+            } finally { GLES30.glDeleteShader(vs); if (fs != 0) GLES30.glDeleteShader(fs); }
+        }
+        private void schedule() { gpu.removeCallbacks(draw); if (active) gpu.post(draw); }
+        private final Runnable draw = new Runnable() {
+            @Override public void run() {
+                if (!active || program == 0 || output == EGL14.EGL_NO_SURFACE) return;
+                try {
+                    long started = System.nanoTime();
+                    uniforms.clear(); uniforms.putFloat(width).putFloat(height);
+                    uniforms.putFloat(speed == 0 ? 0 : (System.nanoTime() - epoch) / 1e9f * speed).putFloat(0);
+                    for (int i = 0; i < 4; i++) uniforms.putFloat(0);
+                    for (float value : theme) uniforms.putFloat(value);
+                    uniforms.flip();
+                    GLES30.glViewport(0, 0, width, height); GLES30.glUseProgram(program);
+                    GLES30.glBindBuffer(GLES30.GL_UNIFORM_BUFFER, buffer);
+                    GLES30.glBufferSubData(GLES30.GL_UNIFORM_BUFFER, 0, 48, uniforms);
+                    GLES30.glDrawArrays(GLES30.GL_TRIANGLES, 0, 3);
+                    int error = GLES30.glGetError();
+                    if (error != GLES30.GL_NO_ERROR) throw new IllegalStateException("GL error " + error);
+                    if (!EGL14.eglSwapBuffers(display, output)) throw new IllegalStateException("EGL swap failed");
+                    // One submitted frame at a time; wait for completion before pacing.
+                    GLES30.glFinish();
+                    workNanos += System.nanoTime() - started;
+                    if (++completedFrames == 300) {
+                        long now = System.nanoTime();
+                        android.util.Log.i("CanvasBackground", "fps=" + (completedFrames * 1e9 / (now - sampleStart))
+                            + " mean-frame-work-ms=" + (workNanos / 1e6 / completedFrames));
+                        completedFrames = 0; workNanos = 0; sampleStart = now;
+                    }
+                    if (active && speed > 0) gpu.postDelayed(this,
+                        Math.max(1, 33 - TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)));
+                } catch (Exception error) { failure(error); }
+            }
+        };
+        @Override public void surfaceCreated(SurfaceHolder holder) {
+            int w = Math.max(1, getWidth()), h = Math.max(1, getHeight());
+            float scale = Math.min(1, Math.min(1280f / w, 720f / h));
+            width = Math.max(1, Math.round(w * scale)); height = Math.max(1, Math.round(h * scale));
+            holder.setFixedSize(width, height);
+            gpu.post(() -> {
+                try {
+                    display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY);
+                    if (!EGL14.eglInitialize(display, new int[2], 0, new int[2], 0)) throw new IllegalStateException("EGL initialize failed");
+                    EGLConfig[] configs = new EGLConfig[1]; int[] count = new int[1];
+                    int[] attributes = {EGL14.EGL_RENDERABLE_TYPE, 0x40, EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT,
+                        EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8, EGL14.EGL_ALPHA_SIZE, 8, EGL14.EGL_NONE};
+                    if (!EGL14.eglChooseConfig(display, attributes, 0, configs, 0, 1, count, 0) || count[0] == 0)
+                        throw new IllegalStateException("No GLES3 window config");
+                    context = EGL14.eglCreateContext(display, configs[0], EGL14.EGL_NO_CONTEXT,
+                        new int[]{EGL14.EGL_CONTEXT_CLIENT_VERSION, 3, EGL14.EGL_NONE}, 0);
+                    output = EGL14.eglCreateWindowSurface(display, configs[0], holder.getSurface(), new int[]{EGL14.EGL_NONE}, 0);
+                    if (!EGL14.eglMakeCurrent(display, output, output, context)) throw new IllegalStateException("EGL context failed");
+                    completedFrames = 0; workNanos = 0; sampleStart = System.nanoTime();
+                    android.util.Log.i("CanvasBackground", "GPU=" + GLES30.glGetString(GLES30.GL_RENDERER)
+                        + " GL=" + GLES30.glGetString(GLES30.GL_VERSION) + " buffer=" + width + "x" + height);
+                    if (!vertex.isEmpty()) installProgram(); schedule();
+                } catch (Exception error) { failure(error); }
+            });
+        }
+        private void release() {
+            gpu.removeCallbacks(draw); releaseProgram();
+            if (display != EGL14.EGL_NO_DISPLAY) {
+                EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT);
+                if (output != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(display, output);
+                if (context != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(display, context);
+                EGL14.eglTerminate(display);
+            }
+            display = EGL14.EGL_NO_DISPLAY; context = EGL14.EGL_NO_CONTEXT; output = EGL14.EGL_NO_SURFACE;
+        }
+        @Override public void surfaceDestroyed(SurfaceHolder holder) {
+            gpu.removeCallbacks(draw);
+            java.util.concurrent.CountDownLatch released = new java.util.concurrent.CountDownLatch(1);
+            if (gpu.post(() -> { release(); released.countDown(); })) {
+                try {
+                    if (!released.await(2, TimeUnit.SECONDS)) failure(new IllegalStateException("GPU teardown timed out"));
+                } catch (InterruptedException error) { Thread.currentThread().interrupt(); failure(error); }
+            }
+        }
+        @Override public void surfaceChanged(SurfaceHolder holder, int format, int w, int h) {
+            gpu.post(() -> { width = w; height = h; schedule(); });
+        }
+        void dispose() { active = false; gpu.post(() -> { release(); worker.quitSafely(); }); }
+    }
+
     /** Paints canonical gfx primitives; no duplicate clock geometry in Java. */
     private final class AnalogClockView extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -77,7 +259,7 @@ public final class TvActivity extends Activity {
                 Color.parseColor(palette.getString("text_muted")),
                 Color.parseColor(palette.getString("text")),
                 Color.parseColor(palette.getString("primary"))};
-            setBackgroundColor(Color.parseColor(palette.getString("background")));
+            setBackgroundColor(Color.TRANSPARENT);
             setContentDescription("Analog clock");
             paint.setStrokeCap(Paint.Cap.ROUND);
         }
@@ -85,7 +267,9 @@ public final class TvActivity extends Activity {
             super.onDraw(target);
             if (!resumed || getWidth() == 0 || getHeight() == 0) return;
             time.setTimeInMillis(System.currentTimeMillis());
-            float[] records = nativeClockFrame(getWidth(), getHeight(), time.get(Calendar.HOUR_OF_DAY),
+            float density = getResources().getDisplayMetrics().density;
+            target.save(); target.scale(density, density);
+            float[] records = nativeClockFrame(Math.max(1, Math.round(getWidth() / density)), Math.max(1, Math.round(getHeight() / density)), time.get(Calendar.HOUR_OF_DAY),
                 time.get(Calendar.MINUTE), time.get(Calendar.SECOND) + time.get(Calendar.MILLISECOND) / 1000f);
             if (records == null || records.length != 65 * 8) throw new IllegalStateException("Invalid clock primitives");
             for (int i = 0; i < records.length; i += 8) {
@@ -104,6 +288,7 @@ public final class TvActivity extends Activity {
                     target.drawLine(records[i + 1], records[i + 2], records[i + 3], records[i + 4], paint);
                 } else throw new IllegalStateException("Unsupported clock primitive");
             }
+            target.restore();
             postInvalidateDelayed(40);
         }
     }
@@ -134,7 +319,8 @@ public final class TvActivity extends Activity {
             fitPage = width < viewHeight;
             rasterWidth = Math.max(1, Math.min(width, 1920));
             setOrientation(VERTICAL);
-            setBackgroundColor(Color.parseColor(palette.getString("surface")));
+            // The page is opaque paper; unused fit/scroll bounds are not chrome.
+            setBackgroundColor(Color.TRANSPARENT);
             image = new ImageView(TvActivity.this);
             image.setScaleType(ImageView.ScaleType.FIT_CENTER);
             image.setAdjustViewBounds(true);
@@ -243,6 +429,7 @@ public final class TvActivity extends Activity {
     }
 
     @Override public void onDestroy() {
+        if (background != null) background.dispose();
         for (View widget : widgets) if (widget instanceof PdfSurface) ((PdfSurface)widget).dispose();
         pdfJobs.shutdownNow();
         super.onDestroy();
@@ -263,7 +450,10 @@ public final class TvActivity extends Activity {
             | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
         frame = new FrameLayout(this);
         frame.setBackgroundColor(0xff000000);
+        background = new GpuBackground();
+        frame.addView(background, new FrameLayout.LayoutParams(-1, -1));
         video = new VideoView(this);
+        video.setZOrderMediaOverlay(true); // Above shader surface, below native UI.
         FrameLayout.LayoutParams geometry = new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER);
         frame.addView(video, geometry);
         status = new TextView(this);
@@ -368,6 +558,7 @@ public final class TvActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         resumed = true;
+        background.setActive(true);
         lastProjection = "";
         if (workspaceMode) currentUrl = "";
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -377,6 +568,7 @@ public final class TvActivity extends Activity {
 
     @Override protected void onPause() {
         resumed = false;
+        background.setActive(false);
         updates.removeCallbacks(refresh);
         preparedPlayer = null;
         video.stopPlayback(); // Release tuner when the app is no longer visible.
@@ -434,6 +626,7 @@ public final class TvActivity extends Activity {
             workspaceMode = true;
             JSONObject palette = projection.getJSONObject("palette");
             frame.setBackgroundColor(Color.parseColor(palette.getString("background")));
+            background.configure(projection.getJSONObject("document"), palette);
             selector.setBackgroundColor(Color.parseColor(palette.getString("surface")));
             styleControl(muteButton, palette, false);
             JSONObject catalog = projection.getJSONObject("catalog");

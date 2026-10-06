@@ -3,15 +3,17 @@ use std::net::IpAddr;
 pub const CONTROL_PORT: u16 = 27841;
 
 #[cfg(feature = "shared-workspaces")]
-pub mod geometry;
-#[cfg(feature = "shared-workspaces")]
-pub mod workspaces;
-#[cfg(feature = "shared-workspaces")]
 pub mod assets;
 #[cfg(feature = "android-native-video")]
+pub mod background;
+#[cfg(feature = "android-native-video")]
 pub mod clock;
+#[cfg(feature = "shared-workspaces")]
+pub mod geometry;
 #[cfg(all(target_os = "android", feature = "android-native-video"))]
 mod native_control;
+#[cfg(feature = "shared-workspaces")]
+pub mod workspaces;
 
 #[cfg(all(target_os = "android", feature = "android-native-video"))]
 #[unsafe(no_mangle)]

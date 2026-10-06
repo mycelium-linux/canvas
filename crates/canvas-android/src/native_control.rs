@@ -138,6 +138,26 @@ fn string(env: &mut jni::JNIEnv, value: String) -> jni::sys::jstring {
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeBackgroundProgram(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    id: jni::objects::JString,
+) -> jni::sys::jstring {
+    let result = env
+        .get_string(&id)
+        .map(String::from)
+        .map_err(|e| e.to_string())
+        .and_then(|id| crate::background::program(&id));
+    string(
+        &mut env,
+        match result {
+            Ok(program) => program.to_string(),
+            Err(error) => serde_json::json!({"error": error}).to_string(),
+        },
+    )
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeClockFrame(
     mut env: jni::JNIEnv,
     _class: jni::objects::JClass,

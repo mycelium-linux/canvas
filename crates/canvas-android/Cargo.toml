@@ -12,11 +12,12 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
-android-native-video = ["dep:jni", "shared-workspaces", "dep:getrandom", "dep:subtle", "dep:fpl-gfx"]
+android-native-video = ["dep:jni", "shared-workspaces", "dep:getrandom", "dep:subtle", "dep:fpl-gfx", "dep:naga"]
 shared-workspaces = ["dep:canvas-core", "dep:canvas-workspace", "dep:serde_json", "dep:sha2"]
 
 [dependencies]
 url = "2"
+naga = { version = "27", features = ["wgsl-in", "glsl-out"], optional = true }
 canvas-core = { path = "../canvas-core", optional = true }
 canvas-workspace = { path = "../canvas-workspace", optional = true }
 serde_json = { version = "1", optional = true }
