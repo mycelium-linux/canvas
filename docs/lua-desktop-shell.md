@@ -53,6 +53,25 @@ This requires the updated native host before installing the new Lua files.
 
 ## Window switching
 
+Shell layouts now use `widget.pixel_space(width, height)` for logical-pixel
+geometry. `widget.icon_button` shares native Coherence hover, selection, and
+disabled treatment. Its bounded `icon` vocabulary is `apps`, `window`,
+`terminal`, `document`, `browser`, and `chart`; `icon_size` is 8–96 logical pixels.
+`icon_caption=true` adds a centered, Unicode-safe shortened label, while the
+hover tooltip retains the full supplied label. No arbitrary image paths, SVG,
+colors, or native callbacks enter the Lua control contract.
+
+Alt-Tab is a dedicated horizontal strip, sized from its visible window count
+instead of a percentage of the display. Its panel and the compact icon dock
+share native borders and shadows; Lua owns their panel geometry. The root
+`ground` rectangle is the shell panel contract and must be unparented. Captured
+external surfaces and raster windows reuse their existing textures as live
+previews; other destinations use semantic vector symbols. These are not OS app
+brand icons. There are no additional capture sessions or media encoders.
+
+Install the updated native host **before** deploying these Lua sources. Once
+installed, their layout and styling can be hot-reloaded without recompilation.
+
 With Canvas focused, **Alt-Tab** (Option-Tab on Neo) previews attached windows
 in most-recently-focused order. Shift reverses the cycle; releasing Alt commits
 focus (Enter also commits), restores a minimized destination, changes its page if necessary, and

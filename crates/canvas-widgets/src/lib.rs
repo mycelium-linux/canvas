@@ -14,6 +14,18 @@ use std::path::PathBuf;
 pub mod quant;
 pub mod roster;
 
+/// Bounded, theme-colored shell symbols. These describe content, not app brands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellIcon {
+    Apps,
+    Window,
+    Terminal,
+    Document,
+    Browser,
+    Chart,
+}
+
 pub const WIDGET_SCHEMA_VERSION: u32 = 2;
 pub const MAX_SPECTRAL_HISTORY_ROWS: usize = 1_024;
 const MAX_SPEC_BYTES: u64 = 256 * 1024;

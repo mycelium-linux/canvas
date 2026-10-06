@@ -373,6 +373,7 @@ fn remote(
 
 #[derive(Debug, Clone)]
 pub struct Launcher {
+    pub viewport: [f32; 2],
     pub window_cycle: bool,
     pub targets: Vec<Target>,
     pub target: usize,
@@ -394,6 +395,7 @@ pub struct Launcher {
 impl Launcher {
     pub fn new() -> Result<Self, String> {
         Ok(Self {
+            viewport: [600.0, 440.0],
             window_cycle: false,
             targets: targets()?,
             target: 0,
@@ -427,6 +429,16 @@ impl Launcher {
             .collect();
         rows.sort_by_key(|e| !e.title.to_lowercase().starts_with(&query));
         rows
+    }
+    pub fn visible_rows(&self) -> usize {
+        if self.window_cycle {
+            (((self.viewport[0] - 32.0) / 112.0).floor() as usize).clamp(1, 6)
+        } else {
+            6
+        }
+    }
+    pub fn row_start(&self) -> usize {
+        self.selected.saturating_sub(self.visible_rows() - 1)
     }
     pub fn accept(&mut self, generation: u64, result: Result<Catalog, String>, now: u64) {
         if generation != self.generation {
@@ -563,9 +575,21 @@ impl Launcher {
     ) -> Result<(), String> {
         use crate::lua_module::{ModuleInputSnapshot, ModuleInputValue};
         let mut values = std::collections::BTreeMap::new();
+        values.insert(
+            "width".into(),
+            ModuleInputValue::Number(f64::from(self.viewport[0])),
+        );
+        values.insert(
+            "height".into(),
+            ModuleInputValue::Number(f64::from(self.viewport[1])),
+        );
         let fresh = self.catalog.is_some()
-            && (self.window_cycle || now.saturating_sub(self.observed) < LEASE_MS) && !self.busy;
-        values.insert("window-cycle".into(), ModuleInputValue::Boolean(self.window_cycle));
+            && (self.window_cycle || now.saturating_sub(self.observed) < LEASE_MS)
+            && !self.busy;
+        values.insert(
+            "window-cycle".into(),
+            ModuleInputValue::Boolean(self.window_cycle),
+        );
         for (id, value) in [
             ("target", self.targets[self.target].label.clone()),
             ("query", self.query.clone()),
@@ -586,8 +610,14 @@ impl Launcher {
         }
         values.insert("live".into(), ModuleInputValue::Boolean(fresh));
         let rows = self.matches();
-        let start = self.selected.saturating_sub(5);
-        for (slot, (index, e)) in rows.iter().enumerate().skip(start).take(6).enumerate() {
+        let start = self.row_start();
+        for (slot, (index, e)) in rows
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(self.visible_rows())
+            .enumerate()
+        {
             for (suffix, value) in [
                 (
                     "title",

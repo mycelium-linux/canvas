@@ -7,6 +7,81 @@ use canvas_core::VisualTheme;
 use iced::widget::{button, container, row, space, text};
 use iced::{Color, Element, Length};
 
+/// Resolution-independent symbols; no font glyphs, file paths, or SVG parsing.
+pub fn shell_icon<Message: 'static>(
+    icon: crate::ShellIcon,
+    size: f32,
+    ink: Color,
+) -> Element<'static, Message> {
+    use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
+    struct Symbol(crate::ShellIcon, Color);
+    impl<Message> canvas::Program<Message> for Symbol {
+        type State = ();
+        fn draw(
+            &self,
+            _: &(),
+            renderer: &iced::Renderer,
+            _: &iced::Theme,
+            bounds: iced::Rectangle,
+            _: iced::mouse::Cursor,
+        ) -> Vec<Geometry> {
+            let mut frame = Frame::new(renderer, bounds.size());
+            let s = bounds.width.min(bounds.height) / 24.0;
+            frame.scale(s);
+            let stroke = Stroke::default().with_color(self.1).with_width(1.6);
+            let line = |frame: &mut Frame, a: [f32; 2], b: [f32; 2]| {
+                frame.stroke(&Path::line(a.into(), b.into()), stroke);
+            };
+            use crate::ShellIcon;
+            match self.0 {
+                ShellIcon::Apps => {
+                    for x in [5.0, 12.0, 19.0] {
+                        for y in [5.0, 12.0, 19.0] {
+                            frame.fill(&Path::circle(iced::Point::new(x, y), 1.5), self.1);
+                        }
+                    }
+                }
+                ShellIcon::Window | ShellIcon::Browser => {
+                    frame.stroke(
+                        &Path::rectangle(iced::Point::new(3.0, 4.0), iced::Size::new(18.0, 16.0)),
+                        stroke,
+                    );
+                    line(&mut frame, [3.0, 9.0], [21.0, 9.0]);
+                    if self.0 == ShellIcon::Browser {
+                        for x in [6.0, 9.0, 12.0] {
+                            frame.fill(&Path::circle(iced::Point::new(x, 6.5), 0.65), self.1);
+                        }
+                    }
+                }
+                ShellIcon::Terminal => {
+                    line(&mut frame, [4.0, 7.0], [9.0, 12.0]);
+                    line(&mut frame, [9.0, 12.0], [4.0, 17.0]);
+                    line(&mut frame, [12.0, 17.0], [20.0, 17.0]);
+                }
+                ShellIcon::Document => {
+                    frame.stroke(
+                        &Path::rectangle(iced::Point::new(6.0, 3.0), iced::Size::new(12.0, 18.0)),
+                        stroke,
+                    );
+                    for y in [8.0, 12.0, 16.0] {
+                        line(&mut frame, [9.0, y], [15.0, y]);
+                    }
+                }
+                ShellIcon::Chart => {
+                    for (x, y) in [(5.0, 13.0), (12.0, 7.0), (19.0, 10.0)] {
+                        line(&mut frame, [x, 20.0], [x, y]);
+                    }
+                }
+            }
+            vec![frame.into_geometry()]
+        }
+    }
+    canvas::Canvas::new(Symbol(icon, ink))
+        .width(size)
+        .height(size)
+        .into()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Density {
     /// Persistent tools: browsers, timelines, inspectors and transport bars.
@@ -298,7 +373,7 @@ pub fn quiet_button_style(
     if !active && !matches!(status, button::Status::Hovered | button::Status::Pressed) {
         style.background = None;
     }
-    style.border.width = 0.0;
+    style.border.width = if active { 1.0 } else { 0.0 };
     style.border.radius = visual.metrics.radius_md.into();
     style
 }

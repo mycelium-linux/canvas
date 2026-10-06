@@ -1,21 +1,42 @@
--- One cloth: same bounded primitives and semantic theme as every Lua widget.
+-- Logical pixels, shared desktop primitives, no dashboard chrome in Alt-Tab.
 local i,t=module.inputs,module.theme
+local w,h=i.width or 600,i.height or 440
+local p=widget.pixel_space(w,h)
 widget.panel({id="ground",x=-4,y=4,width=8,height=8,ink="surface",opacity=1,radius=t.radius})
-widget.label({id="heading",text=i["window-cycle"] and "Windows" or "Applications & spaces",x=-3.65,y=3.65,size=t.title,ink="text"})
-widget.label({id="target",text="ON " .. (i.target or "This screen"),x=0.45,y=3.65,size=t.small,ink="muted"})
-widget.panel({id="search-bg",x=-3.7,y=2.95,width=7.4,height=0.8,ink="primary",opacity=0.09})
-widget.label({id="search",text=i["window-cycle"] and "Most recently used" or ((i.query or "")=="" and "Search workspaces, windows, apps…" or (i.query .. "▏")),x=-3.5,y=2.68,size=t.body,ink=(i.query or "")=="" and "muted" or "text"})
-for n=0,5 do
-  local key="row" .. n
-  local title=i[key .. "-title"]
-  if title then
-    local y=1.85-n*0.69
-    local selected=i[key .. "-selected"]==true
-    if selected then widget.panel({id=key .. "-bg",x=-3.7,y=y+0.16,width=7.4,height=0.66,ink="primary",opacity=0.16}) end
-    widget.button({id=key,label=title,appearance="quiet",action="select",body={origin="desktop-launcher"},x=-3.7,y=y+0.16,width=7.4,height=0.4,enabled=i[key .. "-available"]==true})
-    widget.label({id=key.."-detail",text=i[key.."-detail"] or "",x=-3.5,y=y-0.29,size=t.micro,ink="muted"})
+if i["window-cycle"] then
+  local count=0
+  for n=0,5 do if i["row"..n.."-title"] then count=count+1 end end
+  count=math.max(1,count)
+  local gap,inset=8,16
+  local tile=(w-2*inset-gap*(count-1))/count
+  for n=0,count-1 do
+    local key="row"..n
+    local title=i[key.."-title"]
+    if title then
+      local left=inset+n*(tile+gap)
+      widget.icon_button({id=key,label=title,icon="window",icon_size=64,icon_caption=true,
+        action="select",body={origin="desktop-launcher"},
+        x=p.x(left),y=p.y(16),width=p.w(tile),height=p.h(h-32),
+        enabled=i[key.."-available"]==true})
+    end
+  end
+else
+  widget.label({id="heading",text="Applications",x=p.x(24),y=p.y(22),size=t.title,ink="text"})
+  widget.label({id="target",text=i.target or "This screen",x=p.x(w-144),y=p.y(28),size=t.small,ink="muted"})
+  widget.panel({id="search-bg",x=p.x(20),y=p.y(62),width=p.w(w-40),height=p.h(38),ink="muted",opacity=0.08,radius=t.radius})
+  widget.label({id="search",text=(i.query or "")=="" and "Search apps, windows, workspaces" or (i.query.."▏"),x=p.x(32),y=p.y(72),size=t.body,ink=(i.query or "")=="" and "muted" or "text"})
+  for n=0,5 do
+    local key="row"..n
+    local title=i[key.."-title"]
+    if title then
+      widget.button({id=key,label=title,appearance="quiet",action="select",body={origin="desktop-launcher"},
+        x=p.x(20),y=p.y(112+n*44),width=p.w(w-40),height=p.h(40),enabled=i[key.."-available"]==true})
+    end
+  end
+  if (i.count or 0)==0 then
+    widget.label({id="empty",text=i.live and "No matches" or "Connecting…",x=p.x(32),y=p.y(132),size=t.body,ink="muted"})
+  end
+  if not i.live then
+    widget.label({id="health",text=i.health or "Connecting…",x=p.x(24),y=p.y(h-30),size=t.small,ink="warning"})
   end
 end
-if (i.count or 0)==0 then widget.label({id="empty",text=i.live and "No matching choices" or "Waiting for this target",x=-3.5,y=0.6,size=t.body,ink="muted"}) end
-widget.label({id="health",text=i.health or "Loading…",x=-3.5,y=-2.58,size=t.micro,ink=i.live and "success" or "warning"})
-widget.label({id="keys",text=i["window-cycle"] and "Alt-Tab · Shift reverses · release Alt to focus · Esc cancels" or "Click to open · ↑↓ Enter · Tab screen · Esc close",x=-3.5,y=-3.3,size=t.micro,ink="muted"})

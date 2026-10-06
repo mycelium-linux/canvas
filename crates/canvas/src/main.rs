@@ -1731,6 +1731,10 @@ impl App {
                 Task::none()
             }
             Message::ShellFocusSurface(id) => {
+                if self.window_cycle.active() {
+                    self.window_cycle.cancel();
+                    self.project_switcher = None;
+                }
                 self.focus_shell_surface(&id);
                 Task::none()
             }
@@ -3812,11 +3816,14 @@ impl App {
             let visual = self.presented_visual_theme();
             let accent = self.effective_theme(&self.document).accent();
             let theme = ::canvas::lua_module::ModuleThemeTokens::from_visual(&visual, accent);
-            if let Some(launcher) = self.project_switcher.as_mut()
-                && let Err(error) = launcher.render(theme, now_unix_ms())
-            {
-                launcher.status = format!("Launcher Lua error: {error}");
-                self.status = launcher.status.clone();
+            if let Some(launcher) = self.project_switcher.as_mut() {
+                launcher.viewport = ::canvas::shell_geometry::sheet_size(
+                    launcher.window_cycle, launcher.matches().len(),
+                    [self.frame.width as f32, self.frame.height as f32]);
+                if let Err(error) = launcher.render(theme, now_unix_ms()) {
+                    launcher.status = format!("Launcher Lua error: {error}");
+                    self.status = launcher.status.clone();
+                }
             }
         }
     }
@@ -3859,7 +3866,7 @@ impl App {
         use ::canvas::lua_module::{ModuleInputSnapshot, ModuleInputValue as Value, ModuleThemeTokens};
         let mut values = BTreeMap::from([
             ("width".into(), Value::Number(f64::from(self.frame.width.max(1)))),
-            ("height".into(), Value::Number(68.0)),
+            ("height".into(), Value::Number(f64::from(::canvas::shell_geometry::DOCK_HEIGHT))),
             ("count".into(), Value::Number(::canvas::shell_presentation::dock_surfaces(&self.document).count() as f64)),
         ]);
         for (n, surface) in ::canvas::shell_presentation::dock_surfaces(&self.document).take(6).enumerate() {
@@ -8169,20 +8176,51 @@ impl App {
                 let height = control.height * viewport.height as f32 / 8.0;
                 let selected = selected(control);
                 let appearance = control.appearance;
-                let item = button(
-                    text(control.label.clone())
-                        .size(visual.metrics.small)
-                        .center(),
-                )
+                let message = action(control);
+                let content: Element<'static, Message> = if let Some(icon) = control.icon {
+                    let id = match &message {
+                        Some(Message::ShellFocusSurface(id)) => Some(id.as_str()),
+                        Some(Message::ShellLauncherPick { entry_id, .. }) => entry_id.strip_prefix("surface:"),
+                        _ => None,
+                    };
+                    let preview = id.and_then(|id| self.decoded.get(id)).and_then(|surface| {
+                        match &surface.source {
+                            ContentSource::ExternalSurface { source_id } => self.external_surfaces.frame(source_id)
+                                .map(canvas_model_viewer::video::external_view),
+                            ContentSource::Image { .. } | ContentSource::LiveImage { .. } => Some(image_widget(surface.handle.clone())
+                                .content_fit(ContentFit::Contain).width(Length::Fill).height(Length::Fill).into()),
+                            _ => None,
+                        }
+                    });
+                    let picture: Element<'static, Message> = container(preview.unwrap_or_else(|| canvas_widgets::live::app_chrome::shell_icon(
+                        icon, control.icon_size, color(if control.enabled { visual.palette.text } else { visual.palette.text_muted }))))
+                        .width(control.icon_size.min(width - 8.0).max(8.0))
+                        .height(control.icon_size.min(height - 8.0).max(8.0))
+                        .center(Length::Shrink).into();
+                    let content = if control.icon_caption {
+                        let mut caption: String = control.label.chars().take(10).collect();
+                        if control.label.chars().count() > 10 { caption.push('…'); }
+                        column![picture, text(caption).size(visual.metrics.small).center()]
+                            .spacing(10).align_x(iced::Alignment::Center).into()
+                    } else { picture };
+                    container(content).center(Length::Fill).into()
+                } else {
+                    text(control.label.clone()).size(visual.metrics.small).center().into()
+                };
+                let item = button(content)
                 .width(width)
                 .height(height)
-                .on_press_maybe(action(control))
+                .on_press_maybe(message)
                 .style(move |_, status| {
                     match appearance {
                         ::canvas::lua_module::ModuleButtonAppearance::Standard => canvas_widgets::live::app_chrome::cube_button_style(visual, selected, status),
                         ::canvas::lua_module::ModuleButtonAppearance::Quiet => canvas_widgets::live::app_chrome::quiet_button_style(visual, selected, status),
                     }
                 });
+                let item: Element<'static, Message> = if control.icon.is_some() {
+                    iced::widget::tooltip(item, text(control.label.clone()).size(visual.metrics.small),
+                        iced::widget::tooltip::Position::Top).delay(Duration::from_millis(450)).into()
+                } else { item.into() };
                 container(item)
                     .padding(iced::Padding {
                         top: y,
@@ -8264,6 +8302,38 @@ impl App {
     /// Shared by document-authored scenes and resolved Lua modules, so an
     /// authored widget can never look like a different toolkit than a placed one.
     fn scene_layer(&self, scene: &Scene, viewport: LogicalSize) -> Element<'static, Message> {
+        self.scene_layer_filtered(scene, viewport, false)
+    }
+
+    /// Lua owns the shell panel geometry; native chrome adds the shared border
+    /// and shadow without drawing its opaque ground a second time.
+    fn shell_scene_layer(&self, scene: &Scene, viewport: LogicalSize) -> Element<'static, Message> {
+        let Some(node) = scene.nodes.iter().find(|node| node.id == "ground") else {
+            return self.scene_layer(scene, viewport);
+        };
+        let NodeContent::Rect { ink, opacity, radius } = node.content else {
+            return self.scene_layer(scene, viewport);
+        };
+        let [x, y] = scene_node_position(node.transform.translation, viewport);
+        let palette = self.presented_palette();
+        let mut fill = color(scene_ink(ink, &palette));
+        fill.a = opacity;
+        let border = color(palette.border);
+        let panel = container(space::horizontal())
+            .width(node.transform.scale[0].abs() * viewport.width as f32 / 8.0)
+            .height(node.transform.scale[1].abs() * viewport.height as f32 / 8.0)
+            .style(move |_| container::Style {
+                background: Some(fill.into()),
+                border: iced::Border { color: border, width: 1.0, radius: radius.into() },
+                shadow: iced::Shadow { color: Color::from_rgba(0.0, 0.0, 0.0, 0.24),
+                    offset: iced::Vector::new(0.0, 4.0), blur_radius: 18.0 },
+                ..Default::default()
+            });
+        stack![container(panel).padding(iced::Padding { top: y, left: x, ..Default::default() }),
+            self.scene_layer_filtered(scene, viewport, true)].into()
+    }
+
+    fn scene_layer_filtered(&self, scene: &Scene, viewport: LogicalSize, shell_ground: bool) -> Element<'static, Message> {
         let visual = self.presented_visual_theme();
         let palette = visual.palette;
         let metrics = visual.metrics;
@@ -8274,7 +8344,7 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, node)| {
-                matches!(
+                (!shell_ground || node.id != "ground") && matches!(
                     node.content,
                     NodeContent::Text { .. } | NodeContent::Rect { .. }
                 )
@@ -10022,17 +10092,14 @@ impl App {
         if let Some(picker) = self.project_switcher.as_ref() {
             #[cfg(feature = "lua-scenes")]
             if let Some(scene) = &picker.scene {
-                let width = (viewport.width as f32 * 0.60)
-                    .clamp(420.0, 760.0)
-                    .min(viewport.width as f32);
-                let height = (viewport.height as f32 * 0.80).min(600.0);
+                let [width, height] = picker.viewport;
                 let size = LogicalSize { width: width as f64, height: height as f64 };
-                let mut sheet_layers = vec![self.scene_layer(
+                let mut sheet_layers = vec![self.shell_scene_layer(
                     scene,
                     size,
                 )];
                 let rows = picker.matches();
-                let start = picker.selected.saturating_sub(5);
+                let start = picker.row_start();
                 sheet_layers.extend(self.native_module_buttons_selected(&picker.buttons, size, |control| {
                     if !control.enabled { return None; }
                     let slot = control.id.strip_prefix("row")?.parse::<usize>().ok()?;
@@ -10279,10 +10346,11 @@ impl App {
         }
 
         #[cfg(feature = "lua-scenes")]
-        if shell_bar_height > 0 && self.project_switcher.is_none() {
+        if shell_bar_height > 0 && self.project_switcher.as_ref().is_none_or(|picker| picker.window_cycle) {
             if let Some(presentation) = self.desktop_dock.retained() {
-                let size = LogicalSize { width: f64::from(viewport.width), height: 68.0 };
-                let controls = self.native_module_buttons(&presentation.buttons, size, |control| {
+                let dock_height = ::canvas::shell_geometry::DOCK_HEIGHT;
+                let size = LogicalSize { width: f64::from(viewport.width), height: f64::from(dock_height) };
+                let controls = self.native_module_buttons_selected(&presentation.buttons, size, |control| {
                     if !control.enabled { return None; }
                     match control.id.as_str() {
                         "launcher" => Some(Message::ShellProjects),
@@ -10291,10 +10359,12 @@ impl App {
                             .filter(|surface| self.decoded.contains_key(&surface.id))
                             .map(|surface| Message::ShellFocusSurface(surface.id.clone())),
                     }
-                });
-                let mut children = vec![self.scene_layer(&presentation.scene, size)];
+                }, |control| control.id.strip_prefix("item").and_then(|n| n.parse::<usize>().ok())
+                    .and_then(|n| ::canvas::shell_presentation::dock_surfaces(&self.document).nth(n))
+                    .is_some_and(|surface| !self.desktop_focused && self.document.focused_surface_id.as_ref() == Some(&surface.id)));
+                let mut children = vec![self.shell_scene_layer(&presentation.scene, size)];
                 children.extend(controls);
-                layers.push(container(container(stack(children)).height(Length::Fixed(68.0)).clip(true))
+                layers.push(container(container(stack(children)).height(Length::Fixed(dock_height)))
                     .width(Length::Fill).height(Length::Fill)
                     .padding(iced::Padding { bottom: 12.0, ..Default::default() })
                     .align_y(iced::alignment::Vertical::Bottom).into());

@@ -355,4 +355,67 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn switcher_has_only_compact_window_tiles_not_launcher_chrome() {
+        use crate::lua_module::ModuleInputValue as V;
+        for count in [1, 3, 6] {
+            let [width, height] = crate::shell_geometry::sheet_size(true, count, [1408.0, 881.0]);
+            let mut s = snapshot();
+            s.values = std::collections::BTreeMap::from([
+                ("width".into(), V::Number(f64::from(width))),
+                ("height".into(), V::Number(f64::from(height))),
+                ("window-cycle".into(), V::Boolean(true)),
+                ("count".into(), V::Number(count as f64)),
+                ("live".into(), V::Boolean(true)),
+            ]);
+            for n in 0..count {
+                s.values.insert(
+                    format!("row{n}-title"),
+                    V::Text("日本語のウィンドウ 🎹".into()),
+                );
+                s.values
+                    .insert(format!("row{n}-available"), V::Boolean(true));
+            }
+            let mut p = Presentation::default();
+            p.refresh(MANIFEST, SOURCE, s, theme()).unwrap();
+            let output = p.retained().unwrap();
+            assert_eq!(output.buttons.len(), count);
+            assert!(output.actions.is_empty());
+            assert_eq!(
+                output.scene.nodes.len(),
+                1,
+                "only the shared panel, no search/help/status labels"
+            );
+            for button in &output.buttons {
+                assert_eq!(button.icon, Some(canvas_widgets::ShellIcon::Window));
+                assert!(button.icon_caption);
+                assert!(button.enabled);
+                assert!(button.x >= -4.0 && button.x + button.width <= 4.001);
+                assert!(button.y <= 4.0 && button.y - button.height >= -4.001);
+            }
+        }
+    }
+
+    #[test]
+    fn icon_primitives_are_bounded_and_do_not_grant_file_access() {
+        let manifest = r#"{"schema_version":1,"id":"icon-test","title":"Icons","inputs":[],"capabilities":{"write_scene":true,"read_theme":true},"actions":[{"id":"select","destination":"canvas.shell","kind":"select"}]}"#;
+        for (icon, size, valid) in [
+            ("apps", 28, true),
+            ("terminal", 48, true),
+            ("/tmp/app.svg", 28, false),
+            ("window", 999, false),
+        ] {
+            let source = format!(
+                "widget.icon_button({{id='app',label='App',icon='{icon}',icon_size={size},action='select',body={{}},x=-1,y=1,width=2,height=1}})"
+            );
+            let mut p = Presentation::default();
+            let result = p.refresh(manifest, &source, snapshot(), theme());
+            assert_eq!(
+                result.is_ok(),
+                valid,
+                "icon={icon}, size={size}: {result:?}"
+            );
+        }
+    }
 }

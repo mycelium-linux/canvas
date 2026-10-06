@@ -3,6 +3,8 @@
   "id": "desktop-launcher-v1",
   "title": "Canvas launcher",
   "inputs": [
+    {"id":"width","kind":"number","required":false},
+    {"id":"height","kind":"number","required":false},
     {
       "id": "window-cycle",
       "kind": "boolean",
@@ -157,6 +159,7 @@
   "capabilities": {
     "write_scene": true,
     "read_inputs": [
+      "width", "height",
       "window-cycle",
       "target",
       "query",

@@ -30,6 +30,24 @@ const MAX_RESOURCE_SURFACES: usize = 64;
 /// conventions. Keeping this prelude in one place prevents every widget from
 /// inventing another label scale, badge opacity, or metric hierarchy.
 const WIDGET_PRIMITIVES_V1: &str = r#"
+-- Logical pixels are the layout vocabulary; scene coordinates stay internal.
+function widget.pixel_space(width, height)
+  if width <= 0 or height <= 0 then error("pixel space needs positive dimensions") end
+  return {
+    x = function(px) return -4 + 8 * px / width end,
+    y = function(px) return 4 - 8 * px / height end,
+    w = function(px) return 8 * px / width end,
+    h = function(px) return 8 * px / height end,
+  }
+end
+
+function widget.icon_button(spec)
+  spec.icon = spec.icon or "window"
+  spec.icon_size = spec.icon_size or 28
+  spec.appearance = spec.appearance or "quiet"
+  widget.button(spec)
+end
+
 local function required(spec, key)
   local value = spec[key]
   if value == nil then error("widget primitive requires " .. key, 3) end
@@ -139,6 +157,9 @@ pub struct ModuleButton {
     pub height: f32,
     pub enabled: bool,
     pub appearance: ModuleButtonAppearance,
+    pub icon: Option<canvas_widgets::ShellIcon>,
+    pub icon_size: f32,
+    pub icon_caption: bool,
 }
 
 /// Semantic control treatment; Lua never supplies native colors or callbacks.
@@ -738,6 +759,9 @@ fn install_button_api(
                         "height",
                         "enabled",
                         "appearance",
+                        "icon",
+                        "icon_size",
+                        "icon_caption",
                     ],
                 )?;
                 let id = required_string(&spec, "id")?;
@@ -748,6 +772,15 @@ fn install_button_api(
                     .find(|grant| grant.id == action_id)
                     .ok_or_else(|| mlua::Error::external("undeclared module action"))?;
                 let button = ModuleButton {
+                    icon: spec
+                        .get::<Option<String>>("icon")?
+                        .map(|icon| {
+                            serde_json::from_value(serde_json::Value::String(icon))
+                                .map_err(mlua::Error::external)
+                        })
+                        .transpose()?,
+                    icon_size: spec.get::<Option<f32>>("icon_size")?.unwrap_or(28.0),
+                    icon_caption: spec.get::<Option<bool>>("icon_caption")?.unwrap_or(false),
                     id,
                     label,
                     x: spec.get("x")?,
@@ -764,6 +797,8 @@ fn install_button_api(
                 if !identifier(&button.id)
                     || !visible(&button.label)
                     || button.label.len() > 128
+                    || !button.icon_size.is_finite()
+                    || !(8.0..=96.0).contains(&button.icon_size)
                     || ![button.x, button.y, button.width, button.height]
                         .iter()
                         .all(|n| n.is_finite())
