@@ -6,8 +6,9 @@ is an in-place upgrade, not a second installed app.
 
 ## IPFS PDF workspace
 
-The `PDFs` project in `config/deploy/firetv/workspaces.json` contains the same
-Attention and Stanford HMM PDFs used on Home-Pi. Their source CIDs are recorded
+The `Attention` and `HMM` projects in `config/deploy/firetv/workspaces.json` contain
+the same PDFs used on Home-Pi, one document per full-width reading workspace.
+Their source CIDs are recorded
 in Unibus's `docs/ipfs-adapter.md`. Retrieve approved documents through the
 existing `unibus-ipfs fetch`/`download` interface; provision the returned bytes
 over authorized ADB into the app-private `files/assets/SHA256` directory.
@@ -18,10 +19,12 @@ schema. Rust validates MIME, size (at most 64 MiB), regular-file type and SHA256
 before the native Android PdfRenderer opens a document. Cached assets are
 immutable and named only by the validated digest; no arbitrary paths or URLs.
 The Android shim rasterizes off the UI thread with one worker and a bounded
-queue, fits the page into the Rust-solved tile, and releases raster resources
+queue, renders at reading width (bounded to 1920 × 2560), and releases raster resources
 when switching workspaces. The controls inherit the shared Canvas palette.
 
-Use the remote's D-pad and OK to focus/click the previous/next page controls.
+Use the remote's D-pad to scroll the page and OK to click previous/next page controls.
+The workspace strip is 32 dp tall; the page toolbar is 28 dp. Full-width rendering
+avoids shrinking an entire portrait page to the TV's landscape height.
 Page cursors currently belong to the local PDF renderer: they are **not** yet
 persisted in the shared view or synchronized across screens. Workspace selection
 is retained; returning to the PDF workspace starts each document at page one.

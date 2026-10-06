@@ -18,6 +18,7 @@ import android.widget.LinearLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.TextClock;
 import android.widget.ImageView;
+import android.widget.ScrollView;
 import android.graphics.Bitmap;
 import android.graphics.pdf.PdfRenderer;
 import android.os.ParcelFileDescriptor;
@@ -65,11 +66,12 @@ public final class TvActivity extends Activity {
     /** Platform raster adapter only; source identity and geometry come from Rust. */
     private final class PdfSurface extends LinearLayout {
         private final ImageView image;
+        private final ScrollView scroll;
         private final TextView label;
         private final Button previous, next;
         private final String asset;
         private final String title;
-        private final int rasterWidth, rasterHeight;
+        private final int rasterWidth, viewWidth;
         private int pageIndex, pageCount, generation;
         private boolean disposed, busy;
         private Bitmap bitmap;
@@ -78,13 +80,17 @@ public final class TvActivity extends Activity {
         PdfSurface(JSONObject source, String title, JSONObject palette, int width, int height) throws Exception {
             super(TvActivity.this);
             this.asset = source.toString(); this.title = title;
+            viewWidth = width;
             rasterWidth = Math.max(1, Math.min(width, 1920));
-            rasterHeight = Math.max(1, Math.min(height - barHeight(), 1080));
             setOrientation(VERTICAL);
             setBackgroundColor(Color.parseColor(palette.getString("surface")));
             image = new ImageView(TvActivity.this);
             image.setScaleType(ImageView.ScaleType.FIT_CENTER);
-            addView(image, new LinearLayout.LayoutParams(-1, 0, 1));
+            scroll = new ScrollView(TvActivity.this);
+            scroll.setFillViewport(false);
+            scroll.setFocusable(true);
+            scroll.addView(image, new ScrollView.LayoutParams(-1, -2));
+            addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
             LinearLayout controls = new LinearLayout(TvActivity.this);
             controls.setGravity(Gravity.CENTER_VERTICAL);
             previous = new Button(TvActivity.this); previous.setText("‹");
@@ -96,7 +102,7 @@ public final class TvActivity extends Activity {
             controls.addView(previous, new LinearLayout.LayoutParams(80, -1));
             controls.addView(label, new LinearLayout.LayoutParams(0, -1, 1));
             controls.addView(next, new LinearLayout.LayoutParams(80, -1));
-            addView(controls, new LinearLayout.LayoutParams(-1, barHeight()));
+            addView(controls, new LinearLayout.LayoutParams(-1, dp(28)));
             previous.setOnClickListener(v -> render(pageIndex - 1));
             next.setOnClickListener(v -> render(pageIndex + 1));
             render(0);
@@ -118,7 +124,7 @@ public final class TvActivity extends Activity {
                             final int count = renderer.getPageCount();
                             if (requested >= count) throw new IllegalArgumentException("Page out of range");
                             try (PdfRenderer.Page page = renderer.openPage(requested)) {
-                                float scale = Math.min((float)rasterWidth / page.getWidth(), (float)rasterHeight / page.getHeight());
+                                float scale = Math.min((float)rasterWidth / page.getWidth(), 2560f / page.getHeight());
                                 result = Bitmap.createBitmap(Math.max(1, (int)(page.getWidth() * scale)),
                                     Math.max(1, (int)(page.getHeight() * scale)), Bitmap.Config.ARGB_8888);
                                 result.eraseColor(Color.WHITE);
@@ -127,7 +133,10 @@ public final class TvActivity extends Activity {
                             final Bitmap ready = result;
                             runOnUiThread(() -> {
                                 if (disposed || generation != ticket) { ready.recycle(); return; }
+                                image.setLayoutParams(new ScrollView.LayoutParams(-1,
+                                    Math.max(1, (int)((float)ready.getHeight() / ready.getWidth() * viewWidth))));
                                 image.setImageBitmap(ready);
+                                scroll.scrollTo(0, 0);
                                 if (bitmap != null) bitmap.recycle();
                                 bitmap = ready; pageIndex = requested; pageCount = count; busy = false;
                                 label.setText(title + " · " + (requested + 1) + " / " + count);
@@ -363,15 +372,16 @@ public final class TvActivity extends Activity {
                 Button button = new Button(this);
                 button.setTag(projectId);
                 button.setText((projectId.equals(catalog.getString("selected_project")) ? "● " : "") + project.getString("name"));
-                button.setTextSize(14);
+                button.setTextSize(12);
                 styleControl(button, palette, projectId.equals(catalog.getString("selected_project")));
                 button.setOnClickListener(v -> {
                     String error = nativeSelectWorkspace(projectId);
                     if (error == null || !error.isEmpty()) showStatus("Switch failed: " + error);
                     else { lastProjection = ""; refreshWorkspace(); }
                 });
-                LinearLayout.LayoutParams item = new LinearLayout.LayoutParams(-2, barHeight() - 24);
-                item.setMargins(12, 12, 0, 12);
+                button.setMinHeight(0); button.setMinimumHeight(0);
+                LinearLayout.LayoutParams item = new LinearLayout.LayoutParams(-2, barHeight() - dp(4));
+                item.setMargins(dp(4), dp(2), 0, dp(2));
                 selector.addView(button, item);
                 if (projectId.equals(focusedProject)) button.requestFocus();
             }
@@ -454,6 +464,10 @@ public final class TvActivity extends Activity {
     }
 
     private int barHeight() {
-        return Math.round(56 * getResources().getDisplayMetrics().density);
+        return dp(32);
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
     }
 }

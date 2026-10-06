@@ -10,7 +10,8 @@
       "projects": [
         {"id":"television","name":"Television","theme":{"source":"coherence","mode":"dark","accent":"info"},"resources":[]},
         {"id":"clock","name":"Clock","theme":{"source":"coherence","mode":"dark","accent":"info"},"resources":[]},
-        {"id":"ipfs-reading","name":"PDFs","theme":{"source":"coherence","mode":"dark","accent":"info"},"resources":[]}
+        {"id":"ipfs-reading","name":"Attention","theme":{"source":"coherence","mode":"dark","accent":"info"},"resources":[]},
+        {"id":"ipfs-hmm","name":"HMM","theme":{"source":"coherence","mode":"dark","accent":"info"},"resources":[]}
       ]
     },
     "documents": [
@@ -40,12 +41,19 @@
       {
         "schema_version":1,"id":"tv-ipfs-reading","project_id":"ipfs-reading","revision":1,"theme":{"source":"project"},
         "surfaces":[
-          {"id":"attention","title":"Attention Is All You Need","content":{"kind":"asset","asset":{"sha256":"bdfaa68d8984f0dc02beaca527b76f207d99b666d31d1da728ee0728182df697","media_type":"application/pdf","byte_length":2215244}}},
+          {"id":"attention","title":"Attention Is All You Need","content":{"kind":"asset","asset":{"sha256":"bdfaa68d8984f0dc02beaca527b76f207d99b666d31d1da728ee0728182df697","media_type":"application/pdf","byte_length":2215244}}}
+        ],
+        "layout":{"kind":"canvas","placements":[
+          {"surface_id":"attention","bounds":{"x":0.02,"y":0.005,"width":0.96,"height":0.985},"layer":0}
+        ]}
+      },
+      {
+        "schema_version":1,"id":"tv-ipfs-hmm","project_id":"ipfs-hmm","revision":1,"theme":{"source":"project"},
+        "surfaces":[
           {"id":"hmm","title":"Stanford · Hidden Markov Models","content":{"kind":"asset","asset":{"sha256":"73cfc92bd12dfd269a29e51cba99ceec48270dccbdaf49b9e6add4693af79253","media_type":"application/pdf","byte_length":574091}}}
         ],
         "layout":{"kind":"canvas","placements":[
-          {"surface_id":"attention","bounds":{"x":0.04,"y":0.015,"width":0.445,"height":0.965},"layer":0},
-          {"surface_id":"hmm","bounds":{"x":0.515,"y":0.015,"width":0.445,"height":0.965},"layer":0}
+          {"surface_id":"hmm","bounds":{"x":0.02,"y":0.005,"width":0.96,"height":0.985},"layer":0}
         ]}
       }
     ]
