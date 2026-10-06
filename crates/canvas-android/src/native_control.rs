@@ -158,6 +158,33 @@ pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeSignalSnapshot(
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeSignalLabels(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    width: jni::sys::jint,
+    height: jni::sys::jint,
+    raw: jni::objects::JString,
+) -> jni::sys::jstring {
+    let result = env
+        .get_string(&raw)
+        .map_err(|e| e.to_string())
+        .and_then(|raw| {
+            crate::signals::label_records(
+                width.try_into().map_err(|_| "Invalid width")?,
+                height.try_into().map_err(|_| "Invalid height")?,
+                &String::from(raw),
+            )
+        });
+    match result {
+        Ok(labels) => string(&mut env, labels),
+        Err(error) => {
+            let _ = env.throw_new("java/lang/IllegalArgumentException", error);
+            std::ptr::null_mut()
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeSignalFrame(
     mut env: jni::JNIEnv,
     _class: jni::objects::JClass,

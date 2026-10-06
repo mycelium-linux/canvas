@@ -51,9 +51,10 @@ impl<Message> canvas::Program<Message> for Program {
             let color = iced::Color::from_linear_rgba(c.r, c.g, c.b, c.a);
             match p.kind {
                 PrimitiveKind::RoundedRect => target.fill(
-                    &canvas::Path::rectangle(
+                    &canvas::Path::rounded_rectangle(
                         Point::new(p.rect.x, p.rect.y),
                         iced::Size::new(p.rect.width, p.rect.height),
+                        p.radius.into(),
                     ),
                     color,
                 ),
@@ -73,6 +74,21 @@ impl<Message> canvas::Program<Message> for Program {
                     );
                 }
                 _ => unreachable!("signal builders only emit rectangles and lines"),
+            }
+        }
+        if let Ok(labels) = self
+            .frame
+            .labels(Rect::new(0.0, 0.0, bounds.width, bounds.height))
+        {
+            for label in labels {
+                let c = self.theme.color(label.role);
+                target.fill_text(canvas::Text {
+                    content: label.text,
+                    position: Point::new(label.bounds.x, label.bounds.y),
+                    size: iced::Pixels((label.bounds.height * 0.8).clamp(10.0, 22.0)),
+                    color: iced::Color::from_linear_rgba(c.r, c.g, c.b, c.a),
+                    ..Default::default()
+                });
             }
         }
         vec![target.into_geometry()]

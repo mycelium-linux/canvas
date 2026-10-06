@@ -1,6 +1,27 @@
 //! Thin Android paint adapter for the canonical gfx signal geometry.
 use fpl_gfx::{PrimitiveKind, Rect, Scene, signals::SignalFrame};
 
+pub fn label_records(width: u32, height: u32, raw: &str) -> Result<String, String> {
+    if width < 2 || height < 2 || width > 8192 || height > 8192 || raw.len() > 512 * 1024 {
+        return Err("Invalid signal labels extent or payload size".into());
+    }
+    let snapshot: SignalFrame = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+    let labels = snapshot
+        .labels(Rect::new(0.0, 0.0, width as f32, height as f32))
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::Value::Array(
+        labels
+            .into_iter()
+            .map(|label| {
+                serde_json::json!({
+                    "text":label.text,"bounds":label.bounds,"role":label.role as u32
+                })
+            })
+            .collect(),
+    )
+    .to_string())
+}
+
 pub fn paint_records(width: u32, height: u32, raw: &str) -> Result<Vec<f32>, String> {
     if width < 2 || height < 2 || width > 8192 || height > 8192 || raw.len() > 512 * 1024 {
         return Err("Invalid signal frame extent or payload size".into());
@@ -47,6 +68,20 @@ pub fn paint_records(width: u32, height: u32, raw: &str) -> Result<Vec<f32>, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn topology_uses_shared_cards_cables_and_label_anchors() {
+        let raw = r#"{"view":"topology","graph":{"nodes":[{"id":"a","label":"Keys","lane":0,"state":"connected","level":null},{"id":"b","label":"Synth","lane":1,"state":"configured","level":0.5}],"edges":[{"source":"a","target":"b","state":"configured"}]}}"#;
+        let records = paint_records(800, 400, raw).unwrap();
+        assert_eq!(records.len() % 8, 0);
+        assert!(records.chunks_exact(8).any(|r| r[0] == 5.0));
+        let labels: serde_json::Value =
+            serde_json::from_str(&label_records(800, 400, raw).unwrap()).unwrap();
+        assert_eq!(labels.as_array().unwrap().len(), 4);
+        assert_eq!(labels[0]["text"], "Keys");
+        assert!(
+            labels[0]["bounds"]["x"].as_f64().unwrap() < labels[2]["bounds"]["x"].as_f64().unwrap()
+        );
+    }
     #[test]
     fn native_records_are_shared_geometry() {
         let raw = r#"{"view":"scope","range":{"minimum":-1,"maximum":1},"samples":[0,1,0]}"#;

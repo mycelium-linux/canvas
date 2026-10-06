@@ -64,6 +64,7 @@ public final class TvActivity extends Activity {
     private static native String nativeBackgroundProgram(String id);
     private static native String nativeSignalSnapshot(String id);
     private static native float[] nativeSignalFrame(int width, int height, String frame);
+    private static native String nativeSignalLabels(int width, int height, String frame);
     private GpuBackground background;
     private VideoView video;
     private TextView status;
@@ -586,6 +587,7 @@ public final class TvActivity extends Activity {
                 final Paint ink = new Paint(Paint.ANTI_ALIAS_FLAG);
                 String previous = "";
                 float[] records;
+                JSONArray labels;
                 int oldWidth, oldHeight;
                 @Override protected void onDraw(android.graphics.Canvas target) {
                     super.onDraw(target);
@@ -600,6 +602,7 @@ public final class TvActivity extends Activity {
                         String raw = snapshot.getJSONObject("frame").toString();
                         if (!raw.equals(previous) || oldWidth != getWidth() || oldHeight != getHeight()) {
                             records = nativeSignalFrame(getWidth(), getHeight(), raw);
+                            labels = new JSONArray(nativeSignalLabels(getWidth(), getHeight(), raw));
                             if (records == null || records.length % 8 != 0) throw new IllegalStateException("Invalid signal paint records");
                             previous = raw; oldWidth = getWidth(); oldHeight = getHeight();
                         }
@@ -616,6 +619,21 @@ public final class TvActivity extends Activity {
                                 ink.setStrokeWidth(records[i+5]);
                                 target.drawLine(records[i+1], records[i+2], records[i+3], records[i+4], ink);
                             } else throw new IllegalStateException("Unsupported signal primitive");
+                        }
+                        ink.setStyle(Paint.Style.FILL);
+                        for (int i = 0; i < labels.length(); i++) {
+                            JSONObject text = labels.getJSONObject(i), box = text.getJSONObject("bounds");
+                            float x = (float)box.getDouble("x"), y = (float)box.getDouble("y");
+                            float width = (float)box.getDouble("width"), height = (float)box.getDouble("height");
+                            ink.setTextSize(Math.max(10f, Math.min(26f, height * 0.8f)));
+                            ink.setColor(inks[text.getInt("role")]); ink.setAlpha(state.equals("ready") ? 255 : 100);
+                            String value = text.getString("text");
+                            if (ink.measureText(value) > width) {
+                                int count = ink.breakText(value, true, Math.max(0f, width-ink.measureText("…")), null);
+                                value = value.substring(0, count) + "…";
+                            }
+                            target.save(); target.clipRect(x, y, x+width, y+height);
+                            target.drawText(value, x, y-ink.ascent(), ink); target.restore();
                         }
                     } catch (Exception error) { footer.setText("Signal unavailable: " + error.getMessage()); }
                     postInvalidateDelayed(interval);
