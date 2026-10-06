@@ -1,0 +1,65 @@
+//! Android platform shell. Rust owns command admission; Java owns the surface.
+use std::net::IpAddr;
+
+/// Initial playback accepts explicit private-LAN HTTP endpoints only. This is
+/// not discovery, pairing, or permission to expose an owner control token.
+pub fn validate_stream(input: &str) -> Result<(), &'static str> {
+    let url = url::Url::parse(input).map_err(|_| "Invalid stream URL")?;
+    if url.scheme() != "http"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("Expected a private-LAN HTTP stream without credentials");
+    }
+    let address: IpAddr = url
+        .host_str()
+        .ok_or("Missing host")?
+        .parse()
+        .map_err(|_| "Use an explicit private IPv4 address")?;
+    match address {
+        IpAddr::V4(ip) if ip.is_private() => Ok(()),
+        _ => Err("Stream must be on a private IPv4 network"),
+    }
+}
+
+#[cfg(all(target_os = "android", feature = "android-native-video"))]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeValidate(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    input: jni::objects::JString,
+) -> jni::sys::jstring {
+    let result = env
+        .get_string(&input)
+        .map(|s| String::from(s))
+        .map_err(|_| "Could not read stream URL")
+        .and_then(|s| validate_stream(&s));
+    match env.new_string(result.err().unwrap_or("")) {
+        Ok(message) => message.into_raw(),
+        Err(_) => std::ptr::null_mut(), // JVM allocation exception remains pending.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn accepts_explicit_lan_stream() {
+        assert!(validate_stream("http://192.168.2.74:5004/auto/v4.1").is_ok());
+    }
+    #[test]
+    fn rejects_untrusted_destinations_and_credentials() {
+        for value in [
+            "https://192.168.2.74/x",
+            "http://example.com/x",
+            "http://8.8.8.8/x",
+            "http://127.0.0.1/x",
+            "http://user:pass@192.168.2.74/x",
+            "file:///etc/passwd",
+            "http://192.168.2.74/x#fragment",
+        ] {
+            assert!(validate_stream(value).is_err(), "{value}");
+        }
+    }
+}
