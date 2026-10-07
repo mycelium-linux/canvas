@@ -53,6 +53,20 @@ Packaging instructions are in `README.md` in this crate.
 
 ## Playback test coordination
 
+AirPlay has its own `airplay` workspace and `cast-airplay-video` surface,
+pointing to `http://192.168.2.67:8099/live.ts`. Select it with:
+
+```sh
+printf 'workspace switch airplay\n' | canvas-tvctl 192.168.2.97:5555
+```
+
+The retained document template is `config/deploy/firetv/airplay.json` in the
+repository. Add it to the current catalog with a revision-bound install that
+preserves all existing projects and documents; it is not a replacement catalog.
+Do not put AirPlay in the Television workspace: tuner controls previously
+replaced its active stream with KOMO, invalidating playback measurements.
+Verify the selected document and URL before counting frames.
+
 Do not install an APK, force-stop the app, switch workspaces, or restart a stream
 backend during another agent's playback measurement. Those actions interrupt
 video and invalidate a stability result. Inspect first and coordinate changes.
