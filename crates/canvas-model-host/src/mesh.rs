@@ -51,9 +51,10 @@ pub fn bake_stl_with_field(path: &Path, field: Option<&crate::Field>) -> Result<
         min = min.min(*point);
         max = max.max(*point);
     }
-    if let Some(field) = field {
-        field.validate_vertices(&positions.iter().map(|p| p.to_array()).collect::<Vec<_>>())?;
-    }
+    let source_positions: Vec<_> = positions.iter().map(|p| p.to_array()).collect();
+    let scalar_values = field
+        .map(|f| f.normalized_values(&source_positions))
+        .transpose()?;
     let center = (min + max) * 0.5;
     let extent = (max - min).max_element();
     ensure!(
@@ -94,9 +95,7 @@ pub fn bake_stl_with_field(path: &Path, field: Option<&crate::Field>) -> Result<
             // Sampled in the part's own coordinates, before the mesh is
             // recentred for display: a heat source sits where the designer put
             // it, not where the viewport happens to place the model.
-            field: field
-                .map(|spec| spec.normalize(spec.sample_vertex(index, position.to_array())))
-                .unwrap_or(0.0),
+            field: scalar_values.as_ref().map_or(0.0, |values| values[index]),
             position: ((*position - center) / extent * 2.0).to_array(),
             normal: normal.normalize_or_zero().to_array(),
         })
