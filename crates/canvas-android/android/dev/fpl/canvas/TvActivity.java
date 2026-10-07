@@ -91,6 +91,12 @@ public final class TvActivity extends Activity {
     private FrameLayout frame;
     private Button muteButton;
     private MediaPlayer preparedPlayer;
+    private final java.util.Map<String, StreamTileView> extraStreams = new java.util.HashMap<>();
+    private final PageRotation pageRotation = new PageRotation();
+    private void disposeExtraStreams() {
+        for (StreamTileView tile : extraStreams.values()) { tile.dispose(); frame.removeView(tile); }
+        extraStreams.clear();
+    }
     private boolean resumed;
     private LinearLayout selector;
     private final Handler updates = new Handler();
@@ -576,6 +582,7 @@ public final class TvActivity extends Activity {
     }
 
     @Override public void onDestroy() {
+        disposeExtraStreams();
         if(cachedLibraryScreen!=null)cachedLibraryScreen.dispose();
         if (background != null) background.dispose();
         for (View widget : widgets) if (widget instanceof PdfSurface) ((PdfSurface)widget).dispose();
@@ -1125,6 +1132,7 @@ public final class TvActivity extends Activity {
 
     @Override protected void onPause() {
         resumed = false;
+        disposeExtraStreams();
         for (View widget : widgets) if(widget instanceof ConwaysView) ((ConwaysView)widget).setActive(false);
         background.setActive(false);
         updates.removeCallbacks(refresh);
@@ -1279,6 +1287,7 @@ public final class TvActivity extends Activity {
             button.setText(i==0 ? "▥" : pages.getJSONObject(i-1).getString("name"));button.setTextSize(12);
             styleControl(button,palette,i==projection.getJSONObject("document").optInt("active_page",0));
             button.setOnClickListener(v -> {
+                pageRotation.defer(android.os.SystemClock.uptimeMillis(), 5000);
                 String error=nativeSelectPage(page);
                 if(error == null || !error.isEmpty()) showStatus("View switch failed: "+error);
                 else {lastProjection="";refreshWorkspace();}
@@ -1318,13 +1327,25 @@ public final class TvActivity extends Activity {
         int width = frame.getWidth(), height = frame.getHeight() - barHeight();
         if (width <= 0 || height <= 0) return;
         String raw = nativeProjection(width, height);
-        if (raw == null || raw.equals(lastProjection)) return;
+        if (raw == null) return;
         try {
             JSONObject projection = new JSONObject(raw);
             if (projection.has("error")) { showStatus(projection.getString("error")); return; }
             if (projection.isNull("document")) return;
             currentWorkspaceId=projection.getJSONObject("document").getString("id");
             currentProjectId=projection.getJSONObject("document").getString("project_id");
+            JSONObject rotations = menuDescriptor().optJSONObject("page_rotation_ms");
+            int interval = rotations == null ? 0 : rotations.optInt(currentProjectId, 0);
+            long now = android.os.SystemClock.uptimeMillis();
+            if (pageRotation.enter(currentWorkspaceId, now, interval)) disposeExtraStreams();
+            JSONArray rotatingPages = projection.getJSONObject("document").optJSONArray("pages");
+            int nextPage = pageRotation.due(now, interval, rotatingPages == null ? 0 : rotatingPages.length(), projection.getJSONObject("document").optInt("active_page", 0));
+            if (nextPage >= 0) {
+                String error = nativeSelectPage(nextPage);
+                if (error == null || !error.isEmpty()) showStatus("View rotation failed: " + error);
+                else { lastProjection = ""; return; }
+            }
+            if (raw.equals(lastProjection)) return;
             if(channelScreen!=null && !currentWorkspaceId.equals(channelScreenWorkspace)) closeChannels();
             workspaceMode = true;
             JSONObject palette = projection.getJSONObject("palette");
@@ -1370,6 +1391,7 @@ public final class TvActivity extends Activity {
             statusLists.clear();
             JSONArray tiles = projection.getJSONArray("tiles");
             boolean hasVideo = false;
+            java.util.Set<String> visibleExtraStreams = new java.util.HashSet<>();
             for (int i = 0; i < tiles.length(); i++) {
                 JSONObject tile = tiles.getJSONObject(i), surface = tile.getJSONObject("surface");
                 JSONObject content = surface.getJSONObject("content");
@@ -1397,6 +1419,19 @@ public final class TvActivity extends Activity {
                         showStatus("Connecting…");
                         video.setVideoURI(Uri.parse(url));
                     }
+                } else if (content.getString("kind").equals("stream")) {
+                    String id = surface.getString("id"), url = content.getString("url");
+                    String error = nativeValidate(url);
+                    if (error == null || !error.isEmpty()) throw new IllegalArgumentException("Stream rejected: " + error);
+                    if (visibleExtraStreams.size() >= 3) throw new IllegalArgumentException("At most four video tiles are supported");
+                    visibleExtraStreams.add(id);
+                    StreamTileView extra = extraStreams.get(id);
+                    if (extra != null && !extra.matches(url)) { extra.dispose(); frame.removeView(extra); extraStreams.remove(id); extra = null; }
+                    if (extra == null) {
+                        extra = new StreamTileView(this, surface.getString("title"), url, palette);
+                        extraStreams.put(id, extra); frame.addView(extra, geometry);
+                    } else extra.setLayoutParams(geometry);
+                    styleControl(extra.muteControl(), palette, false);
                 } else if (content.getString("kind").equals("conways")) {
                     ConwaysView life = new ConwaysView(this, palette);
                     frame.addView(life, geometry); widgets.add(life);
@@ -1451,6 +1486,9 @@ public final class TvActivity extends Activity {
                     frame.addView(widget, geometry); widgets.add(widget);
                 }
             }
+            for (String id : new java.util.ArrayList<>(extraStreams.keySet())) if (!visibleExtraStreams.contains(id)) {
+                StreamTileView extra = extraStreams.remove(id); extra.dispose(); frame.removeView(extra);
+            }
             if (!hasVideo) {
                 closeChannels();
                 videoSurfaceId=""; channelButton.setVisibility(View.GONE);
@@ -1462,7 +1500,12 @@ public final class TvActivity extends Activity {
                 channelButton.bringToFront();
                 muteButton.setVisibility(View.VISIBLE);
                 FrameLayout.LayoutParams chrome = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.RIGHT);
-                chrome.topMargin = barHeight(); muteButton.setLayoutParams(chrome);
+                FrameLayout.LayoutParams videoBounds = (FrameLayout.LayoutParams)video.getLayoutParams();
+                chrome.topMargin = videoBounds.topMargin;
+                chrome.rightMargin = Math.max(0, width - videoBounds.leftMargin - videoBounds.width);
+                muteButton.setTextSize(12);
+                muteButton.setMaxWidth(videoBounds.width);
+                muteButton.setLayoutParams(chrome);
                 muteButton.bringToFront();
                 if (preparedPlayer != null) status.setVisibility(View.GONE);
             }
