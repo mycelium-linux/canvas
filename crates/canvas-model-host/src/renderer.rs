@@ -6,21 +6,12 @@ use crate::{
     mesh::{PreparedMesh, Vertex},
 };
 use anyhow::{Context, Result};
-use bytemuck::{Pod, Zeroable};
+use bytemuck::Zeroable;
 use canvas_core::VisualTheme;
+use fpl_gfx::mesh::Uniforms;
 use glam::{Mat4, Vec3};
 use std::sync::mpsc;
 use wgpu::util::DeviceExt;
-
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct Uniforms {
-    mvp: [[f32; 4]; 4],
-    model: [[f32; 4]; 4],
-    color: [f32; 4],
-    params: [f32; 4],
-    field_params: [f32; 4],
-}
 
 struct GpuMesh {
     vertices: wgpu::Buffer,
@@ -153,7 +144,7 @@ impl Renderer {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("model-hologram-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("model.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(fpl_gfx::mesh::SHADER.into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("model-pipeline-layout"),
@@ -168,27 +159,7 @@ impl Renderer {
                     module: &shader,
                     entry_point: Some("vs_main"),
                     compilation_options: Default::default(),
-                    buffers: &[wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<Vertex>() as u64,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &[
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x3,
-                                offset: 0,
-                                shader_location: 0,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x3,
-                                offset: 12,
-                                shader_location: 1,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32,
-                                offset: 24,
-                                shader_location: 2,
-                            },
-                        ],
-                    }],
+                    buffers: &[Vertex::layout()],
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
@@ -317,6 +288,7 @@ impl Renderer {
             .unwrap_or(theme.palette.primary)
             .map(|value| value as f32 / 255.0);
         let uniform = Uniforms {
+            eye: [eye.x, eye.y, eye.z, 0.0],
             mvp: (projection * view * model).to_cols_array_2d(),
             model: model.to_cols_array_2d(),
             color: [rgb[0], rgb[1], rgb[2], 1.0],
@@ -345,7 +317,11 @@ impl Renderer {
             });
         {
             let color_view = self.color.create_view(&Default::default());
-            let background = theme.palette.background.map(|v| f64::from(v) / 255.0);
+            let [r, g, b] = theme.palette.background;
+            let background = fpl_gfx::Color::from_srgb8(r, g, b, 255)
+                .to_array()
+                .map(f64::from);
+
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("model-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -411,6 +387,11 @@ impl Renderer {
         self.readbacks[slot_index].pending = Some(rx);
         self.next_readback = (slot_index + 1) % self.readbacks.len();
         Ok(completed)
+    }
+
+    /// Collect the pending frame without submitting another render.
+    pub fn drain(&mut self) -> Result<Option<Vec<u8>>> {
+        self.collect_slot(self.next_readback)
     }
 
     fn collect_slot(&mut self, slot_index: usize) -> Result<Option<Vec<u8>>> {

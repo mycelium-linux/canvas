@@ -690,6 +690,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "canvas-core",
+ "fpl-gfx",
  "glam 0.30.10",
  "mlua",
  "pollster",

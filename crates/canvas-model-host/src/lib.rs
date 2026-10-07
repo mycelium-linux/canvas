@@ -132,6 +132,13 @@ pub struct Field {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FieldSource {
+    /// Solver/closed-form results bound to the exact ordered STL vertices.
+    /// No nearest-neighbor substitution or extrapolation is performed.
+    VertexSamples {
+        positions: Vec<[f32; 3]>,
+        values: Vec<f32>,
+        provenance: AnalysisProvenance,
+    },
     /// Steady-state heat from a point, falling off with distance.
     ///
     /// `ambient + power / (1 + falloff * r^2)` — not physics, but the right
@@ -151,6 +158,26 @@ pub enum FieldSource {
     Radial { at: [f32; 3], scale: f32 },
 }
 
+/// Numerical method declared by the producer; not certification by the renderer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalysisMethod {
+    FiniteElement,
+    ClosedForm,
+    Measurement,
+}
+
+/// Auditable context travels with every imported analysis field.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnalysisProvenance {
+    pub method: AnalysisMethod,
+    pub solver: String,
+    /// Mesh/model dimension and bounded assumptions, e.g. 1D conduction.
+    pub model: String,
+    pub boundary_conditions: String,
+}
+
 fn default_ambient() -> f32 {
     20.0
 }
@@ -167,35 +194,20 @@ pub enum Axis {
     Z,
 }
 
-/// Perceptually ordered colour ramps.
-///
-/// All three are monotonic in lightness so a reader can rank two points by eye.
-/// A rainbow ramp is deliberately absent: it invents banding that looks like
-/// structure in the data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Colormap {
-    #[default]
-    Inferno,
-    Viridis,
-    Magma,
-}
-
-impl Colormap {
-    /// Index the shader uses. Kept beside the enum so the two cannot drift.
-    pub fn shader_index(self) -> f32 {
-        match self {
-            Self::Inferno => 0.0,
-            Self::Viridis => 1.0,
-            Self::Magma => 2.0,
-        }
-    }
-}
+pub use fpl_gfx::mesh::Colormap;
 
 impl Field {
     /// Evaluate the field at one point, in the field's own unit.
     pub fn sample(&self, position: [f32; 3]) -> f32 {
         match &self.source {
+            FieldSource::VertexSamples {
+                positions, values, ..
+            } => positions
+                .iter()
+                .position(|p| *p == position)
+                .and_then(|i| values.get(i))
+                .copied()
+                .unwrap_or(f32::NAN),
             FieldSource::PointHeat {
                 at,
                 power,
@@ -213,6 +225,62 @@ impl Field {
                 let squared = (0..3).map(|i| (position[i] - at[i]).powi(2)).sum::<f32>();
                 squared.sqrt() * scale
             }
+        }
+    }
+
+    /// Validate the complete field and its binding before allocating GPU data.
+    pub fn validate_vertices(&self, positions: &[[f32; 3]]) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.name.trim().is_empty(), "field needs a name");
+        anyhow::ensure!(
+            self.range.iter().all(|v| v.is_finite()) && self.range[1] >= self.range[0],
+            "invalid field range"
+        );
+        if let FieldSource::VertexSamples {
+            positions: bound,
+            values,
+            provenance,
+        } = &self.source
+        {
+            anyhow::ensure!(
+                bound == positions && values.len() == positions.len(),
+                "analysis geometry binding mismatch"
+            );
+            anyhow::ensure!(!self.unit.trim().is_empty(), "analysis field needs units");
+            anyhow::ensure!(
+                [
+                    &provenance.solver,
+                    &provenance.model,
+                    &provenance.boundary_conditions
+                ]
+                .iter()
+                .all(|s| !s.trim().is_empty()),
+                "analysis provenance is incomplete"
+            );
+            anyhow::ensure!(
+                values.iter().all(|v| v.is_finite()),
+                "non-finite analysis values"
+            );
+        } else {
+            anyhow::ensure!(
+                positions.iter().all(|p| self.sample(*p).is_finite()),
+                "non-finite field values"
+            );
+        }
+        Ok(())
+    }
+
+    /// Sample by validated vertex index without an expensive spatial search.
+    pub fn sample_vertex(&self, index: usize, position: [f32; 3]) -> f32 {
+        match &self.source {
+            FieldSource::VertexSamples {
+                positions, values, ..
+            } => {
+                if positions.get(index) != Some(&position) {
+                    return f32::NAN;
+                }
+                values.get(index).copied().unwrap_or(f32::NAN)
+            }
+            _ => self.sample(position),
         }
     }
 
@@ -549,6 +617,31 @@ mod scene_context_tests {
 #[cfg(test)]
 mod field_tests {
     use super::*;
+
+    #[test]
+    fn imported_results_require_exact_geometry_finite_values_and_provenance() {
+        let mut field = thermal(
+            FieldSource::VertexSamples {
+                positions: vec![[0.0; 3], [1.0; 3]],
+                values: vec![20.0, 30.0],
+                provenance: AnalysisProvenance {
+                    method: AnalysisMethod::FiniteElement,
+                    solver: "test".into(),
+                    model: "1D conduction".into(),
+                    boundary_conditions: "fixed ends".into(),
+                },
+            },
+            [20.0, 30.0],
+        );
+        assert!(field.validate_vertices(&[[0.0; 3], [1.0; 3]]).is_ok());
+        assert!(field.validate_vertices(&[[1.0; 3], [0.0; 3]]).is_err());
+        assert!(field.validate_vertices(&[[0.0; 3]]).is_err());
+        assert!(field.sample_vertex(0, [1.0; 3]).is_nan());
+        if let FieldSource::VertexSamples { values, .. } = &mut field.source {
+            values[0] = f32::NAN;
+        }
+        assert!(field.validate_vertices(&[[0.0; 3], [1.0; 3]]).is_err());
+    }
 
     fn thermal(source: FieldSource, range: [f32; 2]) -> Field {
         Field {

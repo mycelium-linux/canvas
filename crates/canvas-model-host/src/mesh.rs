@@ -1,7 +1,7 @@
 //! CPU-side mesh baking performed away from the render loop.
 
 use anyhow::{Context, Result, ensure};
-use bytemuck::{Pod, Zeroable};
+pub use fpl_gfx::mesh::Vertex;
 use glam::Vec3;
 use std::{
     collections::BTreeSet,
@@ -11,19 +11,6 @@ use std::{
     sync::mpsc::{Receiver, SyncSender, sync_channel},
     thread,
 };
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
-pub struct Vertex {
-    pub position: [f32; 3],
-    pub normal: [f32; 3],
-    /// Field value at this vertex, already normalised to 0..=1.
-    ///
-    /// Normalised on the CPU rather than in the shader so the GPU never needs
-    /// the field's unit or range, and so a solved field and a closed form look
-    /// identical by the time they reach it.
-    pub field: f32,
-}
 
 #[derive(Debug, Clone)]
 pub struct PreparedMesh {
@@ -64,6 +51,9 @@ pub fn bake_stl_with_field(path: &Path, field: Option<&crate::Field>) -> Result<
         min = min.min(*point);
         max = max.max(*point);
     }
+    if let Some(field) = field {
+        field.validate_vertices(&positions.iter().map(|p| p.to_array()).collect::<Vec<_>>())?;
+    }
     let center = (min + max) * 0.5;
     let extent = (max - min).max_element();
     ensure!(
@@ -99,12 +89,13 @@ pub fn bake_stl_with_field(path: &Path, field: Option<&crate::Field>) -> Result<
     let vertices = positions
         .iter()
         .zip(normals)
-        .map(|(position, normal)| Vertex {
+        .enumerate()
+        .map(|(index, (position, normal))| Vertex {
             // Sampled in the part's own coordinates, before the mesh is
             // recentred for display: a heat source sits where the designer put
             // it, not where the viewport happens to place the model.
             field: field
-                .map(|spec| spec.normalize(spec.sample(position.to_array())))
+                .map(|spec| spec.normalize(spec.sample_vertex(index, position.to_array())))
                 .unwrap_or(0.0),
             position: ((*position - center) / extent * 2.0).to_array(),
             normal: normal.normalize_or_zero().to_array(),
