@@ -1,0 +1,7 @@
+{
+  "project_id": "holodeck",
+  "surface_id": "holodeck-cast",
+  "ssh_target": "agora-one",
+  "playlist_path": "/home/ajmwagar/.local/share/canvas-tv-hls/quest-fast.m3u8",
+  "url": "http://192.168.2.67:18089/quest-fast.m3u8"
+}

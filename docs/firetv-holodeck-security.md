@@ -19,10 +19,9 @@ These are separate sources, not automatic substitutes for each other:
 
 - `holodeck-tour.m3u8`: animated rendered tour, not live camera footage.
 - `holodeck-cctv.m3u8`: live Agora-rendered virtual spectator cameras.
-- First-person cast is an explicit waiting state while no capture producer is
-  running. When confirmed live, replace that surface content with a `stream`
-  URL for the producer's HLS endpoint (the existing Quest reduced-buffering
-  profile uses `quest-fast.m3u8`). Do not show a stale playlist as live footage.
+- First-person cast automatically waits while no capture producer is running,
+  then plays the existing Quest reduced-buffering `quest-fast.m3u8` output when
+  its media sequence/segment identities advance. A file existing is not enough.
 - AirPlay's existing `/live.m3u8`: requires an active sender session.
 
 "CCTV-like cameras" here means virtual spectator cameras rendered inside the
@@ -31,6 +30,49 @@ rendering, room state and capture. Producers continue to own rendering/capture,
 Unibus owns transport, Mycelium owns discovery, and Canvas owns layout and
 playback. A headset/FPS capture and a virtual spectator view are distinct
 sources. The existing HTTP service retains its TV client allowlist.
+
+### Automatic first-person lifecycle
+
+`canvas-tv-stream-watch` reads the explicitly configured producer playlist over
+authorized SSH, never scans for sources, and updates only the named surface
+while its workspace is selected. It does not steal workspace/page selection.
+The Quest capture producer remains separate; wake/wear the headset and start
+that producer using Holodeck's `docs/quest-tv-casting.md` runbook.
+
+```sh
+cargo check --manifest-path crates/canvas-android/Cargo.toml --features shared-workspaces --bin canvas-tv-stream-watch
+cargo build --manifest-path crates/canvas-android/Cargo.toml --features shared-workspaces --bin canvas-tv-stream-watch
+canvas-tv-stream-watch 192.168.2.97:5555 config/deploy/firetv/holodeck-cast-source.json
+```
+
+The observer emits the narrow shared `live_stream` content contract:
+
+```json
+{"kind":"live_stream","schema_version":1,"url":"http://192.168.2.67:18089/quest-fast.m3u8","generation":"producer-session","issued_at_unix_ms":0,"expires_at_unix_ms":5000}
+```
+
+The sample timestamps are illustrative; the observer supplies actual wall-clock
+milliseconds. The maximum lease is five seconds and consumer clocks must be
+synchronized (up to one second of future issue-time tolerance). Canvas Rust
+normalizes it into the ordinary stream primitive while valid, and a waiting
+scene when expired. Retained state is not rewritten by the renderer. The TV
+checks independently every presentation refresh, including when the observer
+dies or the user returns from another workspace. Older endpoints retain this
+unknown kind and show an unsupported placeholder rather than playing stale
+video. Other platform renderers must opt into the same lease contract before
+using it for playback.
+
+Unchanging playlists and metadata-only rewrites cannot renew a lease. ENDLIST,
+missing/stale files, SSH timeouts and malformed playlists return to waiting.
+At startup or after failure, two observations with actual media progress are
+required. A sequence rollback or recovery after expiry changes generation;
+the player URL receives that generation to invalidate cached decoder state.
+Renewals in the same generation produce identical presentation content and do
+not reconstruct/restart playback. Neo's launch agent is
+`config/deploy/neo/dev.fpl.canvas-tv-cast.plist`.
+
+Channels is available only in Television. Both the Java affordance and Rust
+tuner admission check enforce that scope before any catalog/tune request.
 
 ## Security
 

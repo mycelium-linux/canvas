@@ -81,6 +81,10 @@ public final class TvActivity extends Activity {
     private LinearLayout channelScreen;
     private String channelScreenSurface = "";
     private String currentWorkspaceId = "", channelScreenWorkspace = "";
+    private String currentProjectId = "";
+    private boolean tunerWorkspace() {
+        return "television".equals(currentProjectId) && !tunerEndpoint.isEmpty();
+    }
     private GpuBackground background;
     private VideoView video;
     private TextView status;
@@ -620,7 +624,7 @@ public final class TvActivity extends Activity {
         FrameLayout.LayoutParams channelChrome = new FrameLayout.LayoutParams(-2,-2,Gravity.TOP|Gravity.LEFT);
         channelChrome.topMargin = barHeight();
         frame.addView(channelButton, channelChrome);
-        channelButton.setVisibility(tunerEndpoint.isEmpty() ? View.GONE : View.VISIBLE);
+        channelButton.setVisibility(View.GONE);
         setContentView(frame);
         libraryEndpoint = getIntent().getStringExtra("library_endpoint");
         if(libraryEndpoint != null) getPreferences(0).edit().putString("library_endpoint",libraryEndpoint).apply();
@@ -672,7 +676,7 @@ public final class TvActivity extends Activity {
     }
 
     private void showChannels() {
-        if (tunerBusy || videoSurfaceId.isEmpty()) return;
+        if (tunerBusy || videoSurfaceId.isEmpty() || !tunerWorkspace()) return;
         tunerBusy = true; channelButton.setEnabled(false);
         final String surface = videoSurfaceId;
         final String workspace = currentWorkspaceId;
@@ -680,6 +684,7 @@ public final class TvActivity extends Activity {
             String raw = nativeTunerControl(tunerEndpoint, "", surface, getFilesDir().getAbsolutePath());
             updates.post(() -> {
                 tunerBusy = false; channelButton.setEnabled(true);
+                if (!tunerWorkspace() || !surface.equals(videoSurfaceId) || !workspace.equals(currentWorkspaceId)) return;
                 try {
                     JSONObject reply = new JSONObject(raw);
                     if (reply.has("error")) throw new IllegalArgumentException(reply.getString("error"));
@@ -752,12 +757,13 @@ public final class TvActivity extends Activity {
     }
 
     private void tuneChannel(String channel, String surface) {
-        if (tunerBusy) return;
+        if (tunerBusy || !tunerWorkspace() || !surface.equals(videoSurfaceId)) return;
         tunerBusy=true; channelButton.setEnabled(false); showStatus("Tuning "+channel+"…");
         new Thread(() -> {
             String raw=nativeTunerControl(tunerEndpoint,channel,surface,getFilesDir().getAbsolutePath());
             updates.post(() -> {
                 tunerBusy=false; channelButton.setEnabled(true);
+                if (!tunerWorkspace() || !surface.equals(videoSurfaceId)) return;
                 try {
                     JSONObject reply=new JSONObject(raw);
                     if (reply.has("error")) throw new IllegalArgumentException(reply.getString("error"));
@@ -1318,6 +1324,7 @@ public final class TvActivity extends Activity {
             if (projection.has("error")) { showStatus(projection.getString("error")); return; }
             if (projection.isNull("document")) return;
             currentWorkspaceId=projection.getJSONObject("document").getString("id");
+            currentProjectId=projection.getJSONObject("document").getString("project_id");
             if(channelScreen!=null && !currentWorkspaceId.equals(channelScreenWorkspace)) closeChannels();
             workspaceMode = true;
             JSONObject palette = projection.getJSONObject("palette");
@@ -1451,7 +1458,7 @@ public final class TvActivity extends Activity {
                 video.setVisibility(View.INVISIBLE); muteButton.setVisibility(View.GONE);
                 status.setVisibility(View.GONE);
             } else {
-                channelButton.setVisibility(tunerEndpoint.isEmpty() ? View.GONE : View.VISIBLE);
+                channelButton.setVisibility(tunerWorkspace() ? View.VISIBLE : View.GONE);
                 channelButton.bringToFront();
                 muteButton.setVisibility(View.VISIBLE);
                 FrameLayout.LayoutParams chrome = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.RIGHT);

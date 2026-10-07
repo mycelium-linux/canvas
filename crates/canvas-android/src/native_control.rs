@@ -415,6 +415,10 @@ pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeProjection(
             serde_json::json!({"surface":surface,
                 "bounds":[placement.frame.x,placement.frame.y,placement.frame.width,placement.frame.height]})
         }).collect::<Vec<_>>()).map_err(|e| e.to_string())?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).map_err(|_| "Invalid system clock")?
+            .as_millis() as u64;
+        canvas_core::stream_lease::present_projection(&mut snapshot, now);
         Ok(snapshot)
     })();
     let output = match result {

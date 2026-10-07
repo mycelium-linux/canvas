@@ -5,6 +5,25 @@ use std::{
     time::Duration,
 };
 
+/// Admission is enforced before any tuner I/O, not only by button visibility.
+pub fn admit_surface(snapshot: &serde_json::Value, id: &str) -> Result<(), &'static str> {
+    if snapshot["data"]["catalog"]["selected_project"] != "television"
+        || snapshot["data"]["document"]["project_id"] != "television"
+    {
+        return Err("Tuner controls belong to the Television workspace");
+    }
+    let surfaces = snapshot["data"]["document"]["surfaces"]
+        .as_array()
+        .ok_or("Missing surfaces")?;
+    if !surfaces
+        .iter()
+        .any(|surface| surface["id"] == id && surface["content"]["kind"] == "stream")
+    {
+        return Err("Tuner video surface unavailable");
+    }
+    Ok(())
+}
+
 pub fn request(base: &str, channel: Option<&str>) -> Result<serde_json::Value, String> {
     crate::validate_stream(base).map_err(str::to_string)?;
     let mut url = url::Url::parse(base).map_err(|e| e.to_string())?;
@@ -134,9 +153,11 @@ pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeTunerControl(
         let directory = String::from(env.get_string(&directory).map_err(|e| e.to_string())?);
         let inspect = serde_json::json!({"schema_version":1,"request_id":"tv-channel-inspect","command":{"command":"inspect"}});
         let before = presentation(&directory, inspect.clone())?;
+        admit_surface(&before, &id)?;
         let value = request(&base, (!channel.is_empty()).then_some(channel.as_str()))?;
         if !channel.is_empty() {
             let current = presentation(&directory, inspect)?;
+            admit_surface(&current, &id)?;
             let document = &current["data"]["document"];
             if document["id"] != before["data"]["document"]["id"] {
                 return Err("Channel tuned, but workspace changed".into());
@@ -185,6 +206,20 @@ pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeTunerControl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn refuses_non_tv_workspaces_even_with_a_valid_video_surface() {
+        for project in ["holodeck", "airplay", "studio", "security"] {
+            let snapshot = serde_json::json!({"data":{"catalog":{"selected_project":project},
+                "document":{"project_id":project,"surfaces":[{"id":"video","content":{"kind":"stream"}}]}}});
+            assert!(admit_surface(&snapshot, "video").is_err());
+        }
+        let mut snapshot = serde_json::json!({"data":{"catalog":{"selected_project":"television"},
+            "document":{"project_id":"television","surfaces":[{"id":"komo4","content":{"kind":"stream"}}]}}});
+        assert!(admit_surface(&snapshot, "komo4").is_ok());
+        assert!(admit_surface(&snapshot, "missing").is_err());
+        snapshot["data"]["document"]["project_id"] = serde_json::json!("holodeck");
+        assert!(admit_surface(&snapshot, "komo4").is_err());
+    }
     #[test]
     fn rejects_non_origin_and_untrusted_control() {
         for base in [

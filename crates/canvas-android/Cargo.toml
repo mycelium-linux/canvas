@@ -35,3 +35,8 @@ jni = { version = "0.21", optional = true }
 name = "canvas-tvctl"
 path = "src/bin/canvas-tvctl.rs"
 required-features = ["shared-workspaces"]
+
+[[bin]]
+name = "canvas-tv-stream-watch"
+path = "src/bin/canvas-tv-stream-watch.rs"
+required-features = ["shared-workspaces"]

@@ -28,6 +28,7 @@ pub mod workspace_layout;
 pub mod workspace_navigation;
 pub mod manifest_query;
 pub mod notification;
+pub mod stream_lease;
 pub mod part_inspector;
 pub mod project_browser;
 pub mod task;
