@@ -919,6 +919,10 @@ public final class TvActivity extends Activity {
                         String label = state + " · " + data.optString("detail", "");
                         if (!footer.getText().toString().equals(label)) footer.setText(label);
                         JSONObject frame = snapshot.getJSONObject("frame");
+                        String viewKind = frame.optString("view");
+                        if ((state.equals("stale") || state.equals("no_data"))
+                            && (viewKind.equals("attention") || viewKind.equals("task_deck")))
+                            frame.getJSONObject("panel").put("fresh", false);
                         // Static briefs have their own source footer, not a live-sensor heartbeat.
                         boolean staticBrief = frame.optString("view").equals("brief");
                         footer.setVisibility(frameless && (state.equals("ready")

@@ -127,6 +127,7 @@ mod tests {
         assert!(!signal.contains("setAlpha(state"));
         assert_eq!(signal.matches("ink.setAlpha(255)").count(), 3);
         assert!(signal.contains("footer.setText(label)"));
+        assert!(signal.contains("frame.getJSONObject(\"panel\").put(\"fresh\", false)"));
     }
     use super::*;
     #[test]
