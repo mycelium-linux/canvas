@@ -957,10 +957,11 @@ public final class TvActivity extends Activity {
                             if (records == null || records.length % 8 != 0) throw new IllegalStateException("Invalid signal paint records");
                             previous = raw; oldWidth = getWidth(); oldHeight = getHeight();
                         }
-                        ink.setAlpha(state.equals("ready") ? 255 : 100);
+                        // Freshness is explicit in the footer and frame, never whole-panel opacity.
+                        ink.setAlpha(255);
                         for (int i = 0; i < records.length; i += 8) {
                             ink.setColor(frameInks[(int)records[i+6]]);
-                            ink.setAlpha(state.equals("ready") ? 255 : 100);
+                            ink.setAlpha(255);
                             if (records[i] == 0f) {
                                 ink.setStyle(Paint.Style.FILL);
                                 target.drawRoundRect(records[i+1], records[i+2], records[i+1]+records[i+3],
@@ -977,7 +978,7 @@ public final class TvActivity extends Activity {
                             float x = (float)box.getDouble("x"), y = (float)box.getDouble("y");
                             float width = (float)box.getDouble("width"), height = (float)box.getDouble("height");
                             ink.setTextSize(Math.max(10f, Math.min(32f, height * 0.8f)));
-                            ink.setColor(frameInks[text.getInt("role")]); ink.setAlpha(state.equals("ready") ? 255 : 100);
+                            ink.setColor(frameInks[text.getInt("role")]); ink.setAlpha(255);
                             String value = text.getString("text");
                             if (ink.measureText(value) > width) {
                                 int count = ink.breakText(value, true, Math.max(0f, width-ink.measureText("…")), null);

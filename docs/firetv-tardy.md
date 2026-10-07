@@ -55,6 +55,10 @@ not provider parsing, clocks or actions. Stale frames show em dashes, never
 positive waiting counts. The same frame works through desktop GFX and the
 FireTV signal adapter, with no fake traffic or perpetual animation.
 
+Freshness never reduces the signal panel's opacity. Partial coverage keeps
+observed symbols and labels legible; stale data uses the visible freshness
+footer and em-dash readings instead of fading the entire instrument.
+
 The forwarding adapter retains status-list compatibility until the target
 surface is explicitly migrated to `signal_view`; do not send an attention frame
 to an older APK without the corresponding GFX decoder.

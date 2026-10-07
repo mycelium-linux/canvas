@@ -117,6 +117,17 @@ pub fn paint_records_with_appearance(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn android_signal_freshness_never_dims_the_instrument() {
+        // Contract check for the Java paint shim: freshness stays in its footer,
+        // while provider-safe frames (including stale em dashes) remain readable.
+        let source = include_str!("../android/dev/fpl/canvas/TvActivity.java");
+        let signal = source.split("private final class SignalView").nth(1).unwrap()
+            .split("/** Generic themed primitive").next().unwrap();
+        assert!(!signal.contains("setAlpha(state"));
+        assert_eq!(signal.matches("ink.setAlpha(255)").count(), 3);
+        assert!(signal.contains("footer.setText(label)"));
+    }
     use super::*;
     #[test]
     fn console_meter_records_use_shared_needle_and_led_geometry() {
