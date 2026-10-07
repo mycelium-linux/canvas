@@ -693,7 +693,9 @@ public final class TvActivity extends Activity {
             TextView title = new TextView(TvActivity.this);
             title.setText(spec.getString("title")); title.setTextSize(20);
             title.setTextColor(Color.parseColor(palette.getString("text")));
-            addView(title, new LinearLayout.LayoutParams(-1, -2));
+            final boolean frameless = spec.optString("chrome", "auto").equals("frameless");
+            if (!frameless && !spec.getString("title").isEmpty())
+                addView(title, new LinearLayout.LayoutParams(-1, -2));
             footer = new TextView(TvActivity.this); footer.setTextSize(13);
             footer.setTextColor(Color.parseColor(palette.getString("text_muted")));
             final long interval = Math.max(33L, Math.min(5000L, spec.optLong("refresh_ms", 250L)));
@@ -724,6 +726,7 @@ public final class TvActivity extends Activity {
                         String state = data.getString("state");
                         String label = state + " · " + data.optString("detail", "");
                         if (!footer.getText().toString().equals(label)) footer.setText(label);
+                        footer.setVisibility(frameless && state.equals("ready") ? View.GONE : View.VISIBLE);
                         JSONObject frame = snapshot.getJSONObject("frame");
                         String raw = frame.toString();
                         String paintRaw = raw;
@@ -791,7 +794,10 @@ public final class TvActivity extends Activity {
                             target.save(); target.clipRect(x, y, x+width, y+height);
                             target.drawText(value, x, y-ink.ascent(), ink); target.restore();
                         }
-                    } catch (Exception error) { footer.setText("Signal unavailable: " + error.getMessage()); }
+                    } catch (Exception error) {
+                        footer.setVisibility(View.VISIBLE);
+                        footer.setText("Signal unavailable: " + error.getMessage());
+                    }
                     postInvalidateDelayed(interval);
                 }
             };
