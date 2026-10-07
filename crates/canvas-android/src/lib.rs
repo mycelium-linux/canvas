@@ -9,7 +9,11 @@ pub mod background;
 #[cfg(feature = "android-native-video")]
 pub mod clock;
 #[cfg(feature = "android-native-video")]
+pub mod reactor;
+#[cfg(feature = "android-native-video")]
 pub mod signals;
+#[cfg(feature = "android-native-video")]
+pub mod music;
 #[cfg(any(feature = "android-native-video", feature = "android-tuner-control"))]
 pub mod tuner;
 #[cfg(feature = "shared-workspaces")]

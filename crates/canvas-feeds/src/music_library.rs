@@ -2,7 +2,7 @@
 use serde::Deserialize;
 
 /// Stable selection tuple, independent of Deadwax's derived track row IDs.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
 pub struct Album {
     pub artist: String,
     pub album: String,
@@ -11,7 +11,7 @@ pub struct Album {
 }
 
 /// Catalog track metadata; paths deliberately stay on the owner side.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
 pub struct Track {
     pub title: String,
     pub position: String,
@@ -20,7 +20,7 @@ pub struct Track {
 }
 
 /// Owner acknowledgement; IDs belong to MPD's queue, not catalog rows.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
 pub struct SelectionReceipt {
     pub song_ids: Vec<u32>,
     pub started: bool,
@@ -34,6 +34,40 @@ pub struct Library {
 }
 
 impl Library {
+    /// Fetch authoritative local artwork. Missing art is distinct from a failed request.
+    pub fn artwork(&self, album: &Album) -> Result<Option<Vec<u8>>, String> {
+        use std::io::Read;
+        let mut url = self
+            .base
+            .join("albums/art")
+            .map_err(|error| error.to_string())?;
+        url.query_pairs_mut()
+            .append_pair("artist", &album.artist)
+            .append_pair("album", &album.album);
+        let mut request = self.client.get(url);
+        if let Some(token) = &self.bearer {
+            request = request.bearer_auth(token);
+        }
+        let response = request
+            .send()
+            .map_err(|_| "artwork request failed".to_string())?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let response = response
+            .error_for_status()
+            .map_err(|_| "artwork owner failed".to_string())?;
+        const MAX: u64 = 8 * 1024 * 1024;
+        let mut bytes = Vec::new();
+        response
+            .take(MAX + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "artwork read failed".to_string())?;
+        if bytes.len() as u64 > MAX {
+            return Err("artwork exceeds 8 MiB".into());
+        }
+        Ok(Some(bytes))
+    }
     pub fn new(base: &str, bearer: Option<String>) -> Result<Self, String> {
         let base = reqwest::Url::parse(base).map_err(|error| error.to_string())?;
         if !matches!(base.scheme(), "http" | "https")

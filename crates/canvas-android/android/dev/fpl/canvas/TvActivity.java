@@ -95,6 +95,27 @@ public final class TvActivity extends Activity {
     private String surfaceTitle = "KOMO";
     private boolean workspaceMode;
     private TextView workspaceHeader;
+    private LibraryView libraryScreen;
+    private String libraryEndpoint = "";
+
+    private void showLibrary() {
+        if (libraryScreen != null || libraryEndpoint.isEmpty()) return;
+        try {
+            JSONObject palette = new JSONObject(nativeProjection(frame.getWidth(),frame.getHeight())).getJSONObject("palette");
+            libraryScreen = new LibraryView(this,libraryEndpoint,palette,() -> closeLibrary());
+            video.setVisibility(View.INVISIBLE);
+            FrameLayout.LayoutParams bounds = new FrameLayout.LayoutParams(-1,-1);
+            bounds.topMargin = barHeight();
+            frame.addView(libraryScreen,bounds);
+            libraryScreen.bringToFront();
+        } catch(Exception e) { showStatus("Library unavailable: "+e.getMessage()); }
+    }
+
+    private void closeLibrary() {
+        if(libraryScreen == null) return;
+        libraryScreen.dispose(); frame.removeView(libraryScreen); libraryScreen=null;
+        lastProjection=""; lastStructure=""; refreshWorkspace();
+    }
     private HorizontalScrollView workspaceSelector;
     private final ArrayList<View> widgets = new ArrayList<>();
     private final java.util.HashMap<String, StatusListView> statusLists = new java.util.HashMap<>();
@@ -452,6 +473,7 @@ public final class TvActivity extends Activity {
     }
 
     @Override public void onDestroy() {
+        if(libraryScreen!=null)libraryScreen.dispose();
         if (background != null) background.dispose();
         for (View widget : widgets) if (widget instanceof PdfSurface) ((PdfSurface)widget).dispose();
         pdfJobs.shutdownNow();
@@ -501,6 +523,9 @@ public final class TvActivity extends Activity {
         frame.addView(channelButton, channelChrome);
         channelButton.setVisibility(tunerEndpoint.isEmpty() ? View.GONE : View.VISIBLE);
         setContentView(frame);
+        libraryEndpoint = getIntent().getStringExtra("library_endpoint");
+        if(libraryEndpoint != null) getPreferences(0).edit().putString("library_endpoint",libraryEndpoint).apply();
+        else libraryEndpoint = getPreferences(0).getString("library_endpoint", "");
         selector = new LinearLayout(this);
         selector.setOrientation(LinearLayout.HORIZONTAL);
         HorizontalScrollView scroller = new HorizontalScrollView(this);
@@ -619,6 +644,7 @@ public final class TvActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
+        if(libraryScreen!=null) { closeLibrary(); return; }
         if(channelScreen!=null) { closeChannels(); return; }
         super.onBackPressed();
     }
@@ -1107,6 +1133,11 @@ public final class TvActivity extends Activity {
                 if (projectId.equals(focusedProject)) button.requestFocus();
             }
             JSONObject document = projection.getJSONObject("document");
+            if(!libraryEndpoint.isEmpty()) {
+                Button library = new Button(this); library.setText("Library"); library.setTextSize(12);
+                styleControl(library,palette,libraryScreen!=null); library.setOnClickListener(v -> showLibrary());
+                selector.addView(library,new LinearLayout.LayoutParams(-2,barHeight()-dp(4)));
+            }
             JSONArray pages = document.optJSONArray("pages");
             if (pages != null && pages.length() > 0) {
                 for (int i=0; i<=pages.length(); i++) {
@@ -1221,6 +1252,7 @@ public final class TvActivity extends Activity {
                 if (preparedPlayer != null) status.setVisibility(View.GONE);
             }
             selector.getParent().requestLayout();
+            if(libraryScreen!=null) { video.setVisibility(View.INVISIBLE); libraryScreen.bringToFront(); }
             lastProjection = raw;
             lastStructure = structure;
         } catch (Exception error) { showStatus("Workspace presentation failed: " + error.getMessage()); }
