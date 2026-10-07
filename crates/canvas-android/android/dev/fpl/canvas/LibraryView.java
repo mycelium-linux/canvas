@@ -15,16 +15,18 @@ import java.util.concurrent.*;
 
 /** Platform paint/input adapter. Rust owns catalog admission, playback and GFX layout. */
 final class LibraryView extends FrameLayout {
-    private static final int PAGE_SIZE=6;
+    private static final int PAGE_SIZE=24;
     private static native String request(String origin, String action, String artist, String album, int offset);
     private static native String layout(int width, int height, int count);
+    private static native String crateLayout(int width,int height,int count);
     private static native byte[] artwork(String origin, String artist, String album);
     private static native int accent(byte[] rgba);
     private final Activity host;
     private final String origin;
+    private final RecordSounds sounds;
     private final Handler ui = new Handler();
     private final ThreadPoolExecutor worker = new ThreadPoolExecutor(1,1,30,TimeUnit.SECONDS,new ArrayBlockingQueue<Runnable>(12));
-    private final ThreadPoolExecutor artWorker = new ThreadPoolExecutor(1,1,30,TimeUnit.SECONDS,new ArrayBlockingQueue<Runnable>(8));
+    private final ThreadPoolExecutor artWorker = new ThreadPoolExecutor(1,1,30,TimeUnit.SECONDS,new ArrayBlockingQueue<Runnable>(24));
     private final ThreadPoolExecutor detailWorker = new ThreadPoolExecutor(1,1,30,TimeUnit.SECONDS,new ArrayBlockingQueue<Runnable>(1));
     private final int foreground, muted, accent, surface;
     private final TextView status, title, artist, trackList;
@@ -39,6 +41,7 @@ final class LibraryView extends FrameLayout {
     private boolean busy=false;
     private boolean detailMode=false;
     private boolean active=false;
+    private boolean compact;
     private Runnable pendingFocus;
     private View returnFocus;
     private final java.util.HashMap<String,String> trackCache=new java.util.HashMap<>();
@@ -48,25 +51,33 @@ final class LibraryView extends FrameLayout {
     };
     private JSONArray albums=new JSONArray();
     private int count=0;
+    private int directoryColumns=1;
+    private final java.util.ArrayDeque<Integer> pageHistory=new java.util.ArrayDeque<>();
     private String section="albums", artistFilter="";
     private volatile int selectionRevision=0;
 
     LibraryView(Activity host, String origin, JSONObject palette, Runnable close) throws Exception {
         super(host); this.host=host; this.origin=origin;
-        foreground=Color.parseColor(palette.getString("text")); muted=Color.parseColor(palette.getString("text_muted"));
-        accent=Color.parseColor(palette.getString("primary")); surface=Color.parseColor(palette.getString("surface"));
-        setBackgroundColor(Color.parseColor(palette.getString("background")));
+        sounds=new RecordSounds(host,host.getPreferences(0).getBoolean("record_sfx",true));
+        compact=host.getPreferences(0).getBoolean("record_compact",true);
+        foreground=0xff292721; muted=0xff68645b;
+        accent=Color.parseColor(palette.getString("primary")); surface=0xffe5dfd2;
+        setBackgroundColor(0xfff1ecdf);
         LinearLayout bar=new LinearLayout(host); bar.setGravity(Gravity.CENTER_VERTICAL); bar.setPadding(dp(28),0,dp(28),0);
         back=button("‹ Close"); back.setOnClickListener(v -> { if(!goBack())close.run(); }); bar.addView(back);
         for(String category:new String[]{"playlists","artists","albums"}) {
             Button tab=button(category.equals("albums")?"Downloaded":category.equals("artists")?"Artists":"Playlists");
             tabs.add(tab);
-            tab.setOnClickListener(v->{if(busy)return; section=category;artistFilter="";load(0);});bar.addView(tab);
+            tab.setOnClickListener(v->{if(busy)return; pageHistory.clear();section=category;artistFilter="";load(0);});bar.addView(tab);
         }
         View space=new View(host);bar.addView(space,new LinearLayout.LayoutParams(0,1,1));
+        Button density=button(compact?"▦":"▤");density.setContentDescription("Toggle compact record crate");
+        density.setOnClickListener(v->toggleDensity(density));bar.addView(density);tabs.add(density);
+        Button sound=button(host.getPreferences(0).getBoolean("record_sfx",true)?"♪":"♪ Off");sound.setContentDescription("Toggle record selection sounds");
+        sound.setOnClickListener(v->{boolean enabled=!host.getPreferences(0).getBoolean("record_sfx",true);host.getPreferences(0).edit().putBoolean("record_sfx",enabled).apply();sounds.enabled(enabled);sound.setText(enabled?"♪":"♪ Off");});bar.addView(sound);tabs.add(sound);
         previous=button("‹"); next=button("›"); previous.setContentDescription("Previous albums"); next.setContentDescription("Next albums");
-        previous.setOnClickListener(v -> { if(!busy) load(Math.max(0,offset-(section.equals("albums")?Math.max(1,count):24))); });
-        next.setOnClickListener(v -> { if(!busy && count>0) load(offset+count); });
+        previous.setOnClickListener(v -> { if(!busy&&!pageHistory.isEmpty()) load(pageHistory.pop()); });
+        next.setOnClickListener(v -> { if(!busy && count>0){pageHistory.push(offset);load(offset+count);} });
         bar.addView(previous); bar.addView(next); addView(bar,new LayoutParams(-1,dp(64)));
         shelf=new FrameLayout(host); LayoutParams body=new LayoutParams(-1,-1); body.topMargin=dp(86); body.leftMargin=dp(36); body.rightMargin=dp(36); body.bottomMargin=dp(50); addView(shelf,body);
         detail=new LinearLayout(host); detail.setOrientation(LinearLayout.VERTICAL); detail.setPadding(dp(24),dp(20),dp(24),dp(20)); detail.setBackground(plate(surface,0,0));
@@ -82,7 +93,7 @@ final class LibraryView extends FrameLayout {
     void enter() { active=true; back.setEnabled(true); post(() -> { if(!active||disposed)return; if(returnFocus!=null && returnFocus.isEnabled() && returnFocus.isAttachedToWindow())returnFocus.requestFocus(); else if(!covers.isEmpty())covers.get(0).requestFocus();else back.requestFocus(); }); }
     void leave() { active=false; returnFocus=findFocus(); if(pendingFocus!=null)ui.removeCallbacks(pendingFocus); }
     boolean goBack() {
-        if(!artistFilter.isEmpty()) {artistFilter="";section="artists";load(0);return true;}
+        if(!artistFilter.isEmpty()) {pageHistory.clear();artistFilter="";section="artists";load(0);return true;}
         if(detailMode && selected>=0 && selected<covers.size()) {
             detailMode=false; back.setText("‹ Close"); covers.get(selected).requestFocus(); return true;
         }
@@ -93,6 +104,7 @@ final class LibraryView extends FrameLayout {
         view.setBackground(plate(surface,focused?accent:surface,focused?3:1));
         if(focused){detailMode=true;back.setText("‹ Records");}
     }
+    private void toggleDensity(Button button){if(busy)return;compact=!compact;host.getPreferences(0).edit().putBoolean("record_compact",compact).apply();button.setText(compact?"▦":"▤");try{if(section.equals("albums"))render(++generation);else renderDirectory(section,++generation);}catch(Exception e){status.setText("Layout unavailable: "+e.getMessage());}}
     @Override public View focusSearch(View focused,int direction) {
         View next=super.focusSearch(focused,direction);
         View candidate=next;
@@ -120,28 +132,35 @@ final class LibraryView extends FrameLayout {
     private void renderDirectory(String category,int current) throws Exception {
         if(pendingFocus!=null)ui.removeCallbacks(pendingFocus);
         artWorker.getQueue().clear();covers.clear();shelf.removeAllViews();detailMode=false;
-        LinearLayout rows=new LinearLayout(host);rows.setOrientation(LinearLayout.VERTICAL);
-        ScrollView scroll=new ScrollView(host);scroll.addView(rows);shelf.addView(scroll,new LayoutParams(-1,-1));
-        count=Math.min(24,albums.length());
-        previous.setEnabled(offset>0);next.setEnabled(count==24);
+        float density=getResources().getDisplayMetrics().density;
+        JSONObject geometry=crateGeometry(false,Math.min(24,albums.length()));
+        JSONArray cards=geometry.getJSONArray("cards");directoryColumns=geometry.getInt("columns");count=cards.length();
+        previous.setEnabled(!pageHistory.isEmpty());next.setEnabled(albums.length()>count||count==24);
         for(int i=0;i<count;i++) {
             final int index=i;
             String name=category.equals("artists")?albums.getString(i):albums.getJSONObject(i).getJSONObject("playlist").getString("name");
-            Button row=button(name);rows.addView(row,new LinearLayout.LayoutParams(-1,dp(64)));covers.add(row);
+            String subtitle=category.equals("artists")?"":albums.getJSONObject(i).getJSONObject("playlist").optInt("track_count")+" tracks";
+            RecordTile row=new RecordTile(host,cards.getJSONObject(i),name,subtitle,foreground,muted,surface,accent);
+            row.compact(compact);
+            shelf.addView(row,rect(cards.getJSONObject(i).getJSONObject("bounds")));covers.add(row);
+            row.setOnFocusChangeListener((v,focused)->{row.focused(focused);if(focused)status.setText(name+(subtitle.isEmpty()?"":" · "+subtitle));});
+            loadDirectoryArt(row,category,i,current);
             row.setOnClickListener(v->{try {
-                if(category.equals("artists")){artistFilter=albums.getString(index);section="albums";load(0);}
+                sounds.play();
+                if(category.equals("artists")){pageHistory.clear();artistFilter=albums.getString(index);section="albums";load(0);}
                 else {
                     JSONObject list=albums.getJSONObject(index).getJSONObject("playlist");
                     final String owner=albums.getJSONObject(index).getString("owner"),playlistName=list.getString("name");
+                    final int revision=++selectionRevision;
                     status.setText("Opening "+playlistName+"…");
-                    job(()->{try {
+                    detailWorker.getQueue().clear();detailWorker.execute(()->{try {
                         JSONArray tracks=reply(request(origin,"playlist.tracks",owner,playlistName,0)).getJSONArray("tracks");StringBuilder text=new StringBuilder(playlistName).append("\n\n");
                         for(int n=0;n<tracks.length();n++){JSONObject track=tracks.getJSONObject(n);text.append(track.optString("artist")).append(" — ").append(track.optString("title")).append("\n");}
-                        ui.post(()->{if(disposed||!active||current!=generation)return;
+                        ui.post(()->{if(disposed||!active||current!=generation||revision!=selectionRevision)return;
                             TextView contents=label(text.toString(),18,foreground);contents.setPadding(dp(20),dp(20),dp(20),dp(20));ScrollView reader=new ScrollView(host);reader.addView(contents);
                             new android.app.AlertDialog.Builder(host).setTitle("Playlist · first 100 tracks · metadata").setView(reader).setPositiveButton("Close",null).show();status.setText("Imported playlist · local availability is separate");
                         });
-                    }catch(Exception e){ui.post(()->{if(!disposed&&current==generation)status.setText("Playlist unavailable: "+e.getMessage());});}});
+                    }catch(Exception e){ui.post(()->{if(!disposed&&current==generation&&revision==selectionRevision)status.setText("Playlist unavailable: "+e.getMessage());});}});
                 }
             }catch(Exception e){status.setText("Selection unavailable: "+e.getMessage());}});
         }
@@ -154,41 +173,50 @@ final class LibraryView extends FrameLayout {
         java.util.ArrayList<Button> header=new java.util.ArrayList<>();header.add(back);header.addAll(tabs);
         if(previous.isEnabled())header.add(previous);if(next.isEnabled())header.add(next);
         for(int i=0;i<header.size();i++){Button item=header.get(i);item.setNextFocusLeftId(header.get(Math.max(0,i-1)).getId());item.setNextFocusRightId(header.get(Math.min(header.size()-1,i+1)).getId());item.setNextFocusUpId(item.getId());if(!covers.isEmpty())item.setNextFocusDownId(covers.get(0).getId());}
-        if(!section.equals("albums"))for(int i=0;i<covers.size();i++){View row=covers.get(i);row.setNextFocusUpId(i==0?tabs.get(0).getId():covers.get(i-1).getId());row.setNextFocusDownId(i+1<covers.size()?covers.get(i+1).getId():row.getId());}
+        if(!section.equals("albums"))for(int i=0;i<covers.size();i++){View row=covers.get(i);row.setNextFocusUpId(i<directoryColumns?tabs.get(0).getId():covers.get(i-directoryColumns).getId());row.setNextFocusDownId(i+directoryColumns<covers.size()?covers.get(i+directoryColumns).getId():row.getId());row.setNextFocusLeftId(i%directoryColumns==0?row.getId():covers.get(i-1).getId());row.setNextFocusRightId(i%directoryColumns==directoryColumns-1||i+1==covers.size()?row.getId():covers.get(i+1).getId());}
+    }
+    private void loadDirectoryArt(RecordTile tile,String category,int index,int current)throws Exception {
+        final String artistName=category.equals("artists")?albums.getString(index):"";
+        final JSONArray candidates=category.equals("playlists")?albums.getJSONObject(index).getJSONObject("playlist").optJSONArray("covers"):category.equals("albums")?new JSONArray().put(albums.getJSONObject(index)):null;
+        artWorker.execute(()->{try {
+            JSONArray choices=category.equals("artists")?reply(request(origin,"albums",artistName,"",0)).getJSONArray("albums"):candidates;
+            if(choices==null)return;
+            for(int i=0;i<Math.min(4,choices.length());i++) {
+                if(disposed||current!=generation)return;
+                JSONObject item=choices.getJSONObject(i);String a=item.getString("artist"),b=item.getString("album"),key=a+"\u0000"+b;
+                Art cached=artCache.get(key);
+                if(cached!=null){ui.post(()->{if(!disposed&&current==generation)tile.artwork(cached.image,cached.color);});return;}
+                byte[] bytes=artwork(origin,a,b);if(bytes==null||bytes.length==0)continue;
+                Art art=decodeArt(bytes);
+                ui.post(()->{if(disposed||current!=generation){art.image.recycle();return;}artCache.put(key,art);tile.artwork(art.image,art.color);});return;
+            }
+        }catch(Exception error){ui.post(()->{if(!disposed&&current==generation)tile.setContentDescription(tile.getContentDescription()+" · artwork unavailable");});}});
+    }
+    private Art decodeArt(byte[] bytes)throws Exception {
+        BitmapFactory.Options options=new BitmapFactory.Options();options.inJustDecodeBounds=true;BitmapFactory.decodeByteArray(bytes,0,bytes.length,options);
+        if(options.outWidth<=0||options.outHeight<=0||((long)options.outWidth*options.outHeight)>32_000_000L)throw new IllegalArgumentException("Artwork dimensions invalid");
+        options.inJustDecodeBounds=false;options.inSampleSize=1;while(Math.max(options.outWidth,options.outHeight)/options.inSampleSize>512)options.inSampleSize*=2;
+        Bitmap bitmap=BitmapFactory.decodeByteArray(bytes,0,bytes.length,options);if(bitmap==null)throw new IllegalArgumentException("Artwork decode failed");
+        Bitmap thumbnail=Bitmap.createScaledBitmap(bitmap,64,64,true);int[] pixels=new int[4096];thumbnail.getPixels(pixels,0,64,0,0,64,64);byte[] rgba=new byte[4096*4];
+        for(int p=0;p<pixels.length;p++){rgba[p*4]=(byte)(pixels[p]>>16);rgba[p*4+1]=(byte)(pixels[p]>>8);rgba[p*4+2]=(byte)pixels[p];rgba[p*4+3]=(byte)(pixels[p]>>24);}if(thumbnail!=bitmap)thumbnail.recycle();
+        return new Art(bitmap,accent(rgba));
     }
     private void render(int current) throws Exception {
         if(pendingFocus!=null)ui.removeCallbacks(pendingFocus);
         artWorker.getQueue().clear(); covers.clear();
         shelf.removeAllViews(); count=Math.min(PAGE_SIZE,albums.length()); float density=getResources().getDisplayMetrics().density;
-        JSONObject geometry=reply(layout(Math.round(shelf.getWidth()/density),Math.round(shelf.getHeight()/density),count));
+        JSONObject geometry=crateGeometry(true,count);
         count=geometry.getJSONArray("cards").length();
         JSONObject panel=geometry.getJSONObject("detail"); shelf.addView(detail,rect(panel)); title.setText("Select a record"); artist.setText(""); trackList.setText(""); play.setEnabled(false); enqueue.setEnabled(false);
-        previous.setEnabled(offset>0); next.setEnabled(albums.length()>count); status.setText(count==0?"No local records in this page":"Deadwax · MPD    /    Select a cover, then Play or Queue");
+        previous.setEnabled(!pageHistory.isEmpty()); next.setEnabled(albums.length()>count||count==PAGE_SIZE); status.setText(count==0?"No local records in this page":"Deadwax · MPD    /    Select a cover, then Play or Queue");
         JSONArray cards=geometry.getJSONArray("cards");
         for(int i=0;i<count;i++) {
             final int index=i; JSONObject album=albums.getJSONObject(i), bounds=cards.getJSONObject(i).getJSONObject("bounds");
-            LinearLayout card=new LinearLayout(host); card.setId(View.generateViewId()); card.setOrientation(LinearLayout.VERTICAL); card.setFocusable(true); card.setFocusableInTouchMode(true); card.setClickable(true); card.setBackground(plate(surface,surface,1)); card.setPadding(dp(4),dp(4),dp(4),dp(4)); covers.add(card);
-            card.setContentDescription(album.getString("album")+" by "+album.getString("artist"));
-            FrameLayout cover=new FrameLayout(host); ImageView image=new ImageView(host); image.setScaleType(ImageView.ScaleType.CENTER_CROP); cover.addView(image,new LayoutParams(-1,-1));
-            TextView placeholder=label("◎",72,muted); placeholder.setGravity(Gravity.CENTER); cover.addView(placeholder,new LayoutParams(-1,-1)); card.addView(cover,new LinearLayout.LayoutParams(-1,dp((float)bounds.getDouble("width")-8)));
-            TextView name=label(album.getString("album"),18,foreground); name.setSingleLine(true); name.setEllipsize(android.text.TextUtils.TruncateAt.END); name.setPadding(dp(10),dp(8),dp(10),0); card.addView(name);
-            TextView by=label(album.getString("artist"),14,muted); by.setSingleLine(true); by.setEllipsize(android.text.TextUtils.TruncateAt.END); by.setPadding(dp(10),0,dp(10),0); card.addView(by);
-            final int[] cardAccent={accent};
-            card.setOnFocusChangeListener((v,focused)-> { v.setBackground(plate(surface,focused?cardAccent[0]:surface,focused?3:1)); TvMotion.focus(v,focused);if(focused)focus(index,current); });
-            card.setOnClickListener(v -> { focus(index,current); play.requestFocus(); }); shelf.addView(card,rect(bounds));
-            final String a=album.getString("artist"), b=album.getString("album");
-            final String artKey=album.toString(); Art cached=artCache.get(artKey);
-            if(cached!=null) { image.setImageBitmap(cached.image); placeholder.setVisibility(View.GONE); if(cached.color!=0)cardAccent[0]=cached.color; continue; }
-            artWorker.execute(() -> { if(disposed||current!=generation)return; try { byte[] bytes=artwork(origin,a,b); if(bytes==null||bytes.length==0)return;
-                BitmapFactory.Options options=new BitmapFactory.Options(); options.inJustDecodeBounds=true; BitmapFactory.decodeByteArray(bytes,0,bytes.length,options);
-                if(options.outWidth<=0||options.outHeight<=0||((long)options.outWidth*options.outHeight)>32_000_000L)throw new IllegalArgumentException("Artwork dimensions invalid");
-                options.inJustDecodeBounds=false; options.inSampleSize=1; while(Math.max(options.outWidth,options.outHeight)/options.inSampleSize>640)options.inSampleSize*=2;
-                Bitmap bitmap=BitmapFactory.decodeByteArray(bytes,0,bytes.length,options); if(bitmap==null)throw new IllegalArgumentException("Artwork decode failed");
-                Bitmap thumbnail=Bitmap.createScaledBitmap(bitmap,64,64,true); int[] pixels=new int[4096]; thumbnail.getPixels(pixels,0,64,0,0,64,64); byte[] rgba=new byte[4096*4];
-                for(int p=0;p<pixels.length;p++){rgba[p*4]=(byte)(pixels[p]>>16);rgba[p*4+1]=(byte)(pixels[p]>>8);rgba[p*4+2]=(byte)pixels[p];rgba[p*4+3]=(byte)(pixels[p]>>24);} if(thumbnail!=bitmap)thumbnail.recycle();
-                final int coverAccent=accent(rgba);
-                ui.post(()->{ if(disposed||current!=generation){bitmap.recycle();return;} artCache.put(artKey,new Art(bitmap,coverAccent)); image.setImageBitmap(bitmap); placeholder.setVisibility(View.GONE); if(coverAccent!=0){cardAccent[0]=coverAccent;if(card.hasFocus())card.setBackground(plate(surface,coverAccent,3));} });
-            } catch(Exception e) { ui.post(()->{if(!disposed&&current==generation)placeholder.setContentDescription("Local artwork unavailable");}); } });
+            RecordTile card=new RecordTile(host,cards.getJSONObject(i),album.getString("album"),album.getString("artist"),foreground,muted,surface,accent);covers.add(card);
+            card.compact(compact);
+            card.setOnFocusChangeListener((v,focused)-> {card.focused(focused);if(focused)focus(index,current); });
+            card.setOnClickListener(v -> { sounds.play();focus(index,current); play.requestFocus(); }); shelf.addView(card,rect(bounds));
+            loadDirectoryArt(card,"albums",i,current);
         }
         if(count>0) {
             int columns=1; while(columns<count && cards.getJSONObject(columns).getJSONObject("bounds").getDouble("y")==cards.getJSONObject(0).getJSONObject("bounds").getDouble("y"))columns++;
@@ -209,6 +237,20 @@ final class LibraryView extends FrameLayout {
         TvMotion.reveal(shelf);
         linkHeader();
         if(active){if(count>0)covers.get(0).requestFocus();else back.requestFocus();}
+    }
+    /** Density is a host logical-coordinate transform; GFX remains the sole layout owner. */
+    private JSONObject crateGeometry(boolean withDetail,int requested)throws Exception {
+        float scale=compact?.76f:1f,density=getResources().getDisplayMetrics().density;
+        int width=(int)Math.floor(shelf.getWidth()/density/scale),height=(int)Math.floor(shelf.getHeight()/density/scale);
+        JSONObject geometry=reply(withDetail?layout(width,height,requested):crateLayout(width,height,requested));
+        scaleGeometry(geometry,scale);return geometry;
+    }
+    private void scaleGeometry(JSONObject object,float scale)throws Exception {
+        java.util.Iterator<String> keys=object.keys();while(keys.hasNext()){String key=keys.next();Object value=object.get(key);
+            if(value instanceof JSONObject)scaleGeometry((JSONObject)value,scale);
+            else if(value instanceof JSONArray){JSONArray array=(JSONArray)value;for(int i=0;i<array.length();i++)if(array.get(i) instanceof JSONObject)scaleGeometry(array.getJSONObject(i),scale);}
+            else if(key.equals("x")||key.equals("y")||key.equals("width")||key.equals("height"))object.put(key,object.getDouble(key)*scale);
+        }
     }
     private LayoutParams rect(JSONObject value) throws Exception { LayoutParams p=new LayoutParams(dp((float)value.getDouble("width")),dp((float)value.getDouble("height"))); p.leftMargin=dp((float)value.getDouble("x")); p.topMargin=dp((float)value.getDouble("y")); return p; }
     private void focus(int index,int current) {
@@ -233,5 +275,5 @@ final class LibraryView extends FrameLayout {
             catch(Exception e){ui.post(()->{if(!disposed){busy=false;play.setEnabled(true);enqueue.setEnabled(true);status.setText("Playback failed: "+e.getMessage()+" — queue may have changed; do not retry blindly");}});} });
         }catch(Exception e){busy=false;status.setText("Selection unavailable");}
     }
-    void dispose() { disposed=true; generation++; worker.shutdownNow(); artWorker.shutdownNow(); detailWorker.shutdownNow();ui.removeCallbacksAndMessages(null); }
+    void dispose() { disposed=true; generation++; worker.shutdownNow(); artWorker.shutdownNow(); detailWorker.shutdownNow();sounds.dispose();ui.removeCallbacksAndMessages(null); }
 }

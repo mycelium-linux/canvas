@@ -27,5 +27,10 @@ final class TvMotion {
         view.setAlpha(0);
         view.animate().alpha(1).setDuration(160).setInterpolator(EASING).start();
     }
+    static void pose(View view,float x,float rotation) {
+        view.animate().cancel();
+        if(android.os.Build.VERSION.SDK_INT>=26 && !ValueAnimator.areAnimatorsEnabled()) {view.setTranslationX(x);view.setRotation(rotation);return;}
+        view.animate().translationX(x).rotation(rotation).setDuration(180).setInterpolator(EASING).start();
+    }
     private TvMotion() {}
 }

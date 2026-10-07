@@ -54,15 +54,50 @@ pub fn request(
 pub fn geometry(width: u32, height: u32, count: usize) -> Result<String, String> {
     if count > fpl_gfx::media::MAX_CARDS {return Err("Too many shelf cards".into());}
     let bounds=fpl_gfx::Rect::new(0.0, 0.0, width as f32, height as f32);
-    let shelf = (if count==0 {0..=0}else{1..=count}).rev()
-        .find_map(|visible| fpl_gfx::media::Shelf::layout(bounds,visible))
+    let shelf = fpl_gfx::media::Shelf::layout(bounds,0)
     .ok_or("Library viewport cannot fit this page")?;
-    Ok(serde_json::json!({"cards":shelf.cards.iter().map(|card| serde_json::json!({"bounds":card.bounds,"artwork":card.artwork})).collect::<Vec<_>>(),"detail":shelf.detail}).to_string())
+    let grid=fpl_gfx::media::RecordCrate::layout(fpl_gfx::Rect::new(0.0,0.0,shelf.detail.x-fpl_gfx::media::DETAIL_GAP,height as f32),count).ok_or("Record crate cannot fit beside detail")?;
+    Ok(serde_json::json!({"cards":grid.cards.iter().map(|card| serde_json::json!({"bounds":card.bounds,"sleeve":card.sleeve,"record":card.record,"artwork":card.sleeve})).collect::<Vec<_>>(),"detail":shelf.detail}).to_string())
+}
+
+pub fn crate_geometry(width:u32,height:u32,count:usize)->Result<String,String> {
+    let grid=fpl_gfx::media::RecordCrate::layout(fpl_gfx::Rect::new(0.0,0.0,width as f32,height as f32),count).ok_or("Record crate cannot fit this viewport")?;
+    Ok(serde_json::json!({"columns":grid.columns,"capacity":grid.capacity,"cards":grid.cards.iter().map(|card|serde_json::json!({"bounds":card.bounds,"sleeve":card.sleeve,"record":card.record})).collect::<Vec<_>>()} ).to_string())
+}
+
+/// Quiet deterministic paper-brush UI cue, independent of the studio audio engine.
+pub fn record_selection_wav()->Vec<u8> {
+    const RATE:u32=22_050;
+    const FRAMES:u32=882;
+    let mut bytes=Vec::with_capacity(44+FRAMES as usize*2);
+    bytes.extend(b"RIFF");bytes.extend((36+FRAMES*2).to_le_bytes());bytes.extend(b"WAVEfmt ");bytes.extend(16u32.to_le_bytes());
+    bytes.extend(1u16.to_le_bytes());bytes.extend(1u16.to_le_bytes());bytes.extend(RATE.to_le_bytes());bytes.extend((RATE*2).to_le_bytes());bytes.extend(2u16.to_le_bytes());bytes.extend(16u16.to_le_bytes());bytes.extend(b"data");bytes.extend((FRAMES*2).to_le_bytes());
+    let mut seed=0x7a31u32;let mut low=0.0f32;
+    for index in 0..FRAMES {
+        seed=seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let noise=((seed>>16) as f32/32767.5)-1.0;low+=(noise-low)*0.2;
+        let t=index as f32/(FRAMES-1) as f32;
+        let envelope=(std::f32::consts::PI*t).sin().powi(2);
+        let sample=(low*envelope*0.18*i16::MAX as f32) as i16;bytes.extend(sample.to_le_bytes());
+    }
+    bytes
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn selection_cue_is_bounded_quiet_and_deterministic() {
+        let bytes=record_selection_wav();assert_eq!(&bytes[0..4],b"RIFF");assert_eq!(bytes.len(),44+882*2);assert_eq!(bytes,record_selection_wav());
+        assert!(bytes[44..].chunks_exact(2).all(|s|i16::from_le_bytes([s[0],s[1]]).unsigned_abs()<6000));
+    }
+    #[test]
+    fn crate_geometry_paginates_without_overflow() {
+        let grid:serde_json::Value=serde_json::from_str(&crate_geometry(960,540,24).unwrap()).unwrap();
+        assert!(grid["cards"].as_array().unwrap().len()<24);
+        assert!(grid["columns"].as_u64().unwrap()>1);
+        assert!(crate_geometry(960,540,25).is_err());
+    }
     #[test]
     fn only_private_bridge_origins_are_accepted() {
         assert!(library("http://127.0.0.1:26601").is_ok());
@@ -97,6 +132,21 @@ mod jni_api {
         env.new_string(raw)
             .map(|value| value.into_raw())
             .unwrap_or(std::ptr::null_mut())
+    }
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_dev_fpl_canvas_RecordSounds_selectionWav(env:JNIEnv,_class:JClass)->jbyteArray {
+        env.byte_array_from_slice(&super::record_selection_wav()).map(|value|value.into_raw()).unwrap_or(std::ptr::null_mut())
+    }
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_dev_fpl_canvas_LibraryView_crateLayout(mut env:JNIEnv,_class:JClass,width:jint,height:jint,count:jint)->jstring {
+        let value=(||super::crate_geometry(width.try_into().map_err(|_|"Invalid width")?,height.try_into().map_err(|_|"Invalid height")?,count.try_into().map_err(|_|"Invalid count")?))();
+        result(&mut env,value)
+    }
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_dev_fpl_canvas_RecordTile_vinylRadii(env:JNIEnv,_class:JClass,diameter:jint)->jni::sys::jfloatArray {
+        let Some(values)=fpl_gfx::media::vinyl_radii(diameter as f32) else {return std::ptr::null_mut();};
+        let Ok(array)=env.new_float_array(values.len() as i32) else {return std::ptr::null_mut();};
+        if env.set_float_array_region(&array,0,&values).is_err(){return std::ptr::null_mut();}array.into_raw()
     }
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_dev_fpl_canvas_TvMotion_curve(env: JNIEnv, _class: JClass) -> jni::sys::jfloatArray {
