@@ -24,7 +24,12 @@ adb -s TV shell am start -n dev.fpl.canvas.tv/dev.fpl.canvas.TvActivity --es lib
 
 Use the remote to select Library, then a cover. The detail pane lists tracks;
 Play starts the selected album, Queue appends without starting, Back restores the
-workspace. Refreshing covers never changes playback, volume, or queue. Action
+workspace. From record controls, Back first returns to the selected cover; the
+next Back closes Library and restores workspace focus. Focus is contained inside
+the library while it is open. Closing does not rebuild the workspace or destroy
+the underlying video surface. Late catalog responses cannot claim focus after
+closing. Reopening retains the current shelf, selection, and decoded covers.
+Refreshing covers never changes playback, volume, or queue. Action
 receipts say “Started MPD”, not a fabricated continuous now-playing status.
 Do not blindly retry an ambiguous playback failure; the owner may have added tracks.
 
@@ -33,3 +38,13 @@ Bounded work: six visible covers, one artwork worker separate from control reque
 64×64 accent samples, no artwork/geometry network work on the draw thread. No
 background catalog polling. Spotify browsing/transport and live now-playing remain
 separate follow-up slices; this view does not claim they are already integrated.
+
+Focus metadata is debounced by 120 ms and stale queued requests are skipped.
+Decoded cover caching is bounded to 16 MiB, with at most 24 cached track lists.
+Rust reuses one pooled owner client rather than creating a runtime per request.
+
+Interaction verification runbook (does not alter playback): open Library, activate
+a cover to focus Play without activating it, press Back to return to the cover,
+then Back to close. Reopen and verify the same shelf and focus are retained.
+Repeat while artwork is loading. Check each current focus before sending another
+remote input; do not activate Play or Queue as a navigation test.

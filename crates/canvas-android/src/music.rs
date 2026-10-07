@@ -1,12 +1,26 @@
 //! Platform adapter: shared catalog client and GFX geometry, no player implementation.
 use canvas_feeds::music_library::{Album, Library};
 
-pub fn library(origin: &str) -> Result<Library, String> {
+pub fn library(origin: &str) -> Result<std::sync::Arc<Library>, String> {
     let url = url::Url::parse(origin).map_err(|_| "Invalid library origin")?;
     if url.host_str() != Some("127.0.0.1") || url.scheme() != "http" {
         return Err("Library requires a loopback authenticated bridge".into());
     }
-    Library::new(origin, None)
+    // One pooled client/runtime, not a new HTTP runtime for each focus/art request.
+    type Cached = Option<(String, std::sync::Arc<Library>)>;
+    static CLIENT: std::sync::OnceLock<std::sync::Mutex<Cached>> = std::sync::OnceLock::new();
+    let mut cached = CLIENT
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .map_err(|_| "Library client unavailable")?;
+    if let Some((key, client)) = cached.as_ref() {
+        if key == origin {
+            return Ok(client.clone());
+        }
+    }
+    let client = std::sync::Arc::new(Library::new(origin, None)?);
+    *cached = Some((origin.into(), client.clone()));
+    Ok(client)
 }
 
 pub fn request(
@@ -56,6 +70,12 @@ mod tests {
     fn geometry_is_shared_and_bounded() {
         assert!(geometry(1920, 1080, 8).is_ok());
         assert!(geometry(640, 320, 24).is_err());
+    }
+    #[test]
+    fn requests_share_a_single_client() {
+        let a = library("http://127.0.0.1:26601").unwrap();
+        let b = library("http://127.0.0.1:26601").unwrap();
+        assert!(std::sync::Arc::ptr_eq(&a, &b));
     }
 }
 

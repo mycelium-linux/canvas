@@ -96,25 +96,44 @@ public final class TvActivity extends Activity {
     private boolean workspaceMode;
     private TextView workspaceHeader;
     private LibraryView libraryScreen;
+    private LibraryView cachedLibraryScreen;
     private String libraryEndpoint = "";
+    private View libraryReturnFocus;
+    private int libraryReturnFocusability;
 
     private void showLibrary() {
         if (libraryScreen != null || libraryEndpoint.isEmpty()) return;
         try {
             JSONObject palette = new JSONObject(nativeProjection(frame.getWidth(),frame.getHeight())).getJSONObject("palette");
-            libraryScreen = new LibraryView(this,libraryEndpoint,palette,() -> closeLibrary());
-            video.setVisibility(View.INVISIBLE);
+            libraryReturnFocus = getCurrentFocus();
+            libraryReturnFocusability = selector.getDescendantFocusability();
+            if(cachedLibraryScreen==null)cachedLibraryScreen = new LibraryView(this,libraryEndpoint,palette,() -> closeLibrary());
+            libraryScreen = cachedLibraryScreen;
+            // An opaque view covers video without destroying its Surface/decoder.
+            background.setActive(false);
+            selector.setDescendantFocusability(android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+            selector.setFocusable(false);
             FrameLayout.LayoutParams bounds = new FrameLayout.LayoutParams(-1,-1);
             bounds.topMargin = barHeight();
             frame.addView(libraryScreen,bounds);
             libraryScreen.bringToFront();
+            libraryScreen.enter();
         } catch(Exception e) { showStatus("Library unavailable: "+e.getMessage()); }
     }
 
     private void closeLibrary() {
         if(libraryScreen == null) return;
-        libraryScreen.dispose(); frame.removeView(libraryScreen); libraryScreen=null;
-        lastProjection=""; lastStructure=""; refreshWorkspace();
+        libraryScreen.leave(); frame.removeView(libraryScreen); libraryScreen=null;
+        selector.setDescendantFocusability(libraryReturnFocusability);
+        background.setActive(resumed);
+        for(View widget:widgets) {
+            widget.invalidate();
+            if(widget instanceof android.view.ViewGroup) {
+                android.view.ViewGroup group=(android.view.ViewGroup)widget;
+                for(int i=0;i<group.getChildCount();i++)group.getChildAt(i).invalidate();
+            }
+        }
+        if(libraryReturnFocus!=null && libraryReturnFocus.isAttachedToWindow())libraryReturnFocus.requestFocus();
     }
     private HorizontalScrollView workspaceSelector;
     private final ArrayList<View> widgets = new ArrayList<>();
@@ -473,7 +492,7 @@ public final class TvActivity extends Activity {
     }
 
     @Override public void onDestroy() {
-        if(libraryScreen!=null)libraryScreen.dispose();
+        if(cachedLibraryScreen!=null)cachedLibraryScreen.dispose();
         if (background != null) background.dispose();
         for (View widget : widgets) if (widget instanceof PdfSurface) ((PdfSurface)widget).dispose();
         pdfJobs.shutdownNow();
@@ -482,7 +501,7 @@ public final class TvActivity extends Activity {
     private final Runnable refresh = new Runnable() {
         @Override public void run() {
             if (!resumed) return;
-            refreshWorkspace();
+            if(libraryScreen==null)refreshWorkspace();
             updates.postDelayed(this, 250);
         }
     };
@@ -644,7 +663,7 @@ public final class TvActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
-        if(libraryScreen!=null) { closeLibrary(); return; }
+        if(libraryScreen!=null) { if(!libraryScreen.goBack())closeLibrary(); return; }
         if(channelScreen!=null) { closeChannels(); return; }
         super.onBackPressed();
     }
@@ -756,7 +775,7 @@ public final class TvActivity extends Activity {
                 long lastNeedleFrame;
                 @Override protected void onDraw(android.graphics.Canvas target) {
                     super.onDraw(target);
-                    if (!resumed || getWidth() < 2 || getHeight() < 2) return;
+                    if (!resumed || libraryScreen!=null || getWidth() < 2 || getHeight() < 2) return;
                     try {
                         JSONObject snapshot = new JSONObject(nativeSignalSnapshot(id));
                         if (snapshot.has("error")) throw new IllegalStateException(snapshot.getString("error"));
@@ -1252,7 +1271,7 @@ public final class TvActivity extends Activity {
                 if (preparedPlayer != null) status.setVisibility(View.GONE);
             }
             selector.getParent().requestLayout();
-            if(libraryScreen!=null) { video.setVisibility(View.INVISIBLE); libraryScreen.bringToFront(); }
+            if(libraryScreen!=null) libraryScreen.bringToFront();
             lastProjection = raw;
             lastStructure = structure;
         } catch (Exception error) { showStatus("Workspace presentation failed: " + error.getMessage()); }
