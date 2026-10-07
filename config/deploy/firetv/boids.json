@@ -20,7 +20,9 @@
         "spec": {
           "schema_version": 2,
           "id": "boids",
-          "kind": "boids"
+          "kind": "boids",
+          "footnote": "Each boid follows three local rules. Separation keeps it from crowding its neighbors. Alignment turns it toward their average direction. Cohesion draws it toward the center of its nearby neighbors. Together, these small decisions create a flock without a leader.\n\nBoids was created by Craig Reynolds in 1986 and presented at SIGGRAPH in 1987.",
+          "footnote_source": "https://www.red3d.com/cwr/boids/"
         }
       }
     }

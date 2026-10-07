@@ -315,14 +315,23 @@ public final class TvActivity extends Activity {
     /** Paints canonical gfx primitives; no duplicate clock geometry in Java. */
     /** Local, bounded Rust flock rendered with hardware-accelerated UI strokes. */
     private final class BoidsView extends View {
+        private final String footnote;
+        private final android.text.TextPaint noteInk = new android.text.TextPaint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint notePanel = new Paint();
+        private android.text.StaticLayout noteLayout;
+        private boolean showNote = true;
         private final boolean aquarium;
         private final int fishInk, sharkInk;
         private final Paint ink = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final long epoch = System.nanoTime();
         private long sample = epoch, work;
         private int frames;
-        BoidsView(JSONObject palette, boolean aquarium) throws Exception {
+        BoidsView(JSONObject palette, boolean aquarium, String footnote) throws Exception {
             super(TvActivity.this);
+            if (footnote.length() > 2048) throw new IllegalArgumentException("Footnote exceeds limit");
+            this.footnote = footnote;
+            noteInk.setTextSize(dp(18)); noteInk.setColor(Color.parseColor(palette.getString("text_muted")));
+            notePanel.setColor(Color.parseColor(palette.getString("surface")));
             this.aquarium = aquarium;
             fishInk = Color.parseColor(palette.getString("primary"));
             sharkInk = Color.parseColor(palette.getString("text"));
@@ -330,6 +339,15 @@ public final class TvActivity extends Activity {
             setContentDescription("Boids · local flock");
             ink.setColor(Color.parseColor(palette.getString("primary")));
             ink.setStyle(Paint.Style.STROKE); ink.setStrokeCap(Paint.Cap.ROUND);
+        }
+        boolean toggleFootnote() {
+            if (footnote.isEmpty()) return false;
+            showNote = !showNote; invalidate(); return true;
+        }
+        @Override protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+            super.onSizeChanged(w,h,oldw,oldh);
+            if (!footnote.isEmpty()) noteLayout = new android.text.StaticLayout(
+                footnote,noteInk,Math.max(1,w-dp(64)),android.text.Layout.Alignment.ALIGN_NORMAL,1.15f,0f,false);
         }
         @Override protected void onDraw(android.graphics.Canvas target) {
             super.onDraw(target);
@@ -352,6 +370,16 @@ public final class TvActivity extends Activity {
                 ink.setStrokeWidth(records[i+5]);
                 ink.setColor(records[i+6] == 2f ? sharkInk : fishInk);
                 target.drawLine(records[i+1],records[i+2],records[i+3],records[i+4],ink);
+            }
+            if (!footnote.isEmpty()) {
+                float bottom=getHeight()-dp(20);
+                if(showNote && noteLayout != null) {
+                    float top=Math.max(dp(8),bottom-noteLayout.getHeight()-dp(44));
+                    target.drawRect(dp(16),top,getWidth()-dp(16),getHeight()-dp(12),notePanel);
+                    target.save(); target.clipRect(dp(16),top,getWidth()-dp(16),getHeight()-dp(12));
+                    target.translate(dp(32),top+dp(14)); noteLayout.draw(target); target.restore();
+                }
+                target.drawText("Play/Pause · rules",dp(32),bottom,noteInk);
             }
             frames++; work += System.nanoTime()-start;
             if (start-sample >= 10000000000L) {
@@ -1098,6 +1126,14 @@ public final class TvActivity extends Activity {
     }
 
     @Override public boolean onKeyDown(int key, KeyEvent event) {
+        if (key == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || key == KeyEvent.KEYCODE_INFO || key == KeyEvent.KEYCODE_I) {
+            for (View widget : widgets) {
+                if (widget instanceof BoidsView && !((BoidsView)widget).footnote.isEmpty()) {
+                    if(event.getRepeatCount()==0) ((BoidsView)widget).toggleFootnote();
+                    return true;
+                }
+            }
+        }
         if (key == KeyEvent.KEYCODE_MENU && selector.getChildCount() > 0) {
             selector.getChildAt(0).requestFocus();
             return true;
@@ -1273,7 +1309,8 @@ public final class TvActivity extends Activity {
                 } else if (content.getString("kind").equals("widget")
                     && (content.getJSONObject("spec").getString("kind").equals("boids")
                         || content.getJSONObject("spec").getString("kind").equals("aquarium"))) {
-                    BoidsView flock = new BoidsView(palette, content.getJSONObject("spec").getString("kind").equals("aquarium"));
+                    BoidsView flock = new BoidsView(palette, content.getJSONObject("spec").getString("kind").equals("aquarium"),
+                        content.getJSONObject("spec").optString("footnote", ""));
                     frame.addView(flock, geometry); widgets.add(flock);
                 } else if (content.getString("kind").equals("widget")
                     && content.getJSONObject("spec").getString("kind").equals("signal_view")) {
