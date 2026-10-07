@@ -76,6 +76,7 @@ mod tests {
         ] {
             let frame = SignalFrame::Console {
                 panel: fpl_gfx::console::Console {
+                    icon: None,
                     strips: vec![fpl_gfx::console::Strip {
                         show_meter: true,
                         name: "L".into(),

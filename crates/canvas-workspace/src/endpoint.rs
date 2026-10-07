@@ -39,6 +39,12 @@ pub enum Command {
     WorkspaceRead {
         name: String,
     },
+    WorkspacePages {
+        pages: Vec<crate::Page>,
+    },
+    WorkspacePage {
+        index: usize,
+    },
     ApplyPatch {
         patch: WorkspacePatch,
     },
@@ -289,6 +295,18 @@ impl Endpoint {
                 session.select(Actor::Human, &name)?;
                 self.frames.clear();
             }
+            Command::WorkspacePages { pages } => {
+                self.session
+                    .as_mut()
+                    .ok_or("Endpoint has no catalog")?
+                    .set_pages(pages)?;
+            }
+            Command::WorkspacePage { index } => {
+                self.session
+                    .as_mut()
+                    .ok_or("Endpoint has no catalog")?
+                    .select_page(index)?;
+            }
             Command::ApplyPatch { patch } => {
                 self.session
                     .as_mut()
@@ -325,6 +343,77 @@ impl Endpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn named_views_are_revision_bound_and_invalid_selection_is_atomic() {
+        let mut endpoint = Endpoint::new("firetv-omni");
+        let request: Request = serde_json::from_str(include_str!(
+            "../../../config/deploy/firetv/workspaces.json"
+        ))
+        .unwrap();
+        endpoint.execute(request).unwrap();
+        let layout = endpoint
+            .session
+            .as_ref()
+            .unwrap()
+            .document()
+            .unwrap()
+            .layout
+            .clone();
+        endpoint
+            .execute(Request {
+                schema_version: 1,
+                request_id: "views".into(),
+                expected_revision: Some(endpoint.revision),
+                command: Command::WorkspacePages {
+                    pages: vec![crate::Page {
+                        name: "Routing".into(),
+                        layout,
+                    }],
+                },
+            })
+            .unwrap();
+        let revision = endpoint.revision;
+        assert!(
+            endpoint
+                .execute(Request {
+                    schema_version: 1,
+                    request_id: "stale".into(),
+                    expected_revision: Some(revision - 1),
+                    command: Command::WorkspacePage { index: 1 }
+                })
+                .is_err()
+        );
+        endpoint
+            .execute(Request {
+                schema_version: 1,
+                request_id: "select".into(),
+                expected_revision: Some(revision),
+                command: Command::WorkspacePage { index: 1 },
+            })
+            .unwrap();
+        assert_eq!(
+            endpoint
+                .session
+                .as_ref()
+                .unwrap()
+                .document()
+                .unwrap()
+                .active_page_name(),
+            "Routing"
+        );
+        let before = endpoint.snapshot();
+        assert!(
+            endpoint
+                .execute(Request {
+                    schema_version: 1,
+                    request_id: "invalid".into(),
+                    expected_revision: Some(endpoint.revision),
+                    command: Command::WorkspacePage { index: 99 }
+                })
+                .is_err()
+        );
+        assert_eq!(endpoint.snapshot(), before);
+    }
     #[test]
     fn status_snapshots_are_live_not_saved_and_expire() {
         let mut endpoint = Endpoint::new("firetv-omni");

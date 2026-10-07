@@ -66,6 +66,7 @@ public final class TvActivity extends Activity {
     private static native String nativeStartControl(String directory);
     private static native String nativeProjection(int width, int height);
     private static native String nativeSelectWorkspace(String project);
+    private static native String nativeSelectPage(int index);
     private static native String nativePdfAsset(String asset);
     private static native float[] nativeClockFrame(int width, int height, int hour, int minute, float second);
     private static native String nativeBackgroundProgram(String id);
@@ -784,7 +785,7 @@ public final class TvActivity extends Activity {
                             JSONObject text = labels.getJSONObject(i), box = text.getJSONObject("bounds");
                             float x = (float)box.getDouble("x"), y = (float)box.getDouble("y");
                             float width = (float)box.getDouble("width"), height = (float)box.getDouble("height");
-                            ink.setTextSize(Math.max(10f, Math.min(26f, height * 0.8f)));
+                            ink.setTextSize(Math.max(10f, Math.min(32f, height * 0.8f)));
                             ink.setColor(frameInks[text.getInt("role")]); ink.setAlpha(state.equals("ready") ? 255 : 100);
                             String value = text.getString("text");
                             if (ink.measureText(value) > width) {
@@ -1075,6 +1076,25 @@ public final class TvActivity extends Activity {
                 item.setMargins(dp(4), dp(2), 0, dp(2));
                 selector.addView(button, item);
                 if (projectId.equals(focusedProject)) button.requestFocus();
+            }
+            JSONObject document = projection.getJSONObject("document");
+            JSONArray pages = document.optJSONArray("pages");
+            if (pages != null && pages.length() > 0) {
+                for (int i=0; i<=pages.length(); i++) {
+                    final int page = i;
+                    Button button = new Button(this);
+                    button.setText(i == 0 ? "▥" : pages.getJSONObject(i-1).getString("name"));
+                    button.setContentDescription(i == 0 ? "Console" : button.getText());
+                    button.setTextSize(12);
+                    styleControl(button, palette, i == document.optInt("active_page", 0));
+                    button.setOnClickListener(v -> {
+                        String error = nativeSelectPage(page);
+                        if (error == null || !error.isEmpty()) showStatus("View switch failed: " + error);
+                        else { lastProjection = ""; refreshWorkspace(); }
+                    });
+                    button.setMinHeight(0); button.setMinimumHeight(0);
+                    selector.addView(button, new LinearLayout.LayoutParams(-2, barHeight()-dp(4)));
+                }
             }
             for (View widget : widgets) {
                 if (widget instanceof PdfSurface) ((PdfSurface)widget).dispose();

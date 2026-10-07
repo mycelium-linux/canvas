@@ -68,6 +68,35 @@ impl Workspaces {
         self.documents.get(project)
     }
 
+    /// Replace only the selected workspace's named views, preserving all surfaces.
+    pub fn set_pages(&mut self, pages: Vec<crate::Page>) -> Result<(), String> {
+        let mut next = self.document().ok_or("No selected document")?.clone();
+        next.pages = pages;
+        next.active_page = 0;
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or("Document revision exhausted")?;
+        next.validate(&self.catalog).map_err(|e| e.to_string())?;
+        self.documents.insert(next.project_id.clone(), next);
+        Ok(())
+    }
+
+    /// Select a declared view without dropping transient instrument frames.
+    pub fn select_page(&mut self, index: usize) -> Result<(), String> {
+        let mut next = self.document().ok_or("No selected document")?.clone();
+        if index >= next.page_count() {
+            return Err("Page index out of range".into());
+        }
+        next.active_page = index;
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or("Document revision exhausted")?;
+        self.documents.insert(next.project_id.clone(), next);
+        Ok(())
+    }
+
     pub fn palette(&self) -> Result<Option<canvas_core::ThemePalette>, String> {
         self.document()
             .map(|document| {

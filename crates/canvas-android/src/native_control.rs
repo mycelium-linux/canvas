@@ -386,3 +386,36 @@ pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeProjection(
     };
     string(&mut env, output)
 }
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeSelectPage(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    index: jni::sys::jint,
+) -> jni::sys::jstring {
+    let result = (|| -> Result<(), String> {
+        let index = usize::try_from(index).map_err(|_| "Invalid page index")?;
+        let revision = endpoint()
+            .lock()
+            .map_err(|_| "Presentation state unavailable")?
+            .snapshot()["revision"]
+            .as_u64()
+            .ok_or("Missing revision")?;
+        let reply: serde_json::Value = serde_json::from_str(&dispatch(
+            &serde_json::json!({
+                "schema_version":1,"request_id":"tv-select-page","expected_revision":revision,
+                "command":{"command":"workspace_page","index":index}
+            })
+            .to_string(),
+        ))
+        .map_err(|_| "Invalid page receipt")?;
+        if reply["ok"] == true {
+            Ok(())
+        } else {
+            Err(reply["error"]
+                .as_str()
+                .unwrap_or("Page switch failed")
+                .into())
+        }
+    })();
+    string(&mut env, result.err().unwrap_or_default())
+}
