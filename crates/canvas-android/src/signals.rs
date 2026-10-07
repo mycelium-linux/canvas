@@ -44,6 +44,35 @@ pub fn paint_records(width: u32, height: u32, raw: &str) -> Result<Vec<f32>, Str
                 p.fill as u32 as f32,
                 0.0,
             ]),
+            PrimitiveKind::Disc | PrimitiveKind::Lamp => {
+                // Existing Android records can paint circles as round rectangles.
+                // Preserve unknown lamps as recessed wells, never invented activity.
+                let side = p.rect.width.min(p.rect.height);
+                let center = p.rect.center();
+                records.extend_from_slice(&[
+                    0.0,
+                    center.x - side * 0.5,
+                    center.y - side * 0.5,
+                    side,
+                    side,
+                    side * 0.5,
+                    p.fill as u32 as f32,
+                    0.0,
+                ]);
+                if p.kind == PrimitiveKind::Lamp && p.value > 0.0 {
+                    let inset = side * 0.15;
+                    records.extend_from_slice(&[
+                        0.0,
+                        center.x - side * 0.5 + inset,
+                        center.y - side * 0.5 + inset,
+                        side - inset * 2.0,
+                        side - inset * 2.0,
+                        side * 0.35,
+                        p.accent as u32 as f32,
+                        0.0,
+                    ]);
+                }
+            }
             PrimitiveKind::Line => {
                 let center = p.rect.center();
                 let dx = p.rotation.cos() * p.value;
