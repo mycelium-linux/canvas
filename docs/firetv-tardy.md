@@ -65,11 +65,11 @@ to an older APK without the corresponding GFX decoder.
 
 The opt-in `agent.sessions.v2` presenter in
 `config/binders/agent-dashboard-v2.lua` adds separate Needs input / Needs approval
-counts and four priority-ordered session detail rows beneath the public caption.
-Rows show safe project/task labels, owner/provider and time first observed waiting.
+counts and four priority-ordered task tiles beneath the public caption.
+Tiles show safe project/task labels, owner/provider and time first observed waiting.
 Unknown titles stay unnamed; no prompt, preview, transcript or full path is used.
 Waiting sessions sort first, oldest observed wait first, then active/unknown/idle.
-The analog clock and reel remain unchanged. These are read-only detail rows,
+The analog clock and reel remain unchanged. These are read-only task tiles,
 not controls that answer a question or approve an agent action.
 
 The Lua presenter accepts authenticated snapshots/events, bounds owner and
@@ -86,6 +86,18 @@ not Documents: a newly signed launch-agent binary can block on a protected-folde
 permission prompt. This installation uses
 `~/.local/share/agent-telemetry/agent-dashboard-v2.lua`; copy the reviewed binder
 there when deploying an update.
+
+`SignalFrame::TaskDeck` is the shared GFX project-first tile primitive. Lua owns
+selection and ordering, not GFX; the task deck repeats neither a total-session
+table nor provider interpretation. Stale deck frames force unknown symbols and
+suppress wait metadata without opacity fading.
+
+The caption uses `SignalFrame::Brief`: source kicker, headline, bounded verbatim
+caption excerpt and source footer. Long text is visibly marked as an excerpt;
+this is not an AI summary. Author/post UUIDs and transport debugging stay out of
+the reading surface. Both primitives use injected semantic theme roles and the
+same desktop/FireTV geometry. Text wrapping is conservative when host font
+measurement is unavailable; hosts still clip/ellipsize within declared bounds.
 
 ```sh
 lua config/binders/tests/agent-dashboard-v2-test.lua config/binders/agent-dashboard-v2.lua

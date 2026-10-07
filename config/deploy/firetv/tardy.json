@@ -45,11 +45,9 @@
         "spec": {
           "schema_version": 2,
           "id": "tardy-caption",
-          "kind": "rich_card",
-          "title": "Tardy · public reels",
-          "body": "Loading public videos",
-          "format": "markdown",
-          "citations": [],
+          "kind": "signal_view",
+          "title": "Public reel",
+          "frame": {"view":"brief","panel":{"kicker":"TARDY / PUBLIC REEL","headline":"Public reels","body":"Waiting for the public feed","footer":"Public caption · Tardy"}},
           "chrome": "frameless",
           "data": {
             "state": "loading",
@@ -94,9 +92,9 @@
         "spec": {
           "schema_version": 2,
           "id": "tv-agent-details",
-          "kind": "status_list",
-          "title": "Agent attention",
-          "nodes": [{"label": "Telemetry", "detail": "Waiting for explicit owner status", "state": "neutral"}],
+          "kind": "signal_view",
+          "title": "In focus",
+          "frame": {"view":"task_deck","panel":{"items":[],"fresh":false}},
           "data": {"state": "loading", "source": "unibus:agent.sessions.v2", "provenance": "live"}
         }
       }

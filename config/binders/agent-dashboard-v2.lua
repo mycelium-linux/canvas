@@ -70,7 +70,7 @@ function M.render(now_ms)
         if aa~=bb then return aa<bb end
         return a.owner.host .. a.owner.provider .. a.session.id < b.owner.host .. b.owner.provider .. b.session.id
     end)
-    local nodes={}
+    local nodes={};local tasks={}
     for i=1,math.min(#roster,4) do
         local row=roster[i];local s=row.session
         local state=(row.status=="input" or row.status=="approval") and "warning" or row.status=="active" and "good" or "neutral"
@@ -78,6 +78,8 @@ function M.render(now_ms)
         local timing=row.fresh and s.attention and (" · seen waiting "..age(now_ms-s.attention.since_unix_ms)) or ""
         nodes[#nodes+1]={label=s.project or "Unassigned",state=state,
             detail=status..timing.."\n"..(s.task or ("Unnamed session "..s.id:sub(1,8))).."\n"..row.owner.provider.." @ "..row.owner.host}
+        tasks[#tasks+1]={project=s.project or "Unassigned",title=s.task or ("Unnamed session "..s.id:sub(1,8)),
+            state=row.status,meta=row.owner.provider.." @ "..row.owner.host..timing}
     end
     if #nodes==0 then nodes={{label="Sessions",detail=owner_count==0 and "Waiting for owner telemetry" or "No loaded sessions",state="neutral"}} end
     local function count(label,n,state) return {label=label,detail=owner_count>0 and tostring(n) or "—",state=state} end
@@ -90,6 +92,7 @@ function M.render(now_ms)
         count("Unknown",counts.unknown,counts.unknown>0 and "warning" or "neutral")}},
         visual={view="attention",panel={input=counts.input,approval=counts.approval,active=counts.active,
             idle=counts.idle,unknown=counts.unknown,fresh=owner_count>0 and not stale}},
+        deck={view="task_deck",panel={items=tasks,fresh=owner_count>0 and not stale}},
         details={widget={kind="status_list",title="Agent attention · "..#roster.." sessions",nodes=nodes}},
         data=data,observed_at_unix_ms=newest}
 end

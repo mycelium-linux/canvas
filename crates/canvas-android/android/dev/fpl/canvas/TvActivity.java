@@ -918,8 +918,11 @@ public final class TvActivity extends Activity {
                         String state = data.getString("state");
                         String label = state + " · " + data.optString("detail", "");
                         if (!footer.getText().toString().equals(label)) footer.setText(label);
-                        footer.setVisibility(frameless && state.equals("ready") ? View.GONE : View.VISIBLE);
                         JSONObject frame = snapshot.getJSONObject("frame");
+                        // Static briefs have their own source footer, not a live-sensor heartbeat.
+                        boolean staticBrief = frame.optString("view").equals("brief");
+                        footer.setVisibility(frameless && (state.equals("ready")
+                            || (staticBrief && state.equals("no_data"))) ? View.GONE : View.VISIBLE);
                         String raw = frame.toString();
                         String paintRaw = raw;
                         int[] frameInks = inks;
@@ -977,7 +980,8 @@ public final class TvActivity extends Activity {
                             JSONObject text = labels.getJSONObject(i), box = text.getJSONObject("bounds");
                             float x = (float)box.getDouble("x"), y = (float)box.getDouble("y");
                             float width = (float)box.getDouble("width"), height = (float)box.getDouble("height");
-                            ink.setTextSize(Math.max(10f, Math.min(32f, height * 0.8f)));
+                            // Shared label geometry supplies hierarchy; allow headings beyond body size.
+                            ink.setTextSize(Math.max(10f, Math.min(48f, height * 0.8f)));
                             ink.setColor(frameInks[text.getInt("role")]); ink.setAlpha(255);
                             String value = text.getString("text");
                             if (ink.measureText(value) > width) {

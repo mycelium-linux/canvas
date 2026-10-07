@@ -20,7 +20,6 @@ struct Feed {
 #[derive(Deserialize)]
 struct Post {
     id: String,
-    author_id: String,
     caption: String,
     format: String,
     media: Vec<Media>,
@@ -35,7 +34,6 @@ struct Media {
 }
 struct Reel {
     id: String,
-    author: String,
     caption: String,
     url: String,
     duration: Duration,
@@ -70,7 +68,6 @@ fn select(feed: Feed) -> Vec<Reel> {
             }
             Some(Reel {
                 id: post.id,
-                author: post.author_id,
                 caption: post.caption.chars().take(6000).collect(),
                 url: media.url,
                 duration: Duration::from_millis(media.duration_ms),
@@ -187,6 +184,12 @@ fn patch(serial: &str, reel: Option<&Reel>, error: Option<&str>) -> Result<(), S
             }
             Some("tardy-caption") => {
                 let spec = &mut surface["content"]["spec"];
+                if spec["kind"] == "signal_view" {
+                    spec["frame"] = caption_brief(reel.map(|r| r.caption.as_str()), error);
+                    spec["data"]["state"] = json!(if error.is_some() { "error" } else { "ready" });
+                    operations.push(json!({"op":"upsert_surface","surface":surface}));
+                    continue;
+                }
                 spec["title"] = json!(if error.is_some() {
                     "Tardy · degraded"
                 } else {
@@ -195,10 +198,7 @@ fn patch(serial: &str, reel: Option<&Reel>, error: Option<&str>) -> Result<(), S
                 spec["body"] = json!(if let Some(error) = error {
                     error.to_owned()
                 } else if let Some(reel) = reel {
-                    format!(
-                        "{}\n\nAuthor profile: {}\nPublic post: {}\n\nAnonymous public feed · auto-advance · TV-local audio",
-                        reel.caption, reel.author, reel.id
-                    )
+                    format!("{}\n\nPublic caption · Tardy", reel.caption)
                 } else {
                     "Waiting for public reels".into()
                 });
@@ -211,6 +211,37 @@ fn patch(serial: &str, reel: Option<&Reel>, error: Option<&str>) -> Result<(), S
     let revision = doc["revision"].as_u64().ok_or("No document revision")?;
     let request = json!({"schema_version":1,"request_id":"tardy-public-feed","expected_revision":state["revision"],"command":{"command":"apply_patch","patch":{"schema_version":1,"workspace_id":doc["id"],"base_revision":revision,"revision":revision+1,"operations":operations}}});
     control(serial, &request.to_string()).map(|_| ())
+}
+
+fn bounded_text(text: &str, maximum: usize) -> String {
+    text.chars()
+        .filter(|c| !c.is_control() || *c == '\n')
+        .scan(0, |bytes, c| {
+            *bytes += c.len_utf8();
+            (*bytes <= maximum).then_some(c)
+        })
+        .collect()
+}
+
+fn caption_brief(caption: Option<&str>, error: Option<&str>) -> Value {
+    let text = error.unwrap_or_else(|| caption.unwrap_or("Waiting for public reels"));
+    let (first, rest) = text.trim().split_once('\n').unwrap_or((text, ""));
+    let (headline, body) = if first.len() > 160 {
+        ("Public reel", text)
+    } else {
+        (first, rest)
+    };
+    json!({"view":"brief","panel":{"kicker":if error.is_some() {"PUBLIC FEED · UNAVAILABLE"} else {"TARDY / PUBLIC REEL"},
+        "headline":bounded_text(headline,160),"body":bounded_text(body.trim(),3500),
+        "footer":if body.len()>3500 {"Caption excerpt · Tardy"} else {"Public caption · Tardy"}}})
+}
+
+fn validate_visual(value: &Value) -> Result<(), String> {
+    let frame: fpl_gfx::signals::SignalFrame =
+        serde_json::from_value(value.clone()).map_err(|_| "Invalid GFX presentation frame")?;
+    frame
+        .validate()
+        .map_err(|_| "GFX presentation exceeds bounds".to_owned())
 }
 
 fn agent_frame(raw: &[u8], now_ms: i64) -> Result<Value, String> {
@@ -238,22 +269,10 @@ fn agent_frame(raw: &[u8], now_ms: i64) -> Result<Value, String> {
     }
     let mut output = json!({"frame":{"title":value["widget"]["title"],"nodes":nodes},"data":data});
     if let Some(visual) = value.get("visual") {
-        if visual["view"] != "attention" || !visual["panel"]["fresh"].is_boolean() {
+        if visual["view"] != "attention" {
             return Err("Invalid attention instrument".into());
         }
-        let mut total = 0;
-        for key in ["input", "approval", "active", "idle", "unknown"] {
-            let count = visual["panel"][key]
-                .as_u64()
-                .ok_or("Invalid attention count")?;
-            if count > 32768 {
-                return Err("Attention count exceeds limit".into());
-            }
-            total += count;
-        }
-        if total > 32768 {
-            return Err("Attention roster exceeds limit".into());
-        }
+        validate_visual(visual)?;
         output["visual"] = visual.clone();
         if !(-5000..=30000).contains(&age) {
             output["visual"]["panel"]["fresh"] = json!(false);
@@ -267,6 +286,16 @@ fn agent_frame(raw: &[u8], now_ms: i64) -> Result<Value, String> {
             return Err("Invalid attention detail widget".into());
         }
         output["details"] = json!({"title":details["widget"]["title"],"nodes":rows});
+    }
+    if let Some(deck) = value.get("deck") {
+        if deck["view"] != "task_deck" {
+            return Err("Expected task deck".into());
+        }
+        validate_visual(deck)?;
+        output["deck"] = deck.clone();
+        if !(-5000..=30000).contains(&age) {
+            output["deck"]["panel"]["fresh"] = json!(false);
+        }
     }
     if !(-5000..=30000).contains(&age) && value["data"]["source"] == "unibus:agent.sessions.v2" {
         for row in output["frame"]["nodes"]
@@ -324,7 +353,22 @@ fn agents(serial: &str) -> Result<(), String> {
             };
             let mut targets = vec![("agent-dashboard", summary)];
             if frame.get("details").is_some() {
-                targets.push(("agent-details", &frame["details"]));
+                let tiled = state["data"]["document"]["surfaces"]
+                    .as_array()
+                    .is_some_and(|surfaces| {
+                        surfaces.iter().any(|surface| {
+                            surface["id"] == "agent-details"
+                                && surface["content"]["spec"]["kind"] == "signal_view"
+                        })
+                    });
+                targets.push((
+                    "agent-details",
+                    if tiled && frame.get("deck").is_some() {
+                        &frame["deck"]
+                    } else {
+                        &frame["details"]
+                    },
+                ));
             }
             for (surface_id, content) in targets {
                 if !state["data"]["document"]["surfaces"]
@@ -465,6 +509,39 @@ mod tests {
             false
         );
         value["visual"]["panel"]["input"] = json!(32769);
+        assert!(agent_frame(&serde_json::to_vec(&value).unwrap(), 11000).is_err());
+    }
+    #[test]
+    fn editorial_caption_is_owner_authored_and_bounds_unicode() {
+        let brief = caption_brief(Some("A real headline\n\nA real paragraph."), None);
+        assert_eq!(brief["panel"]["headline"], "A real headline");
+        assert_eq!(brief["panel"]["body"], "A real paragraph.");
+        validate_visual(&brief).unwrap();
+        let long = "世界".repeat(1000);
+        let brief = caption_brief(Some(&long), None);
+        assert_eq!(brief["panel"]["headline"], "Public reel");
+        assert!(brief["panel"]["body"].as_str().unwrap().len() <= 3500);
+        validate_visual(&brief).unwrap();
+        assert_eq!(
+            caption_brief(None, Some("Feed offline"))["panel"]["headline"],
+            "Feed offline"
+        );
+    }
+    #[test]
+    fn task_deck_forwards_bounded_tiles_and_overrides_stale_state() {
+        let mut value = json!({"widget":{"kind":"status_list","title":"Agents","nodes":[]},
+            "data":{"state":"ready","source":"unibus:agent.sessions.v2","observed_at":"1970-01-01T00:00:10Z"},
+            "deck":{"view":"task_deck","panel":{"fresh":true,"items":[{"project":"Canvas","title":"UI pass","meta":"codex @ neo","state":"approval"}]}}});
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert_eq!(
+            agent_frame(&bytes, 11000).unwrap()["deck"]["panel"]["items"][0]["state"],
+            "approval"
+        );
+        assert_eq!(
+            agent_frame(&bytes, 50000).unwrap()["deck"]["panel"]["fresh"],
+            false
+        );
+        value["deck"]["panel"]["items"] = json!([{}, {}, {}, {}, {}]);
         assert!(agent_frame(&serde_json::to_vec(&value).unwrap(), 11000).is_err());
     }
 }
