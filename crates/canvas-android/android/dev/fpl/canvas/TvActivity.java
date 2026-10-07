@@ -130,6 +130,13 @@ public final class TvActivity extends Activity {
     private String consoleAppearance = "";
     private View libraryReturnFocus;
     private int libraryReturnFocusability;
+    private boolean pendingLibraryOpen;
+
+    private void openRequestedLibrary() {
+        if(!pendingLibraryOpen || frame.getWidth()==0 || frame.getHeight()==0)return;
+        pendingLibraryOpen=false;
+        showLibrary();
+    }
 
     private void showLibrary() {
         if (libraryScreen != null || libraryEndpoint.isEmpty()) return;
@@ -678,6 +685,7 @@ public final class TvActivity extends Activity {
             showStatus("Control unavailable: " + controlError);
         }
         frame.addOnLayoutChangeListener((v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> {
+            if(pendingLibraryOpen) frame.post(() -> openRequestedLibrary());
             if (right - left != oldRight - oldLeft || bottom - top != oldBottom - oldTop) {
                 applySurfaceGeometry();
             }
@@ -800,6 +808,11 @@ public final class TvActivity extends Activity {
     }
 
     private void applyIntent(Intent intent) {
+        if(intent.getBooleanExtra("open_library",false)) {
+            pendingLibraryOpen=true;
+            frame.post(() -> openRequestedLibrary());
+            return;
+        }
         if (workspaceMode) return;
         applySurfaceGeometry();
         preparedPlayer = null;
