@@ -131,6 +131,7 @@ public final class TvActivity extends Activity {
     private View libraryReturnFocus;
     private int libraryReturnFocusability;
     private boolean pendingLibraryOpen;
+    private int libraryMuteVisibility, libraryChannelVisibility, libraryStatusVisibility;
 
     private void openRequestedLibrary() {
         if(!pendingLibraryOpen || frame.getWidth()==0 || frame.getHeight()==0)return;
@@ -146,6 +147,10 @@ public final class TvActivity extends Activity {
             libraryReturnFocusability = selector.getDescendantFocusability();
             if(cachedLibraryScreen==null)cachedLibraryScreen = new LibraryView(this,libraryEndpoint,palette,() -> closeLibrary());
             libraryScreen = cachedLibraryScreen;
+            libraryMuteVisibility=muteButton.getVisibility();
+            libraryChannelVisibility=channelButton.getVisibility();
+            libraryStatusVisibility=status.getVisibility();
+            muteButton.setVisibility(View.GONE);channelButton.setVisibility(View.GONE);status.setVisibility(View.GONE);
             // An opaque view covers video without destroying its Surface/decoder.
             background.setActive(false);
             selector.setDescendantFocusability(android.view.ViewGroup.FOCUS_BLOCK_DESCENDANTS);
@@ -161,6 +166,7 @@ public final class TvActivity extends Activity {
     private void closeLibrary() {
         if(libraryScreen == null) return;
         libraryScreen.leave(); frame.removeView(libraryScreen); libraryScreen=null;
+        muteButton.setVisibility(libraryMuteVisibility);channelButton.setVisibility(libraryChannelVisibility);status.setVisibility(libraryStatusVisibility);
         selector.setDescendantFocusability(libraryReturnFocusability);
         background.setActive(resumed);
         for(View widget:widgets) {
