@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "id": "tv-cat-toy-boids",
+  "project_id": "cat-toy-boids",
+  "revision": 1,
+  "theme": {
+    "source": "project"
+  },
+  "chrome": {
+    "canvas_padding": 0,
+    "surface_gap": 0,
+    "title": "hidden"
+  },
+  "surfaces": [
+    {
+      "id": "boids",
+      "title": "Boids",
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "boids",
+          "kind": "boids"
+        }
+      }
+    }
+  ],
+  "layout": {
+    "kind": "canvas",
+    "placements": [
+      {
+        "surface_id": "boids",
+        "bounds": {
+          "x": 0,
+          "y": 0,
+          "width": 1,
+          "height": 1
+        },
+        "layer": 0
+      }
+    ]
+  },
+  "pages": [],
+  "active_page": 0,
+  "bindings": [],
+  "focused_surface_id": null
+}

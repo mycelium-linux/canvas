@@ -240,6 +240,40 @@ pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeBackgroundProgram(
     )
 }
 
+static BOIDS_RUNTIME: std::sync::OnceLock<std::sync::Mutex<crate::boids::Runtime>> = std::sync::OnceLock::new();
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeBoidsFrame(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    width: jni::sys::jint,
+    height: jni::sys::jint,
+    elapsed: jni::sys::jfloat,
+    aquarium: jni::sys::jboolean,
+) -> jni::sys::jfloatArray {
+    let result = (|| -> Result<Vec<f32>, &'static str> {
+        BOIDS_RUNTIME.get_or_init(|| std::sync::Mutex::new(crate::boids::Runtime::default()))
+            .lock().map_err(|_| "Flock state unavailable")?.frame(
+                u32::try_from(width).map_err(|_| "Invalid width")?,
+                u32::try_from(height).map_err(|_| "Invalid height")?, elapsed, aquarium != 0)
+    })();
+    match result {
+        Ok(records) => match env.new_float_array(records.len() as i32) {
+            Ok(array) => {
+                if env.set_float_array_region(&array, 0, &records).is_err() {
+                    return std::ptr::null_mut();
+                }
+                array.into_raw()
+            }
+            Err(_) => std::ptr::null_mut(),
+        },
+        Err(error) => {
+            let _ = env.throw_new("java/lang/IllegalArgumentException", error);
+            std::ptr::null_mut()
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeClockFrame(
     mut env: jni::JNIEnv,

@@ -27,6 +27,11 @@ pub fn paint_records(
         second,
     }
     .append(&mut scene, Rect::new(0.0, 0.0, width as f32, height as f32));
+    paint_scene(&scene)
+}
+
+/// Platform-neutral primitives using the clock adapter's four semantic inks.
+pub fn paint_scene(scene: &Scene) -> Result<Vec<f32>, &'static str> {
     let role = |role| match role {
         ThemeRole::Surface => Ok(0.0),
         ThemeRole::TextMuted => Ok(1.0),
@@ -34,7 +39,7 @@ pub fn paint_records(
         ThemeRole::Primary => Ok(3.0),
         _ => Err("Unsupported clock ink"),
     };
-    let mut records = Vec::with_capacity(65 * 8);
+    let mut records = Vec::with_capacity(scene.iter().count() * 8);
     for p in scene.iter() {
         let center = [
             p.rect.x + p.rect.width * 0.5,

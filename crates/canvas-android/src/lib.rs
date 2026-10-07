@@ -9,6 +9,8 @@ pub mod background;
 #[cfg(feature = "android-native-video")]
 pub mod clock;
 #[cfg(feature = "android-native-video")]
+pub mod boids;
+#[cfg(feature = "android-native-video")]
 pub mod signals;
 #[cfg(feature = "android-native-video")]
 pub mod music;

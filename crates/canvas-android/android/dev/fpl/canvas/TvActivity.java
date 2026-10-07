@@ -70,6 +70,7 @@ public final class TvActivity extends Activity {
     private static native String nativePdfAsset(String asset);
     private static native float[] nativeClockFrame(int width, int height, int hour, int minute, float second);
     private static native String nativeBackgroundProgram(String id);
+    private static native float[] nativeBoidsFrame(int width, int height, float elapsed, boolean aquarium);
     private static native String nativeSignalSnapshot(String id);
     private static native float[] nativeSignalFrame(int width, int height, String frame, String appearance);
     private static native String nativeSignalLabels(int width, int height, String frame);
@@ -312,6 +313,55 @@ public final class TvActivity extends Activity {
     }
 
     /** Paints canonical gfx primitives; no duplicate clock geometry in Java. */
+    /** Local, bounded Rust flock rendered with hardware-accelerated UI strokes. */
+    private final class BoidsView extends View {
+        private final boolean aquarium;
+        private final int fishInk, sharkInk;
+        private final Paint ink = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final long epoch = System.nanoTime();
+        private long sample = epoch, work;
+        private int frames;
+        BoidsView(JSONObject palette, boolean aquarium) throws Exception {
+            super(TvActivity.this);
+            this.aquarium = aquarium;
+            fishInk = Color.parseColor(palette.getString("primary"));
+            sharkInk = Color.parseColor(palette.getString("text"));
+            setBackgroundColor(aquarium ? Color.rgb(2,18,35) : Color.BLACK);
+            setContentDescription("Boids · local flock");
+            ink.setColor(Color.parseColor(palette.getString("primary")));
+            ink.setStyle(Paint.Style.STROKE); ink.setStrokeCap(Paint.Cap.ROUND);
+        }
+        @Override protected void onDraw(android.graphics.Canvas target) {
+            super.onDraw(target);
+            if (!resumed || getWidth() == 0 || getHeight() == 0) return;
+            long start = System.nanoTime();
+            float elapsed=(start-epoch)/1000000000f;
+            if (aquarium) {
+                ink.setColor(Color.rgb(12,49,64)); ink.setStrokeWidth(2f);
+                for (int b=0;b<18;b++) {
+                    float x=(b*0.061f+0.035f)*getWidth();
+                    float y=(1f-((elapsed*0.023f+b*0.137f)%1f))*getHeight();
+                    target.drawCircle(x,y,3f+(b%4)*2f,ink);
+                }
+            }
+            float[] records = nativeBoidsFrame(getWidth(), getHeight(), elapsed, aquarium);
+            if (records == null || records.length % 8 != 0) throw new IllegalStateException("Invalid flock primitives");
+            for (int i=0; i<records.length; i+=8) {
+                if(records[i] == 9f) { target.drawARGB(Math.round(records[i+1]*110f),160,0,20); continue; }
+                if(records[i] != 5f) throw new IllegalStateException("Unsupported flock primitive");
+                ink.setStrokeWidth(records[i+5]);
+                ink.setColor(records[i+6] == 2f ? sharkInk : fishInk);
+                target.drawLine(records[i+1],records[i+2],records[i+3],records[i+4],ink);
+            }
+            frames++; work += System.nanoTime()-start;
+            if (start-sample >= 10000000000L) {
+                android.util.Log.i("CanvasBoids","fps="+(frames*1000000000.0/(start-sample))+" mean-cpu-frame-work-ms="+(work/1000000.0/frames));
+                frames=0;work=0;sample=start;
+            }
+            postInvalidateOnAnimation();
+        }
+    }
+
     private final class AnalogClockView extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Calendar time = Calendar.getInstance();
@@ -1220,6 +1270,11 @@ public final class TvActivity extends Activity {
                         || content.getJSONObject("spec").getString("kind").equals("time_series"))) {
                     StatusListView list = new StatusListView(content.getJSONObject("spec"), palette);
                     frame.addView(list, geometry); widgets.add(list); statusLists.put(surface.getString("id"), list);
+                } else if (content.getString("kind").equals("widget")
+                    && (content.getJSONObject("spec").getString("kind").equals("boids")
+                        || content.getJSONObject("spec").getString("kind").equals("aquarium"))) {
+                    BoidsView flock = new BoidsView(palette, content.getJSONObject("spec").getString("kind").equals("aquarium"));
+                    frame.addView(flock, geometry); widgets.add(flock);
                 } else if (content.getString("kind").equals("widget")
                     && content.getJSONObject("spec").getString("kind").equals("signal_view")) {
                     SignalView signal = new SignalView(surface.getString("id"), content.getJSONObject("spec"), palette);
