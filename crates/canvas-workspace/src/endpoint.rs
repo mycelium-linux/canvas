@@ -188,7 +188,10 @@ impl Endpoint {
         }
         let writes = !matches!(
             request.command,
-            Command::Inspect | Command::ReadDocument | Command::WorkspaceRead { .. }
+            Command::Inspect
+                | Command::ReadDocument
+                | Command::WorkspaceRead { .. }
+                | Command::SurfaceSnapshot { .. }
         );
         if writes && request.expected_revision != Some(self.revision) {
             return Err("Stale or missing endpoint revision; inspect this target first".into());
@@ -434,7 +437,9 @@ mod tests {
             .execute(Request {
                 schema_version: 1,
                 request_id: "status".into(),
-                expected_revision: Some(2),
+                // Transient frames stay valid across navigation revisions;
+                // selected workspace and declared surface still gate ingress.
+                expected_revision: Some(1),
                 command: Command::SurfaceSnapshot {
                     workspace_id: "tv-television".into(),
                     surface_id: "clock".into(),
