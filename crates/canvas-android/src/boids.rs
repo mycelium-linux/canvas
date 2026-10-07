@@ -26,11 +26,7 @@ impl Runtime {
         {
             return Err("Invalid flock viewport or clock");
         }
-        let inset = if aquarium {
-            (height as f32 * 0.025).min(32.0)
-        } else {
-            0.0
-        };
+        let inset = (height as f32 * 0.025).min(32.0);
         let viewport = Rect::new(
             inset,
             inset,
@@ -46,7 +42,7 @@ impl Runtime {
             self.flock = Some(if aquarium {
                 Flock::aquarium(COUNT, aspect)?
             } else {
-                Flock::new(COUNT, aspect)?
+                Flock::bounded(COUNT, aspect)?
             });
             self.aquarium = aquarium;
             self.aspect = aspect;
@@ -58,7 +54,7 @@ impl Runtime {
         flock.step(dt)?;
         let mut scene = Scene::with_capacity(COUNT * 2);
         flock.append(&mut scene, viewport, ThemeRole::Primary);
-        if aquarium {
+        {
             let x = viewport.x;
             let y = viewport.y;
             let r = x + viewport.width;
@@ -88,7 +84,7 @@ mod tests {
         let mut host = Runtime::default();
         let first = host.frame(1920, 1080, 0.0, false).unwrap();
         let next = host.frame(1920, 1080, 0.033, false).unwrap();
-        assert_eq!(next.len(), COUNT * 2 * 8);
+        assert_eq!(next.len(), (COUNT * 2 + 4) * 8);
         assert!(next.iter().all(|x| x.is_finite()));
         assert_ne!(first, next);
         assert!(host.frame(1920, 1080, 10000.0, false).is_ok());

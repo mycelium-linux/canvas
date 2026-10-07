@@ -347,7 +347,7 @@ public final class TvActivity extends Activity {
         @Override protected void onSizeChanged(int w, int h, int oldw, int oldh) {
             super.onSizeChanged(w,h,oldw,oldh);
             if (!footnote.isEmpty()) noteLayout = new android.text.StaticLayout(
-                footnote,noteInk,Math.max(1,w-dp(64)),android.text.Layout.Alignment.ALIGN_NORMAL,1.15f,0f,false);
+                footnote,noteInk,Math.max(1,Math.min(dp(560),(int)(w*0.36f)-dp(32))),android.text.Layout.Alignment.ALIGN_NORMAL,1.15f,0f,false);
         }
         @Override protected void onDraw(android.graphics.Canvas target) {
             super.onDraw(target);
@@ -374,12 +374,13 @@ public final class TvActivity extends Activity {
             if (!footnote.isEmpty()) {
                 float bottom=getHeight()-dp(20);
                 if(showNote && noteLayout != null) {
+                    float left=getWidth()-noteLayout.getWidth()-dp(48);
                     float top=Math.max(dp(8),bottom-noteLayout.getHeight()-dp(44));
-                    target.drawRect(dp(16),top,getWidth()-dp(16),getHeight()-dp(12),notePanel);
-                    target.save(); target.clipRect(dp(16),top,getWidth()-dp(16),getHeight()-dp(12));
-                    target.translate(dp(32),top+dp(14)); noteLayout.draw(target); target.restore();
+                    target.drawRect(left,top,getWidth()-dp(16),getHeight()-dp(12),notePanel);
+                    target.save(); target.clipRect(left,top,getWidth()-dp(16),getHeight()-dp(12));
+                    target.translate(left+dp(16),top+dp(14)); noteLayout.draw(target); target.restore();
                 }
-                target.drawText("Play/Pause · rules",dp(32),bottom,noteInk);
+                target.drawText("Play/Pause · rules",getWidth()-dp(32)-noteInk.measureText("Play/Pause · rules"),bottom,noteInk);
             }
             frames++; work += System.nanoTime()-start;
             if (start-sample >= 10000000000L) {
