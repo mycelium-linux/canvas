@@ -94,6 +94,8 @@ public final class TvActivity extends Activity {
     private String currentUrl = "";
     private String surfaceTitle = "KOMO";
     private boolean workspaceMode;
+    private TextView workspaceHeader;
+    private HorizontalScrollView workspaceSelector;
     private final ArrayList<View> widgets = new ArrayList<>();
     private final java.util.HashMap<String, StatusListView> statusLists = new java.util.HashMap<>();
     private final ThreadPoolExecutor pdfJobs = new ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS,
@@ -502,9 +504,18 @@ public final class TvActivity extends Activity {
         selector = new LinearLayout(this);
         selector.setOrientation(LinearLayout.HORIZONTAL);
         HorizontalScrollView scroller = new HorizontalScrollView(this);
+        workspaceSelector = scroller;
         scroller.addView(selector);
         FrameLayout.LayoutParams bar = new FrameLayout.LayoutParams(-1, barHeight(), Gravity.TOP);
         frame.addView(scroller, bar);
+        workspaceHeader = new TextView(this);
+        workspaceHeader.setSingleLine(true);
+        workspaceHeader.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        workspaceHeader.setTextSize(18);
+        workspaceHeader.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
+        workspaceHeader.setPadding(dp(12), 0, dp(16), 0);
+        workspaceHeader.setVisibility(View.GONE);
+        frame.addView(workspaceHeader, new FrameLayout.LayoutParams(0, barHeight(), Gravity.TOP | Gravity.RIGHT));
         String controlError = nativeStartControl(getFilesDir().getAbsolutePath());
         if (controlError == null || !controlError.isEmpty()) {
             showStatus("Control unavailable: " + controlError);
@@ -955,6 +966,7 @@ public final class TvActivity extends Activity {
     }
     private String structuralProjection(JSONObject projection) throws Exception {
         JSONObject copy = new JSONObject(projection.toString()); copy.remove("revision");
+        copy.remove("header");
         JSONObject document = copy.getJSONObject("document"); document.remove("revision");
         JSONArray surfaces = document.getJSONArray("surfaces");
         for (int i = 0; i < surfaces.length(); i++) stripStatusValues(surfaces.getJSONObject(i));
@@ -1036,6 +1048,23 @@ public final class TvActivity extends Activity {
             if(channelScreen!=null && !currentWorkspaceId.equals(channelScreenWorkspace)) closeChannels();
             workspaceMode = true;
             JSONObject palette = projection.getJSONObject("palette");
+            JSONObject header = projection.optJSONObject("header");
+            boolean hasHeader = header != null;
+            workspaceHeader.setVisibility(hasHeader ? View.VISIBLE : View.GONE);
+            int headerWidth = hasHeader ? Math.min(width / 2, dp(540)) : 0;
+            workspaceHeader.setLayoutParams(new FrameLayout.LayoutParams(headerWidth, barHeight(), Gravity.TOP | Gravity.RIGHT));
+            FrameLayout.LayoutParams selectorBounds = (FrameLayout.LayoutParams)workspaceSelector.getLayoutParams();
+            selectorBounds.rightMargin = headerWidth;
+            workspaceSelector.setLayoutParams(selectorBounds);
+            if (hasHeader) {
+                String state = header.getJSONObject("data").optString("state", "no_data");
+                String text = header.getJSONObject("frame").optString("title", "");
+                if (state.equals("no_data") || state.equals("error")) text = "Unavailable";
+                else if (state.equals("stale")) text += " · Stale";
+                workspaceHeader.setText(text);
+                workspaceHeader.setTextColor(Color.parseColor(palette.getString("text")));
+                workspaceHeader.setBackgroundColor(Color.parseColor(palette.getString("surface")));
+            }
             String structure = structuralProjection(projection);
             if (structure.equals(lastStructure)) {
                 JSONArray tiles = projection.getJSONArray("tiles");

@@ -45,6 +45,17 @@ printf 'workspace switch ipfs-reading\n' | canvas-tvctl 192.168.2.97:5555
 
 ## Shared ownership
 
+### Workspace header slot
+
+A workspace may declare an unplaced `status_list` surface with the reserved ID
+`workspace-header`. Its transient `SurfaceSnapshot` title occupies the right side
+of the TV's top bar. Producers use the same authenticated ingress, selected-owner
+admission and receiver-owned freshness as other surfaces. The header is not
+persisted as live state; stale or disconnected producers remain visibly marked.
+No app-specific track lookup or playback logic lives in the TV shell. Workspaces
+without the surface retain the full-width selector. Header updates do not rebuild
+signal views or PDFs.
+
 `canvas-core::workspace_layout` owns durable layout types and validation;
 `canvas-core::layout_tree` owns the BSP solver and mutations. Desktop's old
 `canvas::layout_tree` import is a compatibility re-export, not a fork. Android

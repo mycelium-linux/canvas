@@ -1,10 +1,13 @@
 //! Transport-independent presentation endpoint. Transport authenticates callers;
 //! this state machine owns admission, revisions and the target's own catalog.
-use crate::{WorkspaceDocument, WorkspacePatch, session::Workspaces};
+use crate::{session::Workspaces, WorkspaceDocument, WorkspacePatch};
 use canvas_core::{Actor, Catalog};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_FRAME: usize = 4 * 1024 * 1024;
+/// Optional declared status-list surface occupying the workspace's header slot.
+/// Uses the same authenticated transient frame ingress and freshness as tiles.
+pub const HEADER_SURFACE_ID: &str = "workspace-header";
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -82,6 +85,9 @@ impl Endpoint {
             "palette":self.session.as_ref().and_then(|session| session.palette().ok().flatten()),
             "document":self.session.as_ref().and_then(Workspaces::document)
         });
+        snapshot["header"] = self
+            .surface_snapshot(HEADER_SURFACE_ID)
+            .unwrap_or(serde_json::Value::Null);
         if let Some(surfaces) = snapshot["document"]["surfaces"].as_array_mut() {
             for surface in surfaces {
                 if surface["content"]["spec"]["kind"] != "status_list" {
@@ -376,16 +382,14 @@ mod tests {
             })
             .unwrap();
         let revision = endpoint.revision;
-        assert!(
-            endpoint
-                .execute(Request {
-                    schema_version: 1,
-                    request_id: "stale".into(),
-                    expected_revision: Some(revision - 1),
-                    command: Command::WorkspacePage { index: 1 }
-                })
-                .is_err()
-        );
+        assert!(endpoint
+            .execute(Request {
+                schema_version: 1,
+                request_id: "stale".into(),
+                expected_revision: Some(revision - 1),
+                command: Command::WorkspacePage { index: 1 }
+            })
+            .is_err());
         endpoint
             .execute(Request {
                 schema_version: 1,
@@ -405,17 +409,59 @@ mod tests {
             "Routing"
         );
         let before = endpoint.snapshot();
-        assert!(
-            endpoint
-                .execute(Request {
-                    schema_version: 1,
-                    request_id: "invalid".into(),
-                    expected_revision: Some(endpoint.revision),
-                    command: Command::WorkspacePage { index: 99 }
-                })
-                .is_err()
-        );
+        assert!(endpoint
+            .execute(Request {
+                schema_version: 1,
+                request_id: "invalid".into(),
+                expected_revision: Some(endpoint.revision),
+                command: Command::WorkspacePage { index: 99 }
+            })
+            .is_err());
         assert_eq!(endpoint.snapshot(), before);
+    }
+    #[test]
+    fn header_slot_is_declared_transient_and_has_owner_freshness() {
+        let mut endpoint = Endpoint::new("firetv-omni");
+        let mut request: Request = serde_json::from_str(include_str!(
+            "../../../config/deploy/firetv/workspaces.json"
+        ))
+        .unwrap();
+        let Command::Install { documents, .. } = &mut request.command else {
+            panic!()
+        };
+        let mut header = documents[0].surfaces[1].clone();
+        header.id = HEADER_SURFACE_ID.into();
+        header.content = crate::SurfaceContent::Widget { spec: canvas_widgets::WidgetSpec::from_json(br#"{"schema_version":2,"id":"workspace-header","kind":"status_list","title":"Waiting","nodes":[]}"#).unwrap() };
+        documents[0].surfaces.push(header);
+        endpoint.execute(request).unwrap();
+        assert_eq!(endpoint.snapshot()["header"]["data"]["state"], "no_data");
+        let saved = endpoint.checkpoint();
+        endpoint
+            .execute(Request {
+                schema_version: 1,
+                request_id: "header".into(),
+                expected_revision: None,
+                command: Command::SurfaceSnapshot {
+                    workspace_id: "tv-television".into(),
+                    surface_id: HEADER_SURFACE_ID.into(),
+                    frame: serde_json::json!({"title":"Album · Song","nodes":[]}),
+                    data: canvas_widgets::WidgetData {
+                        state: canvas_widgets::WidgetDataState::Ready,
+                        ..Default::default()
+                    },
+                },
+            })
+            .unwrap();
+        assert_eq!(
+            endpoint.snapshot()["header"]["frame"]["title"],
+            "Album · Song"
+        );
+        assert_eq!(endpoint.checkpoint(), saved);
+        endpoint.frames.get_mut(HEADER_SURFACE_ID).unwrap().2 =
+            std::time::Instant::now() - std::time::Duration::from_secs(4);
+        assert_eq!(endpoint.snapshot()["header"]["data"]["state"], "stale");
+        let restored = Endpoint::restore("firetv-omni", &saved.to_string()).unwrap();
+        assert_eq!(restored.snapshot()["header"]["data"]["state"], "no_data");
     }
     #[test]
     fn status_snapshots_are_live_not_saved_and_expire() {
@@ -513,21 +559,19 @@ mod tests {
             restored.surface_snapshot("clock").unwrap()["data"]["state"],
             "no_data"
         );
-        assert!(
-            endpoint
-                .execute(Request {
-                    schema_version: 1,
-                    request_id: "wrong".into(),
-                    expected_revision: Some(2),
-                    command: Command::SurfaceSnapshot {
-                        workspace_id: "other".into(),
-                        surface_id: "clock".into(),
-                        frame,
-                        data: Default::default()
-                    }
-                })
-                .is_err()
-        );
+        assert!(endpoint
+            .execute(Request {
+                schema_version: 1,
+                request_id: "wrong".into(),
+                expected_revision: Some(2),
+                command: Command::SurfaceSnapshot {
+                    workspace_id: "other".into(),
+                    surface_id: "clock".into(),
+                    frame,
+                    data: Default::default()
+                }
+            })
+            .is_err());
         assert_eq!(endpoint.checkpoint(), before);
     }
     #[test]
@@ -571,18 +615,16 @@ mod tests {
     #[test]
     fn stale_mutations_and_unsupported_commands_leave_target_unchanged() {
         let mut endpoint = Endpoint::new("tv");
-        assert!(
-            endpoint
-                .execute(Request {
-                    schema_version: 1,
-                    request_id: "test".into(),
-                    expected_revision: None,
-                    command: Command::WorkspaceSwitch {
-                        name: "studio".into()
-                    }
-                })
-                .is_err()
-        );
+        assert!(endpoint
+            .execute(Request {
+                schema_version: 1,
+                request_id: "test".into(),
+                expected_revision: None,
+                command: Command::WorkspaceSwitch {
+                    name: "studio".into()
+                }
+            })
+            .is_err());
         assert_eq!(endpoint.snapshot()["revision"], 1);
         assert!(
             !serde_json::from_str::<serde_json::Value>(&endpoint.dispatch(
