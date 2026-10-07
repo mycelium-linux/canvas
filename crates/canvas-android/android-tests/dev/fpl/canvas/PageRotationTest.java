@@ -20,6 +20,12 @@ public final class PageRotationTest {
         expect(r.enter("other", 25000, 5000));
         expect(r.due(29999, 5000, 2, 1) == -1);
         expect(r.due(30000, 5000, 2, 1) == 2);
-        System.out.println("Page rotation boundary, wrap, disable, manual defer and workspace reset passed");
+        expect(r.enter("slow", 31000, 15000));
+        expect(r.due(45999, 15000, 2, 0) == -1);
+        expect(r.due(46000, 15000, 2, 0) == 1);
+        r.defer(47000, 15000);
+        expect(r.due(61999, 15000, 2, 1) == -1);
+        expect(r.due(62000, 15000, 2, 1) == 2);
+        System.out.println("Page rotation boundary, wrap, disable, manual defer, slow cadence and workspace reset passed");
     }
 }

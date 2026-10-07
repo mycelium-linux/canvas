@@ -93,6 +93,24 @@ public final class TvActivity extends Activity {
     private MediaPlayer preparedPlayer;
     private final java.util.Map<String, StreamTileView> extraStreams = new java.util.HashMap<>();
     private final PageRotation pageRotation = new PageRotation();
+    private int rotationInterval = 5000;
+    private final java.util.Map<String, View> panelCache = new java.util.HashMap<>();
+    private String renderedWorkspace = "";
+    private int renderedPage = -1;
+    private void clearPanelCache() {
+        for (View panel : panelCache.values()) {
+            panel.animate().cancel();
+            if (panel instanceof PdfSurface) ((PdfSurface)panel).dispose();
+            frame.removeView(panel);
+        }
+        panelCache.clear();
+    }
+    private String panelKey(JSONObject tile, JSONObject palette) throws Exception {
+        JSONObject content = tile.getJSONObject("surface").getJSONObject("content");
+        boolean pdf = content.getString("kind").equals("asset") && content.getJSONObject("asset").getString("media_type").equals("application/pdf");
+        boolean card = content.getString("kind").equals("widget") && content.getJSONObject("spec").getString("kind").equals("rich_card");
+        return pdf || card ? tile.toString() + palette.toString() : "";
+    }
     private void disposeExtraStreams() {
         for (StreamTileView tile : extraStreams.values()) { tile.dispose(); frame.removeView(tile); }
         extraStreams.clear();
@@ -582,6 +600,7 @@ public final class TvActivity extends Activity {
     }
 
     @Override public void onDestroy() {
+        clearPanelCache();
         disposeExtraStreams();
         if(cachedLibraryScreen!=null)cachedLibraryScreen.dispose();
         if (background != null) background.dispose();
@@ -1132,6 +1151,7 @@ public final class TvActivity extends Activity {
 
     @Override protected void onPause() {
         resumed = false;
+        clearPanelCache();
         disposeExtraStreams();
         for (View widget : widgets) if(widget instanceof ConwaysView) ((ConwaysView)widget).setActive(false);
         background.setActive(false);
@@ -1287,7 +1307,7 @@ public final class TvActivity extends Activity {
             button.setText(i==0 ? "▥" : pages.getJSONObject(i-1).getString("name"));button.setTextSize(12);
             styleControl(button,palette,i==projection.getJSONObject("document").optInt("active_page",0));
             button.setOnClickListener(v -> {
-                pageRotation.defer(android.os.SystemClock.uptimeMillis(), 5000);
+                pageRotation.defer(android.os.SystemClock.uptimeMillis(), rotationInterval);
                 String error=nativeSelectPage(page);
                 if(error == null || !error.isEmpty()) showStatus("View switch failed: "+error);
                 else {lastProjection="";refreshWorkspace();}
@@ -1336,8 +1356,9 @@ public final class TvActivity extends Activity {
             currentProjectId=projection.getJSONObject("document").getString("project_id");
             JSONObject rotations = menuDescriptor().optJSONObject("page_rotation_ms");
             int interval = rotations == null ? 0 : rotations.optInt(currentProjectId, 0);
+            rotationInterval = interval;
             long now = android.os.SystemClock.uptimeMillis();
-            if (pageRotation.enter(currentWorkspaceId, now, interval)) disposeExtraStreams();
+            if (pageRotation.enter(currentWorkspaceId, now, interval)) { disposeExtraStreams(); clearPanelCache(); }
             JSONArray rotatingPages = projection.getJSONObject("document").optJSONArray("pages");
             int nextPage = pageRotation.due(now, interval, rotatingPages == null ? 0 : rotatingPages.length(), projection.getJSONObject("document").optInt("active_page", 0));
             if (nextPage >= 0) {
@@ -1383,13 +1404,26 @@ public final class TvActivity extends Activity {
             styleControl(muteButton, palette, false);
             styleControl(channelButton, palette, false);
             renderWorkspaceMenu(projection);
+            JSONArray tiles = projection.getJSONArray("tiles");
+            boolean retainPanels = interval >= 5000 && interval <= 300000;
+            int page = projection.getJSONObject("document").optInt("active_page", 0);
+            boolean crossfade = retainPanels && currentWorkspaceId.equals(renderedWorkspace) && page != renderedPage;
+            java.util.Set<View> previousPanels = new java.util.HashSet<>(widgets);
+            java.util.Set<String> desiredPanels = new java.util.HashSet<>();
+            if (retainPanels) for (int i = 0; i < tiles.length(); i++) desiredPanels.add(panelKey(tiles.getJSONObject(i), palette));
             for (View widget : widgets) {
+                if (panelCache.containsValue(widget)) {
+                    if (desiredPanels.stream().anyMatch(key -> panelCache.get(key) == widget)) continue;
+                    widget.animate().cancel();
+                    if (crossfade) widget.animate().alpha(0).setDuration(450).withEndAction(() -> widget.setVisibility(View.GONE)).start();
+                    else widget.setVisibility(View.GONE);
+                    continue;
+                }
                 if (widget instanceof PdfSurface) ((PdfSurface)widget).dispose();
                 frame.removeView(widget);
             }
             widgets.clear();
             statusLists.clear();
-            JSONArray tiles = projection.getJSONArray("tiles");
             boolean hasVideo = false;
             java.util.Set<String> visibleExtraStreams = new java.util.HashSet<>();
             for (int i = 0; i < tiles.length(); i++) {
@@ -1400,6 +1434,18 @@ public final class TvActivity extends Activity {
                 int w = bounds.getInt(2), h = bounds.getInt(3);
                 FrameLayout.LayoutParams geometry = new FrameLayout.LayoutParams(w, h, Gravity.TOP | Gravity.LEFT);
                 geometry.leftMargin = x; geometry.topMargin = y;
+                String cacheKey = retainPanels ? panelKey(tile, palette) : "";
+                View cached = panelCache.get(cacheKey);
+                if (cached != null) {
+                    cached.animate().cancel(); cached.setVisibility(View.VISIBLE);
+                    cached.setLayoutParams(geometry);
+                    if (crossfade && !previousPanels.contains(cached)) {
+                        cached.setAlpha(0); cached.animate().alpha(1).setDuration(450).start();
+                    } else cached.setAlpha(1);
+                    widgets.add(cached);
+                    continue;
+                }
+                int beforeWidgets = widgets.size();
                 if (content.getString("kind").equals("stream") && !hasVideo) {
                     String url = content.getString("url");
                     String error = nativeValidate(url);
@@ -1485,7 +1531,14 @@ public final class TvActivity extends Activity {
                     widget.setPadding(20, 20, 20, 20);
                     frame.addView(widget, geometry); widgets.add(widget);
                 }
+                if (!cacheKey.isEmpty() && widgets.size() > beforeWidgets && panelCache.size() < 12) {
+                    View panel = widgets.get(widgets.size() - 1);
+                    panelCache.put(cacheKey, panel);
+                    if (crossfade) { panel.setAlpha(0); panel.animate().alpha(1).setDuration(450).start(); }
+                }
             }
+            renderedWorkspace = currentWorkspaceId;
+            renderedPage = page;
             for (String id : new java.util.ArrayList<>(extraStreams.keySet())) if (!visibleExtraStreams.contains(id)) {
                 StreamTileView extra = extraStreams.remove(id); extra.dispose(); frame.removeView(extra);
             }
