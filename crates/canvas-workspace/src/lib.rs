@@ -379,6 +379,8 @@ impl KnownBackground {
 #[serde(rename_all = "kebab-case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum BackgroundShader {
+    CatToyBall,
+    DvdBounce,
     Tidepool,
     AuroraDrift,
     DuskEmber,
@@ -392,7 +394,9 @@ pub enum BackgroundShader {
 }
 
 impl BackgroundShader {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 12] = [
+        Self::CatToyBall,
+        Self::DvdBounce,
         Self::Tidepool,
         Self::AuroraDrift,
         Self::DuskEmber,

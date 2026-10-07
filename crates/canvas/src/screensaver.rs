@@ -405,6 +405,20 @@ fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 
 pub const SHADERS: &[ShaderPiece] = &[
     ShaderPiece {
+        id: BackgroundShader::CatToyBall,
+        name: "Cat Toy · Ball",
+        wgsl: canvas_workspace::background_shaders::CAT_TOY_BALL,
+        credit: "FPL",
+        license: "MIT",
+    },
+    ShaderPiece {
+        id: BackgroundShader::DvdBounce,
+        name: "DVD Bounce",
+        wgsl: canvas_workspace::background_shaders::DVD_BOUNCE,
+        credit: "FPL · DVD-style emblem",
+        license: "MIT",
+    },
+    ShaderPiece {
         id: BackgroundShader::Tidepool,
         name: "Tidepool",
         wgsl: TIDEPOOL,

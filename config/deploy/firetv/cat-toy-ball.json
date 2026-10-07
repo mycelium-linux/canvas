@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "id": "tv-cat-toy-ball",
+  "project_id": "cat-toy-ball",
+  "revision": 2,
+  "theme": {"source": "project"},
+  "background": {"kind": "shader", "shader_id": "cat-toy-ball", "speed": 1.0},
+  "chrome": {"canvas_padding": 0, "surface_gap": 0, "title": "hidden"},
+  "surfaces": [],
+  "layout": {"kind": "empty"},
+  "pages": [], "active_page": 0, "bindings": [], "focused_surface_id": null
+}

@@ -68,7 +68,7 @@ mod tests {
     use super::*;
     #[test]
     fn calm_catalog_translates_to_gles() {
-        for id in ["tidepool", "aurora-drift", "dusk-ember", "slow-ripple"] {
+        for id in ["tidepool", "aurora-drift", "dusk-ember", "slow-ripple", "cat-toy-ball", "dvd-bounce"] {
             let program = program(id).unwrap();
             assert!(
                 program["vertex"]

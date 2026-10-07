@@ -1,8 +1,13 @@
 //! Canonical calm background sources, shared by platform rendering adapters.
 use crate::BackgroundShader;
+#[path = "cat_toy_shaders.rs"]
+mod cat_toy;
+pub use cat_toy::{BALL as CAT_TOY_BALL, DVD as DVD_BOUNCE};
 
 pub fn source(shader: BackgroundShader) -> Option<&'static str> {
     match shader {
+        BackgroundShader::CatToyBall => Some(CAT_TOY_BALL),
+        BackgroundShader::DvdBounce => Some(DVD_BOUNCE),
         BackgroundShader::Tidepool => Some(TIDEPOOL),
         BackgroundShader::AuroraDrift => Some(AURORA_DRIFT),
         BackgroundShader::DuskEmber => Some(DUSK_EMBER),
