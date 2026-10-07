@@ -73,28 +73,12 @@
             "window": null
           },
           "id": "tv-agent-dashboard",
-          "kind": "status_list",
-          "nodes": [
-            {
-              "detail": "3",
-              "label": "Active",
-              "state": "good"
-            },
-            {
-              "detail": "22",
-              "label": "Idle",
-              "state": "neutral"
-            },
-            {
-              "detail": "1",
-              "label": "Unknown",
-              "state": "warning"
-            }
-          ],
+          "kind": "signal_view",
+          "frame": {"view": "attention", "panel": {"input": 0, "approval": 0, "active": 0, "idle": 0, "unknown": 0, "fresh": false}},
           "refresh_ms": null,
           "schema_version": 2,
           "theme": null,
-          "title": "Agents"
+          "title": "Agent attention"
         }
       },
       "id": "agent-dashboard",

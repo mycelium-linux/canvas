@@ -7,11 +7,13 @@ end
 local waiting={id='a',state='unknown',project='Canvas',task='Agent panel',attention={reason='input',since_unix_ms=1000,timing='first_observed'}}
 p.receive(snapshot(1,1000,{waiting,{id='b',state='active'},{id='c',state='idle'}}),1000)
 local r=p.render(2000)
+assert(r.visual.view=='attention' and r.visual.panel.fresh and r.visual.panel.input==1 and r.visual.panel.active==1)
 assert(r.widget.nodes[1].detail=='1' and r.widget.nodes[3].detail=='1' and r.widget.nodes[4].detail=='1')
 assert(r.details.widget.nodes[1].label=='Canvas' and r.details.widget.nodes[1].detail:find('seen waiting 1s'))
 p.receive(snapshot(0,2000,{}),2000)
 assert(p.render(2000).widget.nodes[1].detail=='1')
 local stale=p.render(32000)
+assert(not stale.visual.panel.fresh and stale.visual.panel.input==0)
 assert(stale.data.state=='stale' and stale.widget.nodes[1].detail=='0' and stale.widget.nodes[5].detail=='3')
 assert(not stale.details.widget.nodes[1].detail:find('seen waiting'))
 local ended=snapshot(2,3000,{{id='a',state='ended'}});ended.mode='event'

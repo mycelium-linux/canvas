@@ -237,6 +237,28 @@ fn agent_frame(raw: &[u8], now_ms: i64) -> Result<Value, String> {
         data["state"] = json!("stale");
     }
     let mut output = json!({"frame":{"title":value["widget"]["title"],"nodes":nodes},"data":data});
+    if let Some(visual) = value.get("visual") {
+        if visual["view"] != "attention" || !visual["panel"]["fresh"].is_boolean() {
+            return Err("Invalid attention instrument".into());
+        }
+        let mut total = 0;
+        for key in ["input", "approval", "active", "idle", "unknown"] {
+            let count = visual["panel"][key]
+                .as_u64()
+                .ok_or("Invalid attention count")?;
+            if count > 32768 {
+                return Err("Attention count exceeds limit".into());
+            }
+            total += count;
+        }
+        if total > 32768 {
+            return Err("Attention roster exceeds limit".into());
+        }
+        output["visual"] = visual.clone();
+        if !(-5000..=30000).contains(&age) {
+            output["visual"]["panel"]["fresh"] = json!(false);
+        }
+    }
     if let Some(details) = value.get("details") {
         let rows = details["widget"]["nodes"]
             .as_array()
@@ -287,7 +309,20 @@ fn agents(serial: &str) -> Result<(), String> {
                 .map_err(|_| "Invalid clock")?
                 .as_millis() as i64;
             let frame = agent_frame(&raw, now)?;
-            let mut targets = vec![("agent-dashboard", &frame["frame"])];
+            let symbolic = state["data"]["document"]["surfaces"]
+                .as_array()
+                .is_some_and(|surfaces| {
+                    surfaces.iter().any(|surface| {
+                        surface["id"] == "agent-dashboard"
+                            && surface["content"]["spec"]["kind"] == "signal_view"
+                    })
+                });
+            let summary = if symbolic && frame.get("visual").is_some() {
+                &frame["visual"]
+            } else {
+                &frame["frame"]
+            };
+            let mut targets = vec![("agent-dashboard", summary)];
             if frame.get("details").is_some() {
                 targets.push(("agent-details", &frame["details"]));
             }
@@ -416,6 +451,20 @@ mod tests {
             "Telemetry stale · status unknown"
         );
         value["details"]["widget"]["nodes"] = json!([{}, {}, {}, {}, {}]);
+        assert!(agent_frame(&serde_json::to_vec(&value).unwrap(), 11000).is_err());
+    }
+    #[test]
+    fn symbolic_attention_is_bounded_and_cannot_claim_stale_waits() {
+        let mut value = json!({"widget":{"kind":"status_list","title":"Agents","nodes":[]},
+            "data":{"state":"ready","source":"unibus:agent.sessions.v2","observed_at":"1970-01-01T00:00:10Z"},
+            "visual":{"view":"attention","panel":{"input":2,"approval":1,"active":3,"idle":4,"unknown":0,"fresh":true}}});
+        let frame = agent_frame(&serde_json::to_vec(&value).unwrap(), 11000).unwrap();
+        assert_eq!(frame["visual"]["panel"]["input"], 2);
+        assert_eq!(
+            agent_frame(&serde_json::to_vec(&value).unwrap(), 50000).unwrap()["visual"]["panel"]["fresh"],
+            false
+        );
+        value["visual"]["panel"]["input"] = json!(32769);
         assert!(agent_frame(&serde_json::to_vec(&value).unwrap(), 11000).is_err());
     }
 }

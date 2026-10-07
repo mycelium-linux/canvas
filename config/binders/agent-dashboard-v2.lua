@@ -88,6 +88,8 @@ function M.render(now_ms)
         count("Needs approval",counts.approval,counts.approval>0 and "warning" or "neutral"),
         count("Active",counts.active,"good"),count("Idle",counts.idle,"neutral"),
         count("Unknown",counts.unknown,counts.unknown>0 and "warning" or "neutral")}},
+        visual={view="attention",panel={input=counts.input,approval=counts.approval,active=counts.active,
+            idle=counts.idle,unknown=counts.unknown,fresh=owner_count>0 and not stale}},
         details={widget={kind="status_list",title="Agent attention · "..#roster.." sessions",nodes=nodes}},
         data=data,observed_at_unix_ms=newest}
 end

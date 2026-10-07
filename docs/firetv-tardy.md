@@ -46,6 +46,19 @@ changes the Tardy panel only; the older Home panel updater is unchanged.
 
 ### Waiting for you and session details
 
+The summary uses the shared `fpl-gfx` attention instrument, not a platform-specific
+table: response bubble, approval shield, working spark, resting dash and broken
+unknown ring. Counts and short labels supplement shape and semantic theme roles;
+color alone never carries meaning. Lua supplies the observed counts via
+`SignalFrame::Attention`. GFX owns only bounded geometry and label placement,
+not provider parsing, clocks or actions. Stale frames show em dashes, never
+positive waiting counts. The same frame works through desktop GFX and the
+FireTV signal adapter, with no fake traffic or perpetual animation.
+
+The forwarding adapter retains status-list compatibility until the target
+surface is explicitly migrated to `signal_view`; do not send an attention frame
+to an older APK without the corresponding GFX decoder.
+
 The opt-in `agent.sessions.v2` presenter in
 `config/binders/agent-dashboard-v2.lua` adds separate Needs input / Needs approval
 counts and four priority-ordered session detail rows beneath the public caption.
