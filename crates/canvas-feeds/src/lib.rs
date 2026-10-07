@@ -15,6 +15,7 @@
 //! fabricating a partial list that reads as complete.
 
 use canvas_core::stream_socket_path;
+pub mod music_library;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
