@@ -35,8 +35,9 @@ pub fn bake_stl_with_field(path: &Path, field: Option<&crate::Field>) -> Result<
         "mesh is empty"
     );
     ensure!(
-        mesh.vertices.len() <= 10_000_000,
-        "mesh exceeds 10M vertices"
+        mesh.vertices.len() <= fpl_gfx::analysis::MAX_FIELD_VERTICES,
+        "mesh exceeds {} vertices",
+        fpl_gfx::analysis::MAX_FIELD_VERTICES
     );
 
     let positions = mesh
