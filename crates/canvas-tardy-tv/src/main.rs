@@ -237,8 +237,8 @@ fn caption_brief(caption: Option<&str>, error: Option<&str>) -> Value {
 }
 
 fn validate_visual(value: &Value) -> Result<(), String> {
-    let frame: fpl_gfx::signals::SignalFrame =
-        serde_json::from_value(value.clone()).map_err(|_| "Invalid GFX presentation frame")?;
+    let frame: fpl_gfx::signals::SignalFrame = serde_json::from_value(value.clone())
+        .map_err(|error| format!("Invalid GFX presentation frame: {error}"))?;
     frame
         .validate()
         .map_err(|_| "GFX presentation exceeds bounds".to_owned())
@@ -291,8 +291,17 @@ fn agent_frame(raw: &[u8], now_ms: i64) -> Result<Value, String> {
         if deck["view"] != "task_deck" {
             return Err("Expected task deck".into());
         }
-        validate_visual(deck)?;
-        output["deck"] = deck.clone();
+        let mut deck = deck.clone();
+        // Lua's empty table has no array/object distinction. Only this exact
+        // empty representation is canonicalized; malformed nonempty maps fail.
+        if deck["panel"]["items"]
+            .as_object()
+            .is_some_and(|items| items.is_empty())
+        {
+            deck["panel"]["items"] = json!([]);
+        }
+        validate_visual(&deck)?;
+        output["deck"] = deck;
         if !(-5000..=30000).contains(&age) {
             output["deck"]["panel"]["fresh"] = json!(false);
         }
@@ -317,6 +326,7 @@ fn agent_frame(raw: &[u8], now_ms: i64) -> Result<Value, String> {
 
 fn agents(serial: &str) -> Result<(), String> {
     loop {
+        let next_refresh = Instant::now() + Duration::from_secs(2);
         let result: Result<(), String> = (|| {
             let state = control(serial, "inspect\n")?;
             if state["data"]["catalog"]["selected_project"] != "tardy" {
@@ -387,11 +397,27 @@ fn agents(serial: &str) -> Result<(), String> {
         if let Err(error) = result {
             eprintln!("canvas-tardy-tv agents: {error}");
         }
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(next_refresh.saturating_duration_since(Instant::now()));
     }
 }
 
 fn main() -> Result<(), String> {
+    if std::env::args().nth(1).as_deref() == Some("--check-agents") {
+        let path = std::env::args()
+            .nth(2)
+            .ok_or("usage: canvas-tardy-tv --check-agents SNAPSHOT")?;
+        let bytes = std::fs::read(path).map_err(|_| "Cannot read agent snapshot")?;
+        if bytes.len() > 65536 {
+            return Err("Agent snapshot exceeds limit".into());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "Invalid clock")?
+            .as_millis() as i64;
+        agent_frame(&bytes, now)?;
+        println!("Agent snapshot valid");
+        return Ok(());
+    }
     if std::env::args().nth(1).as_deref() == Some("--agents") {
         return agents(
             &std::env::args()
@@ -542,6 +568,13 @@ mod tests {
             false
         );
         value["deck"]["panel"]["items"] = json!([{}, {}, {}, {}, {}]);
+        assert!(agent_frame(&serde_json::to_vec(&value).unwrap(), 11000).is_err());
+        value["deck"]["panel"]["items"] = json!({});
+        assert_eq!(
+            agent_frame(&serde_json::to_vec(&value).unwrap(), 11000).unwrap()["deck"]["panel"]["items"],
+            json!([])
+        );
+        value["deck"]["panel"]["items"] = json!({"unexpected":"not an array"});
         assert!(agent_frame(&serde_json::to_vec(&value).unwrap(), 11000).is_err());
     }
 }

@@ -40,7 +40,17 @@ processes or infer another provider's state. It forwards a bounded transient
 `surface_snapshot` every two seconds through `canvas-tvctl`; counts are not
 saved as apparently live document edits. Fresh partial coverage stays partial,
 and observations over 30 seconds old are stale. The Canvas endpoint also owns
-receiver-side expiry when deliveries stop. This avoids the old retained-widget
+receiver-side expiry when deliveries stop.
+Receiver expiry follows each surface's declared `refresh_ms`: three refresh
+periods plus one second of jitter allowance, bounded to 3–300 seconds. The agent
+surfaces declare a two-second cadence, yielding seven seconds before a missed
+delivery is marked stale. The presenter keeps a separate 30-second observation
+deadline: repeat delivery never makes an old owner observation fresh. Adapter
+polling uses a two-second deadline rather than adding sleep after ADB work.
+`canvas-tardy-tv --check-agents SNAPSHOT` validates the typed presentation locally
+without touching the TV; empty Lua task tables are normalized to empty arrays.
+
+This avoids the old retained-widget
 watch path's `no_data` label for a transient status surface. This deployment
 changes the Tardy panel only; the older Home panel updater is unchanged.
 

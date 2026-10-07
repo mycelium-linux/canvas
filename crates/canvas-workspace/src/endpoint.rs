@@ -130,7 +130,9 @@ impl Endpoint {
             || (declared, spec.data.clone()),
             |(frame, data, received)| {
                 let mut data = data.clone();
-                if received.elapsed() > std::time::Duration::from_secs(3) {
+                // Allow three declared refresh periods plus transport jitter.
+                // Fast legacy instruments retain their original three-second floor.
+                if received.elapsed() > surface_frame_expiry(spec.refresh_ms) {
                     data.state = canvas_widgets::WidgetDataState::Stale;
                 }
                 (frame.clone(), data)
@@ -349,8 +351,23 @@ impl Endpoint {
     }
 }
 
+
+fn surface_frame_expiry(refresh_ms: Option<u64>) -> std::time::Duration {
+    std::time::Duration::from_millis(refresh_ms.map_or(3000, |ms| {
+        ms.saturating_mul(3).saturating_add(1000).clamp(3000, 300000)
+    }))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn frame_expiry_tracks_refresh_and_bounds_jitter_budget() {
+        assert_eq!(super::surface_frame_expiry(None).as_millis(), 3000);
+        assert_eq!(super::surface_frame_expiry(Some(33)).as_millis(), 3000);
+        assert_eq!(super::surface_frame_expiry(Some(2000)).as_millis(), 7000);
+        assert_eq!(super::surface_frame_expiry(Some(30000)).as_millis(), 91000);
+        assert_eq!(super::surface_frame_expiry(Some(u64::MAX)).as_millis(), 300000);
+    }
     use super::*;
     #[test]
     fn named_views_are_revision_bound_and_invalid_selection_is_atomic() {

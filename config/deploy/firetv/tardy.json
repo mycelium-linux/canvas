@@ -73,7 +73,7 @@
           "id": "tv-agent-dashboard",
           "kind": "signal_view",
           "frame": {"view": "attention", "panel": {"input": 0, "approval": 0, "active": 0, "idle": 0, "unknown": 0, "fresh": false}},
-          "refresh_ms": null,
+          "refresh_ms": 2000,
           "schema_version": 2,
           "theme": null,
           "title": "Agent attention"
@@ -94,6 +94,7 @@
           "id": "tv-agent-details",
           "kind": "signal_view",
           "title": "In focus",
+          "refresh_ms": 2000,
           "frame": {"view":"task_deck","panel":{"items":[],"fresh":false}},
           "data": {"state": "loading", "source": "unibus:agent.sessions.v2", "provenance": "live"}
         }
