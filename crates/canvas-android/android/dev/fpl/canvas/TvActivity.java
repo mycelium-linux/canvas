@@ -1146,6 +1146,134 @@ public final class TvActivity extends Activity {
         return super.onKeyDown(key, event);
     }
 
+    /** Presentation-only grouping; project identity and activation stay in Rust. */
+    private JSONObject shellMenu;
+    private String menuSection = "", menuProject = "";
+    private JSONObject menuDescriptor() throws Exception {
+        if (shellMenu != null) return shellMenu;
+        try (java.io.InputStream input = getAssets().open("canvas-menu.json")) {
+            java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+            byte[] buffer = new byte[4096]; int count;
+            while ((count=input.read(buffer)) != -1) {
+                if (bytes.size()+count>65536) throw new java.io.IOException("Menu exceeds 64 KiB");
+                bytes.write(buffer,0,count);
+            }
+            JSONObject menu = new JSONObject(new String(bytes.toByteArray(),java.nio.charset.StandardCharsets.UTF_8));
+            if(menu.getInt("schema_version") != 1 || menu.getJSONArray("items").length()>32)
+                throw new IllegalArgumentException("Unsupported menu descriptor");
+            shellMenu=menu; return menu;
+        } catch(java.io.FileNotFoundException absent) {
+            shellMenu=new JSONObject(); shellMenu.put("items",new JSONArray()); return shellMenu;
+        }
+    }
+    private boolean menuContains(JSONObject item, String selected) throws Exception {
+        if(item.optString("project_id").equals(selected)) return true;
+        JSONArray children=item.optJSONArray("children");
+        if(children != null) for(int i=0;i<children.length();i++)
+            if(children.getJSONObject(i).optString("project_id").equals(selected)) return true;
+        return false;
+    }
+    private void addMenuChoice(JSONObject item, JSONObject projection, String focusedTag) throws Exception {
+        JSONObject catalog=projection.getJSONObject("catalog"), palette=projection.getJSONObject("palette");
+        String selected=catalog.getString("selected_project");
+        JSONArray children=item.optJSONArray("children");
+        final String project=item.optString("project_id"), section=item.optString("id");
+        if(children != null && (section.isEmpty() || children.length()>32))
+            throw new IllegalArgumentException("Invalid menu section");
+        if(children == null && project.isEmpty()) throw new IllegalArgumentException("Menu choice needs a project");
+        Button button=new Button(this); String tag=children == null ? project : "section:"+section;
+        button.setTag(tag); button.setText(item.getString("label")+(children == null ? "" : section.equals(menuSection) ? " ▴" : " ▾"));
+        button.setTextSize(12); styleControl(button,palette,menuContains(item,selected));
+        button.setContentDescription(children == null ? "Open "+item.getString("label") : "Browse "+item.getString("label"));
+        button.setOnClickListener(v -> {
+            if(children != null) {
+                menuSection=menuSection.equals(section) ? "" : section;
+                try { renderWorkspaceMenu(projection); }
+                catch(Exception error) { showStatus("Menu failed: "+error.getMessage()); }
+            } else {
+                String error=nativeSelectWorkspace(project);
+                if(error == null || !error.isEmpty()) showStatus("Switch failed: "+error);
+                else { lastProjection=""; refreshWorkspace(); }
+            }
+        });
+        button.setMinHeight(0); button.setMinimumHeight(0);
+        LinearLayout.LayoutParams bounds=new LinearLayout.LayoutParams(-2,barHeight()-dp(4));
+        bounds.setMargins(dp(4),dp(2),0,dp(2)); selector.addView(button,bounds);
+        if(tag.equals(focusedTag)) button.requestFocus();
+    }
+    private void renderWorkspaceMenu(JSONObject projection) throws Exception {
+        JSONObject catalog=projection.getJSONObject("catalog"), palette=projection.getJSONObject("palette");
+        JSONObject menu=menuDescriptor(); JSONArray configured=menu.getJSONArray("items"), items=new JSONArray();
+        java.util.HashSet<String> listed=new java.util.HashSet<>();
+        for(int i=0;i<configured.length();i++) {
+            JSONObject item=configured.getJSONObject(i);items.put(item);
+            JSONArray children=item.optJSONArray("children");
+            if(children==null) listed.add(item.getString("project_id"));
+            else for(int j=0;j<children.length();j++) listed.add(children.getJSONObject(j).getString("project_id"));
+        }
+        JSONArray hidden=menu.optJSONArray("hidden_projects");
+        if(hidden!=null) for(int i=0;i<hidden.length();i++) listed.add(hidden.getString(i));
+        if(menu.optBoolean("include_unlisted",false)) {
+            JSONArray others=new JSONArray(), projects=catalog.getJSONArray("projects");
+            for(int i=0;i<projects.length();i++) {
+                JSONObject project=projects.getJSONObject(i);
+                if(!listed.contains(project.getString("id"))) {
+                    JSONObject item=new JSONObject();item.put("label",project.getString("name"));item.put("project_id",project.getString("id"));others.put(item);
+                }
+            }
+            if(others.length()>0) {
+                JSONObject section=new JSONObject();section.put("id","other");section.put("label","Other");section.put("children",others);items.put(section);
+            }
+        }
+        String selected=catalog.getString("selected_project");
+        if(items.length()==0) {
+            JSONArray projects=catalog.getJSONArray("projects"); items=new JSONArray();
+            for(int i=0;i<projects.length();i++) {
+                JSONObject project=projects.getJSONObject(i), item=new JSONObject();
+                item.put("label",project.getString("name"));item.put("project_id",project.getString("id"));items.put(item);
+            }
+        }
+        if(!selected.equals(menuProject)) {
+            menuProject=selected; menuSection="";
+            for(int i=0;i<items.length();i++) {
+                JSONObject item=items.getJSONObject(i);
+                if(item.has("children") && menuContains(item,selected)) menuSection=item.getString("id");
+            }
+        }
+        View focused=selector.getFocusedChild();
+        String focusedTag=focused != null && focused.getTag()!=null ? focused.getTag().toString() : "";
+        selector.removeAllViews();
+        JSONArray expanded=null;
+        for(int i=0;i<items.length();i++) {
+            JSONObject item=items.getJSONObject(i); addMenuChoice(item,projection,focusedTag);
+            if(item.optString("id").equals(menuSection)) expanded=item.optJSONArray("children");
+        }
+        if(expanded != null) {
+            View divider=new View(this); divider.setBackgroundColor(Color.parseColor(palette.getString("border")));
+            LinearLayout.LayoutParams line=new LinearLayout.LayoutParams(dp(1),barHeight()-dp(14));
+            line.setMargins(dp(12),dp(7),dp(8),dp(7));selector.addView(divider,line);
+            for(int i=0;i<expanded.length();i++) addMenuChoice(expanded.getJSONObject(i),projection,focusedTag);
+        }
+        if(!libraryEndpoint.isEmpty() && (menu.optString("library_project").isEmpty() || menu.optString("library_project").equals(selected))) {
+            Button library=new Button(this);library.setText("Library");library.setTextSize(12);
+            styleControl(library,palette,libraryScreen!=null);library.setOnClickListener(v -> showLibrary());
+            selector.addView(library,new LinearLayout.LayoutParams(-2,barHeight()-dp(4)));
+        }
+        JSONArray pages=projection.getJSONObject("document").optJSONArray("pages");
+        if(pages != null && pages.length()>0) for(int i=0;i<=pages.length();i++) {
+            final int page=i; Button button=new Button(this);
+            button.setText(i==0 ? "▥" : pages.getJSONObject(i-1).getString("name"));button.setTextSize(12);
+            styleControl(button,palette,i==projection.getJSONObject("document").optInt("active_page",0));
+            button.setOnClickListener(v -> {
+                String error=nativeSelectPage(page);
+                if(error == null || !error.isEmpty()) showStatus("View switch failed: "+error);
+                else {lastProjection="";refreshWorkspace();}
+            });
+            button.setMinHeight(0);button.setMinimumHeight(0);
+            selector.addView(button,new LinearLayout.LayoutParams(-2,barHeight()-dp(4)));
+        }
+    }
+
     private void styleControl(Button button, JSONObject palette, boolean selected) throws Exception {
         int primary = Color.parseColor(palette.getString("primary"));
         int text = Color.parseColor(palette.getString("text"));
@@ -1218,55 +1346,7 @@ public final class TvActivity extends Activity {
             selector.setBackgroundColor(Color.parseColor(palette.getString("surface")));
             styleControl(muteButton, palette, false);
             styleControl(channelButton, palette, false);
-            JSONObject catalog = projection.getJSONObject("catalog");
-            JSONArray projects = catalog.getJSONArray("projects");
-            String focusedProject = "";
-            View focused = selector.getFocusedChild();
-            if (focused != null && focused.getTag() != null) focusedProject = focused.getTag().toString();
-            selector.removeAllViews();
-            for (int i = 0; i < projects.length(); i++) {
-                JSONObject project = projects.getJSONObject(i);
-                final String projectId = project.getString("id");
-                Button button = new Button(this);
-                button.setTag(projectId);
-                button.setText((projectId.equals(catalog.getString("selected_project")) ? "● " : "") + project.getString("name"));
-                button.setTextSize(12);
-                styleControl(button, palette, projectId.equals(catalog.getString("selected_project")));
-                button.setOnClickListener(v -> {
-                    String error = nativeSelectWorkspace(projectId);
-                    if (error == null || !error.isEmpty()) showStatus("Switch failed: " + error);
-                    else { lastProjection = ""; refreshWorkspace(); }
-                });
-                button.setMinHeight(0); button.setMinimumHeight(0);
-                LinearLayout.LayoutParams item = new LinearLayout.LayoutParams(-2, barHeight() - dp(4));
-                item.setMargins(dp(4), dp(2), 0, dp(2));
-                selector.addView(button, item);
-                if (projectId.equals(focusedProject)) button.requestFocus();
-            }
-            JSONObject document = projection.getJSONObject("document");
-            if(!libraryEndpoint.isEmpty()) {
-                Button library = new Button(this); library.setText("Library"); library.setTextSize(12);
-                styleControl(library,palette,libraryScreen!=null); library.setOnClickListener(v -> showLibrary());
-                selector.addView(library,new LinearLayout.LayoutParams(-2,barHeight()-dp(4)));
-            }
-            JSONArray pages = document.optJSONArray("pages");
-            if (pages != null && pages.length() > 0) {
-                for (int i=0; i<=pages.length(); i++) {
-                    final int page = i;
-                    Button button = new Button(this);
-                    button.setText(i == 0 ? "▥" : pages.getJSONObject(i-1).getString("name"));
-                    button.setContentDescription(i == 0 ? "Console" : button.getText());
-                    button.setTextSize(12);
-                    styleControl(button, palette, i == document.optInt("active_page", 0));
-                    button.setOnClickListener(v -> {
-                        String error = nativeSelectPage(page);
-                        if (error == null || !error.isEmpty()) showStatus("View switch failed: " + error);
-                        else { lastProjection = ""; refreshWorkspace(); }
-                    });
-                    button.setMinHeight(0); button.setMinimumHeight(0);
-                    selector.addView(button, new LinearLayout.LayoutParams(-2, barHeight()-dp(4)));
-                }
-            }
+            renderWorkspaceMenu(projection);
             for (View widget : widgets) {
                 if (widget instanceof PdfSurface) ((PdfSurface)widget).dispose();
                 frame.removeView(widget);

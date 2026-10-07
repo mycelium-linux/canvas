@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "library_project": "studio",
+  "include_unlisted": true,
+  "hidden_projects": ["clock", "ipfs-reading", "ipfs-hmm"],
+  "items": [
+    {
+      "label": "Home",
+      "project_id": "resume"
+    },
+    {
+      "label": "Studio",
+      "project_id": "studio"
+    },
+    {
+      "id": "media",
+      "label": "TV & AirPlay",
+      "children": [
+        {
+          "label": "TV",
+          "project_id": "television"
+        },
+        {
+          "label": "AirPlay",
+          "project_id": "airplay"
+        }
+      ]
+    },
+    {
+      "id": "toys",
+      "label": "Toys",
+      "children": [
+        {
+          "label": "Ball",
+          "project_id": "cat-toy-ball"
+        },
+        {
+          "label": "DVD",
+          "project_id": "dvd-bounce"
+        },
+        {
+          "label": "Boids",
+          "project_id": "cat-toy-boids"
+        },
+        {
+          "label": "Aquarium",
+          "project_id": "cat-toy-aquarium"
+        }
+      ]
+    }
+  ]
+}

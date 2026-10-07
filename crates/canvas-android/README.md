@@ -332,3 +332,26 @@ systemd-run --user --unit=canvas-tv-hls-http-omni --property=Restart=on-failure 
 Stop the matching unit before recreating it; do not start duplicate producers.
 The allowlist is a development constraint, not pairing or cryptographic
 authentication. Do not expose this endpoint publicly.
+
+### Grouped FireTV workspace menu
+
+`config/deploy/firetv/menu.json` is the presentation-only menu descriptor.
+Its items activate existing shared workspace IDs; sections reveal child choices
+inline without reconstructing the active content. The default groups are Home
+(Résumé), Studio, TV & AirPlay, and Toys. PDF demos and Clock remain retained and
+CLI-addressable, but are not shown in this menu. Library appears only in Studio.
+With `include_unlisted`, new catalog projects appear under Other unless their
+IDs are in `hidden_projects`; explicit sections do not freeze discovery.
+
+Include the descriptor in a native-video APK **before zipalign and signing**:
+
+```sh
+mkdir -p "$tv_package/assets"
+cp -f config/deploy/firetv/menu.json "$tv_package/assets/canvas-menu.json"
+(cd "$tv_package" && zip -q unsigned.apk assets/canvas-menu.json)
+```
+
+The descriptor is bounded to 64 KiB, with at most 32 top-level items and 32
+children per section. An APK without a descriptor retains the flat catalog menu;
+an invalid descriptor surfaces an explicit menu error rather than silently
+inventing navigation. Menu labels do not rename or delete shared projects.
