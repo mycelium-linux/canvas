@@ -1107,6 +1107,7 @@ public final class TvActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         resumed = true;
+        for (View widget : widgets) if(widget instanceof ConwaysView) ((ConwaysView)widget).setActive(true);
         background.setActive(true);
         lastProjection = "";
         lastStructure = "";
@@ -1118,6 +1119,7 @@ public final class TvActivity extends Activity {
 
     @Override protected void onPause() {
         resumed = false;
+        for (View widget : widgets) if(widget instanceof ConwaysView) ((ConwaysView)widget).setActive(false);
         background.setActive(false);
         updates.removeCallbacks(refresh);
         preparedPlayer = null;
@@ -1127,6 +1129,12 @@ public final class TvActivity extends Activity {
     }
 
     @Override public boolean onKeyDown(int key, KeyEvent event) {
+        for (View widget : widgets) {
+            if (widget instanceof ConwaysView && (key == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || key == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD || key == KeyEvent.KEYCODE_MEDIA_REWIND)) {
+                if(event.getRepeatCount()==0) ((ConwaysView)widget).control(key == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE ? "play-pause" : key == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD ? "random" : "clear");
+                return true;
+            }
+        }
         if (key == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || key == KeyEvent.KEYCODE_INFO || key == KeyEvent.KEYCODE_I) {
             for (View widget : widgets) {
                 if (widget instanceof BoidsView && !((BoidsView)widget).footnote.isEmpty()) {
@@ -1382,6 +1390,9 @@ public final class TvActivity extends Activity {
                         showStatus("Connecting…");
                         video.setVideoURI(Uri.parse(url));
                     }
+                } else if (content.getString("kind").equals("conways")) {
+                    ConwaysView life = new ConwaysView(this, palette);
+                    frame.addView(life, geometry); widgets.add(life);
                 } else if (content.getString("kind").equals("widget")
                     && (content.getJSONObject("spec").getString("kind").equals("status_list")
                         || content.getJSONObject("spec").getString("kind").equals("time_series"))) {

@@ -45,6 +45,10 @@
         {
           "label": "Aquarium",
           "project_id": "cat-toy-aquarium"
+        },
+        {
+          "label": "Life",
+          "project_id": "conways"
         }
       ]
     }
