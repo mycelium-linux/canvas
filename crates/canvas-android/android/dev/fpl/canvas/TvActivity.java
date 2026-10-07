@@ -1340,6 +1340,7 @@ public final class TvActivity extends Activity {
         button.setAllCaps(false);
         button.setElevation(0);
         button.setStateListAnimator(null);
+        button.setOnFocusChangeListener((view, focused) -> TvMotion.focus(view, focused));
         button.setPadding((int)(18 * density), 0, (int)(18 * density), 0);
     }
 

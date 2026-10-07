@@ -38,7 +38,10 @@ pub fn request(
         tracks: 0,
     };
     let value = match action {
-        "albums" => serde_json::json!({"albums":library.albums(offset)?}),
+        "albums" => serde_json::json!({"albums":library.albums_by_artist(offset, artist)?}),
+        "artists" => serde_json::json!({"artists":library.artists(offset)?}),
+        "playlists" => serde_json::json!({"playlists":library.playlists(offset)?}),
+        "playlist.tracks" => serde_json::json!({"tracks":library.playlist_tracks(artist,album)?}),
         "tracks" => serde_json::json!({"tracks":library.tracks(&selected)?}),
         "play" | "enqueue" => {
             serde_json::json!({"receipt":library.select(&selected, action == "play")?})
@@ -49,10 +52,10 @@ pub fn request(
 }
 
 pub fn geometry(width: u32, height: u32, count: usize) -> Result<String, String> {
-    let shelf = fpl_gfx::media::Shelf::layout(
-        fpl_gfx::Rect::new(0.0, 0.0, width as f32, height as f32),
-        count,
-    )
+    if count > fpl_gfx::media::MAX_CARDS {return Err("Too many shelf cards".into());}
+    let bounds=fpl_gfx::Rect::new(0.0, 0.0, width as f32, height as f32);
+    let shelf = (if count==0 {0..=0}else{1..=count}).rev()
+        .find_map(|visible| fpl_gfx::media::Shelf::layout(bounds,visible))
     .ok_or("Library viewport cannot fit this page")?;
     Ok(serde_json::json!({"cards":shelf.cards.iter().map(|card| serde_json::json!({"bounds":card.bounds,"artwork":card.artwork})).collect::<Vec<_>>(),"detail":shelf.detail}).to_string())
 }
@@ -69,7 +72,9 @@ mod tests {
     #[test]
     fn geometry_is_shared_and_bounded() {
         assert!(geometry(1920, 1080, 8).is_ok());
-        assert!(geometry(640, 320, 24).is_err());
+        let compact:serde_json::Value=serde_json::from_str(&geometry(960,540,6).unwrap()).unwrap();
+        assert!(!compact["cards"].as_array().unwrap().is_empty());
+        assert!(geometry(960,540,25).is_err());
     }
     #[test]
     fn requests_share_a_single_client() {
@@ -92,6 +97,18 @@ mod jni_api {
         env.new_string(raw)
             .map(|value| value.into_raw())
             .unwrap_or(std::ptr::null_mut())
+    }
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_dev_fpl_canvas_TvMotion_curve(env: JNIEnv, _class: JClass) -> jni::sys::jfloatArray {
+        let mut tween = fpl_gfx::motion::Tween::new(0.0).expect("finite motion origin");
+        tween.retarget(1.0, 1.0);
+        let values: Vec<f32> = (0..=60).map(|index| {
+            let mut sample = tween;
+            sample.advance(index as f32 / 60.0)
+        }).collect();
+        let Ok(array) = env.new_float_array(values.len() as i32) else { return std::ptr::null_mut(); };
+        if env.set_float_array_region(&array, 0, &values).is_err() { return std::ptr::null_mut(); }
+        array.into_raw()
     }
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_dev_fpl_canvas_LibraryView_accent(
