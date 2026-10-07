@@ -71,7 +71,7 @@ public final class TvActivity extends Activity {
     private static native float[] nativeClockFrame(int width, int height, int hour, int minute, float second);
     private static native String nativeBackgroundProgram(String id);
     private static native String nativeSignalSnapshot(String id);
-    private static native float[] nativeSignalFrame(int width, int height, String frame);
+    private static native float[] nativeSignalFrame(int width, int height, String frame, String appearance);
     private static native String nativeSignalLabels(int width, int height, String frame);
     private static native String nativeTunerControl(String base, String channel, String surface, String directory);
     private String tunerEndpoint = "", videoSurfaceId = "";
@@ -98,6 +98,7 @@ public final class TvActivity extends Activity {
     private LibraryView libraryScreen;
     private LibraryView cachedLibraryScreen;
     private String libraryEndpoint = "";
+    private String consoleAppearance = "";
     private View libraryReturnFocus;
     private int libraryReturnFocusability;
 
@@ -545,6 +546,9 @@ public final class TvActivity extends Activity {
         libraryEndpoint = getIntent().getStringExtra("library_endpoint");
         if(libraryEndpoint != null) getPreferences(0).edit().putString("library_endpoint",libraryEndpoint).apply();
         else libraryEndpoint = getPreferences(0).getString("library_endpoint", "");
+        consoleAppearance = getIntent().getStringExtra("console_appearance");
+        if(consoleAppearance != null) getPreferences(0).edit().putString("console_appearance",consoleAppearance).apply();
+        else consoleAppearance = getPreferences(0).getString("console_appearance", "");
         selector = new LinearLayout(this);
         selector.setOrientation(LinearLayout.HORIZONTAL);
         HorizontalScrollView scroller = new HorizontalScrollView(this);
@@ -756,6 +760,7 @@ public final class TvActivity extends Activity {
             footer = new TextView(TvActivity.this); footer.setTextSize(13);
             footer.setTextColor(Color.parseColor(palette.getString("text_muted")));
             final long interval = Math.max(33L, Math.min(5000L, spec.optLong("refresh_ms", 250L)));
+            final String appearance = !consoleAppearance.isEmpty() ? consoleAppearance : palette.optJSONObject("console_appearance") != null ? palette.getJSONObject("console_appearance").toString() : "{}";
             final int[] inks = new int[]{
                 Color.parseColor(palette.getString("background")), Color.parseColor(palette.getString("surface")),
                 Color.parseColor(palette.getString("surface_muted")), Color.parseColor(palette.getString("background")),
@@ -816,7 +821,7 @@ public final class TvActivity extends Activity {
                             }
                         }
                         if (needleAnimation || !raw.equals(previous) || oldWidth != getWidth() || oldHeight != getHeight()) {
-                            records = nativeSignalFrame(getWidth(), getHeight(), paintRaw);
+                            records = nativeSignalFrame(getWidth(), getHeight(), paintRaw, appearance);
                             if (!raw.equals(previous) || oldWidth != getWidth() || oldHeight != getHeight())
                             labels = new JSONArray(nativeSignalLabels(getWidth(), getHeight(), raw));
                             if (records == null || records.length % 8 != 0) throw new IllegalStateException("Invalid signal paint records");

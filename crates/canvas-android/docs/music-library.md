@@ -48,3 +48,25 @@ a cover to focus Play without activating it, press Back to return to the cover,
 then Back to close. Reopen and verify the same shelf and focus are retained.
 Repeat while artwork is loading. Check each current focus before sending another
 remote input; do not activate Play or Queue as a navigation test.
+
+## Console appearance (independent of Library and playback)
+
+Signal console painting accepts the shared GFX `ConsoleAppearance` as host theme
+data. An injected palette may include a `console_appearance` object. The TV shell
+also accepts a persisted `console_appearance` launch extra as a development
+override; an empty string clears the override. This does not modify audio, signal
+snapshots, labels, or control geometry. Unknown fields and out-of-range material
+tokens fail visibly rather than silently selecting a different finish.
+
+Example flat finish (restart the Activity to apply a launch preference):
+
+```sh
+adb -s TV shell am force-stop dev.fpl.canvas.tv
+adb -s TV shell 'am start -n dev.fpl.canvas.tv/dev.fpl.canvas.TvActivity --es console_appearance '\''{"gloss":0,"grain":0,"hardware_details":false,"cast_shadows":false}'\'''
+```
+
+Appearance keys: `face`, `cap`, `slot`, `identity`, `markings` (existing GFX semantic
+roles), `gloss` (0–1), `grain` (0–0.02), `hardware_details`, `cast_shadows`. Defaults
+retain the physical studio finish. The native Android adapter paints geometry;
+wgpu material lighting remains specific to a wgpu host. Assets/filmstrips are not
+loaded by this API, and no Pedalkernel artwork is bundled yet.

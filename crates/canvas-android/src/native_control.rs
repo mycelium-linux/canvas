@@ -191,13 +191,16 @@ pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeSignalFrame(
     width: jni::sys::jint,
     height: jni::sys::jint,
     raw: jni::objects::JString,
+    appearance: jni::objects::JString,
 ) -> jni::sys::jfloatArray {
     let result = (|| -> Result<Vec<f32>, String> {
         let raw: String = env.get_string(&raw).map_err(|e| e.to_string())?.into();
-        crate::signals::paint_records(
+        let appearance: String = env.get_string(&appearance).map_err(|e| e.to_string())?.into();
+        crate::signals::paint_records_with_appearance(
             u32::try_from(width).map_err(|_| "Invalid width")?,
             u32::try_from(height).map_err(|_| "Invalid height")?,
             &raw,
+            &appearance,
         )
     })();
     match result {

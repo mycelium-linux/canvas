@@ -23,14 +23,35 @@ pub fn label_records(width: u32, height: u32, raw: &str) -> Result<String, Strin
 }
 
 pub fn paint_records(width: u32, height: u32, raw: &str) -> Result<Vec<f32>, String> {
+    paint_records_with_appearance(width, height, raw, "{}")
+}
+
+/// Host theme tokens stay separate from the provider's observed signal snapshot.
+pub fn paint_records_with_appearance(
+    width: u32,
+    height: u32,
+    raw: &str,
+    appearance: &str,
+) -> Result<Vec<f32>, String> {
     if width < 2 || height < 2 || width > 8192 || height > 8192 || raw.len() > 512 * 1024 {
         return Err("Invalid signal frame extent or payload size".into());
     }
     let snapshot: SignalFrame = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+    if appearance.len() > 8192 {
+        return Err("Console appearance exceeds limit".into());
+    }
+    let appearance: fpl_gfx::console::ConsoleAppearance =
+        serde_json::from_str(appearance).map_err(|e| format!("Invalid console appearance: {e}"))?;
+    appearance.validate().map_err(|e| e.to_string())?;
     let mut scene = Scene::with_capacity(1200);
-    snapshot
-        .append(&mut scene, Rect::new(0.0, 0.0, width as f32, height as f32))
-        .map_err(|e| e.to_string())?;
+    let bounds = Rect::new(0.0, 0.0, width as f32, height as f32);
+    match snapshot {
+        SignalFrame::Console { panel } => {
+            panel.append_with_appearance(&mut scene, bounds, &appearance)
+        }
+        frame => frame.append(&mut scene, bounds),
+    }
+    .map_err(|e| e.to_string())?;
     let mut records = Vec::with_capacity(scene.len() * 8);
     for p in scene.iter() {
         match p.kind {
@@ -126,6 +147,13 @@ mod tests {
             assert_eq!(records.len() % 8, 0);
             assert!(records.len() < 800);
             assert!(label_records(400, 240, &raw).unwrap().contains("dBFS"));
+            let flat = serde_json::to_string(&fpl_gfx::console::ConsoleAppearance::flat()).unwrap();
+            let flat_records = paint_records_with_appearance(400, 240, &raw, &flat).unwrap();
+            assert!(flat_records.len() < records.len());
+            assert!(paint_records_with_appearance(400, 240, &raw, r#"{"grain":1}"#).is_err());
+            assert!(
+                paint_records_with_appearance(400, 240, &raw, r#"{"unrecognized":true}"#).is_err()
+            );
         }
     }
     #[test]
