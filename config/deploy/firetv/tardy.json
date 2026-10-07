@@ -1,0 +1,164 @@
+{
+  "schema_version": 1,
+  "id": "tv-tardy",
+  "project_id": "tardy",
+  "revision": 1,
+  "active_page": 0,
+  "pages": [],
+  "theme": {
+    "source": "project"
+  },
+  "chrome": {
+    "title": "hidden",
+    "canvas_padding": 12,
+    "surface_gap": 12
+  },
+  "background": {
+    "kind": "theme"
+  },
+  "surfaces": [
+    {
+      "id": "tardy-video",
+      "title": "Tardy · public reels",
+      "inputs": [],
+      "content": {
+        "kind": "scene",
+        "scene": {
+          "nodes": [
+            {
+              "id": "waiting",
+              "content": {
+                "kind": "text",
+                "text": "Connecting to the anonymous public feed…"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "tardy-caption",
+      "title": "Public reel",
+      "inputs": [],
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "tardy-caption",
+          "kind": "rich_card",
+          "title": "Tardy · public reels",
+          "body": "Loading public videos",
+          "format": "markdown",
+          "citations": [],
+          "chrome": "frameless",
+          "data": {
+            "state": "loading",
+            "provenance": "live",
+            "source": "https://api.tardy.news/v1/feed"
+          }
+        }
+      }
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "chrome": "auto",
+          "data": {
+            "detail": "neo · codex",
+            "observed_at": "2026-10-07T04:43:24.752Z",
+            "provenance": "live",
+            "source": "unibus:agent.sessions.v1",
+            "state": "partial",
+            "window": null
+          },
+          "id": "tv-agent-dashboard",
+          "kind": "status_list",
+          "nodes": [
+            {
+              "detail": "3",
+              "label": "Active",
+              "state": "good"
+            },
+            {
+              "detail": "22",
+              "label": "Idle",
+              "state": "neutral"
+            },
+            {
+              "detail": "1",
+              "label": "Unknown",
+              "state": "warning"
+            }
+          ],
+          "refresh_ms": null,
+          "schema_version": 2,
+          "theme": null,
+          "title": "Agents"
+        }
+      },
+      "id": "agent-dashboard",
+      "inputs": [],
+      "title": "Agent activity"
+    },
+    {
+      "id": "clock",
+      "title": "Local time",
+      "inputs": [],
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "tardy-clock",
+          "kind": "clock",
+          "mode": "analog"
+        }
+      }
+    }
+  ],
+  "layout": {
+    "kind": "canvas",
+    "placements": [
+      {
+        "surface_id": "tardy-video",
+        "bounds": {
+          "x": 0.015,
+          "y": 0.025,
+          "width": 0.31,
+          "height": 0.95
+        },
+        "layer": 0
+      },
+      {
+        "surface_id": "tardy-caption",
+        "bounds": {
+          "x": 0.345,
+          "y": 0.025,
+          "width": 0.39,
+          "height": 0.95
+        },
+        "layer": 0
+      },
+      {
+        "surface_id": "agent-dashboard",
+        "bounds": {
+          "x": 0.755,
+          "y": 0.025,
+          "width": 0.23,
+          "height": 0.48
+        },
+        "layer": 0
+      },
+      {
+        "surface_id": "clock",
+        "bounds": {
+          "x": 0.755,
+          "y": 0.535,
+          "width": 0.23,
+          "height": 0.44
+        },
+        "layer": 0
+      }
+    ]
+  }
+}
