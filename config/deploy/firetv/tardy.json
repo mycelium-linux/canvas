@@ -102,6 +102,22 @@
       "title": "Agent activity"
     },
     {
+      "id": "agent-details",
+      "title": "Agent attention",
+      "inputs": [],
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "tv-agent-details",
+          "kind": "status_list",
+          "title": "Agent attention",
+          "nodes": [{"label": "Telemetry", "detail": "Waiting for explicit owner status", "state": "neutral"}],
+          "data": {"state": "loading", "source": "unibus:agent.sessions.v2", "provenance": "live"}
+        }
+      }
+    },
+    {
       "id": "clock",
       "title": "Local time",
       "inputs": [],
@@ -135,7 +151,7 @@
           "x": 0.345,
           "y": 0.025,
           "width": 0.39,
-          "height": 0.95
+          "height": 0.53
         },
         "layer": 0
       },
@@ -147,6 +163,11 @@
           "width": 0.23,
           "height": 0.48
         },
+        "layer": 0
+      },
+      {
+        "surface_id": "agent-details",
+        "bounds": {"x": 0.345, "y": 0.575, "width": 0.39, "height": 0.40},
         "layer": 0
       },
       {

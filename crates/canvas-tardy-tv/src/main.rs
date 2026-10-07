@@ -236,12 +236,37 @@ fn agent_frame(raw: &[u8], now_ms: i64) -> Result<Value, String> {
     if !(-5000..=30000).contains(&age) {
         data["state"] = json!("stale");
     }
-    Ok(json!({"frame":{"title":value["widget"]["title"],"nodes":nodes},"data":data}))
+    let mut output = json!({"frame":{"title":value["widget"]["title"],"nodes":nodes},"data":data});
+    if let Some(details) = value.get("details") {
+        let rows = details["widget"]["nodes"]
+            .as_array()
+            .ok_or("Missing attention rows")?;
+        if details["widget"]["kind"] != "status_list" || rows.len() > 4 {
+            return Err("Invalid attention detail widget".into());
+        }
+        output["details"] = json!({"title":details["widget"]["title"],"nodes":rows});
+    }
+    if !(-5000..=30000).contains(&age) && value["data"]["source"] == "unibus:agent.sessions.v2" {
+        for row in output["frame"]["nodes"]
+            .as_array_mut()
+            .ok_or("Missing summary rows")?
+        {
+            row["detail"] = json!("—");
+            row["state"] = json!("neutral");
+        }
+        if let Some(rows) = output["details"]["nodes"].as_array_mut() {
+            for row in rows {
+                row["detail"] = json!("Telemetry stale · status unknown");
+                row["state"] = json!("neutral");
+            }
+        }
+    }
+    Ok(output)
 }
 
 fn agents(serial: &str) -> Result<(), String> {
     loop {
-        let result = (|| {
+        let result: Result<(), String> = (|| {
             let state = control(serial, "inspect\n")?;
             if state["data"]["catalog"]["selected_project"] != "tardy" {
                 return Ok(());
@@ -262,8 +287,23 @@ fn agents(serial: &str) -> Result<(), String> {
                 .map_err(|_| "Invalid clock")?
                 .as_millis() as i64;
             let frame = agent_frame(&raw, now)?;
-            let request = json!({"schema_version":1,"request_id":"tardy-agent-snapshot","expected_revision":state["revision"],"command":{"command":"surface_snapshot","workspace_id":state["data"]["document"]["id"],"surface_id":"agent-dashboard","frame":frame["frame"],"data":frame["data"]}});
-            control(serial, &request.to_string()).map(|_| ())
+            let mut targets = vec![("agent-dashboard", &frame["frame"])];
+            if frame.get("details").is_some() {
+                targets.push(("agent-details", &frame["details"]));
+            }
+            for (surface_id, content) in targets {
+                if !state["data"]["document"]["surfaces"]
+                    .as_array()
+                    .ok_or("Missing surfaces")?
+                    .iter()
+                    .any(|surface| surface["id"] == surface_id)
+                {
+                    continue;
+                }
+                let request = json!({"schema_version":1,"request_id":"tardy-agent-snapshot","expected_revision":state["revision"],"command":{"command":"surface_snapshot","workspace_id":state["data"]["document"]["id"],"surface_id":surface_id,"frame":content,"data":frame["data"]}});
+                control(serial, &request.to_string())?;
+            }
+            Ok(())
         })();
         if let Err(error) = result {
             eprintln!("canvas-tardy-tv agents: {error}");
@@ -359,5 +399,23 @@ mod tests {
         assert_eq!(agent_frame(raw, 11000).unwrap()["data"]["state"], "partial");
         assert_eq!(agent_frame(raw, 50000).unwrap()["data"]["state"], "stale");
         assert!(agent_frame(b"{}", 0).is_err());
+    }
+    #[test]
+    fn accepts_bounded_attention_details() {
+        let mut value = json!({"widget":{"kind":"status_list","title":"Agents","nodes":[]},
+            "data":{"state":"ready","source":"unibus:agent.sessions.v2","observed_at":"1970-01-01T00:00:10Z"},
+            "details":{"widget":{"kind":"status_list","title":"Attention","nodes":[{"label":"Canvas","detail":"Needs response"}]}}});
+        assert_eq!(
+            agent_frame(&serde_json::to_vec(&value).unwrap(), 11000).unwrap()["details"]["nodes"]
+                [0]["label"],
+            "Canvas"
+        );
+        let stale = agent_frame(&serde_json::to_vec(&value).unwrap(), 50000).unwrap();
+        assert_eq!(
+            stale["details"]["nodes"][0]["detail"],
+            "Telemetry stale · status unknown"
+        );
+        value["details"]["widget"]["nodes"] = json!([{}, {}, {}, {}, {}]);
+        assert!(agent_frame(&serde_json::to_vec(&value).unwrap(), 11000).is_err());
     }
 }

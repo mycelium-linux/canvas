@@ -44,6 +44,36 @@ receiver-side expiry when deliveries stop. This avoids the old retained-widget
 watch path's `no_data` label for a transient status surface. This deployment
 changes the Tardy panel only; the older Home panel updater is unchanged.
 
+### Waiting for you and session details
+
+The opt-in `agent.sessions.v2` presenter in
+`config/binders/agent-dashboard-v2.lua` adds separate Needs input / Needs approval
+counts and four priority-ordered session detail rows beneath the public caption.
+Rows show safe project/task labels, owner/provider and time first observed waiting.
+Unknown titles stay unnamed; no prompt, preview, transcript or full path is used.
+Waiting sessions sort first, oldest observed wait first, then active/unknown/idle.
+The analog clock and reel remain unchanged. These are read-only detail rows,
+not controls that answer a question or approve an agent action.
+
+The Lua presenter accepts authenticated snapshots/events, bounds owner and
+session retention, rejects replay/invalid generations and ages old sessions to
+unknown after 30 seconds. Old waits stop counting or displaying a growing timer.
+Only Neo/Codex is connected in the current installation; the contract supports
+other explicit owners but does not imply that their collectors are installed.
+
+Use `config/deploy/firetv/agent-attention-runtime.example.json` with private token
+and owner socket paths. Explicitly enable `--display-details` only for authorized
+viewers; the V1 source and normalizer remain metadata-free by default.
+On macOS, install the Lua consumer in the adapter's application-data directory,
+not Documents: a newly signed launch-agent binary can block on a protected-folder
+permission prompt. This installation uses
+`~/.local/share/agent-telemetry/agent-dashboard-v2.lua`; copy the reviewed binder
+there when deploying an update.
+
+```sh
+lua config/binders/tests/agent-dashboard-v2-test.lua config/binders/agent-dashboard-v2.lua
+```
+
 ## Build and run
 
 ```sh
