@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "id": "tv-security",
+  "project_id": "security",
+  "revision": 1,
+  "theme": {"source": "project"},
+  "chrome": {"title": "hidden", "canvas_padding": 12, "surface_gap": 12},
+  "surfaces": [
+    {"id": "security-status", "title": "Fleet security", "content": {"kind": "widget", "spec": {
+      "schema_version": 2, "id": "security-status", "kind": "status_list", "title": "Mycelium · security", "nodes": [], "refresh_ms": 10000,
+      "data": {"state": "loading", "source": "mycelium security", "detail": "Waiting for owner telemetry"}
+    }}},
+    {"id": "security-clock", "title": "Local time", "content": {"kind": "widget", "spec": {"schema_version": 2, "id": "security-clock", "kind": "clock", "mode": "analog"}}}
+  ],
+  "layout": {"kind": "canvas", "placements": [
+    {"surface_id": "security-status", "bounds": {"x": 0.02, "y": 0.04, "width": 0.70, "height": 0.92}, "layer": 0},
+    {"surface_id": "security-clock", "bounds": {"x": 0.75, "y": 0.30, "width": 0.23, "height": 0.40}, "layer": 0}
+  ]},
+  "pages": [], "active_page": 0, "bindings": [], "focused_surface_id": null
+}

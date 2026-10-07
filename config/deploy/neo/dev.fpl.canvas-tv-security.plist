@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.fpl.canvas-tv-security</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/ajmwagar/.local/bin/canvas-tvctl</string>
+    <string>192.168.2.97:5555</string><string>widget-watch</string>
+    <string>security</string><string>security-status</string>
+    <string>/Users/ajmwagar/.local/bin/canvas-security-status</string>
+  </array>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/Users/ajmwagar/.local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>/Users/ajmwagar/.local/share/canvas-android/security-watch.log</string>
+  <key>StandardErrorPath</key><string>/Users/ajmwagar/.local/share/canvas-android/security-watch.err</string>
+</dict></plist>

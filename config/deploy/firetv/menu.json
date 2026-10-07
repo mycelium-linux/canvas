@@ -13,6 +13,14 @@
       "project_id": "studio"
     },
     {
+      "label": "Holodeck",
+      "project_id": "holodeck"
+    },
+    {
+      "label": "Security",
+      "project_id": "security"
+    },
+    {
       "id": "media",
       "label": "TV & AirPlay",
       "children": [

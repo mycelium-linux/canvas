@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "id": "tv-holodeck",
+  "project_id": "holodeck",
+  "revision": 1,
+  "theme": {"source": "project"},
+  "chrome": {"title": "hidden", "canvas_padding": 0, "surface_gap": 0},
+  "surfaces": [
+    {"id": "holodeck-tour", "title": "Holodeck · rendered tour", "content": {"kind": "stream", "url": "http://192.168.2.67:18089/holodeck-tour.m3u8"}},
+    {"id": "holodeck-cctv", "title": "Holodeck · virtual spectator cameras", "content": {"kind": "stream", "url": "http://192.168.2.67:18089/holodeck-cctv.m3u8"}},
+    {"id": "holodeck-cast", "title": "Holodeck · first-person cast", "content": {"kind": "scene", "scene": {"nodes": [
+      {"id": "sender-offline", "content": {"kind": "text", "text": "Waiting for a first-person/headset capture producer. The previous playlist is stale, so it is not being presented as live. Virtual spectator cameras are available on the Cameras page."}}
+    ]}}},
+    {"id": "holodeck-airplay", "title": "Holodeck · AirPlay", "content": {"kind": "stream", "url": "http://192.168.2.67:8099/live.m3u8"}}
+  ],
+  "layout": {"kind": "surface", "surface_id": "holodeck-tour"},
+  "pages": [
+    {"name": "Cameras", "layout": {"kind": "surface", "surface_id": "holodeck-cctv"}},
+    {"name": "First-person cast", "layout": {"kind": "surface", "surface_id": "holodeck-cast"}},
+    {"name": "AirPlay", "layout": {"kind": "surface", "surface_id": "holodeck-airplay"}}
+  ],
+  "active_page": 0,
+  "bindings": [],
+  "focused_surface_id": null
+}
