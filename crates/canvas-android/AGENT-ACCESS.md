@@ -54,7 +54,7 @@ Packaging instructions are in `README.md` in this crate.
 ## Playback test coordination
 
 AirPlay has its own `airplay` workspace and `cast-airplay-video` surface,
-pointing to `http://192.168.2.67:8099/live.ts`. Select it with:
+pointing to `http://192.168.2.67:8099/live.m3u8`. Select it with:
 
 ```sh
 printf 'workspace switch airplay\n' | canvas-tvctl 192.168.2.97:5555
