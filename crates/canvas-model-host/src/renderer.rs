@@ -256,6 +256,55 @@ impl Renderer {
         theme: &VisualTheme,
         elapsed: f32,
     ) -> Result<Option<Vec<u8>>> {
+        self.render_palette(
+            eye_direction,
+            distance_scale,
+            model_rotation_degrees,
+            material,
+            field,
+            theme,
+            elapsed,
+            false,
+        )
+    }
+
+    /// Render categorical component colors with shape lighting. This mode is
+    /// illustrative and must not be used with a quantitative scalar legend.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_illustrative(
+        &mut self,
+        eye_direction: Vec3,
+        distance_scale: f32,
+        model_rotation_degrees: [f32; 3],
+        material: &Material,
+        field: Option<&crate::Field>,
+        theme: &VisualTheme,
+        elapsed: f32,
+    ) -> Result<Option<Vec<u8>>> {
+        self.render_palette(
+            eye_direction,
+            distance_scale,
+            model_rotation_degrees,
+            material,
+            field,
+            theme,
+            elapsed,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_palette(
+        &mut self,
+        eye_direction: Vec3,
+        distance_scale: f32,
+        model_rotation_degrees: [f32; 3],
+        material: &Material,
+        field: Option<&crate::Field>,
+        theme: &VisualTheme,
+        elapsed: f32,
+        illustrative_lighting: bool,
+    ) -> Result<Option<Vec<u8>>> {
         let slot_index = self.next_readback;
         let completed = self.collect_slot(slot_index)?;
         let mesh = self.mesh.as_ref().context("no model uploaded")?;
@@ -304,7 +353,7 @@ impl Renderer {
             field_params: [
                 field.is_some() as u8 as f32,
                 field.map(|f| f.colormap.shader_index()).unwrap_or(0.0),
-                0.0,
+                if illustrative_lighting { 1.0 } else { 0.0 },
                 0.0,
             ],
         };
