@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>dev.fpl.canvas-presentation-publisher</string>
+<key>ProgramArguments</key><array><string>/bin/bash</string><string>-c</string><string>set -o pipefail; canvas-presentation-mirror follow 192.168.2.97:5555 | unibus-stream publish /Users/ajmwagar/.config/unibus/canvas-presentation/publish.json canvas/tv/tardy/presentation canvas.presentation.v1</string></array>
+<key>EnvironmentVariables</key><dict><key>PATH</key><string>/Users/ajmwagar/.local/bin:/opt/homebrew/bin:/usr/bin:/bin</string></dict>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer>
+<key>StandardErrorPath</key><string>/Users/ajmwagar/.local/share/canvas-android/presentation-publisher.log</string>
+</dict></plist>

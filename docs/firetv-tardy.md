@@ -167,8 +167,19 @@ It is presentation synchronization, not frame-locked video playback. Each
 desktop decodes the same reel privately and preserves its normalized placement.
 Studio uses only its primary output. Canvas's desktop shell remains local.
 
-The bootstrap backhaul is explicit private SSH, **not yet Unibus network
-fan-out**. Mycelium locates hosts; it does not own view state or authorization.
+Presentation backhaul now uses **Unibus leased stream fan-out**: one publisher
+on Neo reads the authenticated TV presentation, while Neo and Studio subscribe
+independently to `canvas/tv/tardy/presentation` (`canvas.presentation.v1`).
+The existing Home-Pi router owns fan-out, with separate publisher/consumer tokens.
+Consumers pin the authenticated publisher `canvas-tv-presentation`, contract,
+fresh delivery timestamp and increasing sequence. The generic `unibus-stream`
+CLI preserves its older one-shot interface and adds bounded JSON-lines publish
+and subscribe modes. Presentations exceeding its 64 KiB contract fail visibly;
+they are never silently trimmed. The current sample is approximately 6 KiB.
+SSH still encrypts access to the router's loopback listener via local port 19496;
+it no longer pipes presentation JSON from Neo into a remote receiver.
+Mycelium locates hosts; it does not own view state or authorization. This slice
+uses explicit deployment endpoints, not automatic discovery or a new mesh protocol.
 No public listener, new discovery service, or widened media HTTP allowlist is
 introduced. `CANVAS_MIRROR_MEDIA_ORIGIN=http://127.0.0.1:18089` selects the
 operator-owned SSH media tunnel. The independent `canvas-tv` decoder reports
@@ -184,9 +195,12 @@ Manual recovery (installed paths):
 1. Inspect TV with `canvasctl --android 192.168.2.97:5555`; select Tardy there.
 2. On each desktop, verify `canvasctl` and the Canvas app are a matched build.
 3. Restart `dev.fpl.canvas-dashboard-media-tunnel` on Neo and Studio.
-4. Restart Neo's `dev.fpl.canvas-dashboard-mirror`, which fans one source into
-   the local receiver and Studio's receiver. LaunchAgent definitions are in
-   `config/deploy/neo/`; credentials remain in existing ADB/SSH owner storage.
+4. Restart `dev.fpl.canvas-presentation-tunnel` on both desktops, then Neo's
+   `dev.fpl.canvas-presentation-publisher` and each desktop's
+   `dev.fpl.canvas-dashboard-mirror`. LaunchAgent definitions are in
+   `config/deploy/neo/` (Studio uses `dev.fpl.canvas-dashboard-studio.plist`
+   installed as `dev.fpl.canvas-dashboard-mirror.plist`). Tokens are private
+   files under `~/.config/unibus/canvas-presentation/`, never repo assets.
 5. Use Canvas's `screenshot` control request for renderer verification; OS
    capture can omit protected windows. Check mirror logs for rejected frames.
 
@@ -201,3 +215,7 @@ Unlike `read_document`, this represents the view currently being rendered.
 It does not change the endpoint revision or checkpoint; restarted receivers
 must not restore its live data as fresh. Receivers must independently track
 delivery expiry and preserve the exported owner observation/stale metadata.
+
+The transport runbook is in Unibus's `docs/stream-json.md`. Video remains on
+the existing private HLS/media path; only presentation/layout/task state moved
+in this slice. Desktop navigation is still read-only relative to the TV.
