@@ -61,6 +61,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use unibus_media::CameraDetections;
 
+mod default_background;
 mod hid_output;
 mod indicator;
 mod keyboard_input;
@@ -10253,7 +10254,14 @@ impl App {
                     self.screensaver_elapsed,
                     desk,
                 )),
-                Background::Theme | Background::Solid { .. } | Background::Gradient { .. } => {}
+                Background::Theme => layers.push(
+                    image_widget(default_background::handle())
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .content_fit(ContentFit::Cover)
+                        .into(),
+                ),
+                Background::Solid { .. } | Background::Gradient { .. } => {}
                 // Nothing to layer: the ground above already fell back to the
                 // theme gradient for a background this build cannot draw.
                 Background::Unsupported(_) => {}
@@ -10821,10 +10829,7 @@ impl App {
             });
         // An underlay must not become the content stack's sizing base.
         let ground: Element<'_, Message> = if !self.screensaver_settings.enabled
-            && matches!(
-                self.document.background,
-                Background::Theme | Background::Unsupported(_)
-            )
+            && matches!(self.document.background, Background::Unsupported(_))
         {
             stack([ground.into()])
                 .push_under(canvas_widgets::live::retained_gradient::view(
