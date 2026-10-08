@@ -168,6 +168,7 @@ mod tests {
     fn receipt(producer: &str) -> Event {
         Event {
             producer_id: producer.into(),
+            destination: None,
             request_id: "reply-1".into(),
             issued_at_unix_ms: 1,
             kind: "canvas.module.action.result.v1".into(),
