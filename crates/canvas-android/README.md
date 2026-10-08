@@ -138,10 +138,13 @@ mkdir -p "$tv_package/classes" "$tv_package/dex"
 "$tv_sdk/build-tools/33.0.2/d8" --min-api 24 \
   --lib "$tv_sdk/platforms/android-33/android.jar" \
   --output "$tv_package/dex" "$tv_package/classes/dev/fpl/canvas/"*.class
+"$tv_sdk/build-tools/33.0.2/aapt2" compile --dir android/res \
+  -o "$tv_package/resources.zip"
 "$tv_sdk/build-tools/33.0.2/aapt2" link \
   --manifest android/AndroidManifest.xml \
   -I "$tv_sdk/platforms/android-33/android.jar" \
-  -o "$tv_package/unsigned.apk" --version-code 1 --version-name 0.1.0
+  -o "$tv_package/unsigned.apk" --version-code 1 --version-name 0.1.0 \
+  "$tv_package/resources.zip"
 cp -f "$tv_package/dex/classes.dex" "$tv_package/classes.dex"
 cd "$tv_package"
 zip -q unsigned.apk classes.dex lib/armeabi-v7a/libcanvas_android.so
