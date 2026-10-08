@@ -58,6 +58,11 @@ fn validate_endpoint(endpoint: &str) -> Result<()> {
 
 fn main() -> Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if arguments.len() == 3 && arguments[0] == "describe" {
+        let (width, height) = fit_geometry(arguments[1].parse()?, arguments[2].parse()?)?;
+        println!("{}", serde_json::json!({"width":width,"height":height}));
+        return Ok(());
+    }
     if arguments.first().is_some_and(|s| s == "describe") && arguments.len() <= 2 {
         let (width, height) = if let Some(endpoint) = arguments.get(1) {
             stream_geometry(endpoint)?
@@ -75,7 +80,15 @@ fn main() -> Result<()> {
     if arguments[1].starts_with("udp://") {
         return run_hardware(source, &arguments[1]);
     }
-    validate_endpoint(&arguments[1])?;
+    let pipe = arguments[1] == "-";
+    if pipe {
+        ensure!(
+            arguments.len() == 4,
+            "pipe input requires explicit frame geometry"
+        );
+    } else {
+        validate_endpoint(&arguments[1])?;
+    }
     let (width, height) = if arguments.len() == 4 {
         (arguments[2].parse::<u32>()?, arguments[3].parse::<u32>()?)
     } else {
@@ -106,12 +119,16 @@ fn main() -> Result<()> {
                 "15000000",
                 "-i",
             ])
-            .arg(&arguments[1])
+            .arg(if pipe { "pipe:0" } else { &arguments[1] })
             .args([
                 "-map", "0:v:0", "-an", "-vf", &filter, "-pix_fmt", "rgba", "-f", "rawvideo",
                 "pipe:1",
             ])
-            .stdin(Stdio::null())
+            .stdin(if pipe {
+                Stdio::inherit()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()

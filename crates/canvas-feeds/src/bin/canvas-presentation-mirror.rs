@@ -71,18 +71,115 @@ fn layout(presentation: &Value) -> Result<Value, String> {
     Ok(document)
 }
 
-struct Media(std::collections::BTreeMap<String, (String, Value, std::process::Child)>);
-impl Drop for Media {
+struct OwnedChild(std::process::Child);
+impl Drop for OwnedChild {
     fn drop(&mut self) {
-        for (_, _, child) in self.0.values_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        let _ = self.0.kill();
+        let _ = self.0.wait();
     }
 }
+struct MediaWorker {
+    endpoint: String,
+    geometry: Value,
+    decoder: OwnedChild,
+    _transport: Option<OwnedChild>,
+}
+struct Media(std::collections::BTreeMap<String, MediaWorker>);
+
+fn video_bindings() -> Result<Value, String> {
+    let Ok(path) = std::env::var("CANVAS_MIRROR_VIDEO_BINDINGS") else {
+        return Ok(Value::Null);
+    };
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|_| "video bindings unavailable")?
+        .take(65537)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "video bindings read failed")?;
+    if bytes.len() > 65536 {
+        return Err("video bindings exceed bound".into());
+    }
+    serde_json::from_slice(&bytes).map_err(|_| "invalid video bindings".into())
+}
+
+fn unibus_video(id: &str, endpoint: &reqwest::Url, binding: &Value) -> Result<MediaWorker, String> {
+    let config = binding["client_config"]
+        .as_str()
+        .ok_or("missing media client config")?;
+    let stream = binding["stream_id"]
+        .as_str()
+        .ok_or("missing media stream")?;
+    let producer = binding["producer_id"]
+        .as_str()
+        .ok_or("missing media producer")?;
+    let generation = endpoint
+        .query_pairs()
+        .find(|(key, _)| key == "generation")
+        .map(|(_, value)| value.into_owned())
+        .ok_or("missing video generation")?;
+    let mut transport = OwnedChild(
+        Command::new("unibus-video")
+            .args(["receive", config, stream, producer, &generation])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|e| format!("video subscription: {e}"))?,
+    );
+    let mut input = transport.0.stdout.take().ok_or("missing video input")?;
+    // Read only the bounded header, never buffer/discard encoded bytes beyond it.
+    let mut bytes = Vec::new();
+    loop {
+        let mut byte = [0];
+        input
+            .read_exact(&mut byte)
+            .map_err(|_| "video header unavailable")?;
+        if byte[0] == b'\n' {
+            break;
+        }
+        bytes.push(byte[0]);
+        if bytes.len() > 4096 {
+            return Err("video header exceeds bound".into());
+        }
+    }
+    let header: Value = serde_json::from_slice(&bytes).map_err(|_| "invalid video header")?;
+    if header["generation"] != generation || header["codec"] != "h264" {
+        return Err("unexpected video generation/codec".into());
+    }
+    let output = Command::new("canvas-tv")
+        .args(["describe"])
+        .arg(header["width"].to_string())
+        .arg(header["height"].to_string())
+        .output()
+        .map_err(|_| "media geometry helper unavailable")?;
+    if !output.status.success() {
+        return Err("invalid video geometry".into());
+    }
+    let geometry: Value =
+        serde_json::from_slice(&output.stdout).map_err(|_| "invalid decoder geometry")?;
+    let decoder = OwnedChild(
+        Command::new("canvas-tv")
+            .args([id, "-"])
+            .arg(geometry["width"].to_string())
+            .arg(geometry["height"].to_string())
+            .stdin(Stdio::from(input))
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|e| format!("media decoder: {e}"))?,
+    );
+    Ok(MediaWorker {
+        endpoint: endpoint.to_string(),
+        geometry,
+        decoder,
+        _transport: Some(transport),
+    })
+}
+
 impl Media {
     fn prepare(&mut self, document: &mut Value) -> Result<(), String> {
         let mut wanted = std::collections::BTreeSet::new();
+        let bindings = video_bindings()?;
         for surface in document["surfaces"]
             .as_array_mut()
             .ok_or("missing surfaces")?
@@ -100,7 +197,10 @@ impl Media {
                     .ok_or("missing stream URL")?,
             )
             .map_err(|_| "invalid media URL")?;
-            if let Ok(origin) = std::env::var("CANVAS_MIRROR_MEDIA_ORIGIN") {
+            let binding = &bindings[surface["id"].as_str().ok_or("missing surface identity")?];
+            if binding.is_null()
+                && let Ok(origin) = std::env::var("CANVAS_MIRROR_MEDIA_ORIGIN")
+            {
                 let origin =
                     reqwest::Url::parse(&origin).map_err(|_| "invalid private media origin")?;
                 url.set_host(origin.host_str())
@@ -111,18 +211,27 @@ impl Media {
             wanted.insert(id.clone());
             let endpoint = url.to_string();
             let restart = match self.0.get_mut(&id) {
-                Some((previous, _, child)) => {
-                    *previous != endpoint || child.try_wait().map_err(|e| e.to_string())?.is_some()
+                Some(worker) => {
+                    worker.endpoint != endpoint
+                        || worker
+                            .decoder
+                            .0
+                            .try_wait()
+                            .map_err(|e| e.to_string())?
+                            .is_some()
                 }
                 None => true,
             };
-            if restart {
-                let geometry = if let Some((_, geometry, _)) = self
-                    .0
-                    .get(&id)
-                    .filter(|(previous, _, _)| *previous == endpoint)
+            if restart && !binding.is_null() {
+                self.0.remove(&id);
+                let worker = unibus_video(&id, &url, binding)?;
+                self.0.insert(id.clone(), worker);
+            }
+            if restart && binding.is_null() {
+                let geometry = if let Some(worker) =
+                    self.0.get(&id).filter(|worker| worker.endpoint == endpoint)
                 {
-                    geometry.clone()
+                    worker.geometry.clone()
                 } else {
                     let output = Command::new("canvas-tv")
                         .args(["describe", &endpoint])
@@ -134,10 +243,7 @@ impl Media {
                     serde_json::from_slice::<Value>(&output.stdout)
                         .map_err(|_| "invalid media geometry")?
                 };
-                if let Some((_, _, mut child)) = self.0.remove(&id) {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                }
+                self.0.remove(&id);
                 let child = Command::new("canvas-tv")
                     .args([&id, &endpoint])
                     .arg(geometry["width"].to_string())
@@ -147,20 +253,20 @@ impl Media {
                     .stderr(Stdio::inherit())
                     .spawn()
                     .map_err(|e| format!("media decoder: {e}"))?;
-                self.0.insert(id.clone(), (endpoint, geometry, child));
+                self.0.insert(
+                    id.clone(),
+                    MediaWorker {
+                        endpoint,
+                        geometry,
+                        decoder: OwnedChild(child),
+                        _transport: None,
+                    },
+                );
             }
-            let geometry = &self.0.get(&id).ok_or("missing media geometry")?.1;
+            let geometry = &self.0.get(&id).ok_or("missing media geometry")?.geometry;
             surface["content"] = json!({"kind":"live_video","source_id":id,"width":geometry["width"],"height":geometry["height"]});
         }
-        self.0.retain(|id, (_, _, child)| {
-            if wanted.contains(id) {
-                true
-            } else {
-                let _ = child.kill();
-                let _ = child.wait();
-                false
-            }
-        });
+        self.0.retain(|id, _| wanted.contains(id));
         Ok(())
     }
 }

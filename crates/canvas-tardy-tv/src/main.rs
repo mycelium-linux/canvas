@@ -131,6 +131,32 @@ fn relay(
     directory: &std::path::Path,
 ) -> Result<(), String> {
     let bytes = http(client, &reel.url, MEDIA_LIMIT)?;
+    if let Some(root) = std::env::var_os("CANVAS_TARDY_UNIBUS_SOURCE_DIR") {
+        let root = std::path::PathBuf::from(root);
+        std::fs::create_dir_all(&root).map_err(|_| "Unibus source directory unavailable")?;
+        // Promote complete content first, then its generation. A running
+        // FFmpeg keeps the old inode until the media adapter changes generation.
+        std::fs::write(root.join("current.mp4.incoming"), bytes)
+            .and_then(|_| {
+                std::fs::rename(root.join("current.mp4.incoming"), root.join("current.mp4"))
+            })
+            .map_err(|_| "Unibus media promotion failed")?;
+        let expires = reel
+            .generation
+            .saturating_add(reel.duration.as_millis())
+            .saturating_add(30_000);
+        let manifest =
+            json!({"generation":reel.generation.to_string(),"expires_at_unix_ms":expires});
+        std::fs::write(root.join("current.json.incoming"), manifest.to_string())
+            .and_then(|_| {
+                std::fs::rename(
+                    root.join("current.json.incoming"),
+                    root.join("current.json"),
+                )
+            })
+            .map_err(|_| "Unibus generation promotion failed")?;
+        return Ok(());
+    }
     let path = directory.join("reel.mp4");
     std::fs::write(&path, bytes).map_err(|_| "Local media cache failed")?;
     let destination = format!("{HOST}:{ROOT}/tardy-public.mp4");
@@ -180,7 +206,7 @@ fn patch(serial: &str, reel: Option<&Reel>, error: Option<&str>) -> Result<(), S
             Some("tardy-video") if reel.is_some() => {
                 let reel = reel.unwrap();
                 surface["title"] = json!("Tardy · public reel");
-                surface["content"] = json!({"kind":"stream","url":format!("http://192.168.2.67:18089/tardy-public.m3u8?post={}&generation={}",reel.id,reel.generation)});
+                surface["content"] = json!({"kind":"stream","url":reel_endpoint(reel)?});
             }
             Some("tardy-caption") => {
                 let spec = &mut surface["content"]["spec"];
@@ -211,6 +237,35 @@ fn patch(serial: &str, reel: Option<&Reel>, error: Option<&str>) -> Result<(), S
     let revision = doc["revision"].as_u64().ok_or("No document revision")?;
     let request = json!({"schema_version":1,"request_id":"tardy-public-feed","expected_revision":state["revision"],"command":{"command":"apply_patch","patch":{"schema_version":1,"workspace_id":doc["id"],"base_revision":revision,"revision":revision+1,"operations":operations}}});
     control(serial, &request.to_string()).map(|_| ())
+}
+
+fn reel_endpoint(reel: &Reel) -> Result<String, String> {
+    let base = std::env::var("CANVAS_TARDY_MEDIA_BASE")
+        .unwrap_or_else(|_| "http://192.168.2.67:18089/tardy-public.m3u8".into());
+    private_reel_endpoint(&base, &reel.id, reel.generation)
+}
+
+fn private_reel_endpoint(base: &str, id: &str, generation: u128) -> Result<String, String> {
+    let mut url = reqwest::Url::parse(base).map_err(|_| "Invalid private reel endpoint")?;
+    let host: std::net::Ipv4Addr = url
+        .host_str()
+        .ok_or("Missing reel host")?
+        .parse()
+        .map_err(|_| "Reel endpoint requires private IPv4")?;
+    if url.scheme() != "http"
+        || !host.is_private()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || url.query().is_some()
+        || !url.path().ends_with(".m3u8")
+    {
+        return Err("Expected a private HLS media-edge endpoint".into());
+    }
+    url.query_pairs_mut()
+        .append_pair("post", id)
+        .append_pair("generation", &generation.to_string());
+    Ok(url.to_string())
 }
 
 fn bounded_text(text: &str, maximum: usize) -> String {
@@ -481,6 +536,21 @@ fn main() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reel_media_edge_is_private_and_generation_bound() {
+        let endpoint =
+            private_reel_endpoint("http://192.168.2.74:18090/tardy-public.m3u8", "reel", 123)
+                .unwrap();
+        assert!(endpoint.ends_with("?post=reel&generation=123"));
+        for base in [
+            "http://8.8.8.8/a.m3u8",
+            "http://user@192.168.2.74/a.m3u8",
+            "http://192.168.2.74/a.m3u8?x=1",
+            "http://192.168.2.74/a.mp4",
+        ] {
+            assert!(private_reel_endpoint(base, "reel", 123).is_err());
+        }
+    }
     fn post(id: &str, url: &str) -> Value {
         json!({"id":id,"author_id":"author","caption":"caption","format":"reel","media":[{"type":"video","url":url,"duration_ms":20000}]})
     }
