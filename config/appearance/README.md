@@ -5,11 +5,11 @@ It is a static image: decoded once, retained and cover-scaled. Explicit workspac
 images, solid colors, gradients and shaders remain unchanged; unknown backgrounds
 still use the theme-gradient fallback. The screensaver remains independent.
 
-The original Rust distance-field kernel is owned by Mycelium:
-`fungOS/edge/theme/render-undergrowth.rs` (MIT OR Apache-2.0). Regenerate with:
+The original Rust distance-field kernel is owned by fungOS:
+`brand/render-undergrowth.rs` (MIT OR Apache-2.0). Regenerate with:
 
 ```sh
-rustc -O /path/to/mycelium/fungOS/edge/theme/render-undergrowth.rs -o /tmp/fungos-art
+rustc -O /path/to/fungos/brand/render-undergrowth.rs -o /tmp/fungos-art
 /tmp/fungos-art 1600 1000 /tmp/undergrowth.ppm
 ffmpeg -v error -y -i /tmp/undergrowth.ppm -frames:v 1 config/appearance/undergrowth.png
 ```

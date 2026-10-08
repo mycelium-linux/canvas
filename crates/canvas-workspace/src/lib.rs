@@ -272,7 +272,8 @@ pub enum ThemeRef {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum Background {
-    /// Derive the background gradient from the active Coherence project theme.
+    /// Use the renderer's default appearance. The desktop bundles Undergrowth;
+    /// other renderers may derive a gradient from the Coherence project theme.
     #[default]
     Theme,
     Solid {
