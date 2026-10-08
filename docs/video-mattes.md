@@ -29,7 +29,7 @@ acknowledgements are not implemented for these independent tiles.
 
 Color keying approximates silhouettes: objects matching the selected background
 inside a region can become transparent, and compressed edges can retain seams.
-Prefer exact separate alpha when a renderer produces it. Exclude PDF/text regions
+Prefer renderer coverage when available. Exclude PDF/text regions
 that must remain opaque. This capability is implemented on Android; it does not
 establish support on other Canvas hosts.
 
@@ -38,3 +38,19 @@ revision-checked workspace endpoint. Test with actual decoded frames and the
 target device. To revert, remove `matte` using another revision-checked upsert;
 the stream returns to VideoView. Remove the field before installing an older
 application that cannot deserialize it. Do not clear app data.
+
+Renderer coverage can travel in the same decoded frame as its color:
+
+```json
+{"source_size":[2560,960],"packed_alpha":true,"regions":[]}
+```
+
+The left half contains straight sRGB color, the right half grayscale linear
+coverage. `source_size` describes the encoded frame; its displayed size is
+1280×960. GFX packs transparent render readback and unpremultiplies in linear
+light. Its GLES shader samples both halves through the decoder texture transform
+and emits premultiplied RGBA. One decoder frame keeps color and alpha synchronized.
+Opaque black objects remain visible. Packed alpha requires even encoded width
+and an empty key-region list. H.264 transport is lossy, including the coverage
+plane; this is not a lossless RGBA format. Opaque renderer clear remains the
+default; the host opts into transparent clear before scheduling readbacks.

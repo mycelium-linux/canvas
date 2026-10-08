@@ -41,6 +41,7 @@ pub struct Renderer {
     fill_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
     mesh: Option<GpuMesh>,
+    transparent_background: bool,
 }
 
 impl Renderer {
@@ -205,7 +206,19 @@ impl Renderer {
             fill_pipeline,
             line_pipeline,
             mesh: None,
+            transparent_background: false,
         })
+    }
+
+    /// Opt in before submitting frames. Clear coverage to zero while preserving
+    /// the mesh shader's alpha; existing opaque renderers remain unchanged.
+    pub fn set_transparent_background(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            self.readbacks.iter().all(|slot| slot.pending.is_none()),
+            "cannot change coverage with frames in flight"
+        );
+        self.transparent_background = true;
+        Ok(())
     }
 
     pub fn upload(&mut self, mesh: &PreparedMesh) {
@@ -367,9 +380,13 @@ impl Renderer {
         {
             let color_view = self.color.create_view(&Default::default());
             let [r, g, b] = theme.palette.background;
-            let background = fpl_gfx::Color::from_srgb8(r, g, b, 255)
-                .to_array()
-                .map(f64::from);
+            let background = if self.transparent_background {
+                fpl_gfx::Color::TRANSPARENT
+            } else {
+                fpl_gfx::Color::from_srgb8(r, g, b, 255)
+            }
+            .to_array()
+            .map(f64::from);
 
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("model-pass"),
@@ -382,7 +399,11 @@ impl Renderer {
                             r: background[0],
                             g: background[1],
                             b: background[2],
-                            a: 1.0,
+                            a: if self.transparent_background {
+                                0.0
+                            } else {
+                                1.0
+                            },
                         }),
                         store: wgpu::StoreOp::Store,
                     },

@@ -127,6 +127,7 @@ final class MattedVideoView extends TextureView implements TextureView.SurfaceTe
             GLES20.glDeleteShader(vertex); GLES20.glDeleteShader(fragment);
             require(linked[0] != 0, "GFX video shader link: " + GLES20.glGetProgramInfoLog(program));
             GLES20.glUseProgram(program);
+            GLES20.glUniform1f(uniform("uPackedAlpha"), matte.optBoolean("packed_alpha", false) ? 1f : 0f);
             JSONArray regions = matte.getJSONArray("regions");
             GLES20.glUniform1i(uniform("uRegionCount"), regions.length());
             for (int i=0; i<regions.length(); i++) {
@@ -164,7 +165,8 @@ final class MattedVideoView extends TextureView implements TextureView.SurfaceTe
                 if (w != size.getInt(0) || h != size.getInt(1)) {
                     stopWithError("Decoded dimensions " + w + "x" + h + " differ from matte source"); return false;
                 }
-                sourceWidth = w; sourceHeight = h; return true;
+                sourceWidth = matte.optBoolean("packed_alpha", false) ? w / 2 : w;
+                sourceHeight = h; return true;
             } catch (Exception error) { failure(error); release(); return false; }
         }
         private void stopWithError(String message) {
