@@ -87,6 +87,7 @@ public final class TvActivity extends Activity {
         return "television".equals(currentProjectId) && !tunerEndpoint.isEmpty();
     }
     private GpuBackground background;
+    private ImageView themeWallpaper;
     private VideoView video;
     private TextView status;
     private FrameLayout frame;
@@ -657,6 +658,13 @@ public final class TvActivity extends Activity {
             | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
         frame = new FrameLayout(this);
         frame.setBackgroundColor(0xff000000);
+        themeWallpaper = new ImageView(this);
+        themeWallpaper.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        int wallpaper = getResources().getIdentifier("undergrowth", "drawable", getPackageName());
+        if (wallpaper == 0) throw new IllegalStateException("Bundled Undergrowth wallpaper missing");
+        themeWallpaper.setImageResource(wallpaper);
+        themeWallpaper.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        frame.addView(themeWallpaper, new FrameLayout.LayoutParams(-1, -1));
         background = new GpuBackground();
         frame.addView(background, new FrameLayout.LayoutParams(-1, -1));
         video = new VideoView(this);
@@ -1460,7 +1468,11 @@ public final class TvActivity extends Activity {
                 return;
             }
             frame.setBackgroundColor(Color.parseColor(palette.getString("background")));
-            background.configure(projection.getJSONObject("document"), palette);
+            JSONObject document = projection.getJSONObject("document");
+            JSONObject backgroundSpec = document.optJSONObject("background");
+            themeWallpaper.setVisibility(backgroundSpec == null || "theme".equals(backgroundSpec.optString("kind"))
+                ? View.VISIBLE : View.GONE);
+            background.configure(document, palette);
             ShellChrome.bar(workspaceSelector, palette);
             ShellChrome.bar(selector, palette);
             styleControl(muteButton, palette, false);
