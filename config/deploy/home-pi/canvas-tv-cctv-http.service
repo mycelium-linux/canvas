@@ -1,0 +1,16 @@
+[Unit]
+Description=Serve Canvas TV CCTV HLS to the paired TV
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ajm
+RuntimeDirectory=canvas-tv-cctv
+RuntimeDirectoryMode=0755
+ExecStart=/usr/bin/busybox httpd -f -c /home/ajm/.config/canvas/tv-cctv/httpd.conf -p 192.168.2.74:18090 -h /run/canvas-tv-cctv
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

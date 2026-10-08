@@ -76,6 +76,25 @@ tuner admission check enforce that scope before any catalog/tune request.
 
 ## Security
 
+Security opens on the Cameras page. CAT is relayed from Frigate's existing
+`cat_sub` restream as HLS because the TV presentation endpoint accepts private
+LAN HTTP streams, not RTSP URLs. The separate Fleet page retains the Mycelium
+status view. DOOR currently displays an offline panel while camera2
+(`192.168.30.13`) is unreachable and Frigate reports zero frames. Do not replace
+that panel with a stale snapshot or a playback error. Once the camera is
+reachable and `door_sub` probes successfully, enable the `canvas-tv-cctv@door`
+relay, change the DOOR surface to `http://192.168.2.74:18090/door.m3u8`, and
+verify moving video on the TV.
+
+The home-pi relay units are
+`config/deploy/home-pi/canvas-tv-cctv-http.service` and
+`canvas-tv-cctv@.service`. Install their HTTP allowlist as
+`/home/ajm/.config/canvas/tv-cctv/httpd.conf`; it admits only the TV and local
+loopback. The HTTP unit owns `/run/canvas-tv-cctv`, and the CAT FFmpeg unit
+copies H.264 from the existing restream into short HLS segments. Both units are
+enabled on home-pi. The TV's retained Security document was updated through
+revision-bound workspace operations, preserving the other installed projects.
+
 `canvas-security-status` calls Mycelium's existing read-only `security status
 --json` and `security events --json` commands and emits a generic status-list
 projection. It performs no scan, discovery, remediation, or credential handling.
