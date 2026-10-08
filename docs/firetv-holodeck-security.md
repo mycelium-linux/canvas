@@ -78,22 +78,29 @@ tuner admission check enforce that scope before any catalog/tune request.
 
 Security opens on the Cameras page. CAT is relayed from Frigate's existing
 `cat_sub` restream as HLS because the TV presentation endpoint accepts private
-LAN HTTP streams, not RTSP URLs. The separate Fleet page retains the Mycelium
-status view. DOOR currently displays an offline panel while camera2
-(`192.168.30.13`) is unreachable and Frigate reports zero frames. Do not replace
-that panel with a stale snapshot or a playback error. Once the camera is
-reachable and `door_sub` probes successfully, enable the `canvas-tv-cctv@door`
-relay, change the DOOR surface to `http://192.168.2.74:18090/door.m3u8`, and
-verify moving video on the TV.
+LAN HTTP streams, not RTSP URLs. DOOR uses the same relay from `door_sub` at
+`http://192.168.2.74:18090/door.m3u8`. The separate Fleet page retains the
+Mycelium status view. Camera2 is on the untagged TV LAN with static address
+`192.168.2.13/24`, gateway `192.168.2.1`; Frigate's four DOOR source paths
+point there. The old CCTV reservation `192.168.30.13` is no longer the live
+address. Camera2 uses `time.cloudflare.com` for NTP, Pacific standard time,
+and daylight saving time. If the feed fails, check Frigate's DOOR camera FPS,
+probe `door_sub`, and confirm the TV can fetch the HLS playlist before changing
+its surface.
 
 The home-pi relay units are
 `config/deploy/home-pi/canvas-tv-cctv-http.service` and
 `canvas-tv-cctv@.service`. Install their HTTP allowlist as
 `/home/ajm/.config/canvas/tv-cctv/httpd.conf`; it admits only the TV and local
-loopback. The HTTP unit owns `/run/canvas-tv-cctv`, and the CAT FFmpeg unit
-copies H.264 from the existing restream into short HLS segments. Both units are
-enabled on home-pi. The TV's retained Security document was updated through
-revision-bound workspace operations, preserving the other installed projects.
+loopback. The HTTP unit owns `/run/canvas-tv-cctv`, and the FFmpeg units
+copy H.264 from the existing restreams into short HLS segments. Both camera
+relay units and the HTTP unit are enabled on home-pi. The TV's retained
+Security document was updated through revision-bound workspace operations,
+preserving the other installed projects.
+
+The relay template uses `Restart=always` because FFmpeg can exit successfully
+when Frigate restarts and closes an RTSP session; otherwise that camera remains
+stopped after Frigate recovers.
 
 `canvas-security-status` calls Mycelium's existing read-only `security status
 --json` and `security events --json` commands and emits a generic status-list

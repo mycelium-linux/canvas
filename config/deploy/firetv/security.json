@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "tv-security",
   "project_id": "security",
-  "revision": 2,
+  "revision": 3,
   "theme": {"source": "project"},
   "chrome": {"title": "hidden", "canvas_padding": 12, "surface_gap": 12},
   "surfaces": [
@@ -11,9 +11,7 @@
       "data": {"state": "loading", "source": "mycelium security", "detail": "Waiting for owner telemetry"}
     }}},
     {"id": "cat", "title": "CAT", "content": {"kind": "stream", "url": "http://192.168.2.74:18090/cat.m3u8"}},
-    {"id": "door", "title": "DOOR · OFFLINE", "content": {"kind": "scene", "scene": {"nodes": [
-      {"id": "offline", "content": {"kind": "text", "text": "Door camera offline at source · awaiting network recovery"}}
-    ]}}}
+    {"id": "door", "title": "DOOR", "content": {"kind": "stream", "url": "http://192.168.2.74:18090/door.m3u8"}}
   ],
   "layout": {"kind": "canvas", "placements": [
     {"surface_id": "cat", "bounds": {"x": 0.02, "y": 0.03, "width": 0.63, "height": 0.94}, "layer": 0},
