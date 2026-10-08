@@ -219,3 +219,21 @@ delivery expiry and preserve the exported owner observation/stale metadata.
 The transport runbook is in Unibus's `docs/stream-json.md`. Video remains on
 the existing private HLS/media path; only presentation/layout/task state moved
 in this slice. Desktop navigation is still read-only relative to the TV.
+
+### Recovery checks
+
+Check Home-Pi's `unibus-router.service` (not `unibusd`) and its loopback
+listener on 18790. On Neo, restart only the presentation tunnel, publisher,
+and dashboard mirror LaunchAgents if their connections are broken. The source
+must have Tardy selected: another TV workspace intentionally pauses publication.
+Restart `dev.fpl.canvas-tv-tardy` if captions stop updating after ADB reconnects.
+Verify Canvas's event count increases and capture a renderer screenshot; an
+owner's transient snapshot can still report `no_data` while the document renders
+a ready caption, so verify presentation as well as transport status.
+
+For `media geometry unavailable`, check Agora's media HTTP listener, not just
+the FFmpeg producer. Install `config/deploy/agora-one/canvas-tv-media-http.service`
+into Agora's user systemd directory and enable it. It serves only the existing
+media directory on the private LAN address. Verify `/tardy-public.m3u8` returns
+HTTP 200 both on that address and through Neo's loopback media tunnel on 18089.
+Do not expose this unauthenticated media edge to the public Internet.

@@ -1,0 +1,13 @@
+[Unit]
+Description=Private LAN Canvas TV HLS media edge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/busybox httpd -f -p 192.168.2.67:18089 -h /home/ajmwagar/.local/share/canvas-tv-hls
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target
