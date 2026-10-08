@@ -350,16 +350,41 @@ pub fn cube_button_style(
     active: bool,
     status: button::Status,
 ) -> button::Style {
-    let mut style = action_style(visual, active, false, status);
-    style.background = style.background.map(|background| match background {
-        iced::Background::Color(mut color) => {
-            color.a = if active { 0.94 } else { 0.76 };
-            iced::Background::Color(color)
-        }
-        other => other,
-    });
-    style.border.radius = visual.metrics.radius_xs.into();
-    style
+    // The same canonical face is visited by Android's raster adapter. Iced
+    // retains labels and input, while GFX owns shape and state semantics.
+    let shapes = fpl_gfx::ShapeTheme {
+        radius_small: visual.metrics.radius_sm,
+        radius_large: visual.metrics.radius_lg,
+        outline_width: 1.0,
+    };
+    let face = fpl_gfx::chrome::control_face(
+        fpl_gfx::Rect::new(0.0, 0.0, 100.0, 32.0),
+        shapes,
+        fpl_gfx::chrome::ControlState {
+            selected: active,
+            focused: status == button::Status::Hovered,
+            pressed: status == button::Status::Pressed,
+            disabled: status == button::Status::Disabled,
+        },
+    ).expect("validated Canvas chrome metrics");
+    let ink = |role| match role {
+        fpl_gfx::ThemeRole::SurfaceRaised => rgb(visual.palette.surface_muted),
+        fpl_gfx::ThemeRole::Primary => rgb(visual.palette.primary),
+        fpl_gfx::ThemeRole::Outline => rgb(visual.palette.border),
+        _ => rgb(visual.palette.surface),
+    };
+    button::Style {
+        background: Some(ink(face.fill).into()),
+        text_color: rgb(if status == button::Status::Disabled {
+            visual.palette.text_muted
+        } else { visual.palette.text }),
+        border: iced::Border {
+            color: ink(face.outline),
+            width: face.outline_width,
+            radius: face.radius.into(),
+        },
+        ..Default::default()
+    }
 }
 
 /// Borderless shell control, sharing the same Coherence state colors as app
@@ -369,12 +394,13 @@ pub fn quiet_button_style(
     active: bool,
     status: button::Status,
 ) -> button::Style {
-    let mut style = action_style(visual, active, false, status);
+    let mut style = cube_button_style(visual, active, status);
     if !active && !matches!(status, button::Status::Hovered | button::Status::Pressed) {
         style.background = None;
     }
-    style.border.width = if active { 1.0 } else { 0.0 };
-    style.border.radius = visual.metrics.radius_md.into();
+    if !active && !matches!(status, button::Status::Hovered | button::Status::Pressed) {
+        style.border.width = 0.0;
+    }
     style
 }
 
@@ -426,8 +452,20 @@ mod tests {
         assert!(hovered.background.is_some());
         assert!(selected.background.is_some());
         assert_eq!(idle.border.width, 0.0);
-        assert_eq!(hovered.border.width, 0.0);
+        assert_eq!(hovered.border.width, 2.0);
         assert_ne!(disabled.text_color, idle.text_color);
+    }
+
+    #[test]
+    fn shell_controls_respect_live_shape_tokens() {
+        let mut visual = canvas_core::ThemeSelection::coherence(
+            canvas_core::ThemeMode::Dark, canvas_core::Accent::Brand,
+        ).visual_theme();
+        visual.metrics.radius_sm = 9.0;
+        let style = cube_button_style(visual, true, button::Status::Active);
+        assert_eq!(style.border.radius, iced::border::Radius::from(9.0));
+        assert_eq!(quiet_button_style(visual, false, button::Status::Hovered).border.radius,
+            style.border.radius);
     }
 
     #[test]

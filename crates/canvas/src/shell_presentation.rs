@@ -246,7 +246,10 @@ mod tests {
                 }
             }
             let encoded = serde_json::to_string(&output.scene).unwrap();
-            assert!(encoded.contains("SOURCES") == (width >= 750.0));
+            assert!(encoded.contains("sources") == (width >= 750.0));
+            assert!(!output.buttons.iter().any(|b| b.id == "create"));
+            assert!(encoded.contains("12:34") == (width >= 360.0));
+            assert!(!encoded.contains("12:34:56"));
             assert!(!encoded.contains("LIVE"));
             assert!(encoded.contains("\"opacity\":1.0"));
         }

@@ -74,6 +74,14 @@ Omitting `appearance` preserves the standard treatment. Unknown appearances are
 rejected; arbitrary CSS/colors/callbacks are not part of the Lua button API.
 This requires the updated native host before installing the new Lua files.
 
+Standard and quiet shell controls now share `fpl_gfx::chrome::control_face`.
+GFX owns the selected/focused/pressed/disabled shape semantics; the native
+adapter supplies Canvas's resolved shape metrics and palette. Quiet controls
+omit their resting face but retain the canonical focus outline. Styling is
+allocation-free: no temporary GPU scene is created for a button state lookup.
+Android visits the same canonical geometry through retained paint records;
+sharing geometry does not require every platform to use the same GPU backend.
+
 ## Window switching
 
 Shell layouts now use `widget.pixel_space(width, height)` for logical-pixel
