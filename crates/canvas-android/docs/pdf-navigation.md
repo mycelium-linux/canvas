@@ -20,8 +20,8 @@ an app restart requires MENU because no previous workspace exists in memory.
 
 An optional `files/assets/PDF_SHA256.viewports.json` contains schema version 1,
 the exact `pdf_sha256`, and ordered `pages` entries with normalized `[x,y,w,h]`
-`bbox` values and `source_sha256`. Rust requires a regular file of at most64KiB,
-at most512 nonempty regions, finite in-page rectangles and lowercase digests.
+`bbox` values and `source_sha256`. Rust requires a regular file of at most 64 KiB,
+at most 512 nonempty regions, finite in-page rectangles and lowercase digests.
 Android additionally requires the PDF page count to match. Bad metadata is a
 visible error; it cannot silently substitute a guessed drawing crop.
 
