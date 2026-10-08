@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>dev.fpl.canvas-dashboard-mirror</string>
+<key>ProgramArguments</key><array><string>/bin/bash</string><string>-c</string><string>set -o pipefail; canvas-presentation-mirror follow 192.168.2.97:5555 | tee &gt;(canvas-presentation-mirror receive) | ssh -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 ajmwagar@100.108.9.93 'PATH=/Users/ajmwagar/.local/bin:/opt/homebrew/bin:/usr/bin:/bin CANVAS_MIRROR_MEDIA_ORIGIN=http://127.0.0.1:18089 /Users/ajmwagar/.local/bin/canvas-presentation-mirror receive'</string></array>
+<key>EnvironmentVariables</key><dict><key>PATH</key><string>/Users/ajmwagar/.local/bin:/opt/homebrew/bin:/usr/bin:/bin</string><key>CANVAS_MIRROR_MEDIA_ORIGIN</key><string>http://127.0.0.1:18089</string></dict>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer>
+<key>StandardErrorPath</key><string>/Users/ajmwagar/.local/share/canvas-android/dashboard-mirror.log</string>
+<key>StandardOutPath</key><string>/Users/ajmwagar/.local/share/canvas-android/dashboard-mirror.log</string>
+</dict></plist>

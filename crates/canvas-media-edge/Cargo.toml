@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Headless Unibus media-plane adapter for native Canvas camera surfaces"
 
+[features]
+default = ["native-window-capture"]
+native-window-capture = ["dep:screencapturekit"]
+
 [dependencies]
 anyhow.workspace = true
 canvas = { workspace = true }
@@ -14,7 +18,7 @@ serde_json.workspace = true
 unibus-media = { path = "../../../unibus/crates/unibus-media" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-screencapturekit = { version = "11", features = ["macos_15_0"] }
+screencapturekit = { version = "11", features = ["macos_15_0"], optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -42,7 +46,9 @@ path = "src/bin/simulator.rs"
 [[bin]]
 name = "canvas-window-stream"
 path = "src/bin/window.rs"
+required-features = ["native-window-capture"]
 
 [[bin]]
 name = "canvas-native-window"
 path = "src/bin/native-window.rs"
+required-features = ["native-window-capture"]

@@ -19,7 +19,7 @@ use unibus_media::{
 
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "native-window-capture"))]
 pub mod native_window;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

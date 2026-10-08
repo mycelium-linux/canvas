@@ -150,6 +150,50 @@ The APK change is only the shared `canvas-menu.json` asset. No JNI/video rebuild
 is needed for this adapter.
 # Shared presentation export
 
+## Neo and Studio mirrors
+
+`canvas-presentation-mirror follow ADB_SERIAL` emits bounded presentation
+snapshots from the authenticated TV endpoint. `canvas-presentation-mirror receive`
+consumes those snapshots on a desktop: it imports changed layouts through
+Canvas control and sends only transient WidgetKind/data snapshots through
+`canvas.widget.snapshot.v1`. Existing Canvas digest-verified chunking handles
+macOS's datagram limit; neither task lists nor captions are trimmed to fit.
+The receiver keeps only the latest pending generation. Seven seconds without
+delivery marks retained panels stale, independently of owner observation age.
+
+This first deployment mirrors Tardy only. TV remote selection/expansion is
+authoritative; Neo and Studio are read-only mirrors, not extra approval agents.
+It is presentation synchronization, not frame-locked video playback. Each
+desktop decodes the same reel privately and preserves its normalized placement.
+Studio uses only its primary output. Canvas's desktop shell remains local.
+
+The bootstrap backhaul is explicit private SSH, **not yet Unibus network
+fan-out**. Mycelium locates hosts; it does not own view state or authorization.
+No public listener, new discovery service, or widened media HTTP allowlist is
+introduced. `CANVAS_MIRROR_MEDIA_ORIGIN=http://127.0.0.1:18089` selects the
+operator-owned SSH media tunnel. The independent `canvas-tv` decoder reports
+source-derived geometry with `describe PRIVATE_URL`; that same width/height is
+passed explicitly to the decoder and Canvas surface. Portrait reels therefore
+stay portrait rather than being padded into a landscape frame. The receiver
+never guesses stride/resolution.
+Build it with `--no-default-features` to avoid unrelated macOS capture SDKs;
+normal capture builds retain their existing default feature.
+
+Manual recovery (installed paths):
+
+1. Inspect TV with `canvasctl --android 192.168.2.97:5555`; select Tardy there.
+2. On each desktop, verify `canvasctl` and the Canvas app are a matched build.
+3. Restart `dev.fpl.canvas-dashboard-media-tunnel` on Neo and Studio.
+4. Restart Neo's `dev.fpl.canvas-dashboard-mirror`, which fans one source into
+   the local receiver and Studio's receiver. LaunchAgent definitions are in
+   `config/deploy/neo/`; credentials remain in existing ADB/SSH owner storage.
+5. Use Canvas's `screenshot` control request for renderer verification; OS
+   capture can omit protected windows. Check mirror logs for rejected frames.
+
+Do not put transient snapshots into `workspaces.json`, or mark a repeated
+delivery as a new owner observation. Switching the TV away from Tardy pauses
+this mirror and leaves the retained desktop agent panels visibly stale.
+
 The authenticated presentation endpoint accepts `read_presentation` without a
 mutation revision. It returns the active document plus a `surfaces` map of
 transient signal/status snapshots, including task selection and expansion.

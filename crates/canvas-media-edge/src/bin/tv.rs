@@ -1,16 +1,17 @@
 //! Decode an operator-selected LAN television endpoint into Canvas's native frame plane.
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use canvas_media_edge::{
-    gstreamer_raw_plan, publish_frame_size, write_raw_frame, DecodePolicy, HardwareDecoder,
-    RawVideoPlan,
+    DecodePolicy, HardwareDecoder, RawVideoPlan, gstreamer_raw_plan, publish_frame_size,
+    write_raw_frame,
 };
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
-use unibus_media::{CameraStream, TransportRole, VideoCodec, VideoTransport, MEDIA_SCHEMA_VERSION};
+use unibus_media::{CameraStream, MEDIA_SCHEMA_VERSION, TransportRole, VideoCodec, VideoTransport};
 
 // Macroblock-aligned in both dimensions for Pi decoder/converter negotiation.
 const WIDTH: u32 = 1024;
 const HEIGHT: u32 = 576;
+#[cfg(test)]
 const FRAME_BYTES: usize = WIDTH as usize * HEIGHT as usize * 4;
 
 struct Decoder(Child);
@@ -40,31 +41,60 @@ fn validate_endpoint(endpoint: &str) -> Result<()> {
         address.is_private() || address.is_loopback(),
         "only private LAN endpoints are accepted"
     );
+    let plain_path = path.split('?').next().unwrap_or_default();
+    let hls = plain_path.ends_with(".m3u8");
     ensure!(
-        path.starts_with("auto/v") || path.starts_with("tuner0/v") || path.starts_with("tuner1/v"),
-        "expected an HDHomeRun channel path"
+        hls || path.starts_with("auto/v")
+            || path.starts_with("tuner0/v")
+            || path.starts_with("tuner1/v"),
+        "expected a private HLS playlist or HDHomeRun channel"
     );
     ensure!(
-        !path.contains(['?', '#']) && !path.contains(".."),
-        "invalid channel path"
+        !path.contains('#') && !path.contains("..") && (hls || !path.contains('?')),
+        "invalid media path"
     );
     Ok(())
 }
 
 fn main() -> Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if arguments.first().is_some_and(|s| s == "describe") && arguments.len() <= 2 {
+        let (width, height) = if let Some(endpoint) = arguments.get(1) {
+            stream_geometry(endpoint)?
+        } else {
+            (WIDTH, HEIGHT)
+        };
+        println!("{}", serde_json::json!({"width":width,"height":height}));
+        return Ok(());
+    }
     ensure!(
-        arguments.len() == 2,
-        "usage: canvas-tv <source-id> <http://LAN:5004/auto/vCHANNEL | udp://LAN:PORT>"
+        arguments.len() == 2 || arguments.len() == 4,
+        "usage: canvas-tv <source-id> <private URL> [width height]"
     );
     let source = &arguments[0];
     if arguments[1].starts_with("udp://") {
         return run_hardware(source, &arguments[1]);
     }
     validate_endpoint(&arguments[1])?;
+    let (width, height) = if arguments.len() == 4 {
+        (arguments[2].parse::<u32>()?, arguments[3].parse::<u32>()?)
+    } else {
+        (WIDTH, HEIGHT)
+    };
+    ensure!(
+        (16..=4096).contains(&width) && (16..=4096).contains(&height),
+        "invalid frame geometry"
+    );
+    let frame_bytes = (u64::from(width) * u64::from(height) * 4) as usize;
+    ensure!(
+        frame_bytes <= canvas_media_edge::MAX_FRAME_BYTES,
+        "frame allocation exceeds bound"
+    );
     // One geometry owns the sidecar, decoder output, frame length and Canvas texture.
-    publish_frame_size(source, WIDTH, HEIGHT)?;
-    let filter = format!("yadif=mode=send_frame:deint=interlaced,scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24");
+    publish_frame_size(source, width, height)?;
+    let filter = format!(
+        "yadif=mode=send_frame:deint=interlaced,scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24"
+    );
     let mut decoder = Decoder(
         Command::new("ffmpeg")
             .args([
@@ -88,15 +118,61 @@ fn main() -> Result<()> {
             .context("start FFmpeg television decoder")?,
     );
     let mut output = decoder.0.stdout.take().context("decoder stdout missing")?;
-    let mut frame = vec![0; FRAME_BYTES];
+    let mut frame = vec![0; frame_bytes];
     loop {
         output
             .read_exact(&mut frame)
             .context("television decoder stopped before a complete frame")?;
         // No unbounded frame queue and no SD-card writes: the shared publisher
         // atomically replaces a single frame in XDG_RUNTIME_DIR.
-        write_raw_frame(source, FRAME_BYTES, &frame)?;
+        write_raw_frame(source, frame_bytes, &frame)?;
     }
+}
+
+fn fit_geometry(width: u32, height: u32) -> Result<(u32, u32)> {
+    ensure!(
+        (16..=8192).contains(&width) && (16..=8192).contains(&height),
+        "invalid source geometry"
+    );
+    let scale = (1024.0 / f64::from(width.max(height))).min(1.0);
+    Ok((
+        ((f64::from(width) * scale) as u32).max(16) & !1,
+        ((f64::from(height) * scale) as u32).max(16) & !1,
+    ))
+}
+
+fn stream_geometry(endpoint: &str) -> Result<(u32, u32)> {
+    validate_endpoint(endpoint)?;
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-rw_timeout",
+            "3000000",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "json",
+            endpoint,
+        ])
+        .output()
+        .context("probe private media geometry")?;
+    ensure!(
+        output.status.success() && output.stdout.len() <= 65536,
+        "private media probe failed"
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let width: u32 = value["streams"][0]["width"]
+        .as_u64()
+        .context("missing video width")?
+        .try_into()?;
+    let height: u32 = value["streams"][0]["height"]
+        .as_u64()
+        .context("missing video height")?
+        .try_into()?;
+    fit_geometry(width, height)
 }
 
 fn hardware_plan(source: &str, endpoint: &str) -> Result<RawVideoPlan> {
@@ -168,6 +244,7 @@ mod tests {
     #[test]
     fn endpoint_is_private_and_explicit() {
         assert!(validate_endpoint("http://192.168.2.74:5004/auto/v4.1").is_ok());
+        assert!(validate_endpoint("http://127.0.0.1:18089/tardy-public.m3u8?generation=2").is_ok());
         for url in [
             "http://example.com/auto/v4.1",
             "http://8.8.8.8/auto/v4.1",
@@ -182,6 +259,13 @@ mod tests {
     fn geometry_matches_tightly_packed_rgba() {
         assert_eq!(FRAME_BYTES, 2_359_296);
         assert_eq!((WIDTH * 4) % 256, 0);
+    }
+    #[test]
+    fn portrait_and_landscape_preserve_aspect_and_bound_pixels() {
+        assert_eq!(fit_geometry(1080, 1920).unwrap(), (576, 1024));
+        assert_eq!(fit_geometry(1920, 1080).unwrap(), (1024, 576));
+        assert_eq!(fit_geometry(360, 640).unwrap(), (360, 640));
+        assert!(fit_geometry(0, 100).is_err());
     }
     #[test]
     fn hardware_uses_shared_geometry_and_bounded_queue() {
