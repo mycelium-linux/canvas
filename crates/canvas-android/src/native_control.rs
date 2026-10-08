@@ -359,7 +359,7 @@ pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativePdfAsset(
     _class: jni::objects::JClass,
     raw: jni::objects::JString,
 ) -> jni::sys::jstring {
-    let result = (|| -> Result<String, String> {
+    let result = (|| -> Result<serde_json::Value, String> {
         let raw: String = env.get_string(&raw).map_err(|e| e.to_string())?.into();
         let asset =
             serde_json::from_str::<canvas_workspace::AssetRef>(&raw).map_err(|e| e.to_string())?;
@@ -367,10 +367,12 @@ pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativePdfAsset(
             .get()
             .and_then(|path| path.parent())
             .ok_or("App asset store unavailable")?;
-        crate::assets::verified_pdf(root, &asset).map(|path| path.to_string_lossy().into_owned())
+        let path = crate::assets::verified_pdf(root, &asset)?;
+        let viewports = crate::assets::verified_pdf_viewports(root, &asset)?;
+        Ok(serde_json::json!({"path":path.to_string_lossy(),"viewports":viewports}))
     })();
     let reply = match result {
-        Ok(path) => serde_json::json!({"path":path}),
+        Ok(value) => value,
         Err(error) => serde_json::json!({"error":error}),
     };
     string(&mut env, reply.to_string())

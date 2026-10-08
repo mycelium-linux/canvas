@@ -485,7 +485,7 @@ public final class TvActivity extends Activity {
         private final FrameLayout scroll;
         private final LinearLayout controls;
         private final TextView label;
-        private final Button previous, next, sizing;
+        private final Button previous, next, sizing, fitSheet, fitDrawing;
         private final String asset;
         private final String title;
         private final int rasterWidth;
@@ -502,29 +502,37 @@ public final class TvActivity extends Activity {
             setOrientation(VERTICAL);
             // The page is opaque paper; unused fit/scroll bounds are not chrome.
             setBackgroundColor(Color.TRANSPARENT);
-            image = new PdfPageView(TvActivity.this, () -> updateZoomLabel());
+            image = new PdfPageView(TvActivity.this, Color.parseColor(palette.getString("surface")),
+                Color.parseColor(palette.getString("text")), () -> updateZoomLabel());
             scroll = new FrameLayout(TvActivity.this);
             scroll.addView(image, new FrameLayout.LayoutParams(-1, -1));
             addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
             controls = new LinearLayout(TvActivity.this);
             controls.setGravity(Gravity.CENTER_VERTICAL);
-            previous = new Button(TvActivity.this); previous.setText("‹");
-            next = new Button(TvActivity.this); next.setText("›");
-            sizing = new Button(TvActivity.this); sizing.setTextSize(12);
-            sizing.setText("Fit");
+            previous = new Button(TvActivity.this); previous.setText("Previous");
+            next = new Button(TvActivity.this); next.setText("Next");
+            fitSheet = new Button(TvActivity.this); fitSheet.setText("Fit sheet");
+            fitDrawing = new Button(TvActivity.this); fitDrawing.setText("Fit drawing");
+            sizing = new Button(TvActivity.this); sizing.setText("Zoom");
             styleControl(previous, palette, false); styleControl(next, palette, false);
             styleControl(sizing, palette, false);
-            label = new TextView(TvActivity.this); label.setTextSize(12);
+            styleControl(fitSheet, palette, false); styleControl(fitDrawing, palette, false);
+            for (Button control : new Button[]{previous,next,sizing,fitSheet,fitDrawing}) control.setTextSize(18);
+            label = new TextView(TvActivity.this); label.setTextSize(16);
             label.setGravity(Gravity.CENTER);
             label.setTextColor(Color.parseColor(palette.getString("text")));
-            controls.addView(previous, new LinearLayout.LayoutParams(80, -1));
+            controls.addView(previous, new LinearLayout.LayoutParams(dp(112), -1));
             controls.addView(label, new LinearLayout.LayoutParams(0, -1, 1));
-            controls.addView(sizing, new LinearLayout.LayoutParams(dp(72), -1));
-            controls.addView(next, new LinearLayout.LayoutParams(80, -1));
-            addView(controls, new LinearLayout.LayoutParams(-1, dp(28)));
+            controls.addView(fitSheet, new LinearLayout.LayoutParams(dp(128), -1));
+            controls.addView(fitDrawing, new LinearLayout.LayoutParams(dp(148), -1));
+            controls.addView(sizing, new LinearLayout.LayoutParams(dp(104), -1));
+            controls.addView(next, new LinearLayout.LayoutParams(dp(96), -1));
+            addView(controls, new LinearLayout.LayoutParams(-1, dp(56)));
             previous.setOnClickListener(v -> render(pageIndex - 1));
             next.setOnClickListener(v -> render(pageIndex + 1));
             sizing.setOnClickListener(v -> toggleSizing());
+            fitSheet.setOnClickListener(v -> { image.fit(); image.requestFocus(); });
+            fitDrawing.setOnClickListener(v -> { image.fitDrawing(); image.requestFocus(); });
             render(0);
         }
 
@@ -536,13 +544,14 @@ public final class TvActivity extends Activity {
         private void updateZoomLabel() {
             if (sizing == null) return;
             if (failedPage >= 0) { render(failedPage); return; }
-            sizing.setText(image.mode());
+            sizing.setText("Zoom");
             label.setText(title + " · " + (pageIndex + 1) + " / " + pageCount
-                + " · OK zoom · arrows pan · ⏪/⏩ sheet · BACK fit/return");
+                + " · " + image.mode() + "\nOK zoom | arrows pan | Rewind / Fast-forward sheet | BACK fit / return");
         }
 
-        private void applyPageBounds(Bitmap page) {
-            image.page(page);
+        private void applyPageBounds(Bitmap page, double[] bounds) {
+            image.page(page, bounds);
+            fitDrawing.setEnabled(bounds != null);
         }
 
         boolean remote(int key, KeyEvent event) {
@@ -583,6 +592,14 @@ public final class TvActivity extends Activity {
                              PdfRenderer renderer = new PdfRenderer(file)) {
                             final int count = renderer.getPageCount();
                             if (requested >= count) throw new IllegalArgumentException("Page out of range");
+                            double[] bounds=null;
+                            if (!verified.isNull("viewports") && verified.has("viewports")) {
+                                JSONArray regions=verified.getJSONObject("viewports").getJSONArray("pages");
+                                if(regions.length()!=count)throw new IllegalArgumentException("Drawing bounds page count mismatch");
+                                JSONArray rectangle=regions.getJSONObject(requested).getJSONArray("bbox");
+                                bounds=new double[]{rectangle.getDouble(0),rectangle.getDouble(1),rectangle.getDouble(2),rectangle.getDouble(3)};
+                            }
+                            final double[] drawingBounds=bounds;
                             try (PdfRenderer.Page page = renderer.openPage(requested)) {
                                 float scale = Math.min((float)rasterWidth / page.getWidth(), 2560f / page.getHeight());
                                 result = Bitmap.createBitmap(Math.max(1, (int)(page.getWidth() * scale)),
@@ -594,7 +611,7 @@ public final class TvActivity extends Activity {
                             runOnUiThread(() -> {
                                 if (disposed || generation != ticket) { ready.recycle(); return; }
                                 controls.setVisibility(count == 1 ? View.GONE : View.VISIBLE);
-                                applyPageBounds(ready);
+                                applyPageBounds(ready,drawingBounds);
                                 // The viewport holds this single verified raster.
                                 if (bitmap != null) bitmap.recycle();
                                 bitmap = ready; pageIndex = requested; pageCount = count; busy = false;
@@ -872,7 +889,7 @@ public final class TvActivity extends Activity {
     private void setSurfaceMuted(boolean muted) {
         float gain = nativeSetMuted(muted);
         if (preparedPlayer != null) preparedPlayer.setVolume(gain, gain);
-        muteButton.setText(surfaceTitle + (muted ? " · Unmute" : " · Mute"));
+        muteButton.setText(muted ? "Unmute" : "Mute audio");
         muteButton.setContentDescription((muted ? "Unmute " : "Mute ") + surfaceTitle + " audio");
     }
 
@@ -1252,7 +1269,7 @@ public final class TvActivity extends Activity {
 
     @Override public boolean onKeyDown(int key, KeyEvent event) {
         for (View widget : widgets) {
-            if (widget instanceof PdfSurface && ((PdfSurface)widget).remote(key,event)) return true;
+            if (widget instanceof PdfSurface && widget.hasFocus() && ((PdfSurface)widget).remote(key,event)) return true;
             if (widget instanceof ConwaysView && (key == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || key == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD || key == KeyEvent.KEYCODE_MEDIA_REWIND)) {
                 if(event.getRepeatCount()==0) ((ConwaysView)widget).control(key == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE ? "play-pause" : key == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD ? "random" : "clear");
                 return true;
@@ -1314,7 +1331,7 @@ public final class TvActivity extends Activity {
         if(children == null && project.isEmpty()) throw new IllegalArgumentException("Menu choice needs a project");
         Button button=new Button(this); String tag=children == null ? project : "section:"+section;
         button.setTag(tag); button.setText(item.getString("label")+(children == null ? "" : section.equals(menuSection) ? " ▴" : " ▾"));
-        button.setTextSize(12); styleControl(button,palette,menuContains(item,selected));
+        button.setTextSize(18); styleControl(button,palette,menuContains(item,selected));
         button.setContentDescription(children == null ? "Open "+item.getString("label") : "Browse "+item.getString("label"));
         button.setOnClickListener(v -> {
             if(children != null) {
@@ -1386,14 +1403,14 @@ public final class TvActivity extends Activity {
             for(int i=0;i<expanded.length();i++) addMenuChoice(expanded.getJSONObject(i),projection,focusedTag);
         }
         if(!libraryEndpoint.isEmpty() && (menu.optString("library_project").isEmpty() || menu.optString("library_project").equals(selected))) {
-            Button library=new Button(this);library.setText("Library");library.setTextSize(12);
+            Button library=new Button(this);library.setText("Library");library.setTextSize(18);
             styleControl(library,palette,libraryScreen!=null);library.setOnClickListener(v -> showLibrary());
             selector.addView(library,new LinearLayout.LayoutParams(-2,barHeight()-dp(4)));
         }
         JSONArray pages=projection.getJSONObject("document").optJSONArray("pages");
         if(pages != null && pages.length()>0) for(int i=0;i<=pages.length();i++) {
             final int page=i; Button button=new Button(this);
-            button.setText(i==0 ? "▥" : pages.getJSONObject(i-1).getString("name"));button.setTextSize(12);
+            button.setText(i==0 ? "Overview" : pages.getJSONObject(i-1).getString("name"));button.setTextSize(18);
             styleControl(button,palette,i==projection.getJSONObject("document").optInt("active_page",0));
             button.setOnClickListener(v -> {
                 pageRotation.defer(android.os.SystemClock.uptimeMillis(), rotationInterval);
@@ -1629,11 +1646,11 @@ public final class TvActivity extends Activity {
                 channelButton.setVisibility(tunerWorkspace() ? View.VISIBLE : View.GONE);
                 channelButton.bringToFront();
                 muteButton.setVisibility(View.VISIBLE);
-                FrameLayout.LayoutParams chrome = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.RIGHT);
+                FrameLayout.LayoutParams chrome = new FrameLayout.LayoutParams(-2, dp(56), Gravity.TOP | Gravity.RIGHT);
                 FrameLayout.LayoutParams videoBounds = (FrameLayout.LayoutParams)video.getLayoutParams();
                 chrome.topMargin = videoBounds.topMargin;
                 chrome.rightMargin = Math.max(0, width - videoBounds.leftMargin - videoBounds.width);
-                muteButton.setTextSize(12);
+                muteButton.setTextSize(18);
                 muteButton.setMaxWidth(videoBounds.width);
                 muteButton.setLayoutParams(chrome);
                 muteButton.bringToFront();
@@ -1652,7 +1669,7 @@ public final class TvActivity extends Activity {
     }
 
     private int barHeight() {
-        return dp(32);
+        return dp(56);
     }
 
     private int dp(int value) {
