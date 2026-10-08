@@ -791,6 +791,7 @@ dependencies = [
  "canvas-core",
  "canvas-widgets",
  "csv",
+ "fpl-gfx",
  "schemars",
  "serde",
  "serde_json",

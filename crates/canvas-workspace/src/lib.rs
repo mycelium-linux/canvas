@@ -478,6 +478,8 @@ pub enum SurfaceContent {
     },
     Stream {
         url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        matte: Option<fpl_gfx::video_matte::VideoMatte>,
     },
     /// A frame-replaying raster surface: the host reloads
     /// `<runtime dir>/frames/<source_id>.jpg` whenever its bytes change.
@@ -665,6 +667,8 @@ enum Known {
     },
     Stream {
         url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        matte: Option<fpl_gfx::video_matte::VideoMatte>,
     },
     LiveImage {
         source_id: String,
@@ -705,7 +709,7 @@ impl Known {
             Self::Widget { spec } => SurfaceContent::Widget { spec },
             Self::Scene { scene } => SurfaceContent::Scene { scene },
             Self::Terminal { resource_id } => SurfaceContent::Terminal { resource_id },
-            Self::Stream { url } => SurfaceContent::Stream { url },
+            Self::Stream { url, matte } => SurfaceContent::Stream { url, matte },
             Self::LiveImage { source_id } => SurfaceContent::LiveImage { source_id },
             Self::LiveVideo {
                 source_id,
@@ -1277,8 +1281,9 @@ impl WorkspaceDocument {
                     spec.validate().map_err(|error| Error(error.to_string()))?
                 }
                 SurfaceContent::Scene { scene } => scene.validate()?,
-                SurfaceContent::Stream { url } => {
+                SurfaceContent::Stream { url, matte } => {
                     check(!url.is_empty(), "Stream URL must not be empty")?;
+                    if let Some(matte) = matte { matte.validate().map_err(|e| Error(e.into()))?; }
                 }
                 SurfaceContent::LiveImage { source_id } => {
                     check(
@@ -2471,5 +2476,24 @@ mod surface_kind_parity_tests {
         let raw = serde_json::json!({"kind": "hologram", "spin": 3});
         let parsed: SurfaceContent = serde_json::from_value(raw.clone()).expect("parses");
         assert_eq!(parsed, SurfaceContent::Unsupported(raw));
+    }
+}
+
+#[cfg(test)]
+mod video_matte_tests {
+    use super::*;
+    #[test]
+    fn stream_matte_is_retained_and_validated() {
+        let value = serde_json::json!({"kind":"stream","url":"http://192.168.2.67/video.m3u8","matte":{
+            "source_size":[1280,960],"regions":[{"bounds":[0,0,0.625,1],"color":[0,0,0],"cutoff":0.01,"feather":0.02}]
+        }});
+        let content: SurfaceContent = serde_json::from_value(value.clone()).unwrap();
+        let reparsed: SurfaceContent = serde_json::from_value(serde_json::to_value(&content).unwrap()).unwrap();
+        assert_eq!(content, reparsed);
+        let SurfaceContent::Stream { matte: Some(matte), .. } = content else { panic!("matte dropped") };
+        matte.validate().unwrap();
+        let mut invalid = matte;
+        invalid.regions[0].bounds[2] = 2.0;
+        assert!(invalid.validate().is_err());
     }
 }

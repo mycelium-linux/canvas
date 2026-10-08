@@ -6,9 +6,10 @@ license.workspace = true
 
 [features]
 default = []
-schema = ["dep:schemars", "canvas-widgets/schema"]
+schema = ["dep:schemars", "canvas-widgets/schema", "fpl-gfx/schema"]
 
 [dependencies]
+fpl-gfx = { path = "../../../gfx", default-features = false }
 canvas-core.workspace = true
 canvas-widgets = { path = "../canvas-widgets", default-features = false }
 serde.workspace = true

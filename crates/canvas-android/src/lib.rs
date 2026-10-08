@@ -129,6 +129,22 @@ pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeValidate(
     }
 }
 
+#[cfg(all(target_os = "android", feature = "android-native-video"))]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_MattedVideoView_nativeShaders(
+    env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+) -> jni::sys::jstring {
+    let shaders = serde_json::json!({
+        "vertex": fpl_gfx::video_matte::GLES_VERTEX,
+        "fragment": fpl_gfx::video_matte::GLES_FRAGMENT,
+    });
+    match env.new_string(shaders.to_string()) {
+        Ok(message) => message.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

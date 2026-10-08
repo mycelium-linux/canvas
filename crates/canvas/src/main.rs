@@ -14736,6 +14736,7 @@ mod tests {
             title: "Dashboard".into(),
             content: SurfaceContent::Stream {
                 url: "https://example.com".into(),
+                matte: None,
             },
             inputs: Vec::new(),
         }];
@@ -14806,6 +14807,7 @@ mod tests {
                 title: id.into(),
                 content: SurfaceContent::Stream {
                     url: format!("https://example.com/{id}"),
+                matte: None,
                 },
                 inputs: Vec::new(),
             })

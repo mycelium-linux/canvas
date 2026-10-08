@@ -1540,7 +1540,7 @@ public final class TvActivity extends Activity {
                     continue;
                 }
                 int beforeWidgets = widgets.size();
-                if (content.getString("kind").equals("stream") && !hasVideo) {
+                if (content.getString("kind").equals("stream") && !hasVideo && content.optJSONObject("matte") == null) {
                     String url = content.getString("url");
                     String error = nativeValidate(url);
                     if (error == null || !error.isEmpty()) throw new IllegalArgumentException("Stream rejected: " + error);
@@ -1566,9 +1566,9 @@ public final class TvActivity extends Activity {
                     if (visibleExtraStreams.size() >= 3) throw new IllegalArgumentException("At most four video tiles are supported");
                     visibleExtraStreams.add(id);
                     StreamTileView extra = extraStreams.get(id);
-                    if (extra != null && !extra.matches(url)) { extra.dispose(); frame.removeView(extra); extraStreams.remove(id); extra = null; }
+                    if (extra != null && !extra.matches(url, content.optJSONObject("matte"))) { extra.dispose(); frame.removeView(extra); extraStreams.remove(id); extra = null; }
                     if (extra == null) {
-                        extra = new StreamTileView(this, surface.getString("title"), url, palette);
+                        extra = new StreamTileView(this, surface.getString("title"), url, palette, content.optJSONObject("matte"));
                         extraStreams.put(id, extra); frame.addView(extra, geometry);
                     } else extra.setLayoutParams(geometry);
                     styleControl(extra.muteControl(), palette, false);

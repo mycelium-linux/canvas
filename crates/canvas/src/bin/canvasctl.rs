@@ -264,7 +264,7 @@ fn surface_source(content: &SurfaceContent) -> String {
         SurfaceContent::LiveImage { source_id }
         | SurfaceContent::LiveVideo { source_id, .. }
         | SurfaceContent::ExternalSurface { source_id } => source_id.clone(),
-        SurfaceContent::Stream { url } => url.clone(),
+        SurfaceContent::Stream { url, .. } => url.clone(),
         SurfaceContent::Widget { spec } => spec.id.clone(),
         SurfaceContent::Prompt { target, .. } => target.clone(),
         _ => "-".into(),
