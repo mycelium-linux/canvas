@@ -82,7 +82,7 @@ public final class TvActivity extends Activity {
     private LinearLayout channelScreen;
     private String channelScreenSurface = "";
     private String currentWorkspaceId = "", channelScreenWorkspace = "";
-    private String currentProjectId = "";
+    private String currentProjectId = "", previousProjectId = "";
     private boolean tunerWorkspace() {
         return "television".equals(currentProjectId) && !tunerEndpoint.isEmpty();
     }
@@ -480,17 +480,16 @@ public final class TvActivity extends Activity {
 
     /** Platform raster adapter only; source identity and geometry come from Rust. */
     private final class PdfSurface extends LinearLayout {
-        private final ImageView image;
-        private final ScrollView scroll;
+        private final PdfPageView image;
+        private final FrameLayout scroll;
         private final LinearLayout controls;
         private final TextView label;
         private final Button previous, next, sizing;
         private final String asset;
         private final String title;
-        private final int rasterWidth, viewWidth, tileHeight;
-        private int viewHeight;
-        private boolean fitPage;
+        private final int rasterWidth;
         private int pageIndex, pageCount, generation;
+        private int failedPage = -1;
         private boolean disposed, busy;
         private Bitmap bitmap;
         private Future<?> pending;
@@ -498,28 +497,20 @@ public final class TvActivity extends Activity {
         PdfSurface(JSONObject source, String title, JSONObject palette, int width, int height) throws Exception {
             super(TvActivity.this);
             this.asset = source.toString(); this.title = title;
-            viewWidth = width;
-            tileHeight = height;
-            viewHeight = Math.max(1, height - dp(28));
-            fitPage = width < viewHeight;
             rasterWidth = Math.max(1, Math.min(width, 1920));
             setOrientation(VERTICAL);
             // The page is opaque paper; unused fit/scroll bounds are not chrome.
             setBackgroundColor(Color.TRANSPARENT);
-            image = new ImageView(TvActivity.this);
-            image.setScaleType(ImageView.ScaleType.FIT_CENTER);
-            image.setAdjustViewBounds(true);
-            scroll = new ScrollView(TvActivity.this);
-            scroll.setFillViewport(false);
-            scroll.setFocusable(true);
-            scroll.addView(image, new ScrollView.LayoutParams(-1, -2));
+            image = new PdfPageView(TvActivity.this, () -> updateZoomLabel());
+            scroll = new FrameLayout(TvActivity.this);
+            scroll.addView(image, new FrameLayout.LayoutParams(-1, -1));
             addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
             controls = new LinearLayout(TvActivity.this);
             controls.setGravity(Gravity.CENTER_VERTICAL);
             previous = new Button(TvActivity.this); previous.setText("‹");
             next = new Button(TvActivity.this); next.setText("›");
             sizing = new Button(TvActivity.this); sizing.setTextSize(12);
-            sizing.setText(fitPage ? "Read" : "Fit");
+            sizing.setText("Fit");
             styleControl(previous, palette, false); styleControl(next, palette, false);
             styleControl(sizing, palette, false);
             label = new TextView(TvActivity.this); label.setTextSize(12);
@@ -533,26 +524,47 @@ public final class TvActivity extends Activity {
             previous.setOnClickListener(v -> render(pageIndex - 1));
             next.setOnClickListener(v -> render(pageIndex + 1));
             sizing.setOnClickListener(v -> toggleSizing());
-            scroll.setOnKeyListener((v, key, event) -> {
-                if (key != KeyEvent.KEYCODE_DPAD_CENTER && key != KeyEvent.KEYCODE_ENTER) return false;
-                if (event.getAction() == KeyEvent.ACTION_UP) toggleSizing();
-                return true;
-            });
             render(0);
         }
 
         private void toggleSizing() {
-            fitPage = !fitPage;
-            sizing.setText(fitPage ? "Read" : "Fit");
-            if (bitmap != null) applyPageBounds(bitmap);
+            if (failedPage >= 0) render(failedPage); else image.zoom();
+            image.requestFocus();
+        }
+
+        private void updateZoomLabel() {
+            if (sizing == null) return;
+            if (failedPage >= 0) { render(failedPage); return; }
+            sizing.setText(image.mode());
+            label.setText(title + " · " + (pageIndex + 1) + " / " + pageCount
+                + " · OK zoom · arrows pan · ⏪/⏩ sheet · BACK fit/return");
         }
 
         private void applyPageBounds(Bitmap page) {
-            image.setMaxWidth(viewWidth);
-            image.setMaxHeight(fitPage ? viewHeight : Integer.MAX_VALUE);
-            image.setLayoutParams(new ScrollView.LayoutParams(-1, fitPage ? viewHeight
-                : Math.max(1, (int)((float)page.getHeight() / page.getWidth() * viewWidth))));
-            scroll.scrollTo(0, 0);
+            image.page(page);
+        }
+
+        boolean remote(int key, KeyEvent event) {
+            if (failedPage >= 0 && (key == KeyEvent.KEYCODE_DPAD_CENTER || key == KeyEvent.KEYCODE_ENTER)) {
+                if (event.getRepeatCount() == 0) render(failedPage);
+                return true;
+            }
+            if (key == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD || key == KeyEvent.KEYCODE_MEDIA_REWIND) {
+                if (event.getRepeatCount() == 0) render(pageIndex + (key == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD ? 1 : -1));
+                return true;
+            }
+            if (key == KeyEvent.KEYCODE_BACK && !previousProjectId.isEmpty()) {
+                if (event.getRepeatCount() == 0) {
+                    if (image.enlarged() && failedPage < 0) image.fit();
+                    else {
+                        String error = nativeSelectWorkspace(previousProjectId);
+                        if (error == null || !error.isEmpty()) showStatus("Return failed: " + error);
+                        else { lastProjection=""; refreshWorkspace(); }
+                    }
+                }
+                return true;
+            }
+            return false;
         }
 
         private void render(int requested) {
@@ -581,26 +593,33 @@ public final class TvActivity extends Activity {
                             runOnUiThread(() -> {
                                 if (disposed || generation != ticket) { ready.recycle(); return; }
                                 controls.setVisibility(count == 1 ? View.GONE : View.VISIBLE);
-                                viewHeight = Math.max(1, tileHeight - (count == 1 ? 0 : dp(28)));
                                 applyPageBounds(ready);
-                                image.setImageBitmap(ready);
+                                // The viewport holds this single verified raster.
                                 if (bitmap != null) bitmap.recycle();
                                 bitmap = ready; pageIndex = requested; pageCount = count; busy = false;
-                                label.setText(title + " · " + (requested + 1) + " / " + count);
+                                failedPage = -1;
+                                updateZoomLabel();
                                 previous.setEnabled(requested > 0); next.setEnabled(requested + 1 < count);
+                                image.requestFocus();
                             });
                         }
                     } catch (Exception error) {
                         if (result != null) result.recycle();
                         runOnUiThread(() -> {
                             if (!disposed && generation == ticket) {
-                                busy = false; label.setText(title + " · PDF error: " + error.getMessage());
+                                busy = false; failedPage = requested;
+                                label.setText(title + " · Sheet " + (requested + 1) + " failed · OK Retry / BACK return");
+                                sizing.setText("Retry");
+                                image.error(error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage());
+                                image.requestFocus();
                             }
                         });
                     }
                 });
             } catch (java.util.concurrent.RejectedExecutionException error) {
-                busy = false; label.setText(title + " · PDF renderer busy");
+                busy = false; failedPage = requested; sizing.setText("Retry");
+                label.setText(title + " · Renderer busy · OK Retry / BACK return");
+                image.error("Renderer busy; retry this sheet"); image.requestFocus();
             }
         }
 
@@ -608,7 +627,7 @@ public final class TvActivity extends Activity {
             disposed = true; generation++;
             if (pending != null) pending.cancel(false);
             pdfJobs.purge();
-            image.setImageDrawable(null);
+            image.clear();
             if (bitmap != null) { bitmap.recycle(); bitmap = null; }
         }
     }
@@ -676,13 +695,18 @@ public final class TvActivity extends Activity {
         selector.setOrientation(LinearLayout.HORIZONTAL);
         HorizontalScrollView scroller = new HorizontalScrollView(this);
         workspaceSelector = scroller;
+        scroller.setHorizontalScrollBarEnabled(false);
+        scroller.setClipToPadding(false);
+        scroller.setPadding(dp(8), 0, dp(8), 0);
+        selector.setClipChildren(false);
+        selector.setClipToPadding(false);
         scroller.addView(selector);
         FrameLayout.LayoutParams bar = new FrameLayout.LayoutParams(-1, barHeight(), Gravity.TOP);
         frame.addView(scroller, bar);
         workspaceHeader = new TextView(this);
         workspaceHeader.setSingleLine(true);
         workspaceHeader.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        workspaceHeader.setTextSize(18);
+        workspaceHeader.setTextSize(13);
         workspaceHeader.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
         workspaceHeader.setPadding(dp(12), 0, dp(16), 0);
         workspaceHeader.setVisibility(View.GONE);
@@ -1220,6 +1244,7 @@ public final class TvActivity extends Activity {
 
     @Override public boolean onKeyDown(int key, KeyEvent event) {
         for (View widget : widgets) {
+            if (widget instanceof PdfSurface && ((PdfSurface)widget).remote(key,event)) return true;
             if (widget instanceof ConwaysView && (key == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || key == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD || key == KeyEvent.KEYCODE_MEDIA_REWIND)) {
                 if(event.getRepeatCount()==0) ((ConwaysView)widget).control(key == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE ? "play-pause" : key == KeyEvent.KEYCODE_MEDIA_FAST_FORWARD ? "random" : "clear");
                 return true;
@@ -1374,30 +1399,7 @@ public final class TvActivity extends Activity {
     }
 
     private void styleControl(Button button, JSONObject palette, boolean selected) throws Exception {
-        int primary = Color.parseColor(palette.getString("primary"));
-        int text = Color.parseColor(palette.getString("text"));
-        int muted = Color.parseColor(palette.getString("text_muted"));
-        int surface = Color.parseColor(palette.getString("surface"));
-        int border = Color.parseColor(palette.getString("border"));
-        float density = getResources().getDisplayMetrics().density;
-        StateListDrawable states = new StateListDrawable();
-        for (int i = 0; i < 3; i++) {
-            GradientDrawable shape = new GradientDrawable();
-            shape.setColor(surface);
-            shape.setCornerRadius(8 * density);
-            shape.setStroke((int)((i < 2 ? 2 : 1) * density), i < 2 || selected ? primary : border);
-            states.addState(i == 0 ? new int[]{android.R.attr.state_pressed}
-                : i == 1 ? new int[]{android.R.attr.state_focused} : new int[]{}, shape);
-        }
-        button.setBackgroundTintList(null);
-        button.setBackground(states);
-        button.setTextColor(new ColorStateList(new int[][]{
-            {android.R.attr.state_focused}, {}}, new int[]{primary, selected ? text : muted}));
-        button.setAllCaps(false);
-        button.setElevation(0);
-        button.setStateListAnimator(null);
-        button.setOnFocusChangeListener((view, focused) -> TvMotion.focus(view, focused));
-        button.setPadding((int)(18 * density), 0, (int)(18 * density), 0);
+        ShellChrome.control(button, palette, selected);
     }
 
     private void refreshWorkspace() {
@@ -1410,7 +1412,9 @@ public final class TvActivity extends Activity {
             if (projection.has("error")) { showStatus(projection.getString("error")); return; }
             if (projection.isNull("document")) return;
             currentWorkspaceId=projection.getJSONObject("document").getString("id");
-            currentProjectId=projection.getJSONObject("document").getString("project_id");
+            String nextProjectId=projection.getJSONObject("document").getString("project_id");
+            if (!currentProjectId.isEmpty() && !currentProjectId.equals(nextProjectId)) previousProjectId=currentProjectId;
+            currentProjectId=nextProjectId;
             JSONObject rotations = menuDescriptor().optJSONObject("page_rotation_ms");
             int interval = rotations == null ? 0 : rotations.optInt(currentProjectId, 0);
             rotationInterval = interval;
@@ -1442,7 +1446,7 @@ public final class TvActivity extends Activity {
                 else if (state.equals("stale")) text += " · Stale";
                 workspaceHeader.setText(text);
                 workspaceHeader.setTextColor(Color.parseColor(palette.getString("text")));
-                workspaceHeader.setBackgroundColor(Color.parseColor(palette.getString("surface")));
+                ShellChrome.bar(workspaceHeader, palette);
             }
             String structure = structuralProjection(projection);
             if (structure.equals(lastStructure)) {
@@ -1457,7 +1461,8 @@ public final class TvActivity extends Activity {
             }
             frame.setBackgroundColor(Color.parseColor(palette.getString("background")));
             background.configure(projection.getJSONObject("document"), palette);
-            selector.setBackgroundColor(Color.parseColor(palette.getString("surface")));
+            ShellChrome.bar(workspaceSelector, palette);
+            ShellChrome.bar(selector, palette);
             styleControl(muteButton, palette, false);
             styleControl(channelButton, palette, false);
             renderWorkspaceMenu(projection);

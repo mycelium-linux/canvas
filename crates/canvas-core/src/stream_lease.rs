@@ -37,8 +37,18 @@ impl StreamLease {
 }
 
 pub fn waiting_content() -> Value {
+    failure_content(
+        "Waiting for media progress",
+        "The replay has not supplied fresh media yet.",
+        "Playback resumes automatically after media advances. If this persists, check the replay producer and available disk space.",
+    )
+}
+
+/// Reuse the scene contract so failures remain visible on older endpoints too.
+/// Callers supply operator-facing causes, never raw credentials or commands.
+pub fn failure_content(cause: &str, impact: &str, recovery: &str) -> Value {
     json!({"kind":"scene", "scene":{"nodes":[{"id":"stream-waiting", "content":{
-        "kind":"text", "text":"Waiting for a live sender…\nPlayback resumes automatically when fresh frames arrive."}}]}})
+        "kind":"text", "text":format!("{cause}\n{impact}\n{recovery}")}}]}})
 }
 
 /// Unknown content stays intact. Older endpoints retain `live_stream` as an
@@ -52,7 +62,11 @@ pub fn present_content(content: &Value, now: u64) -> Value {
             let separator = if lease.url.contains('?') { '&' } else { '?' };
             json!({"kind":"stream", "url":format!("{}{separator}canvas_generation={}", lease.url, lease.generation)})
         }
-        _ => waiting_content(),
+        _ => failure_content(
+            "Replay observation expired",
+            "Fresh media is no longer confirmed; the retained video has been hidden.",
+            "Playback resumes when the observer confirms progress. Check the observer, replay producer, host sleep and network connection.",
+        ),
     }
 }
 
