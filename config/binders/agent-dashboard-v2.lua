@@ -34,7 +34,13 @@ function M.receive(value, now_ms)
                 and a.since_unix_ms >= 0 and a.since_unix_ms % 1 == 0
                 and a.since_unix_ms <= value.observed_at_unix_ms, "invalid wait timestamp") end
         if session.state == "ended" then rows[session.id]=nil
-        else rows[session.id]={session=session,observed=value.observed_at_unix_ms} end
+        else
+            local previous=old and old.instance==value.instance_id and old.rows[session.id]
+            local continuous=previous and previous.session.state==session.state
+                and previous.session.task==session.task and value.observed_at_unix_ms-previous.observed<=30000
+            rows[session.id]={session=session,observed=value.observed_at_unix_ms,
+                since=continuous and previous.since or value.observed_at_unix_ms}
+        end
     end
     local count=0;for _ in pairs(rows) do count=count+1 end
     assert(count<=512,"retained roster budget exceeded")
@@ -58,7 +64,7 @@ function M.render(now_ms)
             local status=not fresh and "unknown" or session.attention and session.attention.reason or session.state
             counts[status]=counts[status]+1
             if not fresh then stale=true end
-            roster[#roster+1]={session=session,status=status,owner=owner,fresh=fresh}
+            roster[#roster+1]={session=session,status=status,owner=owner,fresh=fresh,since=entry.since}
         end
         if now_ms-owner.observed>30000 then stale=true end
     end
@@ -76,10 +82,19 @@ function M.render(now_ms)
         local state=(row.status=="input" or row.status=="approval") and "warning" or row.status=="active" and "good" or "neutral"
         local status=row.status=="input" and "Needs response" or row.status=="approval" and "Needs approval" or row.status
         local timing=row.fresh and s.attention and (" · seen waiting "..age(now_ms-s.attention.since_unix_ms)) or ""
+        if row.fresh and not s.attention then timing=" · observed "..age(now_ms-row.since) end
+        local why=not row.fresh and "Telemetry stale; current status unknown"
+            or row.status=="input" and "Owner explicitly reports waiting for user input"
+            or row.status=="approval" and "Owner explicitly reports a pending approval"
+            or row.status=="active" and "Owner reports active; current tool is not exposed"
+            or row.status=="idle" and "Owner reports idle; no response request observed"
+            or "Owner has not reported a known status"
         nodes[#nodes+1]={label=s.project or "Unassigned",state=state,
             detail=status..timing.."\n"..(s.task or ("Unnamed session "..s.id:sub(1,8))).."\n"..row.owner.provider.." @ "..row.owner.host}
-        tasks[#tasks+1]={project=s.project or "Unassigned",title=s.task or ("Unnamed session "..s.id:sub(1,8)),
-            state=row.status,meta=row.owner.provider.." @ "..row.owner.host..timing}
+        tasks[#tasks+1]={id=#row.owner.host..":"..row.owner.host..#row.owner.provider..":"..row.owner.provider..s.id,
+            project=s.project or "Unassigned",title=s.task or ("Unnamed session "..s.id:sub(1,8)),
+            state=row.status,meta=row.owner.provider.." @ "..row.owner.host..timing,
+            detail=why.."\n"..row.owner.provider.." @ "..row.owner.host..timing.."\nTask label supplied by the owner; no prompt or transcript.\nRespond or approve in the owning app."}
     end
     if #nodes==0 then nodes={{label="Sessions",detail=owner_count==0 and "Waiting for owner telemetry" or "No loaded sessions",state="neutral"}} end
     local function count(label,n,state) return {label=label,detail=owner_count>0 and tostring(n) or "—",state=state} end

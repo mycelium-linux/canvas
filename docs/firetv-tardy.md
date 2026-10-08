@@ -77,6 +77,21 @@ The opt-in `agent.sessions.v2` presenter in
 `config/binders/agent-dashboard-v2.lua` adds separate Needs input / Needs approval
 counts and four priority-ordered task tiles beneath the public caption.
 Tiles show safe project/task labels, owner/provider and time first observed waiting.
+Task tiles now carry an opaque display identity, bounded owner-derived detail,
+and elapsed time since Canvas first observed the same state/task. This is not
+execution duration. Active status does not imply a known current tool: the
+detail explicitly says when that field is not supplied. Waiting reasons remain
+explicit provider observations, not transcript or terminal guesses.
+
+Use the remote directions to focus the task grid (Right from the reel), then
+directions to select, OK to expand within that same window, and Back to return
+to the grid. Selection follows identity through reordered updates and is cleared
+when the session disappears, the workspace switches, or the endpoint restarts.
+The authenticated control command uses the same shared navigation:
+`{"command":"surface_navigate","surface_id":"agent-details","action":"open"}`
+(inside a normal version-1 request). Actions are `focus`, `left`, `right`, `up`,
+`down`, `open`, and `back`. They carry no provider execution/approval authority.
+Stale detail is visibly unknown; all responses and approvals stay in the owning app.
 Unknown titles stay unnamed; no prompt, preview, transcript or full path is used.
 Waiting sessions sort first, oldest observed wait first, then active/unknown/idle.
 The analog clock and reel remain unchanged. These are read-only task tiles,
@@ -133,3 +148,12 @@ Merge `config/deploy/firetv/tardy.json` into the current catalog/documents with 
 fresh revision-bound `canvas-tvctl` install; never replace unrelated workspaces.
 The APK change is only the shared `canvas-menu.json` asset. No JNI/video rebuild
 is needed for this adapter.
+# Shared presentation export
+
+The authenticated presentation endpoint accepts `read_presentation` without a
+mutation revision. It returns the active document plus a `surfaces` map of
+transient signal/status snapshots, including task selection and expansion.
+Unlike `read_document`, this represents the view currently being rendered.
+It does not change the endpoint revision or checkpoint; restarted receivers
+must not restore its live data as fresh. Receivers must independently track
+delivery expiry and preserve the exported owner observation/stale metadata.

@@ -72,6 +72,7 @@ public final class TvActivity extends Activity {
     private static native String nativeBackgroundProgram(String id);
     private static native float[] nativeBoidsFrame(int width, int height, float elapsed, boolean aquarium);
     private static native String nativeSignalSnapshot(String id);
+    private static native String nativeTaskNavigate(String id, String action);
     private static native float[] nativeSignalFrame(int width, int height, String frame, String appearance);
     private static native String nativeSignalLabels(int width, int height, String frame);
     private static native String nativeTunerControl(String base, String channel, String surface, String directory);
@@ -875,8 +876,21 @@ public final class TvActivity extends Activity {
     /** Paints bounded gfx signal records; owns no MIDI, FFT or waveform reduction. */
     private final class SignalView extends LinearLayout {
         private final TextView footer;
+        private final String surfaceId;
+        private final boolean taskDeck;
+        private View taskPlot;
+        boolean navigate(String action) {
+            try {
+                JSONObject result = new JSONObject(nativeTaskNavigate(surfaceId, action));
+                if (result.has("error")) throw new IllegalStateException(result.getString("error"));
+                if (taskPlot != null) taskPlot.invalidate();
+                return result.optBoolean("handled", false);
+            } catch (Exception error) { footer.setText("Navigation unavailable: " + error.getMessage()); return false; }
+        }
         SignalView(String id, JSONObject spec, JSONObject palette) throws Exception {
             super(TvActivity.this);
+            surfaceId=id;
+            taskDeck=spec.optJSONObject("frame") != null && spec.getJSONObject("frame").optString("view").equals("task_deck");
             setOrientation(VERTICAL);
             setBackgroundColor(Color.parseColor(palette.getString("surface")));
             int pad = Math.round(16 * getResources().getDisplayMetrics().density);
@@ -1004,6 +1018,20 @@ public final class TvActivity extends Activity {
             };
             addView(plot, new LinearLayout.LayoutParams(-1, 0, 1f));
             addView(footer, new LinearLayout.LayoutParams(-1, -2));
+            taskPlot=plot;
+            if (taskDeck) {
+                setFocusable(true); setFocusableInTouchMode(true);
+                setContentDescription("Agent tasks. Direction keys select. OK opens details. Back returns.");
+                setOnFocusChangeListener((view, focused) -> { if (focused) navigate("focus"); });
+                setOnKeyListener((view, key, event) -> {
+                    if (event.getAction()!=KeyEvent.ACTION_DOWN) return false;
+                    String action=key==KeyEvent.KEYCODE_DPAD_LEFT ? "left" : key==KeyEvent.KEYCODE_DPAD_RIGHT ? "right"
+                        : key==KeyEvent.KEYCODE_DPAD_UP ? "up" : key==KeyEvent.KEYCODE_DPAD_DOWN ? "down"
+                        : key==KeyEvent.KEYCODE_DPAD_CENTER || key==KeyEvent.KEYCODE_ENTER ? "open"
+                        : key==KeyEvent.KEYCODE_BACK ? "back" : "";
+                    return !action.isEmpty() && navigate(action);
+                });
+            }
         }
     }
 
@@ -1433,6 +1461,9 @@ public final class TvActivity extends Activity {
             styleControl(muteButton, palette, false);
             styleControl(channelButton, palette, false);
             renderWorkspaceMenu(projection);
+            View previousFocus = getCurrentFocus();
+            String focusedTask = currentWorkspaceId.equals(renderedWorkspace) && previousFocus instanceof SignalView
+                ? ((SignalView)previousFocus).surfaceId : "";
             JSONArray tiles = projection.getJSONArray("tiles");
             boolean retainPanels = interval >= 5000 && interval <= 300000;
             int page = projection.getJSONObject("document").optInt("active_page", 0);
@@ -1592,6 +1623,11 @@ public final class TvActivity extends Activity {
                 if (preparedPlayer != null) status.setVisibility(View.GONE);
             }
             selector.getParent().requestLayout();
+            if (!focusedTask.isEmpty()) for (View widget: widgets) {
+                if (widget instanceof SignalView && ((SignalView)widget).surfaceId.equals(focusedTask)) {
+                    widget.requestFocus(); break;
+                }
+            }
             if(libraryScreen!=null) libraryScreen.bringToFront();
             lastProjection = raw;
             lastStructure = structure;

@@ -1,6 +1,6 @@
 //! Transport-independent presentation endpoint. Transport authenticates callers;
 //! this state machine owns admission, revisions and the target's own catalog.
-use crate::{session::Workspaces, WorkspaceDocument, WorkspacePatch};
+use crate::{WorkspaceDocument, WorkspacePatch, session::Workspaces};
 use canvas_core::{Actor, Catalog};
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +22,11 @@ pub struct Request {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
+    /// Display-only task focus/expansion; never provider execution authority.
+    SurfaceNavigate {
+        surface_id: String,
+        action: fpl_gfx::panels::TaskNavigation,
+    },
     /// Transient display data, not a document edit or a persisted checkpoint.
     SurfaceSnapshot {
         workspace_id: String,
@@ -31,6 +36,8 @@ pub enum Command {
     },
     Inspect,
     ReadDocument,
+    /// Read current transient presentation; not a persisted checkpoint.
+    ReadPresentation,
     Install {
         catalog: Catalog,
         documents: Vec<WorkspaceDocument>,
@@ -55,6 +62,7 @@ pub enum Command {
 
 #[derive(Clone)]
 pub struct Endpoint {
+    task_selection: std::collections::BTreeMap<String, (Option<String>, bool)>,
     owner: String,
     revision: u64,
     session: Option<Workspaces>,
@@ -71,6 +79,7 @@ pub struct Endpoint {
 impl Endpoint {
     pub fn new(owner: &str) -> Self {
         Self {
+            task_selection: Default::default(),
             owner: owner.into(),
             revision: 1,
             session: None,
@@ -126,7 +135,7 @@ impl Endpoint {
             }
             _ => return None,
         };
-        let (frame, mut data) = self.frames.get(surface_id).map_or_else(
+        let (mut frame, mut data) = self.frames.get(surface_id).map_or_else(
             || (declared, spec.data.clone()),
             |(frame, data, received)| {
                 let mut data = data.clone();
@@ -140,6 +149,26 @@ impl Endpoint {
         );
         if !self.frames.contains_key(surface_id) {
             data.state = canvas_widgets::WidgetDataState::NoData;
+        }
+        if frame["view"] == "task_deck" {
+            if let Some((selected, expanded)) = self.task_selection.get(surface_id) {
+                let present = selected.as_ref().is_some_and(|id| {
+                    frame["panel"]["items"]
+                        .as_array()
+                        .is_some_and(|items| items.iter().any(|i| i["id"].as_str() == Some(id)))
+                });
+                if present {
+                    frame["panel"]["selected"] = serde_json::json!(selected);
+                    frame["panel"]["expanded"] = serde_json::json!(expanded);
+                }
+            }
+        }
+        if matches!(
+            data.state,
+            canvas_widgets::WidgetDataState::Stale | canvas_widgets::WidgetDataState::NoData
+        ) && matches!(frame["view"].as_str(), Some("attention" | "task_deck"))
+        {
+            frame["panel"]["fresh"] = serde_json::json!(false);
         }
         Some(serde_json::json!({"frame":frame, "data":data}))
     }
@@ -198,8 +227,10 @@ impl Endpoint {
             request.command,
             Command::Inspect
                 | Command::ReadDocument
+                | Command::ReadPresentation
                 | Command::WorkspaceRead { .. }
                 | Command::SurfaceSnapshot { .. }
+                | Command::SurfaceNavigate { .. }
         );
         if writes && request.expected_revision != Some(self.revision) {
             return Err("Stale or missing endpoint revision; inspect this target first".into());
@@ -209,6 +240,25 @@ impl Endpoint {
             .checked_add(1)
             .ok_or("Endpoint revision exhausted")?;
         match request.command {
+            Command::SurfaceNavigate { surface_id, action } => {
+                let snapshot = self
+                    .surface_snapshot(&surface_id)
+                    .ok_or("Surface is not active")?;
+                let fpl_gfx::signals::SignalFrame::TaskDeck { mut panel } =
+                    serde_json::from_value(snapshot["frame"].clone())
+                        .map_err(|_| "Invalid task deck")?
+                else {
+                    return Err("Surface does not support task navigation".into());
+                };
+                let handled = panel
+                    .navigate(action)
+                    .map_err(|_| "Invalid task navigation")?;
+                self.task_selection
+                    .insert(surface_id, (panel.selected.clone(), panel.expanded));
+                return Ok(
+                    serde_json::json!({"handled":handled,"selected":panel.selected,"expanded":panel.expanded}),
+                );
+            }
             Command::SurfaceSnapshot {
                 workspace_id,
                 surface_id,
@@ -257,6 +307,13 @@ impl Endpoint {
                 };
                 next.data = data.clone();
                 next.validate().map_err(|e| e.to_string())?;
+                if let Some((Some(selected), _)) = self.task_selection.get(&surface_id) {
+                    if !frame["panel"]["items"].as_array().is_some_and(|items| {
+                        items.iter().any(|i| i["id"].as_str() == Some(selected))
+                    }) {
+                        self.task_selection.remove(&surface_id);
+                    }
+                }
                 self.frames
                     .insert(surface_id, (frame, data, std::time::Instant::now()));
                 return Ok(serde_json::json!({"accepted":true}));
@@ -265,6 +322,20 @@ impl Endpoint {
             Command::ReadDocument => {
                 return serde_json::to_value(self.session.as_ref().and_then(Workspaces::document))
                     .map_err(|error| error.to_string());
+            }
+            Command::ReadPresentation => {
+                let document = self.session.as_ref().and_then(Workspaces::document);
+                let mut surfaces = std::collections::BTreeMap::new();
+                if let Some(document) = document {
+                    for surface in &document.surfaces {
+                        if let Some(snapshot) = self.surface_snapshot(&surface.id) {
+                            surfaces.insert(surface.id.clone(), snapshot);
+                        }
+                    }
+                }
+                return Ok(
+                    serde_json::json!({"schema_version":1,"owner":self.owner,"revision":self.revision,"document":document,"surfaces":surfaces}),
+                );
             }
             Command::WorkspaceRead { name } => {
                 let session = self.session.as_ref().ok_or("Endpoint has no catalog")?;
@@ -297,6 +368,7 @@ impl Endpoint {
                 }
                 self.session = Some(next);
                 self.frames.clear();
+                self.task_selection.clear();
             }
             Command::WorkspaceSwitch { name } => {
                 let session = self.session.as_mut().ok_or("Endpoint has no catalog")?;
@@ -305,6 +377,7 @@ impl Endpoint {
                 }
                 session.select(Actor::Human, &name)?;
                 self.frames.clear();
+                self.task_selection.clear();
             }
             Command::WorkspacePages { pages } => {
                 self.session
@@ -319,11 +392,53 @@ impl Endpoint {
                     .select_page(index)?;
             }
             Command::ApplyPatch { patch } => {
+                let previous = self
+                    .session
+                    .as_ref()
+                    .and_then(Workspaces::document)
+                    .cloned();
                 self.session
                     .as_mut()
                     .ok_or("Endpoint has no catalog")?
                     .apply_document_patch(&patch)?;
-                self.frames.clear();
+                let current = self.session.as_ref().and_then(Workspaces::document);
+                let compatible = |id: &str| {
+                    let old = previous
+                        .as_ref()
+                        .and_then(|d| d.surfaces.iter().find(|s| s.id == id));
+                    let new = current
+                        .as_ref()
+                        .and_then(|d| d.surfaces.iter().find(|s| s.id == id));
+                    let (
+                        Some(crate::Surface {
+                            content: crate::SurfaceContent::Widget { spec: old },
+                            ..
+                        }),
+                        Some(crate::Surface {
+                            content: crate::SurfaceContent::Widget { spec: new },
+                            ..
+                        }),
+                    ) = (old, new)
+                    else {
+                        return false;
+                    };
+                    if old.data.source != new.data.source {
+                        return false;
+                    }
+                    match (&old.kind, &new.kind) {
+                        (
+                            canvas_widgets::WidgetKind::SignalView { frame: a, .. },
+                            canvas_widgets::WidgetKind::SignalView { frame: b, .. },
+                        ) => a["view"] == b["view"],
+                        (
+                            canvas_widgets::WidgetKind::StatusList { .. },
+                            canvas_widgets::WidgetKind::StatusList { .. },
+                        ) => true,
+                        _ => false,
+                    }
+                };
+                self.frames.retain(|id, _| compatible(id));
+                self.task_selection.retain(|id, _| compatible(id));
             }
         }
         if writes {
@@ -351,22 +466,159 @@ impl Endpoint {
     }
 }
 
-
 fn surface_frame_expiry(refresh_ms: Option<u64>) -> std::time::Duration {
     std::time::Duration::from_millis(refresh_ms.map_or(3000, |ms| {
-        ms.saturating_mul(3).saturating_add(1000).clamp(3000, 300000)
+        ms.saturating_mul(3)
+            .saturating_add(1000)
+            .clamp(3000, 300000)
     }))
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
+    fn task_navigation_survives_refresh_but_not_removed_identity_or_restart() {
+        let mut endpoint = Endpoint::new("firetv-omni");
+        let mut request: Request = serde_json::from_str(include_str!(
+            "../../../config/deploy/firetv/workspaces.json"
+        ))
+        .unwrap();
+        let Command::Install { documents, .. } = &mut request.command else {
+            panic!()
+        };
+        documents[0].surfaces[1].content=crate::SurfaceContent::Widget { spec: canvas_widgets::WidgetSpec::from_json(br#"{"schema_version":2,"id":"tasks","kind":"signal_view","title":"Tasks","refresh_ms":2000,"frame":{"view":"task_deck","panel":{"items":[],"fresh":false}}}"#).unwrap() };
+        endpoint.execute(request).unwrap();
+        let before = endpoint.checkpoint();
+        let a = serde_json::json!({"id":"a","project":"Canvas","title":"Task A","meta":"neo","state":"active"});
+        let b = serde_json::json!({"id":"b","project":"Bus","title":"Task B","meta":"neo","state":"input"});
+        let snapshot = |items: Vec<serde_json::Value>| Request {
+            schema_version: 1,
+            request_id: "tasks".into(),
+            expected_revision: None,
+            command: Command::SurfaceSnapshot {
+                workspace_id: "tv-television".into(),
+                surface_id: "clock".into(),
+                frame: serde_json::json!({"view":"task_deck","panel":{"items":items,"fresh":true}}),
+                data: Default::default(),
+            },
+        };
+        endpoint
+            .execute(snapshot(vec![a.clone(), b.clone()]))
+            .unwrap();
+        let navigate = |action| Request {
+            schema_version: 1,
+            request_id: "navigation".into(),
+            expected_revision: None,
+            command: Command::SurfaceNavigate {
+                surface_id: "clock".into(),
+                action,
+            },
+        };
+        endpoint
+            .execute(navigate(fpl_gfx::panels::TaskNavigation::Open))
+            .unwrap();
+        endpoint.execute(snapshot(vec![b, a.clone()])).unwrap();
+        assert_eq!(
+            endpoint.surface_snapshot("clock").unwrap()["frame"]["panel"]["selected"],
+            "a"
+        );
+        assert_eq!(endpoint.checkpoint(), before);
+        let presentation = endpoint
+            .execute(Request {
+                schema_version: 1,
+                request_id: "mirror-read".into(),
+                expected_revision: None,
+                command: Command::ReadPresentation,
+            })
+            .unwrap();
+        assert_eq!(presentation["owner"], "firetv-omni");
+        assert_eq!(
+            presentation["surfaces"]["clock"]["frame"]["panel"]["selected"],
+            "a"
+        );
+        assert_eq!(
+            presentation["surfaces"]["clock"]["frame"]["panel"]["expanded"],
+            true
+        );
+        assert_eq!(endpoint.checkpoint(), before);
+        let doc = endpoint.session.as_ref().unwrap().document().unwrap();
+        let patch = WorkspacePatch {
+            schema_version: 1,
+            workspace_id: doc.id.clone(),
+            base_revision: doc.revision,
+            revision: doc.revision + 1,
+            operations: vec![crate::PatchOperation::SetFocus {
+                surface_id: Some("clock".into()),
+            }],
+        };
+        endpoint
+            .execute(Request {
+                schema_version: 1,
+                request_id: "layout-only".into(),
+                expected_revision: Some(endpoint.revision),
+                command: Command::ApplyPatch { patch },
+            })
+            .unwrap();
+        assert_eq!(
+            endpoint.surface_snapshot("clock").unwrap()["frame"]["panel"]["selected"],
+            "a"
+        );
+        assert!(endpoint.frames.contains_key("clock"));
+        endpoint.frames.get_mut("clock").unwrap().2 =
+            std::time::Instant::now() - std::time::Duration::from_secs(4);
+        assert_ne!(
+            endpoint.surface_snapshot("clock").unwrap()["data"]["state"],
+            "stale"
+        );
+        endpoint.frames.get_mut("clock").unwrap().2 =
+            std::time::Instant::now() - std::time::Duration::from_secs(8);
+        assert_eq!(
+            endpoint.surface_snapshot("clock").unwrap()["frame"]["panel"]["fresh"],
+            false
+        );
+        endpoint.execute(snapshot(vec![])).unwrap();
+        endpoint.execute(snapshot(vec![a])).unwrap();
+        assert!(
+            endpoint.surface_snapshot("clock").unwrap()["frame"]["panel"]["selected"].is_null()
+        );
+        assert!(
+            Endpoint::restore("firetv-omni", &before.to_string())
+                .unwrap()
+                .task_selection
+                .is_empty()
+        );
+        let doc = endpoint.session.as_ref().unwrap().document().unwrap();
+        let mut surface = doc.surfaces[1].clone();
+        if let crate::SurfaceContent::Widget { spec } = &mut surface.content {
+            spec.data.source = Some("unibus:other-owner".into());
+        }
+        let patch = WorkspacePatch {
+            schema_version: 1,
+            workspace_id: doc.id.clone(),
+            base_revision: doc.revision,
+            revision: doc.revision + 1,
+            operations: vec![crate::PatchOperation::UpsertSurface { surface }],
+        };
+        endpoint
+            .execute(Request {
+                schema_version: 1,
+                request_id: "new-source".into(),
+                expected_revision: Some(endpoint.revision),
+                command: Command::ApplyPatch { patch },
+            })
+            .unwrap();
+        assert!(!endpoint.frames.contains_key("clock"));
+    }
+    #[test]
     fn frame_expiry_tracks_refresh_and_bounds_jitter_budget() {
         assert_eq!(super::surface_frame_expiry(None).as_millis(), 3000);
         assert_eq!(super::surface_frame_expiry(Some(33)).as_millis(), 3000);
         assert_eq!(super::surface_frame_expiry(Some(2000)).as_millis(), 7000);
         assert_eq!(super::surface_frame_expiry(Some(30000)).as_millis(), 91000);
-        assert_eq!(super::surface_frame_expiry(Some(u64::MAX)).as_millis(), 300000);
+        assert_eq!(
+            super::surface_frame_expiry(Some(u64::MAX)).as_millis(),
+            300000
+        );
     }
     use super::*;
     #[test]
@@ -399,14 +651,16 @@ mod tests {
             })
             .unwrap();
         let revision = endpoint.revision;
-        assert!(endpoint
-            .execute(Request {
-                schema_version: 1,
-                request_id: "stale".into(),
-                expected_revision: Some(revision - 1),
-                command: Command::WorkspacePage { index: 1 }
-            })
-            .is_err());
+        assert!(
+            endpoint
+                .execute(Request {
+                    schema_version: 1,
+                    request_id: "stale".into(),
+                    expected_revision: Some(revision - 1),
+                    command: Command::WorkspacePage { index: 1 }
+                })
+                .is_err()
+        );
         endpoint
             .execute(Request {
                 schema_version: 1,
@@ -426,14 +680,16 @@ mod tests {
             "Routing"
         );
         let before = endpoint.snapshot();
-        assert!(endpoint
-            .execute(Request {
-                schema_version: 1,
-                request_id: "invalid".into(),
-                expected_revision: Some(endpoint.revision),
-                command: Command::WorkspacePage { index: 99 }
-            })
-            .is_err());
+        assert!(
+            endpoint
+                .execute(Request {
+                    schema_version: 1,
+                    request_id: "invalid".into(),
+                    expected_revision: Some(endpoint.revision),
+                    command: Command::WorkspacePage { index: 99 }
+                })
+                .is_err()
+        );
         assert_eq!(endpoint.snapshot(), before);
     }
     #[test]
@@ -576,19 +832,21 @@ mod tests {
             restored.surface_snapshot("clock").unwrap()["data"]["state"],
             "no_data"
         );
-        assert!(endpoint
-            .execute(Request {
-                schema_version: 1,
-                request_id: "wrong".into(),
-                expected_revision: Some(2),
-                command: Command::SurfaceSnapshot {
-                    workspace_id: "other".into(),
-                    surface_id: "clock".into(),
-                    frame,
-                    data: Default::default()
-                }
-            })
-            .is_err());
+        assert!(
+            endpoint
+                .execute(Request {
+                    schema_version: 1,
+                    request_id: "wrong".into(),
+                    expected_revision: Some(2),
+                    command: Command::SurfaceSnapshot {
+                        workspace_id: "other".into(),
+                        surface_id: "clock".into(),
+                        frame,
+                        data: Default::default()
+                    }
+                })
+                .is_err()
+        );
         assert_eq!(endpoint.checkpoint(), before);
     }
     #[test]
@@ -632,16 +890,18 @@ mod tests {
     #[test]
     fn stale_mutations_and_unsupported_commands_leave_target_unchanged() {
         let mut endpoint = Endpoint::new("tv");
-        assert!(endpoint
-            .execute(Request {
-                schema_version: 1,
-                request_id: "test".into(),
-                expected_revision: None,
-                command: Command::WorkspaceSwitch {
-                    name: "studio".into()
-                }
-            })
-            .is_err());
+        assert!(
+            endpoint
+                .execute(Request {
+                    schema_version: 1,
+                    request_id: "test".into(),
+                    expected_revision: None,
+                    command: Command::WorkspaceSwitch {
+                        name: "studio".into()
+                    }
+                })
+                .is_err()
+        );
         assert_eq!(endpoint.snapshot()["revision"], 1);
         assert!(
             !serde_json::from_str::<serde_json::Value>(&endpoint.dispatch(

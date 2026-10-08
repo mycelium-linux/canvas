@@ -140,6 +140,39 @@ fn string(env: &mut jni::JNIEnv, value: String) -> jni::sys::jstring {
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeTaskNavigate(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    id: jni::objects::JString,
+    action: jni::objects::JString,
+) -> jni::sys::jstring {
+    let result = (|| -> Result<serde_json::Value, String> {
+        let id = String::from(env.get_string(&id).map_err(|e| e.to_string())?);
+        let action = String::from(env.get_string(&action).map_err(|e| e.to_string())?);
+        let action =
+            serde_json::from_value(serde_json::json!(action)).map_err(|_| "Invalid navigation")?;
+        endpoint()
+            .lock()
+            .map_err(|_| "Presentation unavailable")?
+            .execute(canvas_workspace::endpoint::Request {
+                schema_version: 1,
+                request_id: "remote-task-navigation".into(),
+                expected_revision: None,
+                command: canvas_workspace::endpoint::Command::SurfaceNavigate {
+                    surface_id: id,
+                    action,
+                },
+            })
+    })();
+    string(
+        &mut env,
+        result
+            .unwrap_or_else(|error| serde_json::json!({"error":error}))
+            .to_string(),
+    )
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeSignalSnapshot(
     mut env: jni::JNIEnv,
     _class: jni::objects::JClass,
@@ -195,7 +228,10 @@ pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeSignalFrame(
 ) -> jni::sys::jfloatArray {
     let result = (|| -> Result<Vec<f32>, String> {
         let raw: String = env.get_string(&raw).map_err(|e| e.to_string())?.into();
-        let appearance: String = env.get_string(&appearance).map_err(|e| e.to_string())?.into();
+        let appearance: String = env
+            .get_string(&appearance)
+            .map_err(|e| e.to_string())?
+            .into();
         crate::signals::paint_records_with_appearance(
             u32::try_from(width).map_err(|_| "Invalid width")?,
             u32::try_from(height).map_err(|_| "Invalid height")?,
@@ -240,7 +276,8 @@ pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeBackgroundProgram(
     )
 }
 
-static BOIDS_RUNTIME: std::sync::OnceLock<std::sync::Mutex<crate::boids::Runtime>> = std::sync::OnceLock::new();
+static BOIDS_RUNTIME: std::sync::OnceLock<std::sync::Mutex<crate::boids::Runtime>> =
+    std::sync::OnceLock::new();
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeBoidsFrame(
@@ -252,10 +289,16 @@ pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeBoidsFrame(
     aquarium: jni::sys::jboolean,
 ) -> jni::sys::jfloatArray {
     let result = (|| -> Result<Vec<f32>, &'static str> {
-        BOIDS_RUNTIME.get_or_init(|| std::sync::Mutex::new(crate::boids::Runtime::default()))
-            .lock().map_err(|_| "Flock state unavailable")?.frame(
+        BOIDS_RUNTIME
+            .get_or_init(|| std::sync::Mutex::new(crate::boids::Runtime::default()))
+            .lock()
+            .map_err(|_| "Flock state unavailable")?
+            .frame(
                 u32::try_from(width).map_err(|_| "Invalid width")?,
-                u32::try_from(height).map_err(|_| "Invalid height")?, elapsed, aquarium != 0)
+                u32::try_from(height).map_err(|_| "Invalid height")?,
+                elapsed,
+                aquarium != 0,
+            )
     })();
     match result {
         Ok(records) => match env.new_float_array(records.len() as i32) {
@@ -416,7 +459,8 @@ pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeProjection(
                 "bounds":[placement.frame.x,placement.frame.y,placement.frame.width,placement.frame.height]})
         }).collect::<Vec<_>>()).map_err(|e| e.to_string())?;
         let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).map_err(|_| "Invalid system clock")?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "Invalid system clock")?
             .as_millis() as u64;
         canvas_core::stream_lease::present_projection(&mut snapshot, now);
         Ok(snapshot)
