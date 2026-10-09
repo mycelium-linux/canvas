@@ -78,4 +78,4 @@ and distribution signing, icons/metadata, privacy/export compliance answers and
 applicable beta review. No team/account is assumed from an unrelated iOS app.
 Beta builds expire after 90 days. Physical Apple TV model, provisioning access,
 runtime availability and authenticated outbound Unibus integration remain
-separate acceptance gates tracked in Beads `dock-cys1`.
+separate acceptance gates tracked in Beads `dock-dusv` (SDK spike `dock-cys1`).
