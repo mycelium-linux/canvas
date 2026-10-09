@@ -79,3 +79,55 @@ applicable beta review. No team/account is assumed from an unrelated iOS app.
 Beta builds expire after 90 days. Physical Apple TV model, provisioning access,
 runtime availability and authenticated outbound Unibus integration remain
 separate acceptance gates tracked in Beads `dock-dusv` (SDK spike `dock-cys1`).
+
+## Device archive and TestFlight export
+
+The shared `CanvasTV` Xcode scheme now targets real Apple TV devices as well as
+simulators. Device identity is **dev.fpl.canvas.tvos**, separate from the manual
+simulator spike and unrelated iOS apps. Apple team is **8B3GZ9UEGE**; the
+registered App Store Connect tvOS app is **6820884143**, named **fungOS Canvas**.
+These are public routing identifiers, not signing credentials.
+
+```sh
+rustup target add aarch64-apple-tvos
+cargo fetch --locked --manifest-path crates/canvas-tvos/Cargo.toml
+sh crates/canvas-tvos/archive-device.sh --unsigned  # compile/archive validation
+sh crates/canvas-tvos/archive-device.sh             # configured signing required
+sh crates/canvas-tvos/export-testflight.sh          # local IPA export, not upload
+```
+
+Unsigned archives are not installable or distributable. Do not export or upload
+one as a successful release. `build/CanvasTV.xcarchive` contains the archive;
+`build/testflight` is the local export directory. Xcode uses the explicit device
+target `aarch64-apple-tvos`; simulator builds use `aarch64-apple-tvos-sim`. Rust
+static libraries are copied into that build's products directory, avoiding
+device/simulator ABI mixing. Build number can be overridden with
+`CURRENT_PROJECT_VERSION=NUMBER` on the archive command. A signed distribution
+archive/profile and current App Store Connect permissions are required to export.
+Scripts do not silently create profiles, download runtimes, or upload binaries.
+An active **fungOS Canvas tvOS App Store** provisioning profile was registered
+for this app using the existing distribution certificate. Its credentials have
+not been downloaded/imported, and no signed archive or export is verified.
+
+The Xcode pre-build phase uses one Cargo job, debug information disabled, and
+checks for at least 1 GiB free before compilation. It requires installed Rust
+targets and offline dependencies. Set `CANVAS_RUST_TARGET_DIR` to an absolute
+build-cache path when using another volume. No automatic cleanup is performed.
+Space checks resolve the existing parent of the Rust cache and Xcode products
+locations, including external volumes. The spike intentionally links debug-profile
+Rust with debug information disabled even for the Release Xcode archive; Swift
+is optimized. Rust release optimization and end-to-end frame performance remain
+unqualified, not implied by the Xcode configuration name.
+Original vector icon artwork is generated deterministically using Apple's
+native graphics API: layered small/large Apple TV icons and a top-shelf image.
+The generated catalog artwork is excluded from git; its generator is source.
+
+Device archive attempt on Neo was blocked **before compilation** by incomplete
+Xcode platform support: the generic tvOS destination reports “tvOS 26.5 is not
+installed,” despite the SDK being present. Asset compilation also requires an
+available Apple TV simulator runtime. Xcode project/scheme and plist/script
+parsing passed; generated artwork exists. No tvOS runtime/platform download was
+started on the disk-constrained host. Install the tvOS platform component on a
+Mac with adequate space, then rerun the unsigned archive gate before signing.
+This packaging slice does not claim a successful device archive or TestFlight
+availability yet.
