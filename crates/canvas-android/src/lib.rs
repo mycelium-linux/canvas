@@ -2,6 +2,136 @@
 use std::net::IpAddr;
 pub const CONTROL_PORT: u16 = 27841;
 
+#[cfg(all(test, feature = "android-native-video"))]
+mod chrome_tests {
+    #[test]
+    fn preserves_shared_state_and_rejects_bad_frames() {
+        let selected = super::chrome_records(100.0, 32.0, 1, false).unwrap();
+        let focus = super::chrome_records(100.0, 32.0, 2, false).unwrap();
+        assert_eq!(selected.len(), 10);
+        assert_eq!(selected[6], fpl_gfx::ThemeRole::SurfaceRaised as u32 as f32);
+        assert_eq!(focus[5], selected[5] * 2.0);
+        assert_eq!(focus[8], fpl_gfx::ThemeRole::Text as u32 as f32);
+        let disabled = super::chrome_records(100.0, 32.0, 15, false).unwrap();
+        assert_eq!(disabled[8], fpl_gfx::ThemeRole::TextMuted as u32 as f32);
+        assert_eq!(disabled[9], 0.45);
+        let quiet = super::chrome_records_with_appearance(100.0, 32.0, 0, false, true).unwrap();
+        assert_eq!(quiet[5], 0.0);
+        assert_eq!(quiet[9], 0.0);
+        let bar = super::chrome_records(100.0, 32.0, 0, true).unwrap();
+        assert_eq!(bar[6], fpl_gfx::ThemeRole::Surface as u32 as f32);
+        assert!(super::chrome_records(f32::NAN, 32.0, 0, false).is_err());
+        assert!(super::chrome_records(100.0, 32.0, 16, false).is_err());
+    }
+}
+
+/// Bounded raster adapter for the shared GFX shell scene.
+#[cfg(feature = "android-native-video")]
+pub fn chrome_records(
+    width: f32,
+    height: f32,
+    state: i32,
+    bar: bool,
+) -> Result<Vec<f32>, &'static str> {
+    chrome_records_with_appearance(width, height, state, bar, false)
+}
+
+#[cfg(feature = "android-native-video")]
+fn chrome_records_with_appearance(
+    width: f32,
+    height: f32,
+    state: i32,
+    bar: bool,
+    quiet: bool,
+) -> Result<Vec<f32>, &'static str> {
+    if !width.is_finite()
+        || !height.is_finite()
+        || width <= 0.0
+        || height <= 0.0
+        || width > 16384.0
+        || height > 16384.0
+        || !(0..=15).contains(&state)
+    {
+        return Err("Invalid chrome frame");
+    }
+    let bounds = fpl_gfx::Rect::new(0.0, 0.0, width, height);
+    let (primitive, ink, opacity) = if bar {
+        let mut scene = fpl_gfx::Scene::with_capacity(1);
+        fpl_gfx::chrome::bar(&mut scene, bounds);
+        (
+            *scene.iter().next().ok_or("Invalid bar frame")?,
+            fpl_gfx::ThemeRole::Text,
+            1.0,
+        )
+    } else {
+        let metrics = canvas_core::ThemeSelection::coherence(
+            canvas_core::ThemeMode::Dark,
+            canvas_core::Accent::Brand,
+        )
+        .metrics();
+        let control = fpl_gfx::chrome::control_visual(
+            bounds,
+            fpl_gfx::ShapeTheme {
+                radius_small: metrics.radius_sm,
+                radius_large: metrics.radius_lg,
+                outline_width: 1.0,
+            },
+            fpl_gfx::chrome::ControlState {
+                selected: state & 1 != 0,
+                focused: state & 2 != 0,
+                pressed: state & 4 != 0,
+                disabled: state & 8 != 0,
+            },
+            if quiet {
+                fpl_gfx::chrome::ControlAppearance::Quiet
+            } else {
+                fpl_gfx::chrome::ControlAppearance::Standard
+            },
+        )
+        .ok_or("Invalid control frame")?;
+        (control.face, control.ink, control.face_opacity)
+    };
+    Ok(vec![
+        primitive.rect.x,
+        primitive.rect.y,
+        primitive.rect.width,
+        primitive.rect.height,
+        primitive.radius,
+        primitive.outline_width,
+        primitive.fill as u32 as f32,
+        primitive.outline as u32 as f32,
+        ink as u32 as f32,
+        opacity,
+    ])
+}
+
+#[cfg(all(target_os = "android", feature = "android-native-video"))]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_ShellChrome_nativeFrame(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    width: jni::sys::jfloat,
+    height: jni::sys::jfloat,
+    state: jni::sys::jint,
+    bar: jni::sys::jboolean,
+    quiet: jni::sys::jboolean,
+) -> jni::sys::jfloatArray {
+    let records = match chrome_records_with_appearance(width, height, state, bar != 0, quiet != 0) {
+        Ok(records) => records,
+        Err(error) => {
+            let _ = env.throw_new("java/lang/IllegalArgumentException", error);
+            return std::ptr::null_mut();
+        }
+    };
+    let Ok(array) = env.new_float_array(records.len() as i32) else {
+        return std::ptr::null_mut();
+    };
+    if env.set_float_array_region(&array, 0, &records).is_err() {
+        return std::ptr::null_mut();
+    }
+    array.into_raw()
+}
+
 #[cfg(feature = "shared-workspaces")]
 pub mod assets;
 #[cfg(feature = "android-native-video")]

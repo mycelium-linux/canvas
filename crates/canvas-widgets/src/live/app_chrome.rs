@@ -350,6 +350,20 @@ pub fn cube_button_style(
     active: bool,
     status: button::Status,
 ) -> button::Style {
+    shared_button_style(
+        visual,
+        active,
+        status,
+        fpl_gfx::chrome::ControlAppearance::Standard,
+    )
+}
+
+fn shared_button_style(
+    visual: VisualTheme,
+    active: bool,
+    status: button::Status,
+    appearance: fpl_gfx::chrome::ControlAppearance,
+) -> button::Style {
     // The same canonical face is visited by Android's raster adapter. Iced
     // retains labels and input, while GFX owns shape and state semantics.
     let shapes = fpl_gfx::ShapeTheme {
@@ -357,7 +371,7 @@ pub fn cube_button_style(
         radius_large: visual.metrics.radius_lg,
         outline_width: 1.0,
     };
-    let face = fpl_gfx::chrome::control_face(
+    let control = fpl_gfx::chrome::control_visual(
         fpl_gfx::Rect::new(0.0, 0.0, 100.0, 32.0),
         shapes,
         fpl_gfx::chrome::ControlState {
@@ -366,18 +380,28 @@ pub fn cube_button_style(
             pressed: status == button::Status::Pressed,
             disabled: status == button::Status::Disabled,
         },
-    ).expect("validated Canvas chrome metrics");
+        appearance,
+    )
+    .expect("validated Canvas chrome metrics");
+    let face = control.face;
     let ink = |role| match role {
         fpl_gfx::ThemeRole::SurfaceRaised => rgb(visual.palette.surface_muted),
         fpl_gfx::ThemeRole::Primary => rgb(visual.palette.primary),
         fpl_gfx::ThemeRole::Outline => rgb(visual.palette.border),
+        fpl_gfx::ThemeRole::SurfaceRecessed => rgb(visual.palette.background_strong),
+        fpl_gfx::ThemeRole::Text => rgb(visual.palette.text),
+        fpl_gfx::ThemeRole::TextMuted => rgb(visual.palette.text_muted),
         _ => rgb(visual.palette.surface),
     };
     button::Style {
-        background: Some(ink(face.fill).into()),
-        text_color: rgb(if status == button::Status::Disabled {
-            visual.palette.text_muted
-        } else { visual.palette.text }),
+        background: (control.face_opacity > 0.0).then(|| {
+            Color {
+                a: control.face_opacity,
+                ..ink(face.fill)
+            }
+            .into()
+        }),
+        text_color: ink(control.ink),
         border: iced::Border {
             color: ink(face.outline),
             width: face.outline_width,
@@ -394,14 +418,12 @@ pub fn quiet_button_style(
     active: bool,
     status: button::Status,
 ) -> button::Style {
-    let mut style = cube_button_style(visual, active, status);
-    if !active && !matches!(status, button::Status::Hovered | button::Status::Pressed) {
-        style.background = None;
-    }
-    if !active && !matches!(status, button::Status::Hovered | button::Status::Pressed) {
-        style.border.width = 0.0;
-    }
-    style
+    shared_button_style(
+        visual,
+        active,
+        status,
+        fpl_gfx::chrome::ControlAppearance::Quiet,
+    )
 }
 
 pub(super) fn rgb(value: [u8; 3]) -> Color {
@@ -453,19 +475,28 @@ mod tests {
         assert!(selected.background.is_some());
         assert_eq!(idle.border.width, 0.0);
         assert_eq!(hovered.border.width, 2.0);
-        assert_ne!(disabled.text_color, idle.text_color);
+        assert_eq!(disabled.text_color, idle.text_color);
+        assert_ne!(hovered.text_color, idle.text_color);
+        let pressed = quiet_button_style(visual, false, button::Status::Pressed);
+        assert_ne!(pressed.background, hovered.background);
     }
 
     #[test]
     fn shell_controls_respect_live_shape_tokens() {
         let mut visual = canvas_core::ThemeSelection::coherence(
-            canvas_core::ThemeMode::Dark, canvas_core::Accent::Brand,
-        ).visual_theme();
+            canvas_core::ThemeMode::Dark,
+            canvas_core::Accent::Brand,
+        )
+        .visual_theme();
         visual.metrics.radius_sm = 9.0;
         let style = cube_button_style(visual, true, button::Status::Active);
         assert_eq!(style.border.radius, iced::border::Radius::from(9.0));
-        assert_eq!(quiet_button_style(visual, false, button::Status::Hovered).border.radius,
-            style.border.radius);
+        assert_eq!(
+            quiet_button_style(visual, false, button::Status::Hovered)
+                .border
+                .radius,
+            style.border.radius
+        );
     }
 
     #[test]

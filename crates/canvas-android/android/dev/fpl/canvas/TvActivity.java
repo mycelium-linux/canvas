@@ -1331,7 +1331,7 @@ public final class TvActivity extends Activity {
         if(children == null && project.isEmpty()) throw new IllegalArgumentException("Menu choice needs a project");
         Button button=new Button(this); String tag=children == null ? project : "section:"+section;
         button.setTag(tag); button.setText(item.getString("label")+(children == null ? "" : section.equals(menuSection) ? " ▴" : " ▾"));
-        button.setTextSize(18); styleControl(button,palette,menuContains(item,selected));
+        button.setTextSize(18); ShellChrome.control(button,palette,menuContains(item,selected),true);
         button.setContentDescription(children == null ? "Open "+item.getString("label") : "Browse "+item.getString("label"));
         button.setOnClickListener(v -> {
             if(children != null) {
