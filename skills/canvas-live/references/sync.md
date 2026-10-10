@@ -4,6 +4,11 @@ Inspect `canvas-fleet status --json` and installed command support. The local
 operator registry is `~/.config/unibus/canvas-fleet.json` (or the XDG config
 directory). Discovery is not a grant to read/import a workspace.
 
+For cross-platform typed geometry, configure the registry's optional
+`document_codec` with the absolute installed path to `canvas-workspace-ctl`.
+Canvas owns normalization of its document model; without the codec, comparisons
+remain exact JSON. Do not add blanket numeric tolerances to hide conflicts.
+
 ```sh
 canvas-fleet sync neo project-work studio,firetv --dry-run
 canvas-fleet sync neo project-work studio,firetv
