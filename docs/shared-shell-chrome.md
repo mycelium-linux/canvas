@@ -31,3 +31,13 @@ This slice does not consolidate app-specific document toolbars or every legacy
 widget action style, nor does it claim identical pixel density across desktop
 and a distant TV. Those are separate presentation concerns, not new platform
 renderers.
+
+## TV audio control
+
+Video surfaces keep a compact 88×44 logical-pixel `Mute` / `Unmute` action.
+One press changes only that decoder's gain; it never touches system volume or
+other tiles. Repeated stream titles are removed from the visible label, but
+the accessibility description retains the exact source and current mute state.
+`Unmute` means this stream is muted, not that playback or audible signal was
+verified. The ordinary main stream and additional independent streams share
+the same label contract. JVM-only `AudioChromeTest` covers that contract.

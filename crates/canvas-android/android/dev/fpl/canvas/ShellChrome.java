@@ -9,6 +9,7 @@ import org.json.JSONObject;
 
 /** Raster visitor for shared GFX chrome. Rust owns geometry and visual state. */
 final class ShellChrome {
+    static final int AUDIO_WIDTH_DP=88, AUDIO_HEIGHT_DP=44, AUDIO_INSET_DP=6;
     private static native float[] nativeFrame(float width, float height, int state, boolean bar, boolean quiet);
     private static int color(JSONObject palette, String role) throws Exception {
         return Color.parseColor(palette.getString(role));
@@ -101,6 +102,17 @@ final class ShellChrome {
     }
     static void bar(View view, JSONObject palette) throws Exception {
         view.setBackground(new Face(view,palette,true,false));
+    }
+    /** Source-local action, not device-wide volume or proof of audible signal. */
+    static void audioState(Button button, String title, boolean muted) {
+        button.setText(audioAction(muted));
+        button.setTextSize(14);
+        button.setContentDescription(audioDescription(title,muted));
+    }
+    static String audioAction(boolean muted) { return muted ? "Unmute" : "Mute"; }
+    static String audioDescription(String title, boolean muted) {
+        return audioAction(muted) + " " + title + " audio. This stream is " +
+            (muted ? "muted." : "unmuted.");
     }
     private ShellChrome() {}
 }

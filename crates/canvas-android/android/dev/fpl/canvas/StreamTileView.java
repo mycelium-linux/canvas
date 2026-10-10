@@ -36,17 +36,21 @@ final class StreamTileView extends FrameLayout {
         addView(status, new LayoutParams(-1, -1));
         mute = new Button(context);
         mute.setAllCaps(false);
-        mute.setTextSize(12);
+        mute.setTextSize(14);
         mute.setTextColor(Color.parseColor(palette.getString("text")));
         mute.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.parseColor(palette.getString("surface"))));
-        mute.setText(title + " · Unmute");
+        ShellChrome.audioState(mute,title,muted);
         mute.setOnClickListener(v -> {
             muted = !muted;
             if (matted != null) matted.setMuted(muted);
             if (player != null) player.setVolume(muted ? 0 : 1, muted ? 0 : 1);
-            mute.setText(title + (muted ? " · Unmute" : " · Mute"));
+            ShellChrome.audioState(mute,title,muted);
         });
-        addView(mute, new LayoutParams(-2, -2, Gravity.TOP | Gravity.RIGHT));
+        int densityHeight=Math.round(ShellChrome.AUDIO_HEIGHT_DP*context.getResources().getDisplayMetrics().density);
+        int densityWidth=Math.round(ShellChrome.AUDIO_WIDTH_DP*context.getResources().getDisplayMetrics().density);
+        LayoutParams audioBounds=new LayoutParams(densityWidth,densityHeight,Gravity.TOP | Gravity.RIGHT);
+        audioBounds.topMargin=audioBounds.rightMargin=Math.round(ShellChrome.AUDIO_INSET_DP*context.getResources().getDisplayMetrics().density);
+        addView(mute,audioBounds);
         if (matte != null) {
             matted = new MattedVideoView(context, source, matte, new MattedVideoView.Listener() {
                 public void prepared() { status.setVisibility(View.GONE); }

@@ -889,8 +889,7 @@ public final class TvActivity extends Activity {
     private void setSurfaceMuted(boolean muted) {
         float gain = nativeSetMuted(muted);
         if (preparedPlayer != null) preparedPlayer.setVolume(gain, gain);
-        muteButton.setText(muted ? "Unmute" : "Mute audio");
-        muteButton.setContentDescription((muted ? "Unmute " : "Mute ") + surfaceTitle + " audio");
+        ShellChrome.audioState(muteButton, surfaceTitle, muted);
     }
 
     // Rust's shared Canvas layout solver owns geometry. Android only applies
@@ -910,7 +909,7 @@ public final class TvActivity extends Activity {
         geometry.leftMargin = bounds[0];
         geometry.topMargin = bounds[1];
         video.setLayoutParams(geometry);
-        FrameLayout.LayoutParams chrome = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.LEFT);
+        FrameLayout.LayoutParams chrome = new FrameLayout.LayoutParams(dp(ShellChrome.AUDIO_WIDTH_DP), dp(ShellChrome.AUDIO_HEIGHT_DP), Gravity.TOP | Gravity.LEFT);
         chrome.leftMargin = width * 4 / 100;
         chrome.topMargin = height * 4 / 100;
         muteButton.setLayoutParams(chrome);
@@ -1646,11 +1645,11 @@ public final class TvActivity extends Activity {
                 channelButton.setVisibility(tunerWorkspace() ? View.VISIBLE : View.GONE);
                 channelButton.bringToFront();
                 muteButton.setVisibility(View.VISIBLE);
-                FrameLayout.LayoutParams chrome = new FrameLayout.LayoutParams(-2, dp(56), Gravity.TOP | Gravity.RIGHT);
+                FrameLayout.LayoutParams chrome = new FrameLayout.LayoutParams(dp(ShellChrome.AUDIO_WIDTH_DP), dp(ShellChrome.AUDIO_HEIGHT_DP), Gravity.TOP | Gravity.RIGHT);
                 FrameLayout.LayoutParams videoBounds = (FrameLayout.LayoutParams)video.getLayoutParams();
-                chrome.topMargin = videoBounds.topMargin;
-                chrome.rightMargin = Math.max(0, width - videoBounds.leftMargin - videoBounds.width);
-                muteButton.setTextSize(18);
+                chrome.topMargin = videoBounds.topMargin + dp(ShellChrome.AUDIO_INSET_DP);
+                chrome.rightMargin = Math.max(0, width - videoBounds.leftMargin - videoBounds.width) + dp(ShellChrome.AUDIO_INSET_DP);
+                chrome.width = Math.min(chrome.width,Math.max(1,videoBounds.width-2*dp(ShellChrome.AUDIO_INSET_DP)));
                 muteButton.setMaxWidth(videoBounds.width);
                 muteButton.setLayoutParams(chrome);
                 muteButton.bringToFront();
