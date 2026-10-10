@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "workspace-canvas-sync",
+  "project_id": "canvas-sync",
+  "revision": 1,
+  "theme": { "source": "project" },
+  "background": { "kind": "theme" },
+  "chrome": { "title": "hidden", "canvas_padding": 18, "surface_gap": 12 },
+  "surfaces": [
+    { "id": "clock", "title": "Local time", "content": { "kind": "widget", "spec": {
+      "schema_version": 2, "id": "clock", "kind": "clock", "mode": "analog"
+    }}},
+    { "id": "sync-notes", "title": "Shared Canvas workspace", "content": { "kind": "widget", "spec": {
+      "schema_version": 2, "id": "sync-notes", "kind": "text",
+      "text": "One workspace, multiple screens.\n\nThis analog clock is rendered locally on each display. Workspace definitions sync explicitly; live inputs and media remain separate.\n\nEach import checks the destination revision, preserves unrelated workspaces, and verifies the retained scene."
+    }}}
+  ],
+  "layout": { "kind": "canvas", "placements": [
+    { "surface_id": "clock", "bounds": { "x": 0.02, "y": 0.12, "width": 0.43, "height": 0.76 }, "layer": 0 },
+    { "surface_id": "sync-notes", "bounds": { "x": 0.48, "y": 0.12, "width": 0.50, "height": 0.76 }, "layer": 0 }
+  ]}
+}

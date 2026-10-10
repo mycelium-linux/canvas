@@ -64,6 +64,49 @@ impl Workspaces {
         self.documents.get(self.selected())
     }
 
+    /// Import one complete generation without replacing the owner's catalog.
+    /// Validation and generation conflicts leave selection and all documents intact.
+    pub fn import_document(&mut self, document: &crate::WorkspaceDocument, activate: bool) -> Result<(), String> {
+        let mut next = self.clone();
+        if next.catalog.project(&document.project_id).is_err() {
+            next.catalog.projects.push(canvas_core::Project {
+                id: document.project_id.clone(),
+                name: document.project_id.replace('-', " "),
+                theme: canvas_core::ThemeSelection::Coherence {
+                    mode: canvas_core::ThemeMode::Dark,
+                    accent: canvas_core::Accent::Info,
+                },
+                // A portable scene is presentation data, not host execution authority.
+                resources: Vec::new(),
+            });
+            if next.catalog.projects.len() > 64 {
+                return Err("Project projection exceeds 64 projects".into());
+            }
+            let encoded = serde_json::to_string(&next.catalog).map_err(|e| e.to_string())?;
+            if encoded.len() > 64 * 1024 {
+                return Err("Project projection exceeds 64 KiB".into());
+            }
+            next.catalog = Catalog::parse(&encoded).map_err(|e| e.to_string())?;
+            let mut state = WorkspaceState::new(&next.catalog).map_err(|e| e.to_string())?;
+            // Preserve owner-local lifecycle/control state for existing projects.
+            for (id, previous) in &next.state.projects {
+                state.projects.insert(id.clone(), previous.clone());
+            }
+            state.selected_project = next.state.selected_project.clone();
+            if let Some(added) = state.projects.get_mut(&document.project_id) {
+                added.lifecycle = canvas_core::Lifecycle::Idle;
+            }
+            state.validate(&next.catalog).map_err(|e| e.to_string())?;
+            next.state = state;
+        }
+        next.install_document(&serde_json::to_string(document).map_err(|e| e.to_string())?)?;
+        if activate {
+            next.select(Actor::Human, &document.project_id)?;
+        }
+        *self = next;
+        Ok(())
+    }
+
     pub fn document_for(&self, project: &str) -> Option<&crate::WorkspaceDocument> {
         self.documents.get(project)
     }
@@ -232,6 +275,32 @@ mod tests {
         session.install_document(&document("studio", 1)).unwrap();
         session.select(Actor::Human, "television").unwrap();
         assert_eq!(session.document(), Some(&original));
+    }
+
+    #[test]
+    fn single_import_retains_other_projects_and_selection_transactionally() {
+        let mut session = Workspaces::from_catalog(CATALOG, "television").unwrap();
+        session.install_document(&document("television", 1)).unwrap();
+        let original = session.document().unwrap().clone();
+        let incoming: crate::WorkspaceDocument = serde_json::from_str(&document("live-work", 2)).unwrap();
+        session.import_document(&incoming, false).unwrap();
+        assert_eq!(session.selected(), "television");
+        assert_eq!(session.document(), Some(&original));
+        assert_eq!(session.document_for("live-work"), Some(&incoming));
+        assert!(session.catalog.project("live-work").unwrap().resources.is_empty());
+        session.import_document(&incoming, false).unwrap();
+        let before = session.retained_projection();
+        let mut conflict = incoming.clone();
+        conflict.surfaces[0].title = "Conflict".into();
+        assert!(session.import_document(&conflict, true).is_err());
+        assert_eq!(session.retained_projection(), before);
+        let mut alias = incoming.clone();
+        alias.project_id = "another-new-project".into();
+        assert!(session.import_document(&alias, false).is_err());
+        assert_eq!(session.retained_projection(), before);
+        session.import_document(&incoming, true).unwrap();
+        assert_eq!(session.selected(), "live-work");
+        assert_eq!(session.document_for("television"), Some(&original));
     }
 
     #[test]

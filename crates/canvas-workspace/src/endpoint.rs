@@ -49,6 +49,12 @@ pub enum Command {
     WorkspaceRead {
         name: String,
     },
+    /// Retain a single portable scene, preserving every other project and selection.
+    WorkspaceImport {
+        document: Box<WorkspaceDocument>,
+        #[serde(default)]
+        activate: bool,
+    },
     WorkspacePages {
         pages: Vec<crate::Page>,
     },
@@ -90,6 +96,7 @@ impl Endpoint {
     pub fn snapshot(&self) -> serde_json::Value {
         let mut snapshot = serde_json::json!({
             "owner":self.owner, "revision":self.revision,
+            "capabilities":["workspace_read", "workspace_import"],
             "catalog":self.session.as_ref().map(Workspaces::selector_projection),
             "palette":self.session.as_ref().and_then(|session| session.palette().ok().flatten()),
             "document":self.session.as_ref().and_then(Workspaces::document)
@@ -341,6 +348,15 @@ impl Endpoint {
                 let session = self.session.as_ref().ok_or("Endpoint has no catalog")?;
                 return serde_json::to_value(session.document_for(&name))
                     .map_err(|error| error.to_string());
+            }
+            Command::WorkspaceImport { document, activate } => {
+                let session = self.session.as_mut().ok_or("Endpoint has no catalog")?;
+                let changed = session.document_for(&document.project_id) != Some(document.as_ref());
+                session.import_document(&document, activate)?;
+                if changed {
+                    self.frames.retain(|(workspace, _), _| workspace != &document.id);
+                    self.task_selection.retain(|(workspace, _), _| workspace != &document.id);
+                }
             }
             Command::Install {
                 catalog,
