@@ -78,6 +78,9 @@ pub struct ExternalSurfaceInbox {
     shared_memory: BTreeMap<(String, u64), Arc<Mmap>>,
     input_sockets: BTreeMap<(String, u64), Arc<UnixDatagram>>,
     native_surfaces: BTreeMap<(String, u64), Arc<crate::native_surface::NativeSurface>>,
+    // A registration is not a frame. Keep the last complete frame until the
+    // replacement generation presents, including its native ownership rights.
+    retained_frames: BTreeMap<String, ExternalSurfaceFrame>,
 }
 
 impl ExternalSurfaceInbox {
@@ -218,7 +221,21 @@ impl ExternalSurfaceInbox {
                 .transpose()?,
             _ => None,
         };
+        let previous_frame = registration
+            .as_ref()
+            .and_then(|(source, _)| self.frame(source));
         let change = self.registry.apply(message, handles.len())?;
+        match &change {
+            RegistryChange::Registered { source_id, .. } => {
+                if let Some(frame) = previous_frame {
+                    self.retained_frames.insert(source_id.clone(), frame);
+                }
+            }
+            RegistryChange::Presented { source_id, .. }
+            | RegistryChange::Withdrawn { source_id, .. } => {
+                self.retained_frames.remove(source_id);
+            }
+        }
         if let Some((source_id, generation)) = registration {
             self.registration_handles
                 .retain(|(id, _), _| id != &source_id);
@@ -263,6 +280,9 @@ impl ExternalSurfaceInbox {
 
     pub fn frame(&self, source_id: &str) -> Option<ExternalSurfaceFrame> {
         let presented = self.registry.get(source_id)?;
+        if presented.slot.is_none() {
+            return self.retained_frames.get(source_id).cloned();
+        }
         let slot = presented.slot?;
         let presented_at_unix_ns = presented.presented_at_unix_ns?;
         let key = (source_id.to_owned(), presented.descriptor.generation);
@@ -304,6 +324,40 @@ impl ExternalSurfaceInbox {
             },
         )
         .map_err(|error| format!("send external surface input: {error}"))
+    }
+
+    pub fn send_scroll(
+        &self,
+        source_id: &str,
+        x: f32,
+        y: f32,
+        dx: f32,
+        dy: f32,
+    ) -> Result<(), String> {
+        let presented = self
+            .registry
+            .get(source_id)
+            .ok_or("external surface is not registered")?;
+        let generation = presented.descriptor.generation;
+        let socket = self
+            .input_sockets
+            .get(&(source_id.to_owned(), generation))
+            .ok_or("external surface has no input channel")?;
+        canvas_core::external_surface_ipc::send_host_event(
+            socket,
+            &canvas_core::external_surface::ExternalSurfaceHostEvent::Scroll(
+                canvas_core::external_surface::ExternalSurfaceScroll {
+                    schema_version: EXTERNAL_SURFACE_VERSION,
+                    source_id: source_id.to_owned(),
+                    generation,
+                    x,
+                    y,
+                    scroll_x: dx,
+                    scroll_y: dy,
+                },
+            ),
+        )
+        .map_err(|e| format!("send external scroll: {e}"))
     }
 
     pub fn send_visibility(&self, source_id: &str, visible: bool) -> Result<u64, String> {
@@ -712,6 +766,34 @@ mod tests {
         let presented = inbox.presented("surf/local").unwrap();
         assert_eq!(presented.slot, Some(0));
         assert_eq!(presented.presented_at_unix_ns, Some(123));
+        let mut next = presented.descriptor.clone();
+        next.generation = 8;
+        canvas_core::external_surface_ipc::send(
+            &sender,
+            &ExternalSurfaceMessage::Register { surface: next },
+            &[file.as_fd()],
+        )
+        .unwrap();
+        inbox.receive(&receiver).unwrap();
+        assert_eq!(
+            inbox.frame("surf/local").unwrap().descriptor.generation,
+            7,
+            "registration must not blank the last complete frame"
+        );
+        canvas_core::external_surface_ipc::send(
+            &sender,
+            &ExternalSurfaceMessage::Present {
+                source_id: "surf/local".into(),
+                generation: 8,
+                slot: 0,
+                sync: FrameSync::Implicit,
+                presented_at_unix_ns: 124,
+            },
+            &[],
+        )
+        .unwrap();
+        inbox.receive(&receiver).unwrap();
+        assert_eq!(inbox.frame("surf/local").unwrap().descriptor.generation, 8);
     }
 
     #[test]

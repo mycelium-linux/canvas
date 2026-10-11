@@ -145,6 +145,65 @@ pub struct ExternalSurfaceVisibility {
 pub enum ExternalSurfaceHostEvent {
     Pointer(ExternalSurfaceInput),
     Visibility(ExternalSurfaceVisibility),
+    Scroll(ExternalSurfaceScroll),
+}
+
+/// Bounded logical-pixel scroll deltas at a normalized surface position.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalSurfaceScroll {
+    pub schema_version: u32,
+    pub source_id: String,
+    pub generation: u64,
+    pub x: f32,
+    pub y: f32,
+    pub scroll_x: f32,
+    pub scroll_y: f32,
+}
+impl ExternalSurfaceScroll {
+    pub fn validate(&self) -> Result<(), String> {
+        ExternalSurfaceInput {
+            schema_version: self.schema_version,
+            source_id: self.source_id.clone(),
+            generation: self.generation,
+            phase: ExternalSurfaceInputPhase::Move,
+            x: self.x,
+            y: self.y,
+        }
+        .validate()?;
+        if [self.scroll_x, self.scroll_y]
+            .iter()
+            .any(|v| !v.is_finite() || v.abs() > 4096.0)
+        {
+            return Err("external surface scroll exceeds finite delta budget".into());
+        }
+        Ok(())
+    }
+}
+#[cfg(test)]
+#[test]
+fn scroll_contract_round_trips_and_rejects_unbounded_deltas() {
+    let mut scroll = ExternalSurfaceScroll {
+        schema_version: EXTERNAL_SURFACE_VERSION,
+        source_id: "galileo/neo-map".into(),
+        generation: 1,
+        x: 0.5,
+        y: 0.4,
+        scroll_x: 0.0,
+        scroll_y: 12.0,
+    };
+    let event = ExternalSurfaceHostEvent::Scroll(scroll.clone());
+    let decoded: ExternalSurfaceHostEvent =
+        serde_json::from_slice(&serde_json::to_vec(&event).unwrap()).unwrap();
+    assert_eq!(event, decoded);
+    decoded.validate().unwrap();
+    scroll.scroll_y = f32::NAN;
+    assert!(scroll.validate().is_err());
+    scroll.scroll_y = 4097.0;
+    assert!(scroll.validate().is_err());
+    scroll.scroll_y = 0.0;
+    scroll.x = -0.1;
+    assert!(scroll.validate().is_err());
 }
 
 impl ExternalSurfaceInput {
@@ -205,6 +264,7 @@ impl ExternalSurfaceHostEvent {
         match self {
             Self::Pointer(input) => input.validate(),
             Self::Visibility(visibility) => visibility.validate(),
+            Self::Scroll(scroll) => scroll.validate(),
         }
     }
 }

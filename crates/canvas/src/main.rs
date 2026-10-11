@@ -6550,6 +6550,36 @@ impl App {
             return;
         }
         let (Some(phase), Some(position)) = (phase, self.cursor) else {
+            if let Event::WheelScrolled { delta } = event
+                && let Some(position) = self.cursor
+                && let Ok(Some(target)) = hit_test(
+                    &surfaces,
+                    position,
+                    SURFACE_RESIZE_HANDLE_SIZE,
+                    f64::from(self.window_chrome().titlebar_height),
+                )
+                && let Some(decoded) = self.decoded.get(&target.surface_id)
+                && let ContentSource::ExternalSurface { source_id } = &decoded.source
+                && let Some(geometry) = surfaces.iter().find(|s| s.surface_id == target.surface_id)
+            {
+                let (dx, dy) = match delta {
+                    iced::mouse::ScrollDelta::Lines { x, y } => (x * 40.0, y * 40.0),
+                    iced::mouse::ScrollDelta::Pixels { x, y } => (x, y),
+                };
+                let x = ((position.x - geometry.bounds.x) / geometry.bounds.width).clamp(0.0, 1.0)
+                    as f32;
+                let y = ((position.y - geometry.bounds.y) / geometry.bounds.height).clamp(0.0, 1.0)
+                    as f32;
+                if let Err(error) = self.external_surfaces.send_scroll(
+                    source_id,
+                    x,
+                    y,
+                    dx.clamp(-4096.0, 4096.0),
+                    dy.clamp(-4096.0, 4096.0),
+                ) {
+                    self.status = format!("Canvas external scroll failed: {error}");
+                }
+            }
             return;
         };
         if self.handle_external_surface_pointer(phase, position, &surfaces) {

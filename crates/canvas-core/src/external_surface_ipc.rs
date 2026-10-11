@@ -212,7 +212,7 @@ pub fn receive_host_event(socket: &UnixDatagram) -> io::Result<ExternalSurfaceHo
     Ok(event)
 }
 
-fn send_host_event(socket: &UnixDatagram, event: &ExternalSurfaceHostEvent) -> io::Result<()> {
+pub fn send_host_event(socket: &UnixDatagram, event: &ExternalSurfaceHostEvent) -> io::Result<()> {
     event.validate().map_err(invalid)?;
     let payload = serde_json::to_vec(event).map_err(invalid)?;
     if payload.len() > MAX_EXTERNAL_SURFACE_MESSAGE {

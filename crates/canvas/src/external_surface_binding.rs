@@ -25,6 +25,19 @@ pub struct ExternalSurfaceFeed {
 }
 
 impl ExternalSurfaceFeed {
+    pub fn send_scroll(
+        &self,
+        source_id: &str,
+        x: f32,
+        y: f32,
+        dx: f32,
+        dy: f32,
+    ) -> Result<(), String> {
+        self.inbox
+            .read()
+            .expect("Canvas external-surface inbox poisoned")
+            .send_scroll(source_id, x, y, dx, dy)
+    }
     pub fn frame(&self, source_id: &str) -> Option<ExternalSurfaceFrame> {
         self.inbox
             .read()
