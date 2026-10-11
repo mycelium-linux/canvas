@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "id": "tv-panopticon-wall",
+  "project_id": "panopticon-wall",
+  "revision": 1,
+  "theme": {"source": "project"},
+  "surfaces": [
+    {"id": "panopticon-map", "title": "Panopticon regional map", "content": {"kind": "widget", "spec": {"schema_version": 2, "id": "panopticon-map", "kind": "signal_view", "chrome": "frameless", "refresh_ms": 10000, "frame": {"view": "geo_map", "map": {"extent": {"south_deg": 46.8, "north_deg": 48.7, "west_deg": -123.5, "east_deg": -121.5}, "markers": [], "paths": [], "selected": null}}, "data": {"state": "disconnected", "source": "Panopticon owner feed not attached"}}}},
+    {"id": "panopticon-source", "title": "Source health", "content": {"kind": "widget", "spec": {"schema_version": 2, "id": "panopticon-source", "kind": "rich_card", "title": "Panopticon", "body": "Waiting for verified owner input", "format": "markdown", "chrome": "frameless"}}}
+  ],
+  "layout": {"kind": "split", "axis": "horizontal", "ratio": 0.75, "first": {"kind": "surface", "surface_id": "panopticon-map"}, "second": {"kind": "surface", "surface_id": "panopticon-source"}}
+}
