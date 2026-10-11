@@ -44,11 +44,13 @@ pub fn png(path: &Path) -> Result<Vec<u8>, String> {
         if length == 0 || length > 4 * 1024 * 1024 {
             return Err("application icon exceeds byte limit".into());
         }
-        let bytes: *const u8 = msg_send![data, bytes];
-        if bytes.is_null() {
-            return Err("application icon bytes unavailable".into());
-        }
-        Ok(std::slice::from_raw_parts(bytes, length).to_vec())
+        // NSData subclasses (notably OS_dispatch_data) can encode `bytes`
+        // as a C string pointer, tripping objc2's checked return ABI. Copy
+        // through NSData's public void-pointer method instead of borrowing
+        // a subclass-specific pointer. Rust owns the initialized output.
+        let mut bytes = vec![0_u8; length];
+        let _: () = msg_send![data, getBytes: bytes.as_mut_ptr().cast::<std::ffi::c_void>(), length: length];
+        Ok(bytes)
     })
 }
 

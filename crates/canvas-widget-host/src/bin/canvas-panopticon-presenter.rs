@@ -154,7 +154,31 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 &config.binder,
                                 &desktop,
                             )?;
+                            if let Some(path) = std::env::var_os("PANOPTICON_LOCAL_MAP_FILE") {
+                                let map = &composed["map"]["frame"]["map"];
+                                if map.is_null() {
+                                    return Err("local Galileo projection has no map".into());
+                                }
+                                let path = std::path::PathBuf::from(path);
+                                let parent = path
+                                    .parent()
+                                    .ok_or("map projection needs a parent directory")?;
+                                std::fs::create_dir_all(parent)?;
+                                let temporary = path.with_extension("pending");
+                                std::fs::write(
+                                    &temporary,
+                                    serde_json::to_vec(
+                                        &serde_json::json!({"schema_version":1,"observed_at_ms":generation.0,"map":map}),
+                                    )?,
+                                )?;
+                                std::fs::rename(temporary, path)?;
+                            }
                             for key in ["map", "evidence", "detail"] {
+                                if key == "map"
+                                    && std::env::var_os("PANOPTICON_LOCAL_MAP_FILE").is_some()
+                                {
+                                    continue;
+                                }
                                 let spec = &composed[key];
                                 let mut widget = spec.clone();
                                 if let Some(object) = widget.as_object_mut() {

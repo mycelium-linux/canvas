@@ -459,14 +459,39 @@ mod macos {
         }
     }
 
-    fn metal_format(format: PixelFormat) -> Result<MTLPixelFormat, ImportError> {
-        match format {
-            PixelFormat::Rgba8Unorm => Ok(MTLPixelFormat::RGBA8Unorm),
-            PixelFormat::Bgra8Unorm => Ok(MTLPixelFormat::BGRA8Unorm),
-            PixelFormat::Rgba16Float => Ok(MTLPixelFormat::RGBA16Float),
-            PixelFormat::R32Float => Ok(MTLPixelFormat::R32Float),
-            PixelFormat::Nv12 => Err(ImportError::UnsupportedFormat(format)),
+    fn metal_format(
+        format: PixelFormat,
+        color_space: ColorSpace,
+    ) -> Result<MTLPixelFormat, ImportError> {
+        // Derive both API interpretations from one contract. A linear Metal
+        // texture behind an sRGB WGPU descriptor silently washes out colors.
+        match wgpu_format(format, color_space)? {
+            wgpu::TextureFormat::Rgba8UnormSrgb => Ok(MTLPixelFormat::RGBA8Unorm_sRGB),
+            wgpu::TextureFormat::Bgra8UnormSrgb => Ok(MTLPixelFormat::BGRA8Unorm_sRGB),
+            wgpu::TextureFormat::Rgba8Unorm => Ok(MTLPixelFormat::RGBA8Unorm),
+            wgpu::TextureFormat::Bgra8Unorm => Ok(MTLPixelFormat::BGRA8Unorm),
+            wgpu::TextureFormat::Rgba16Float => Ok(MTLPixelFormat::RGBA16Float),
+            _ => Err(ImportError::UnsupportedFormat(format)),
         }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn metal_import_matches_declared_color_space() {
+        assert_eq!(
+            metal_format(PixelFormat::Bgra8Unorm, ColorSpace::Srgb).unwrap(),
+            MTLPixelFormat::BGRA8Unorm_sRGB
+        );
+        assert_eq!(
+            metal_format(PixelFormat::Rgba8Unorm, ColorSpace::Srgb).unwrap(),
+            MTLPixelFormat::RGBA8Unorm_sRGB
+        );
+        assert_eq!(
+            metal_format(PixelFormat::Bgra8Unorm, ColorSpace::Linear).unwrap(),
+            MTLPixelFormat::BGRA8Unorm
+        );
+        assert!(metal_format(PixelFormat::Nv12, ColorSpace::Srgb).is_err());
+        assert!(metal_format(PixelFormat::R32Float, ColorSpace::Linear).is_err());
     }
 
     pub(super) fn import(
@@ -480,7 +505,7 @@ mod macos {
             _ => return Err(ImportError::WrongTransport),
         };
         let format = wgpu_format(surface.format, surface.color_space)?;
-        let metal_format = metal_format(surface.format)?;
+        let metal_format = metal_format(surface.format, surface.color_space)?;
         let looked_up = if retained.is_none() {
             Some(
                 NonNull::new(unsafe { IOSurfaceLookup(surface_id) })
