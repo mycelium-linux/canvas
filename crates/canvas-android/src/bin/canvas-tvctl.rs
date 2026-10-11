@@ -6,6 +6,9 @@ use std::{
     process::Command,
 };
 
+#[path = "tvctl/launch.rs"]
+mod launch;
+
 fn adb(serial: &str, arguments: &[&str]) -> Result<Vec<u8>, String> {
     let output = Command::new("adb")
         .args(["-s", serial])
@@ -55,6 +58,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .read_to_string(&mut raw)?;
     if raw.len() > MAX_FRAME {
         return Err("Request exceeds 4 MiB".into());
+    }
+    if raw.trim_start().starts_with('{') {
+        let value: serde_json::Value = serde_json::from_str(&raw)?;
+        if value["command"]["command"] == "launch" {
+            let request: launch::Request = serde_json::from_value(value)?;
+            let receipt = launch::execute(&request, |args| adb(&serial, args));
+            println!("{}", serde_json::to_string(&receipt)?);
+            if receipt["outcome"]["status"] != "ok" {
+                return Err("TV launch failed; see receipt".into());
+            }
+            return Ok(());
+        }
     }
     let text_mode = !raw.trim_start().starts_with('{');
     let mut request: Request = if text_mode {
