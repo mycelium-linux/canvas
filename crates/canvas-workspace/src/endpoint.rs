@@ -154,7 +154,12 @@ impl Endpoint {
                 (frame.clone(), data)
             },
         );
-        if !self.frames.contains_key(surface_id) {
+        // A declared completed sample is retained evidence, not a live sensor
+        // awaiting a transient heartbeat. Only live sources lose readiness on
+        // restart/missing delivery. Do not invent a receipt time for artifacts.
+        if !self.frames.contains_key(surface_id)
+            && spec.data.provenance == canvas_widgets::Provenance::Live
+        {
             data.state = canvas_widgets::WidgetDataState::NoData;
         }
         if frame["view"] == "task_deck" {
@@ -492,6 +497,26 @@ fn surface_frame_expiry(refresh_ms: Option<u64>) -> std::time::Duration {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn completed_sample_signal_is_retained_without_a_live_heartbeat() {
+        let mut endpoint=super::Endpoint::new("firetv-omni");
+        let mut request:super::Request=serde_json::from_str(include_str!("../../../config/deploy/firetv/workspaces.json")).unwrap();
+        let super::Command::Install { documents, .. }=&mut request.command else {panic!()};
+        documents[0].surfaces[1].content=crate::SurfaceContent::Widget {spec:canvas_widgets::WidgetSpec::from_json(br#"{"schema_version":2,"id":"reference","kind":"signal_view","title":"Completed owner reference","frame":{"view":"scope","range":{"minimum":0,"maximum":5.5},"samples":[0,1,5]},"data":{"state":"ready","provenance":"sample","source":"Completed owner simulation"}}"#).unwrap()};
+        endpoint.execute(request).unwrap();
+        let sample=endpoint.surface_snapshot("clock").unwrap();
+        assert_eq!(sample["data"]["state"],"ready");
+        assert!(sample["data"]["observed_at"].is_null());
+        let restored=super::Endpoint::restore("firetv-omni",&endpoint.checkpoint().to_string()).unwrap();
+        assert_eq!(restored.surface_snapshot("clock").unwrap(),sample);
+        let session=endpoint.session.as_mut().unwrap();
+        let mut document=session.document().unwrap().clone();
+        let crate::SurfaceContent::Widget {spec}=&mut document.surfaces[1].content else {panic!()};
+        spec.data.provenance=canvas_widgets::Provenance::Live;
+        document.revision+=1;
+        session.import_document(&document,false).unwrap();
+        assert_eq!(endpoint.surface_snapshot("clock").unwrap()["data"]["state"],"no_data");
+    }
     #[test]
     fn task_navigation_survives_refresh_but_not_removed_identity_or_restart() {
         let mut endpoint = Endpoint::new("firetv-omni");
