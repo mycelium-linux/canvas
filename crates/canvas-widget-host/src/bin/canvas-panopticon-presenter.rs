@@ -6,6 +6,15 @@ use std::{error::Error, path::Path, thread, time::Duration};
 use unibus::client::{Client, ClientConfig};
 
 const KIND: &str = "panopticon.wall.snapshot.v1";
+type Pending = ((u64, u64), Value);
+fn retain_latest(pending: &mut Option<Pending>, generation: (u64, u64), projection: Value) {
+    if pending
+        .as_ref()
+        .is_none_or(|(previous, _)| generation > *previous)
+    {
+        *pending = Some((generation, projection));
+    }
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
@@ -61,78 +70,92 @@ fn main() -> Result<(), Box<dyn Error>> {
             Ok(client) => {
                 delay = 2;
                 loop {
-                    let (envelope, payload) = match client.try_read() {
-                        Ok(Some(frame)) => frame,
-                        Ok(None) => continue,
-                        Err(error) => {
-                            eprintln!("Unibus disconnected: {error}");
-                            break;
+                    let mut pending = None;
+                    let mut disconnected = false;
+                    // Admit every bounded asset, but render only the newest valid
+                    // snapshot after a slow owner call; never replay a UI backlog.
+                    for _ in 0..16 {
+                        let (envelope, payload) = match client.try_read() {
+                            Ok(Some(frame)) => frame,
+                            Ok(None) => break,
+                            Err(error) => {
+                                eprintln!("Unibus disconnected: {error}");
+                                disconnected = true;
+                                break;
+                            }
+                        };
+                        if envelope.message.kind != KIND {
+                            continue;
                         }
-                    };
-                    if envelope.message.kind != KIND {
-                        continue;
-                    }
-                    if envelope.producer_id != config.source_producer
-                        || envelope.installation_id != config.bus.installation_id
-                        || payload.len() > 65536
-                        || serde_json::to_vec(&envelope.message.body)?.len() > 65536
-                    {
-                        eprintln!("rejected unexpected Panopticon sender or payload");
-                        continue;
-                    }
-                    let body = Value::Object(envelope.message.body.clone());
-                    match accept(&body, unibus::envelope::now_ms(), previous) {
-                        Err(error) => eprintln!("rejected Panopticon observation: {error}"),
-                        Ok(generation) => {
-                            let asset = &body["tile_asset"];
-                            if !payload.is_empty() {
-                                if let Err(error) =
-                                    canvas_widget_host::panopticon_tiles::verify(asset, &payload)
-                                {
-                                    eprintln!("rejected tile: {error}");
+                        if envelope.producer_id != config.source_producer
+                            || envelope.installation_id != config.bus.installation_id
+                            || payload.len() > 65536
+                            || serde_json::to_vec(&envelope.message.body)?.len() > 65536
+                        {
+                            eprintln!("rejected unexpected Panopticon sender or payload");
+                            continue;
+                        }
+                        let body = Value::Object(envelope.message.body.clone());
+                        match accept(&body, unibus::envelope::now_ms(), previous) {
+                            Err(error) => eprintln!("rejected Panopticon observation: {error}"),
+                            Ok(generation) => {
+                                let asset = &body["tile_asset"];
+                                if !payload.is_empty() {
+                                    if let Err(error) = canvas_widget_host::panopticon_tiles::verify(
+                                        asset, &payload,
+                                    ) {
+                                        eprintln!("rejected tile: {error}");
+                                        continue;
+                                    }
+                                    let sha = asset["sha256"]
+                                        .as_str()
+                                        .ok_or("missing verified digest")?;
+                                    if !tiles.contains(sha) {
+                                        if tiles.len() >= 64 {
+                                            eprintln!("tile cache admission budget exhausted");
+                                            continue;
+                                        }
+                                        if let Err(error) =
+                                            canvas_widget_host::panopticon_tiles::provision(
+                                                &config.endpoint,
+                                                asset,
+                                                &payload,
+                                            )
+                                        {
+                                            eprintln!("tile delivery failed: {error}");
+                                            continue;
+                                        }
+                                        tiles.insert(sha.to_owned());
+                                        eprintln!("delivered viewport tile {}", sha);
+                                    }
+                                } else if !asset.is_null() {
+                                    eprintln!("missing tile payload");
                                     continue;
                                 }
-                                let sha =
-                                    asset["sha256"].as_str().ok_or("missing verified digest")?;
-                                if !tiles.contains(sha) {
-                                    if tiles.len() >= 64 {
-                                        eprintln!("tile cache admission budget exhausted");
-                                        continue;
-                                    }
-                                    if let Err(error) =
-                                        canvas_widget_host::panopticon_tiles::provision(
-                                            &config.endpoint,
-                                            asset,
-                                            &payload,
-                                        )
-                                    {
-                                        eprintln!("tile delivery failed: {error}");
-                                        continue;
-                                    }
-                                    tiles.insert(sha.to_owned());
-                                    eprintln!("delivered viewport tile {}", sha);
-                                }
-                            } else if !asset.is_null() {
-                                eprintln!("missing tile payload");
-                                continue;
-                            }
-                            previous = generation;
-                            if let Err(error) = panopticon_wall::present(
-                                envelope.message.body["projection"].clone(),
-                                &config.widget_host,
-                                &config.binder,
-                                &config.tvctl,
-                                &config.endpoint,
-                                &mut lost,
-                            ) {
-                                eprintln!("Canvas presentation failed: {error}");
-                            } else {
-                                eprintln!(
-                                    "accepted Panopticon observation {}:{}",
-                                    generation.0, generation.1
-                                );
+                                previous = generation;
+                                retain_latest(&mut pending, generation, body["projection"].clone());
                             }
                         }
+                    }
+                    if let Some((generation, projection)) = pending {
+                        if let Err(error) = panopticon_wall::present(
+                            projection,
+                            &config.widget_host,
+                            &config.binder,
+                            &config.tvctl,
+                            &config.endpoint,
+                            &mut lost,
+                        ) {
+                            eprintln!("Canvas presentation failed: {error}");
+                        } else {
+                            eprintln!(
+                                "accepted Panopticon observation {}:{}",
+                                generation.0, generation.1
+                            );
+                        }
+                    }
+                    if disconnected {
+                        break;
                     }
                 }
             }
@@ -148,6 +171,16 @@ mod tests {
     use serde_json::json;
     fn snapshot() -> Value {
         json!({"sequence":1,"observed_at_unix_ms":10000,"projection":{"schema":"canvas.panopticon-wall.v1","observed_at_unix_ms":10000}})
+    }
+    #[test]
+    fn coalesces_backlog_without_rewinding_the_display() {
+        let mut pending = None;
+        retain_latest(&mut pending, (10000, 1), json!({"frame":"old"}));
+        retain_latest(&mut pending, (15000, 2), json!({"frame":"latest"}));
+        retain_latest(&mut pending, (12000, 3), json!({"frame":"reordered"}));
+        let (generation, projection) = pending.unwrap();
+        assert_eq!(generation, (15000, 2));
+        assert_eq!(projection["frame"], "latest");
     }
     #[test]
     fn rejects_replay_age_and_contract_drift() {

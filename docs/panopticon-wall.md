@@ -167,7 +167,7 @@ is implied by this motion layer alone.
 
 ## Cached current-viewport imagery
 
-APK53 (`0.1.52-panopticon-map-pump`) renders all 20 visible z9 OpenStreetMap
+APK54 (`0.1.53-panopticon-batched-map`) renders all 20 visible z9 OpenStreetMap
 tiles from Studio's existing Galileo cache. `PANOPTICON_TILE_CACHE` points to
 the inspected provider namespace, not an arbitrary provider: do not repoint it
 to different imagery while retaining OSM attribution. The source computes XYZ
@@ -193,7 +193,12 @@ retained bitmap underneath paths/contacts. The separate bounded `MapFramePump`
 keeps only one geometry computation in flight, publishes coherent snapshot /
 geometry / label revisions, and refuses old-size frames after a resize. Worker
 threads idle out when the surface is not drawn. JSON parsing and Rust geometry
-calls no longer block the map's UI draw callback.
+calls no longer block the map's UI draw callback. Consecutive equal-style line
+segments are batched without reordering into fewer Android GPU path commands.
+The presenter drains at most 16 queued messages per batch, validates and
+delivers each admitted attachment, and presents only the newest valid snapshot
+instead of replaying old frames after a slow owner call. A regression test
+rejects display rewind during coalescing.
 
 Source/detail patches use the most recently observed endpoint revision and
 retry genuine endpoint-generation conflicts at most three times, re-reading
@@ -204,9 +209,9 @@ Hardware proof: all 20 PNGs loaded; 38 current contacts and advancing owner
 timestamps read back on `tv-panopticon-wall`; `owner_revision` timing had zero
 fallback samples. Kiosk selection continued at its existing 15-second cadence.
 GFX 132 and Android 29 tests passed on Agora, projection/presenter/library 16
-tests passed locally, and strict host Clippy plus Java/D8/signature validation
+tests passed locally (17 after coalescing), and strict host Clippy plus Java/D8/signature validation
 passed. Initial Android frame-time p50 fell from 61 ms (per-frame tile meshes)
-to 26 ms after cached imagery and the geometry worker; this is not a claim of
+to 24 ms after cached imagery and the geometry worker; this is not a claim of
 stable 30 FPS, and startup/source-update jitter still requires measurement.
 Mixed pre-existing Java/JNI platform edits remain outside blanket commits.
 
