@@ -1,10 +1,7 @@
 //! Read-only public Panopticon entity projection. No renderer or source credentials.
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{
-    collections::BTreeSet,
-    io::{Read, Write},
-};
+use std::{collections::BTreeSet, io::Read};
 
 fn project(input: &Value, now: u64) -> Result<Value, String> {
     let mut markers = Vec::new();
@@ -133,41 +130,30 @@ fn altitude_distribution(observations: &serde_json::Map<String, Value>) -> Value
         .collect();
     json!({"known":known,"ground":ground,"unknown":unknown,"band_width_ft":5000,"plot":{"x":{"label":"Barometric altitude","unit":"ft","minimum":-5000.0,"maximum":-5000.0+upper as f64*5000.0},"y":{"label":"Aircraft per band","unit":"count","minimum":0.0,"maximum":bins.iter().copied().max().unwrap_or(0).max(1)},"series":[{"id":"altitude-bands","label":"5,000 ft altitude bands","role":"primary","points":points}],"viewport":null}})
 }
-fn select(projection: &mut Value, selected: Option<&str>) -> Result<(), String> {
-    let Some(id) = selected else {
-        projection["selection"] = json!({"state":"none"});
-        projection["map"]["selected"] = Value::Null;
-        return Ok(());
-    };
-    if id.len() > 192 || id.is_empty() {
-        return Err("invalid selected owner ID".into());
-    }
-    if projection["observations"].get(id).is_some() {
-        projection["selection"] =
-            json!({"state":"ready","id":id,"observation":projection["observations"][id]});
-        projection["map"]["selected"] = json!(id);
-    } else {
-        projection["selection"] = json!({"state":"lost","id":id});
-        projection["map"]["selected"] = Value::Null;
-    }
-    Ok(())
-}
-
+#[cfg(test)]
+use canvas_widget_host::panopticon_wall::select;
+#[cfg(test)]
+use std::io::Write;
 fn fetch(host: &str) -> Result<Value, String> {
+    fetch_from(Some(host))
+}
+fn fetch_from(host: Option<&str>) -> Result<Value, String> {
     // Private SSH backhaul; public read endpoint only, no provider keys exposed.
-    if host.starts_with('-')
-        || host.len() > 256
-        || !host
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"@.-".contains(&b))
-    {
+    if host.is_some_and(|host| {
+        host.starts_with('-')
+            || host.len() > 256
+            || !host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"@.-".contains(&b))
+    }) {
         return Err("invalid SSH owner".into());
     }
     let mut result = json!({});
     for (domain, port) in [("adsb", 18080), ("ais", 18581)] {
         let command=format!("curl --max-time 8 --fail --silent --show-error 'http://127.0.0.1:{port}/entities/{domain}/near?lat=47.65&lon=-122.35&radius=500000'");
-        let mut child = std::process::Command::new("ssh")
-            .args([
+        let mut source = if let Some(host) = host {
+            let mut source = std::process::Command::new("ssh");
+            source.args([
                 "-o",
                 "BatchMode=yes",
                 "-o",
@@ -178,7 +164,15 @@ fn fetch(host: &str) -> Result<Value, String> {
                 "ServerAliveCountMax=2",
                 host,
                 &command,
-            ])
+            ]);
+            source
+        } else {
+            let mut source = std::process::Command::new("curl");
+            source.args(["--max-time", "8", "--fail", "--silent", "--show-error"])
+                .arg(format!("http://127.0.0.1:{port}/entities/{domain}/near?lat=47.65&lon=-122.35&radius=500000"));
+            source
+        };
+        let mut child = source
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -257,37 +251,6 @@ fn boundaries(path: &str, digest: &str) -> Result<Vec<Value>, String> {
     }
     Ok(paths)
 }
-fn compose(
-    host: &str,
-    binder: &str,
-    projection: &Value,
-) -> Result<Value, Box<dyn std::error::Error>> {
-    let bytes = serde_json::to_vec(projection)?;
-    if bytes.len() > 64 * 1024 {
-        return Err("projection exceeds Lua input budget".into());
-    }
-    let mut child = std::process::Command::new(host)
-        .arg(binder)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()?;
-    child
-        .stdin
-        .take()
-        .ok_or("missing binder input")?
-        .write_all(&bytes)?;
-    let mut output = Vec::new();
-    child
-        .stdout
-        .take()
-        .ok_or("missing binder output")?
-        .take(64 * 1024 + 1)
-        .read_to_end(&mut output)?;
-    if !child.wait()?.success() || output.len() > 64 * 1024 {
-        return Err("bounded binder rejected projection".into());
-    }
-    Ok(serde_json::from_slice(&output)?)
-}
 fn watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.len() != 9 {
         return Err(
@@ -310,52 +273,14 @@ fn watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         projection["map"]["paths"] = json!(paths);
         projection["boundary_source"] =
             json!("Panopticon owner Washington state boundary · not terrain");
-        let presentation = canvas_widget_host::presentation::call(
+        canvas_widget_host::panopticon_wall::present(
+            projection.clone(),
+            &args[5],
+            &args[4],
             &args[6],
             &args[7],
-            &json!({"schema_version":1,"request_id":"panopticon-selection-read","command":{"command":"read_presentation"}}),
+            &mut lost_selection,
         )?;
-        if presentation["ok"] != true {
-            return Err("owner selection read rejected".into());
-        }
-        let requested = presentation["data"]["surfaces"]["panopticon-map"]["frame"]["map"]
-            ["selected"]
-            .as_str()
-            .map(str::to_owned)
-            .or_else(|| lost_selection.clone());
-        select(&mut projection, requested.as_deref())?;
-        lost_selection = if projection["selection"]["state"] == "lost" {
-            requested
-        } else {
-            None
-        };
-        let composed = compose(&args[5], &args[4], &projection)?;
-        // Health edits affect only the selected owner workspace, never switch it.
-        let current = canvas_widget_host::presentation::call(
-            &args[6],
-            &args[7],
-            &json!({"schema_version":1,"request_id":"panopticon-health-read","command":{"command":"read_document"}}),
-        )?;
-        if current["ok"] == true && current["data"]["id"] == "tv-panopticon-wall" {
-            let revision = current["data"]["revision"]
-                .as_u64()
-                .ok_or("missing workspace revision")?;
-            let operations:Vec<_>=[("panopticon-source","Source health","evidence"),("panopticon-detail","Selected contact","detail")].iter().map(|(id,title,key)|json!({"op":"upsert_surface","surface":{"id":id,"title":title,"content":{"kind":"widget","spec":composed[*key]}}})).collect();
-            let patch = json!({"schema_version":1,"request_id":format!("panopticon-health-{now}"),"expected_revision":current["revision"],"command":{"command":"apply_patch","patch":{"schema_version":1,"workspace_id":"tv-panopticon-wall","base_revision":revision,"revision":revision+1,"operations":operations}}});
-            let receipt = canvas_widget_host::presentation::call(&args[6], &args[7], &patch)?;
-            if receipt["ok"] != true {
-                return Err(format!("health patch rejected: {receipt}").into());
-            }
-        }
-        // A platform may recreate views after a document edit: publish the
-        // transient after that edit, never leave a rebuilt live view without data.
-        for (surface, key) in [("panopticon-map", "map"), ("panopticon-chart", "chart")] {
-            let request = json!({"schema_version":1,"request_id":format!("panopticon-{key}-{now}-{tick}"),"command":{"command":"surface_snapshot","workspace_id":"tv-panopticon-wall","surface_id":surface,"frame":composed[key]["frame"],"data":composed[key]["data"]}});
-            let receipt = canvas_widget_host::presentation::call(&args[6], &args[7], &request)?;
-            if receipt["ok"] != true {
-                return Err(format!("{key} snapshot rejected: {receipt}").into());
-            }
-        }
         println!(
             "{}",
             json!({"delivered_at":projection["observed_at"],"sources":projection["sources"],"selection":projection["selection"]["id"],"distribution":{"known":projection["distribution"]["known"],"ground":projection["distribution"]["ground"],"unknown":projection["distribution"]["unknown"]},"cycle":tick+1,"cycles":cycles})
@@ -366,8 +291,139 @@ fn watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+/// Source payload has no recipient-local UI selection.
+fn source_projection(
+    input: &Value,
+    now: u64,
+    paths: &[Value],
+    digest: &str,
+) -> Result<Value, String> {
+    let mut value = project(input, now)?;
+    value
+        .as_object_mut()
+        .ok_or("projection is not an object")?
+        .remove("selection");
+    value["map"]
+        .as_object_mut()
+        .ok_or("map is not an object")?
+        .remove("selected");
+    value["map"]["paths"] = json!(paths);
+    value["boundary_source"] = json!("Panopticon owner Washington state boundary · not terrain");
+    value["boundary_sha256"] = json!(digest);
+    if serde_json::to_vec(&value).map_err(|e| e.to_string())?.len() > 64 * 1024 {
+        return Err("source projection exceeds 64KiB".into());
+    }
+    Ok(value)
+}
+
+fn source(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use unibus::{
+        client::{Client, ClientConfig},
+        Message,
+    };
+    if args.len() != 4 && args.len() != 5 {
+        return Err("usage: source CLIENT_CONFIG OWNER_BOUNDARY SHA256 [FINITE_CYCLES]".into());
+    }
+    let limit = if args.len() == 5 {
+        Some(args[4].parse::<u32>()?)
+    } else {
+        None
+    };
+    if limit.is_some_and(|n| !(1..=120).contains(&n)) {
+        return Err("finite cycles must be 1..120".into());
+    }
+    let config_path = std::path::Path::new(&args[1]);
+    let mut config: ClientConfig = serde_json::from_slice(&std::fs::read(config_path)?)?;
+    config.resolve_token_file(config_path);
+    config.read_timeout_ms = 100;
+    let paths = boundaries(&args[2], &args[3])?;
+    let mut client = None;
+    let mut failures = 0u32;
+    let mut sequence = unibus::envelope::now_ms();
+    let mut cycles = 0u32;
+    loop {
+        let start = std::time::Instant::now();
+        if client.is_none() {
+            match Client::connect(config.clone()) {
+                Ok(connection) => {
+                    client = Some(connection);
+                    failures = 0;
+                }
+                Err(error) => {
+                    failures = failures.saturating_add(1);
+                    eprintln!("panopticon source: Unibus connection failed: {error}");
+                    if limit.is_some() {
+                        return Err(error.into());
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(1u64 << failures.min(5)));
+                    continue;
+                }
+            }
+        }
+        let input = match fetch_from(None) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("panopticon source: owner fetch failed: {error}");
+                json!({"adsb":{"error":"owner fetch rejected"},"ais":{"error":"owner fetch rejected"}})
+            }
+        };
+        let now = unibus::envelope::now_ms().max(1);
+        let projection = match source_projection(&input, now / 1000, &paths, &args[3]) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("panopticon source: invalid owner observation: {error}");
+                source_projection(
+                    &json!({"adsb":{"error":"owner observation invalid"},"ais":{"error":"owner observation invalid"}}),
+                    now / 1000,
+                    &paths,
+                    &args[3],
+                )?
+            }
+        };
+        sequence = sequence
+            .checked_add(1)
+            .ok_or("sequence exhausted")?
+            .max(now);
+        let connection = client.as_ref().ok_or("missing connection")?;
+        let body = json!({"sequence":sequence,"observed_at_unix_ms":now,"projection":projection});
+        let delivered = (|| -> Result<(), Box<dyn std::error::Error>> {
+            let envelope = connection.envelope(
+                Some("panopticon"),
+                Message::new("panopticon.wall.snapshot.v1", body),
+            )?;
+            connection.send(&envelope, &[])?;
+            while let Some((reply, _)) = connection.try_read()? {
+                if reply.message.body.get("success").and_then(Value::as_bool) == Some(false) {
+                    return Err("source publication rejected".into());
+                }
+            }
+            Ok(())
+        })();
+        match delivered {
+            Ok(()) => println!(
+                "{}",
+                json!({"published_sequence":sequence,"observed_at_unix_ms":now,"sources":projection["sources"]})
+            ),
+            Err(error) => {
+                eprintln!("panopticon source: publication failed: {error}");
+                client = None;
+                if limit.is_some() {
+                    return Err(error);
+                }
+            }
+        }
+        cycles = cycles.checked_add(1).ok_or("cycle count exhausted")?;
+        if limit.is_some_and(|n| cycles >= n) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(5).saturating_sub(start.elapsed()));
+    }
+}
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "source") {
+        return source(&args);
+    }
     if args.first().is_some_and(|a| a == "watch") {
         return watch(&args);
     }
@@ -409,6 +465,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn source_has_no_recipient_selection_and_preserves_owner_evidence() {
+        let source = source_projection(&input(), 101, &[], "digest").unwrap();
+        assert!(source.get("selection").is_none());
+        assert!(source["map"].get("selected").is_none());
+        assert_eq!(source["observations"]["adsb:abc"]["last_update"], 100);
+        assert_eq!(source["observations"]["adsb:abc"]["ttl_secs"], 180);
+        let disconnected = source_projection(
+            &json!({"adsb":{"error":"failed"},"ais":{"error":"failed"}}),
+            101,
+            &[],
+            "digest",
+        )
+        .unwrap();
+        assert_eq!(disconnected["sources"][0]["state"], "disconnected");
+        assert!(disconnected["map"]["markers"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
     fn input() -> Value {
         json!({"adsb":{"entities":[{"id":"abc","entity":{"coords":[47.5,-122.3,0],"last_update":100,"ttl_secs":180,"callsign":"REAL"}}]},"ais":{"entities":[]}})
     }

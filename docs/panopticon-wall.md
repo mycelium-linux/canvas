@@ -1,5 +1,39 @@
 # Panopticon regional wall
 
+## Studio producer / local presenter boundary
+
+The production source mode reads the same public-near owner APIs directly on
+Studio loopback. It never invokes SSH, Lua, Canvas control, or a TV API. Its
+bounded `canvas.panopticon-wall.v1` projection contains owner observations,
+TTL-preserving timestamps, distribution and verified state-boundary geometry;
+recipient selection is deliberately absent. Run it with an independently
+provisioned private Unibus client config:
+
+```sh
+canvas-panopticon-projection source CLIENT_CONFIG OWNER_ASSET SHA256
+# Optional final argument 1..120 makes a finite verification run.
+```
+
+The existing Unibus v2 client sends `panopticon.wall.snapshot.v1` to destination
+`panopticon`, with `{sequence, observed_at_unix_ms, projection}`. The router's
+explicit capability route `panopticon.wall.viewer` and zone/node ACLs enforce
+publication and receipt. This deployment intentionally does not use the stream
+interest plugin: the inspected plugin's fanout path lacks the required zone
+check. These are domain messages, not a second networking protocol.
+
+Owner failures produce disconnected samples, never renewed old aircraft. Hub
+connection failures are logged and retried with bounded 2–32 second backoff;
+there is no unbounded message queue. A failed consumer or disconnected transport
+must become stale at the Canvas receiver. Publication logs establish attempted
+delivery, not receipt: independent consumer readback proves actual transport.
+
+The Canvas-owned `panopticon_wall::present` helper adds local selection, reads
+the current owner document, and updates only an already-selected Panopticon
+workspace. It never steals selection. Document patches precede transient map
+and chart frames; generation conflicts remain visible. The coordinating owner
+provisions grants and installs/supervises producer and presenter services.
+The finite SSH watch below remains a manual diagnostic, not production wiring.
+
 Panopticon owns observations; Canvas owns presentation. This bounded companion
 uses the existing public entity-near APIs on the Studio, reached through an
 authorized private SSH connection. It does not use or weaken the authenticated
