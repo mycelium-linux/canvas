@@ -118,6 +118,21 @@ pub fn paint_records_with_appearance(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn plot_uses_shared_axes_legend_and_theme_geometry() {
+        let raw = r#"{"view":"plot","plot":{"x":{"label":"Time","unit":"s","minimum":0,"maximum":1},"y":{"label":"Voltage","unit":"V","minimum":0,"maximum":5},"series":[{"id":"output","label":"U1 pin3 output","role":"primary","points":[{"x":0,"y":0},{"x":0.5,"y":3.66},{"x":1,"y":0}]}],"viewport":null}}"#;
+        let records = super::paint_records(640, 240, raw).unwrap();
+        assert_eq!(records.len() % 8, 0);
+        assert!(records.iter().all(|v| v.is_finite()));
+        let labels = super::label_records(640, 240, raw).unwrap();
+        assert!(
+            labels.contains("Time")
+                && labels.contains("Voltage")
+                && labels.contains("U1 pin3 output")
+        );
+        let bad = raw.replace("\"maximum\":1", "\"maximum\":0");
+        assert!(super::paint_records(640, 240, &bad).is_err());
+    }
+    #[test]
     fn android_signal_freshness_never_dims_the_instrument() {
         // Contract check for the Java paint shim: freshness stays in its footer,
         // while provider-safe frames (including stale em dashes) remain readable.

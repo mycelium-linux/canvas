@@ -128,20 +128,33 @@ Manual runbook (never put private dataset/model artifacts into Git):
    OUTPUT [CONNECTIVITY_SVG [PLOT_SVG]]`. It checks source identity, exact replay
    completion, physical pin groups and component inventory. Connectivity lines
    carry actual pin labels and values, with no inferred signal direction.
-5. Convert SVGs using existing `rsvg-convert --format pdf`. These are conventional
-   engineering-paper vector artifacts, not a second copied Canvas theme.
-   The plot includes Time (s), Voltage (V), ticks, graticule and an explicit trace
-   legend. Provision immutable PDF bytes through the established private asset
-   delivery path, then import the owner workspace revision-bound.
-6. Run `canvas-artifact-carousel MANIFEST TVCTL ENDPOINT 20 30` for a bounded
+5. Compose the waveform as `signal_view` with `frame.view = "plot"`, using the
+   canonical `gfx::plot` contract: physical X/Y domains and units, stable trace
+   identity, semantic theme role and explicit `{x,y}` observations. The Lua
+   binder supplies this frame; do not substitute a PDF screenshot for the
+   widget. The one canonical `plot` stores observations without a duplicate
+   Scope sample array. Desktop paints via Iced/wGPU, Android via its hardware
+   Canvas (the installed TV reports Skia/OpenGL), both using shared geometry.
+   This says nothing about measured frame time.
+6. For the constrained TV comparison pane, convert the **connectivity** SVG
+   using existing `rsvg-convert --format pdf`, provision immutable bytes through
+   the established private asset path, then replace only the second phase's
+   drawing content with that PDF AssetRef. This conventional engineering-paper
+   artifact matches the native schematic and avoids the current dense topology
+   label clipping; it is not original-layout recovery. Keep the Plot widget in
+   both phases byte-for-byte identical, then import revision-bound.
+7. Run `canvas-artifact-carousel MANIFEST TVCTL ENDPOINT 20 30` for a bounded
    roughly ten-minute preview. Drawing-only `apply_patch` operations preserve
    the exact same plot surface; switching to another workspace ends the command
    visibly rather than taking over the newly selected project. Repeat manually
    as desired; this is not an unadvertised forever-running daemon.
 
-The initial verification preview uses the finite plot PDF. This is an interim
-artifact, not the requested richer interactive Canvas plot widget; the shared
-GFX plot/axis/legend primitive replaces it through the normal app update.
-This legitimately avoids the installed false live-sensor footer without a fake
-heartbeat or misrepresenting sample provenance. Private receipts and derived
-assets are retained under `~/.cache/dock/canvas/verk-led-source`.
+The initial PDF plot was replaced by the actual Plot widget in APK 44. The
+retained-sample core fix preserves ready finite evidence without a fake live
+heartbeat. Both drawing phases were checked on the TV with the same readable
+axes, grid and trace legend. Typed viewport bounds support subsequent view
+controls; pointer/remote zoom interaction is not claimed here. Desktop's
+existing geometry CacheState is reused, keyed once per Program by the frame
+and resolved theme; invalid geometry/labels paint an explicit error.
+Private receipts and derived assets are retained under
+`~/.cache/dock/canvas/verk-led-source`.

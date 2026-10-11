@@ -181,15 +181,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 fn trace_svg(trace: &Value) -> Result<String, String> {
-    let samples = trace["frame"]["samples"]
-        .as_array()
-        .ok_or("missing samples")?;
-    let lo = trace["frame"]["range"]["minimum"]
-        .as_f64()
-        .ok_or("missing minimum")?;
-    let hi = trace["frame"]["range"]["maximum"]
-        .as_f64()
-        .ok_or("missing maximum")?;
+    let modern = trace["plot"].is_object();
+    let samples = if modern {
+        trace["plot"]["series"][0]["points"]
+            .as_array()
+            .ok_or("missing plot points")?
+            .iter()
+            .map(|p| p["y"].clone())
+            .collect::<Vec<_>>()
+    } else {
+        trace["frame"]["samples"]
+            .as_array()
+            .ok_or("missing samples")?
+            .clone()
+    };
+    let range = if modern {
+        &trace["plot"]["y"]
+    } else {
+        &trace["frame"]["range"]
+    };
+    let lo = range["minimum"].as_f64().ok_or("missing minimum")?;
+    let hi = range["maximum"].as_f64().ok_or("missing maximum")?;
     let start = trace["start_s"].as_f64().ok_or("missing start")?;
     let stop = trace["stop_s"].as_f64().ok_or("missing stop")?;
     if !(2..=4096).contains(&samples.len())

@@ -251,6 +251,26 @@ fn compose_script(
 mod tests {
     use super::*;
     #[test]
+    fn modeled_led_composes_the_shared_plot_without_transport_or_heartbeat() {
+        let p = serde_json::json!({"schema":"canvas.modeled-trace.v1","source_sha256":"580061c37e6348d8e8c26eb0e8cb04e4440640d77cd2d84a119ab509dd393ca8","probe":{"part":"U1","pin":"3"},"supply":{"positive":"J1.2","ground":"J1.1","volts":5},"time":{"stop_s":1},"frame":{"range":{"minimum":0,"maximum":5}},"plot":{"x":{"label":"Time","unit":"s","minimum":0,"maximum":1},"y":{"label":"Voltage","unit":"V","minimum":0,"maximum":5},"series":[{"id":"output","label":"U1 pin3 output","role":"primary","points":[{"x":0,"y":0},{"x":1,"y":3}]}],"viewport":null},"frequency_hz":7.3,"rising_edges":7,"source_points":2,"simulator_version":"47"});
+        let output = compose_script(
+            include_bytes!("../../../config/binders/spice-modeled-v1.lua"),
+            &serde_json::to_vec(&p).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(output["widget"]["frame"]["view"], "plot");
+        assert_eq!(output["widget"]["frame"]["plot"], p["plot"]);
+        assert_eq!(output["widget"]["data"]["provenance"], "sample");
+        assert!(output["widget"]["data"].get("observed_at").is_none());
+        let mut bad = p;
+        bad["source_sha256"] = serde_json::json!("other");
+        assert!(compose_script(
+            include_bytes!("../../../config/binders/spice-modeled-v1.lua"),
+            &serde_json::to_vec(&bad).unwrap()
+        )
+        .is_err());
+    }
+    #[test]
     fn reference_scope_is_recorded_not_live_and_rejects_other_circuits() {
         let value = serde_json::json!({"schema":"canvas.spice-trace.v1","reference_id":"owned-rc-lowpass-v1","run_state":"complete","scope":"owner reference circuit, not LED-Blinker-Circuit","source_sha256":"a677e9eb780cd584e88d34e47c010a7b6626dee267a36f4b0a3be2beec373ded","probe":"OUT","samples":[0,1,5],"start_s":0,"stop_s":0.003,"sample_period_s":0.0015,"range":{"minimum":0,"maximum":5.5},"source_points":3018,"rise_time_s":0.000349358,"simulator_version":"42"});
         let script = include_bytes!("../../../config/binders/spice-reference-v1.lua");

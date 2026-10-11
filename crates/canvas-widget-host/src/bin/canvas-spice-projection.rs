@@ -214,6 +214,26 @@ fn modeled(
         );
     let mut result = json!({"schema":"canvas.modeled-trace.v1","source_sha256":receipt["source_sha256"],"execution_sha256":receipt["execution_sha256"],"probe":receipt["probe"],"time":receipt["time"],"supply":receipt["supply"],"model":receipt["model"],"led_model":receipt["led_model"],"model_sha256":receipt["model_sha256"],"upstream_sha256":receipt["upstream_sha256"],"simulator_version":version,"frequency_hz":execution["payload"]["frequency_hz"],"rising_edges":execution["payload"]["rising_edges"],"source_points":points.len(),"resampling":"piecewise_linear_uniform","start_s":points[0][0],"stop_s":points.last().unwrap()[0],"sample_period_s":(points.last().unwrap()[0]-points[0][0])/1023.0,"frame":{"view":"scope","range":{"minimum":minimum,"maximum":maximum},"samples":samples}});
     result["led_current_max_a"] = execution["payload"]["led_current_max_a"].clone();
+    let start = points[0][0];
+    let stop = points.last().unwrap()[0];
+    let plot_points = result["frame"]["samples"]
+        .as_array()
+        .ok_or("missing projected samples")?
+        .iter()
+        .enumerate()
+        .map(|(i, v)| json!({"x":start+(stop-start)*i as f64/1023.0,"y":v}))
+        .collect::<Vec<_>>();
+    let part = receipt["probe"]["part"]
+        .as_str()
+        .ok_or("missing probe part")?;
+    let pin = receipt["probe"]["pin"]
+        .as_str()
+        .ok_or("missing probe pin")?;
+    result["plot"] = json!({"x":{"label":"Time","unit":"s","minimum":start,"maximum":stop},"y":{"label":"Voltage","unit":"V","minimum":minimum,"maximum":maximum},"series":[{"id":"output","label":format!("{part} pin{pin} output"),"role":"primary","points":plot_points}],"viewport":null});
+    result
+        .as_object_mut()
+        .ok_or("missing projection object")?
+        .remove("frame");
     Ok(result)
 }
 #[cfg(test)]
