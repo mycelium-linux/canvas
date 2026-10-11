@@ -19,6 +19,76 @@ use unibus_sdk::{Publish, Session};
 const SOURCE: &str = include_str!("../config/modules/holodeck-bench-v1.lua");
 const STATE: &str = "canvas.xr.widget.state.v1";
 const ACTIVATE: &str = "canvas.xr.widget.activate.v1";
+const MAX_SESSIONS: usize = 16;
+const SESSION_TTL_MS: u64 = 10000;
+#[derive(Default)]
+struct Views {
+    sessions: BTreeMap<String, SessionView>,
+}
+struct SessionView {
+    view: View,
+    last_activation: u64,
+    last_seen: u64,
+}
+impl Views {
+    fn expire(&mut self, at: u64) {
+        self.sessions
+            .retain(|_, session| at.saturating_sub(session.last_seen) < SESSION_TTL_MS);
+    }
+    fn request(&mut self, kind: &str, body: Value, at: u64) -> Result<(&'static str, Value)> {
+        self.expire(at);
+        ensure!(
+            serde_json::to_vec(&body)?.len() <= 16384,
+            "UI body exceeds budget"
+        );
+        let session = body["session"]
+            .as_str()
+            .filter(|s| !s.is_empty() && s.len() <= 128 && !s.chars().any(char::is_control))
+            .ok_or_else(|| anyhow::anyhow!("invalid UI session"))?
+            .to_owned();
+        if kind == STATE {
+            if let Some(old) = self.sessions.get_mut(&session) {
+                let old_revision = old.view.state["state_revision"].as_u64().unwrap();
+                let new_revision = body["state_revision"].as_u64().unwrap_or(0);
+                ensure!(new_revision >= old_revision, "older UI state");
+                if new_revision == old_revision {
+                    ensure!(old.view.state == body, "conflicting UI revision");
+                } else {
+                    old.view.advance(project(body)?)?;
+                }
+                old.last_seen = at;
+                return Ok(("canvas.xr.widget.scene.v1", old.view.scene()));
+            }
+            ensure!(
+                self.sessions.len() < MAX_SESSIONS,
+                "UI session budget exceeded"
+            );
+            let view = project(body)?;
+            let scene = view.scene();
+            self.sessions.insert(
+                session,
+                SessionView {
+                    view,
+                    last_activation: 0,
+                    last_seen: at,
+                },
+            );
+            Ok(("canvas.xr.widget.scene.v1", scene))
+        } else {
+            ensure!(kind == ACTIVATE, "unknown request");
+            ensure!(body["schema_version"] == 1, "unsupported activation schema");
+            let current = self
+                .sessions
+                .get_mut(&session)
+                .ok_or_else(|| anyhow::anyhow!("no current UI session"))?;
+            let id = body["activation_id"].as_u64().unwrap_or(0);
+            ensure!(id > current.last_activation, "replayed activation");
+            let action = current.view.activate(&body)?;
+            current.last_activation = id;
+            Ok(("canvas.xr.widget.action.v1", action))
+        }
+    }
+}
 struct View {
     state: Value,
     module: LuaModule,
@@ -229,20 +299,11 @@ fn main() -> Result<()> {
         return Ok(());
     }
     if std::env::args().any(|a| a == "--stdin") {
-        let mut view = None;
+        let mut views = Views::default();
         for line in io::stdin().lock().lines() {
             let v: Value = serde_json::from_str(&line?)?;
-            let result = if v["kind"] == STATE {
-                let next = project(v["body"].clone())?;
-                let scene = next.scene();
-                view = Some(next);
-                scene
-            } else {
-                ensure!(v["kind"] == ACTIVATE, "unknown request");
-                view.as_mut()
-                    .ok_or_else(|| anyhow::anyhow!("no view"))?
-                    .activate(&v["body"])?
-            };
+            let (_, result) =
+                views.request(v["kind"].as_str().unwrap_or(""), v["body"].clone(), now())?;
             println!("{}", serde_json::to_string(&result)?);
         }
         return Ok(());
@@ -257,9 +318,9 @@ fn main() -> Result<()> {
         .to_owned();
     let peer = std::env::var("CANVAS_XR_PEER")?;
     let bus = Session::connect(serde_json::from_value(config)?)?;
-    let mut view: Option<View> = None;
-    let mut last_activation = 0;
+    let mut views = Views::default();
     loop {
+        views.expire(now());
         while let Some(event) = bus.poll() {
             if event.kind == "reply" && event.body["success"] == false {
                 eprintln!("Canvas XR publication rejected by Unibus");
@@ -271,52 +332,15 @@ fn main() -> Result<()> {
             {
                 continue;
             }
-            let result = (|| -> Result<Option<(&str, Value)>> {
-                if event.kind == STATE {
-                    if let Some(old) = &view {
-                        if old.state["session"] == event.body["session"] {
-                            let old_revision = old.state["state_revision"].as_u64().unwrap();
-                            let new_revision = event.body["state_revision"].as_u64().unwrap_or(0);
-                            ensure!(new_revision >= old_revision, "older UI state");
-                            if new_revision == old_revision {
-                                ensure!(old.state == event.body, "conflicting UI revision");
-                                return Ok(Some(("canvas.xr.widget.scene.v1", old.scene())));
-                            }
-                        } else {
-                            last_activation = 0;
-                        }
-                    }
-                    let next = project(event.body)?;
-                    if let Some(old) = view
-                        .as_mut()
-                        .filter(|old| old.state["session"] == next.state["session"])
-                    {
-                        old.advance(next)?;
-                    } else {
-                        view = Some(next);
-                    }
-                    let scene = view.as_ref().unwrap().scene();
-                    Ok(Some(("canvas.xr.widget.scene.v1", scene)))
-                } else {
-                    let id = event.body["activation_id"].as_u64().unwrap_or(0);
-                    ensure!(id > last_activation, "replayed activation");
-                    let action = view
-                        .as_mut()
-                        .ok_or_else(|| anyhow::anyhow!("no view"))?
-                        .activate(&event.body)?;
-                    last_activation = id;
-                    Ok(Some(("canvas.xr.widget.action.v1", action)))
-                }
-            })();
+            let result = views.request(&event.kind, event.body, now());
             match result {
-                Ok(Some((kind, body))) => {
+                Ok((kind, body)) => {
                     bus.publish(Publish {
                         destination: Some(peer.clone()),
                         kind: kind.into(),
                         body,
                     })?;
                 }
-                Ok(None) => {}
                 Err(error) => {
                     eprintln!("Canvas XR request rejected: {error}");
                 }
@@ -366,5 +390,77 @@ mod tests {
         assert!(view.module.retained().output_revision > original);
         assert_eq!(view.module.retained().buttons.len(), 3);
         assert_eq!(view.module.retained().module_generation, 1);
+    }
+    #[test]
+    fn independent_sessions_preserve_selection_and_replay_guards() {
+        let mut views = Views::default();
+        let a = state();
+        let mut b = state();
+        b["session"] = json!("james");
+        b["controls"][1]["enabled"] = json!(false);
+        views.request(STATE, a.clone(), 0).unwrap();
+        views.request(STATE, b.clone(), 1).unwrap();
+        let click = json!({"schema_version":1,"surface_id":"transmog-bench",
+            "session":"test","state_revision":1,"activation_id":1,"target_id":"c1"});
+        assert_eq!(
+            views.request(ACTIVATE, click.clone(), 2).unwrap().1["session"],
+            "test"
+        );
+        let mut other = click.clone();
+        other["session"] = json!("james");
+        assert!(views.request(ACTIVATE, other.clone(), 3).is_err());
+        other["target_id"] = json!("c0");
+        assert!(
+            views.request(ACTIVATE, other.clone(), 4).is_ok(),
+            "activation IDs are per session"
+        );
+        assert!(
+            views.request(ACTIVATE, click, 5).is_err(),
+            "another session cannot reset replay guard"
+        );
+        let before = views.sessions["james"]
+            .view
+            .module
+            .retained()
+            .output_revision;
+        views.request(STATE, b, 6).unwrap();
+        assert_eq!(
+            views.sessions["james"]
+                .view
+                .module
+                .retained()
+                .output_revision,
+            before,
+            "heartbeats reuse the retained scene"
+        );
+        let mut newer = a;
+        newer["state_revision"] = json!(2);
+        views.request(STATE, newer, 7).unwrap();
+        assert_eq!(views.sessions["james"].view.state["state_revision"], 1);
+        assert!(
+            views.request(ACTIVATE, other, SESSION_TTL_MS + 6).is_err(),
+            "expired sessions cannot activate"
+        );
+        assert_eq!(views.sessions.len(), 1);
+    }
+    #[test]
+    fn session_budget_expiry_and_bad_heartbeats() {
+        let mut views = Views::default();
+        for n in 0..MAX_SESSIONS {
+            let mut body = state();
+            body["session"] = json!(format!("room-member-{n}"));
+            views.request(STATE, body, 0).unwrap();
+        }
+        assert!(views.request(STATE, state(), 1).is_err());
+        let mut bad = state();
+        bad["session"] = json!("room-member-0");
+        bad["controls"][0]["enabled"] = json!(false);
+        assert!(views.request(STATE, bad, SESSION_TTL_MS - 1).is_err());
+        assert_eq!(
+            views.sessions["room-member-0"].last_seen, 0,
+            "rejections do not renew sessions"
+        );
+        assert!(views.request(STATE, state(), SESSION_TTL_MS).is_ok());
+        assert_eq!(views.sessions.len(), 1);
     }
 }
