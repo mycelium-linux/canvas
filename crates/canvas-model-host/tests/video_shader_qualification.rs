@@ -1,5 +1,5 @@
 //! Actual GPU video-shader contract checks, independent of decoder transport.
-use fpl_gfx::retained_video::{SHADER, Uniforms};
+use fpl_gfx::retained_video::{Pipeline, Uniforms};
 use wgpu::util::DeviceExt;
 
 #[test]
@@ -10,6 +10,7 @@ fn native_video_alpha_contain_and_stale_pixels() {
             .request_adapter(&Default::default())
             .await
             .unwrap();
+        eprintln!("video qualification adapter: {:?}", adapter.get_info());
         let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
         let texture = |format, size, usage| {
             device.create_texture(&wgpu::TextureDescriptor {
@@ -24,8 +25,8 @@ fn native_video_alpha_contain_and_stale_pixels() {
             })
         };
         let one = wgpu::Extent3d {
-            width: 1,
-            height: 1,
+            width: 2,
+            height: 2,
             depth_or_array_layers: 1,
         };
         let frame = texture(
@@ -39,8 +40,8 @@ fn native_video_alpha_contain_and_stale_pixels() {
             wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         );
         for (texture, bytes, stride) in [
-            (&frame, &[32, 64, 96, 128][..], 4),
-            (&alpha, &[64][..], 1),
+            (&frame, &[32, 64, 96, 128].repeat(4)[..], 8),
+            (&alpha, &[64; 4][..], 2),
         ] {
             queue.write_texture(
                 texture.as_image_copy(),
@@ -48,7 +49,7 @@ fn native_video_alpha_contain_and_stale_pixels() {
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(stride),
-                    rows_per_image: Some(1),
+                    rows_per_image: Some(2),
                 },
                 one,
             );
@@ -62,40 +63,20 @@ fn native_video_alpha_contain_and_stale_pixels() {
             },
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         );
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: None,
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: None,
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview: None,
-            cache: None,
-        });
-        let sampler = device.create_sampler(&Default::default());
+        let pipeline = Pipeline::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        let srgb_output = texture(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            output.size(),
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        );
+        let srgb_pipeline = Pipeline::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
         let frame_view = frame.create_view(&Default::default());
         let alpha_view = alpha.create_view(&Default::default());
-        let view = output.create_view(&Default::default());
-        let capture = |uniforms: Uniforms| {
+        let capture_target = |uniforms: Uniforms,
+                              output: &wgpu::Texture,
+                              pipeline: &Pipeline,
+                              background: wgpu::Color| {
+            let view = output.create_view(&Default::default());
             let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,
                 contents: &uniforms.to_bytes(),
@@ -103,7 +84,7 @@ fn native_video_alpha_contain_and_stale_pixels() {
             });
             let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
-                layout: &pipeline.get_bind_group_layout(0),
+                layout: &pipeline.bind_group_layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -111,7 +92,7 @@ fn native_video_alpha_contain_and_stale_pixels() {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&sampler),
+                        resource: wgpu::BindingResource::Sampler(&pipeline.sampler),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
@@ -138,7 +119,7 @@ fn native_video_alpha_contain_and_stale_pixels() {
                         resolve_target: None,
                         depth_slice: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            load: wgpu::LoadOp::Clear(background),
                             store: wgpu::StoreOp::Store,
                         },
                     })],
@@ -146,7 +127,7 @@ fn native_video_alpha_contain_and_stale_pixels() {
                     timestamp_writes: None,
                     occlusion_query_set: None,
                 });
-                pass.set_pipeline(&pipeline);
+                pass.set_pipeline(&pipeline.render_pipeline);
                 pass.set_bind_group(0, &bind, &[]);
                 pass.draw(0..3, 0..1);
             }
@@ -177,6 +158,8 @@ fn native_video_alpha_contain_and_stale_pixels() {
             readback.unmap();
             bytes
         };
+        let capture =
+            |uniforms| capture_target(uniforms, &output, &pipeline, wgpu::Color::TRANSPARENT);
         let pixel = |bytes: &[u8], x: usize, y: usize| {
             <[u8; 4]>::try_from(&bytes[(y * 64 + x) * 4..(y * 64 + x) * 4 + 4]).unwrap()
         };
@@ -187,6 +170,15 @@ fn native_video_alpha_contain_and_stale_pixels() {
                     "{actual:?} != {expected:?}"
                 );
             }
+        };
+        let sample = |source: &[[u8; 4]; 4], x: usize, y: usize| -> [f64; 4] {
+            let tx = (((x as f64 + 0.5) / 64.0) * 2.0 - 0.5).clamp(0.0, 1.0);
+            let ty = (((y as f64 + 0.5) / 64.0) * 2.0 - 0.5).clamp(0.0, 1.0);
+            std::array::from_fn(|c| {
+                let top = f64::from(source[0][c]) * (1.0 - tx) + f64::from(source[1][c]) * tx;
+                let bottom = f64::from(source[2][c]) * (1.0 - tx) + f64::from(source[3][c]) * tx;
+                (top * (1.0 - ty) + bottom * ty) / 255.0
+            })
         };
         let base = Uniforms {
             viewport: [64., 64.],
@@ -251,5 +243,125 @@ fn native_video_alpha_contain_and_stale_pixels() {
         assert_eq!(pixel(&tall, 8, 32), [0; 4]);
         near(pixel(&wide, 32, 32), [16, 32, 48, 128]);
         near(pixel(&tall, 32, 32), [16, 32, 48, 128]);
+
+        let background = wgpu::Color {
+            r: 0.1,
+            g: 0.2,
+            b: 0.3,
+            a: 1.0,
+        };
+        // Independent linear-light compositing oracle, including target encoding.
+        let encoded = |linear: f64| {
+            if linear <= 0.003_130_8 {
+                12.92 * linear
+            } else {
+                1.055 * linear.powf(1.0 / 2.4) - 0.055
+            }
+        };
+        let alpha_value = 128.0 / 255.0;
+        let linear = [32.0, 64.0, 96.0].map(|c| c / 255.0 * alpha_value);
+        let composite = std::array::from_fn::<f64, 3, _>(|i| {
+            linear[i] + [0.1, 0.2, 0.3][i] * (1.0 - alpha_value)
+        });
+        let mut expected_linear = [255; 4];
+        let mut expected_srgb = [255; 4];
+        for i in 0..3 {
+            expected_linear[i] = (composite[i] * 255.0).round() as u8;
+            expected_srgb[i] = (encoded(composite[i]) * 255.0).round() as u8;
+        }
+        near(
+            pixel(
+                &capture_target(base, &output, &pipeline, background),
+                32,
+                32,
+            ),
+            expected_linear,
+        );
+        near(
+            pixel(
+                &capture_target(base, &srgb_output, &srgb_pipeline, background),
+                32,
+                32,
+            ),
+            expected_srgb,
+        );
+
+        // An asymmetric source catches flipped axes and nearest filtering.
+        let corners = [
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [255; 4],
+        ];
+        queue.write_texture(
+            frame.as_image_copy(),
+            &corners.concat(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(8),
+                rows_per_image: Some(2),
+            },
+            one,
+        );
+        let native = Uniforms {
+            native_alpha: 1.,
+            ..base
+        };
+        let pixels = capture(native);
+        for (x, y, color) in [
+            (15, 15, corners[0]),
+            (48, 15, corners[1]),
+            (15, 48, corners[2]),
+            (48, 48, corners[3]),
+        ] {
+            near(pixel(&pixels, x, y), color);
+        }
+        for y in 0..64 {
+            for x in 0..64 {
+                let expected = sample(&corners, x, y).map(|c| (c * 255.0).round() as u8);
+                near(pixel(&pixels, x, y), expected);
+            }
+        }
+
+        // Premultiplied transparent edge: filtering and unpremultiplication
+        // must preserve foreground energy instead of applying alpha twice.
+        let edges = [
+            [0, 0, 0, 0],
+            [128, 0, 0, 128],
+            [0, 64, 0, 64],
+            [0, 0, 255, 255],
+        ];
+        queue.write_texture(
+            frame.as_image_copy(),
+            &edges.concat(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(8),
+                rows_per_image: Some(2),
+            },
+            one,
+        );
+        let pixels = capture_target(
+            Uniforms {
+                premultiplied: 1.,
+                ..native
+            },
+            &output,
+            &pipeline,
+            background,
+        );
+        for y in 0..64 {
+            for x in 0..64 {
+                let sample = sample(&edges, x, y);
+                let expected = std::array::from_fn(|c| {
+                    if c == 3 {
+                        255
+                    } else {
+                        ((sample[c] + [0.1, 0.2, 0.3][c] * (1.0 - sample[3])) * 255.0).round() as u8
+                    }
+                });
+                near(pixel(&pixels, x, y), expected);
+            }
+        }
     });
 }
