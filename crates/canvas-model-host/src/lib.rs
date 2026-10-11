@@ -121,6 +121,9 @@ pub struct SceneState {
     pub orbit: Option<Orbit>,
     #[serde(default)]
     pub material: Material,
+    /// Opt-in face finish; legacy preserves existing shading and scene bytes.
+    #[serde(default, skip_serializing_if = "fpl_gfx::mesh::Finish::is_legacy")]
+    pub mesh_finish: fpl_gfx::mesh::Finish,
     /// Optional scalar field painted across the mesh.
     #[serde(default)]
     pub field: Option<Field>,
@@ -313,6 +316,7 @@ mod tests {
             orbit: None,
             field: None,
             material: Material::default(),
+            mesh_finish: fpl_gfx::mesh::Finish::Legacy,
             transition_ms: 850,
             fly_in: true,
         };
@@ -320,6 +324,26 @@ mod tests {
         scene.asset = "sha256-deadbeef.stl".into();
         scene.transition_ms = 9_000;
         assert!(scene.validate().is_err());
+    }
+
+    #[test]
+    fn finish_is_opt_in_and_old_scene_serialization_is_preserved() {
+        let source = serde_json::json!({"scene_id":"part","asset":"sha256-part.stl"});
+        let mut scene: SceneState = serde_json::from_value(source.clone()).unwrap();
+        assert_eq!(scene.mesh_finish, fpl_gfx::mesh::Finish::Legacy);
+        assert!(
+            serde_json::to_value(&scene)
+                .unwrap()
+                .get("mesh_finish")
+                .is_none()
+        );
+        scene.mesh_finish = fpl_gfx::mesh::Finish::Hologram;
+        let value = serde_json::to_value(&scene).unwrap();
+        assert_eq!(value["mesh_finish"], "hologram");
+        assert_eq!(serde_json::from_value::<SceneState>(value).unwrap(), scene);
+        let mut bad = source;
+        bad["mesh_finish"] = serde_json::json!("invented");
+        assert!(serde_json::from_value::<SceneState>(bad).is_err());
     }
 }
 

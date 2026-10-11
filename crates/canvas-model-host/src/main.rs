@@ -25,11 +25,16 @@ struct RenderJob {
     distance_scale: f32,
     rotation: [f32; 3],
     material: Material,
+    finish: fpl_gfx::mesh::Finish,
     field: Option<canvas_model_host::Field>,
     theme: VisualTheme,
     elapsed: f32,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "The two-slot worker channel bounds storage; inline jobs avoid a heap allocation for every frame."
+)]
 enum WorkerCommand {
     Render(RenderJob),
     Upload(Arc<mesh::PreparedMesh>),
@@ -64,6 +69,7 @@ impl RenderPool {
                             WorkerCommand::Upload(mesh) => renderer.upload(&mesh),
                             WorkerCommand::Render(job) => {
                                 sequences.push_back(job.sequence);
+                                renderer.set_finish(job.finish);
                                 match renderer.render(
                                     job.direction,
                                     job.distance_scale,
@@ -369,6 +375,7 @@ fn main() -> Result<()> {
             distance_scale: camera_distance,
             rotation: scene.model_rotation_degrees,
             material: scene.material.clone(),
+            finish: scene.mesh_finish,
             field: scene.field.clone(),
             theme,
             elapsed: elapsed_seconds,
@@ -389,7 +396,7 @@ fn main() -> Result<()> {
             }
             next_output += 1;
             frame_count += 1;
-            if frame_count % 120 == 0 {
+            if frame_count.is_multiple_of(120) {
                 let elapsed = measured_at.elapsed().as_secs_f64();
                 eprintln!("canvas-model-host: {:.1} fps", 120.0 / elapsed.max(0.001));
                 measured_at = Instant::now();

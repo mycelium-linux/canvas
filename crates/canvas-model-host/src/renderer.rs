@@ -1,10 +1,7 @@
 //! Headless WGPU renderer. GPU pipelines are created once; model changes only
 //! replace buffers after background baking has completed.
 
-use crate::{
-    Material,
-    mesh::{PreparedMesh, Vertex},
-};
+use crate::{Material, mesh::PreparedMesh};
 use anyhow::{Context, Result};
 use bytemuck::Zeroable;
 use canvas_core::VisualTheme;
@@ -38,6 +35,9 @@ pub struct Renderer {
     padded_row_bytes: u32,
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    edge_uniforms: wgpu::Buffer,
+    edge_bind_group: wgpu::BindGroup,
+    finish: fpl_gfx::mesh::Finish,
     fill_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
     mesh: Option<GpuMesh>,
@@ -122,75 +122,30 @@ impl Renderer {
             contents: bytemuck::bytes_of(&Uniforms::zeroed()),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("model-bind-layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
+        let pipelines = fpl_gfx::mesh::Pipelines::new(&device, format);
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("model-bind-group"),
-            layout: &bind_layout,
+            layout: &pipelines.layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: uniforms.as_entire_binding(),
             }],
         });
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("model-hologram-shader"),
-            source: wgpu::ShaderSource::Wgsl(fpl_gfx::mesh::SHADER.into()),
+        let fill_pipeline = pipelines.triangles;
+        let line_pipeline = pipelines.lines;
+        let edge_uniforms = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("model-edge-uniforms"),
+            contents: bytemuck::bytes_of(&Uniforms::zeroed()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("model-pipeline-layout"),
-            bind_group_layouts: &[&bind_layout],
-            push_constant_ranges: &[],
+        let edge_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("model-edge-bind-group"),
+            layout: &pipelines.layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: edge_uniforms.as_entire_binding(),
+            }],
         });
-        let make_pipeline = |topology| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("model-pipeline"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[Vertex::layout()],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology,
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: true,
-                    depth_compare: wgpu::CompareFunction::LessEqual,
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: Default::default(),
-                multiview: None,
-                cache: None,
-            })
-        };
-        let fill_pipeline = make_pipeline(wgpu::PrimitiveTopology::TriangleList);
-        let line_pipeline = make_pipeline(wgpu::PrimitiveTopology::LineList);
         Ok(Self {
             device,
             queue,
@@ -203,6 +158,9 @@ impl Renderer {
             padded_row_bytes,
             uniforms,
             bind_group,
+            edge_uniforms,
+            edge_bind_group,
+            finish: fpl_gfx::mesh::Finish::Legacy,
             fill_pipeline,
             line_pipeline,
             mesh: None,
@@ -219,6 +177,12 @@ impl Renderer {
         );
         self.transparent_background = true;
         Ok(())
+    }
+
+    /// Select face shading independently of the material's edge overlay flag.
+    /// Existing callers retain legacy output unless they opt in.
+    pub fn set_finish(&mut self, finish: fpl_gfx::mesh::Finish) {
+        self.finish = finish;
     }
 
     pub fn upload(&mut self, mesh: &PreparedMesh) {
@@ -259,6 +223,10 @@ impl Renderer {
     /// dragging one is exactly that, and it has to blend with the other two
     /// rather than race them, so the host now settles on a direction and this
     /// draws it.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Preserve the existing public render API for retained callers."
+    )]
     pub fn render(
         &mut self,
         eye_direction: Vec3,
@@ -370,6 +338,11 @@ impl Renderer {
                 0.0,
             ],
         };
+        let (uniform, edge_uniform) = self.finish.uniforms(uniform, material.wireframe);
+        if let Some(edge_uniform) = edge_uniform {
+            self.queue
+                .write_buffer(&self.edge_uniforms, 0, bytemuck::bytes_of(&edge_uniform));
+        }
         self.queue
             .write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniform));
         let mut encoder = self
@@ -425,6 +398,7 @@ impl Renderer {
             pass.set_index_buffer(mesh.triangles.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..mesh.triangle_count, 0, 0..1);
             if material.wireframe {
+                pass.set_bind_group(0, &self.edge_bind_group, &[]);
                 pass.set_pipeline(&self.line_pipeline);
                 pass.set_index_buffer(mesh.edges.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.edge_count, 0, 0..1);
