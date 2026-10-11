@@ -6,9 +6,11 @@ function M.render(p)
   assert(type(p.observed_at) == "string", "owner read ISO time required")
   local lines = {}
   local connected = false
+  local missing = false
   for _, source in ipairs(p.sources) do
     assert(source.domain == "adsb" or source.domain == "ais", "unknown layer")
     if source.state == "disconnected" then
+      missing = true
       lines[#lines+1] = string.upper(source.domain) .. " · disconnected"
     else
       connected = true
@@ -16,8 +18,11 @@ function M.render(p)
     end
   end
   if p.omitted > 0 then lines[#lines+1] = tostring(p.omitted) .. " omitted by renderer budget" end
-  local data = {state=connected and "ready" or "disconnected",source="Panopticon owner public-near projection",observed_at=p.observed_at,provenance="live"}
+  local data = {state=connected and (missing and "partial" or "ready") or "disconnected",source="Panopticon owner public-near projection",observed_at=p.observed_at,provenance="live"}
   assert(type(p.selection) == "table" and type(p.distribution) == "table", "selection and derived distribution required")
+  local altitude_available = p.distribution.state ~= "disconnected"
+  local chart_data = {state=altitude_available and "ready" or "disconnected",source=data.source,observed_at=data.observed_at,provenance="live"}
+  local distribution_label = altitude_available and string.format("Altitude: %d measured / %d ground / %d unknown",p.distribution.known,p.distribution.ground,p.distribution.unknown) or "Altitude distribution unavailable"
   local title, body = "Select an aircraft", "Use the map direction keys to choose a contact.\n\nPhoto unavailable: this owner feed supplies no aircraft images."
   if p.selection.state == "lost" then
     title = "Contact lost · " .. p.selection.id
@@ -39,9 +44,9 @@ function M.render(p)
   end
   return {
     map={schema_version=2,id="panopticon-map",kind="signal_view",title="Puget Sound · live owner observations",chrome="frameless",refresh_ms=10000,frame={view="geo_map",map=p.map},data=data},
-    evidence={schema_version=2,id="panopticon-source",kind="rich_card",title="Sources · TTL checked",chrome="frameless",format="markdown",body=table.concat(lines,"\n") .. "\nRead " .. (p.observed_at:match("T(%d%d:%d%d:%d%d)") or p.observed_at) .. " UTC\n" .. string.format("Altitude: %d measured / %d ground / %d unknown",p.distribution.known,p.distribution.ground,p.distribution.unknown),data=data},
+    evidence={schema_version=2,id="panopticon-source",kind="rich_card",title="Sources · TTL checked",chrome="frameless",format="markdown",body=table.concat(lines,"\n") .. "\nRead " .. (p.observed_at:match("T(%d%d:%d%d:%d%d)") or p.observed_at) .. " UTC\n" .. distribution_label,data=data},
     detail={schema_version=2,id="panopticon-detail",kind="rich_card",title=title,chrome="frameless",format="markdown",body=body,data=data},
-    chart={schema_version=2,id="panopticon-chart",kind="signal_view",title=string.format("Altitude distribution · %d measured / %d ground / %d unknown",p.distribution.known,p.distribution.ground,p.distribution.unknown),chrome="frameless",refresh_ms=10000,frame={view="plot",plot=p.distribution.plot},data=data}
+    chart={schema_version=2,id="panopticon-chart",kind="signal_view",title=distribution_label,chrome="frameless",refresh_ms=10000,frame={view="plot",plot=p.distribution.plot},data=chart_data}
   }
 end
 return M

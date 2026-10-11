@@ -72,7 +72,21 @@ fn project(input: &Value, now: u64) -> Result<Value, String> {
     let omitted = markers.len().saturating_sub(512);
     markers.truncate(512);
     observations.retain(|key, _| markers.iter().any(|marker| marker["id"] == *key));
-    let distribution = altitude_distribution(&observations);
+    let mut distribution = altitude_distribution(&observations);
+    let altitude_source_available = input["adsb"]["entities"].is_array();
+    distribution["state"] = json!(if altitude_source_available {
+        "ready"
+    } else {
+        "disconnected"
+    });
+    if !altitude_source_available {
+        for point in distribution["plot"]["series"][0]["points"]
+            .as_array_mut()
+            .ok_or("missing distribution points")?
+        {
+            point["y"] = Value::Null;
+        }
+    }
     Ok(
         json!({"schema":"canvas.panopticon-wall.v1","observed_at":chrono::DateTime::from_timestamp(now as i64,0).ok_or("invalid fetch time")?.to_rfc3339(),"observed_at_unix_ms":now.saturating_mul(1000),"observations":observations,"omitted":omitted,"sources":sources,"selection":{"state":"none"},"distribution":distribution,"map":{"extent":{"south_deg":46.8,"north_deg":48.7,"west_deg":-123.5,"east_deg":-121.5},"markers":markers,"paths":[],"selected":null}}),
     )
@@ -420,6 +434,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(p["sources"][0]["state"], "disconnected");
+        assert_eq!(p["distribution"]["state"], "disconnected");
+        assert!(p["distribution"]["plot"]["series"][0]["points"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|point| point["y"].is_null()));
         let mut bad = input();
         bad["adsb"]["entities"][0]["entity"]["coords"][0] = json!(91);
         assert!(project(&bad, 101).is_err());

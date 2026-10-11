@@ -23,4 +23,7 @@ assert(detail.body:find("Altitude unknown",1,true) and detail.body:find("Ground 
 assert(binder.render(input).chart.frame.view=="plot")
 input.selection={state="lost",id="adsb:gone"}
 assert(binder.render(input).detail.title:find("Contact lost",1,true))
+input.distribution.state="disconnected"
+assert(binder.render(input).chart.data.state=="disconnected")
+assert(binder.render(input).evidence.body:find("Altitude distribution unavailable",1,true))
 print("Panopticon binder contract passed")
