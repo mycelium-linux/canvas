@@ -171,6 +171,19 @@ masquerading as new sensor evidence. Detail panels follow the same selected ID
 on the next Unibus observation. The TV renderer polls the kiosk clock at 250 ms
 while the map's independent redraw target remains 33 ms.
 
+Hardware proof: APK50 (`0.1.49-panopticon-kiosk`) installed on FireTV.
+Automatic selections advanced at 21:26:32, 21:26:47, 21:27:02, 21:27:18,
+21:27:33 and 21:27:48 local time. Remote navigation selected QXE2234 and held
+it through the manual pause; automatic cycling resumed at 21:29:03 and
+21:29:18. Owner readback then matched ASA1427's selected ID and detail title.
+Only the initial 21:26:19 workspace reconstruction was logged during this run.
+Earlier motion-only hardware logs accumulated samples and observed paths
+(3 boundary paths growing to 21 total paths) without repeated reconstruction.
+GFX 128 tests and Android 27 tests passed on Agora, plus Java/D8 compile and
+the Lua binder contract. The 33-ms redraw interval is a target, not a measured
+frame-time guarantee. Android Java/JNI integration currently overlaps other
+uncommitted platform work; do not stage those entire files indiscriminately.
+
 ## Initial proof
 
 The inspected real sample at 2026-10-11T03:11:19Z contained 42 current ADS-B
