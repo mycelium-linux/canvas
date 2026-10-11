@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "tv-verk-showcase",
+  "project_id": "verk-showcase",
+  "revision": 1,
+  "theme": {"source": "project"},
+  "surfaces": [
+    {"id": "recovered-model", "title": "Verk · reconstructed geometry", "inputs": [], "content": {"kind": "stream", "url": "http://192.168.2.74:8099/live.m3u8"}},
+    {"id": "provenance", "title": "Reconstruction showcase", "inputs": [], "content": {"kind": "widget", "spec": {"schema_version": 2, "id": "provenance", "kind": "rich_card", "title": "Verk · recovered geometry", "body": "Awaiting the explicitly observed owner inventory and selected reconstruction receipt. Geometry verification is not training admission.", "format": "markdown", "citations": [], "chrome": "frameless", "data": {"state": "no_data", "provenance": "live", "source": "Verk owner reconstruction receipts"}}}}
+  ],
+  "layout": {"kind": "canvas", "placements": [
+    {"surface_id": "recovered-model", "bounds": {"x": 0.01, "y": 0.01, "width": 0.65, "height": 0.98}, "layer": 0},
+    {"surface_id": "provenance", "bounds": {"x": 0.68, "y": 0.01, "width": 0.31, "height": 0.98}, "layer": 1}
+  ]}
+}

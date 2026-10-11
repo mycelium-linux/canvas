@@ -10,6 +10,87 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(feature = "luau")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|s| s == "stream-tv-retained") {
+        if args.len() != 6 {
+            return Err("usage: canvas-widget-host stream-tv-retained BINDER TVCTL ENDPOINT PROJECT SURFACE".into());
+        }
+        let mut stdin = std::io::stdin().lock();
+        loop {
+            let mut line = Vec::new();
+            let count = stdin
+                .by_ref()
+                .take(64 * 1024 + 1)
+                .read_until(b'\n', &mut line)?;
+            if count == 0 {
+                return Ok(());
+            }
+            if count > 64 * 1024 || !line.ends_with(b"\n") {
+                return Err("oversized/incomplete observation".into());
+            }
+            let result = compose(&args[1], &line)?;
+            let widget = result["widget"]
+                .as_object()
+                .ok_or("missing composed widget")?;
+            // Older endpoints support live StatusList snapshots but not RichCard.
+            // Replace only this retained widget, with a revision-bound owner import.
+            let mut accepted = false;
+            for attempt in 0..3 {
+                let read = tv_call(
+                    &args[2],
+                    &args[3],
+                    &serde_json::json!({"schema_version":1,"request_id":"widget-retained-read","command":{"command":"workspace_read","name":args[4]}}),
+                )?;
+                if read["ok"] != true {
+                    return Err("TV rejected workspace read".into());
+                }
+                let mut document = read["data"].clone();
+                let surfaces = document["surfaces"]
+                    .as_array_mut()
+                    .ok_or("missing workspace surfaces")?;
+                let surface = surfaces
+                    .iter_mut()
+                    .find(|surface| surface["id"] == args[5])
+                    .ok_or("retained surface not declared")?;
+                let spec = surface["content"]["spec"]
+                    .as_object_mut()
+                    .ok_or("retained surface is not a widget")?;
+                if spec.get("kind") != widget.get("kind") {
+                    return Err("retained widget kind change rejected".into());
+                }
+                for (key, value) in widget {
+                    if !matches!(key.as_str(), "id" | "schema_version") {
+                        spec.insert(key.clone(), value.clone());
+                    }
+                }
+                spec.insert("data".into(), result["data"].clone());
+                document["revision"] = (document["revision"]
+                    .as_u64()
+                    .ok_or("invalid document revision")?
+                    + 1)
+                .into();
+                let reply = tv_call(
+                    &args[2],
+                    &args[3],
+                    &serde_json::json!({"schema_version":1,"request_id":format!("widget-retained-{}-{attempt}",chrono::Utc::now().timestamp_millis()),"expected_revision":read["revision"],"command":{"command":"workspace_import","document":document,"activate":false}}),
+                )?;
+                if reply["ok"] == true {
+                    accepted = true;
+                    break;
+                }
+                if !reply["error"]
+                    .as_str()
+                    .is_some_and(|e| e.contains("revision"))
+                {
+                    return Err("TV rejected retained widget update".into());
+                }
+            }
+            if !accepted {
+                return Err("TV retained update conflicted three times".into());
+            }
+            println!("delivered retained {} {}", args[4], args[5]);
+            std::io::stdout().flush()?;
+        }
+    }
     if args.first().is_some_and(|s| s == "stream-tv") {
         if args.len() != 6 {
             return Err(
@@ -91,6 +172,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 #[cfg(feature = "luau")]
+fn tv_call(
+    program: &str,
+    endpoint: &str,
+    request: &serde_json::Value,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let mut child = std::process::Command::new(program)
+        .arg(endpoint)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or("missing TV input")?
+        .write_all(&serde_json::to_vec(request)?)?;
+    let stdout = child.stdout.take().ok_or("missing TV output")?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let read = stdout.take(64 * 1024 + 1).read_to_end(&mut bytes);
+        let _ = tx.send(read.map(|_| bytes));
+    });
+    let bytes = match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(value) => value?,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("TV owner deadline exceeded".into());
+        }
+    };
+    let _ = child.wait()?;
+    if bytes.len() > 64 * 1024 {
+        return Err("TV owner response exceeds bound".into());
+    }
+    Ok(serde_json::from_slice(&bytes)?)
+}
+#[cfg(feature = "luau")]
 fn compose(path: &str, input: &[u8]) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let script = std::fs::read(path)?;
     if script.len() > 64 * 1024 {
@@ -141,6 +260,23 @@ fn compose_script(
 #[cfg(all(test, feature = "luau"))]
 mod tests {
     use super::*;
+    #[test]
+    fn showcase_does_not_label_an_unacknowledged_request() {
+        let script = include_bytes!("../../../config/binders/model-showcase-v1.lua");
+        let value = serde_json::json!({"schema":"canvas.model-showcase.v1","catalog_count":954,"observed_at_unix_ms":chrono::Utc::now().timestamp_millis(),"failed_previews":0,"identity_state":"legacy_scene_requested_no_renderer_ack","current":{"sha256":"a".repeat(64),"step":"/owner/model/result/rebuilt.step","geometry":0.0,"training_admitted":false}});
+        assert!(compose_script(script, &serde_json::to_vec(&value).unwrap()).is_err());
+    }
+    #[test]
+    fn showcase_waits_without_inventing_an_identity() {
+        let value = serde_json::json!({"schema":"canvas.model-showcase.v1","catalog_count":954,"observed_at_unix_ms":chrono::Utc::now().timestamp_millis(),"failed_previews":0,"identity_state":"renderer_acknowledged","current":null});
+        let result = compose_script(
+            include_bytes!("../../../config/binders/model-showcase-v1.lua"),
+            &serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["data"]["state"], "no_data");
+        assert_eq!(result["widget"]["title"], "Verk · preparing geometry");
+    }
     #[test]
     fn preserves_observation_clock_not_render_time() {
         let result=compose_script(br#"return {render=function(value,now) return {widget={kind='status_list',title='Evidence'},data={observed_at_unix_ms=value.observed_at_unix_ms}} end}"#,br#"{"observed_at_unix_ms":1000}"#).unwrap();
