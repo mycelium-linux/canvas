@@ -135,6 +135,42 @@ hub zone, multiple observations delivered, and hardware screenshot plus TV
 readback showed 28 current contacts and `ready` at 04:08:32 UTC. Photos and
 raster terrain tiles remain unsupported in this slice.
 
+## Retained trajectories and interpolation
+
+Shared GFX `geo_map::motion::Motion` keeps up to 512 identities and 16 samples
+per identity. It projects known position pairs on a five-second delayed clock
+using shortest-longitude linear interpolation. It never extrapolates beyond
+the newest evidence. Missing contacts are pruned; disconnects freeze and
+reconnects, gaps over 30 seconds, or jumps over 250 km start a new segment.
+Observed trails consume only the map's remaining 128-path/8192-point budget.
+Repeated stationary positions do not produce fake movement or extra trail
+segments. The host may configure bounds without changing the map wire schema.
+
+The current Android adapter explicitly uses receiver sample timing: the
+Panopticon map projection has fetch timestamps but not individual fix times.
+This is history of received owner positions, not a claim of precise ADS-B fix
+timing. Selection-only redraws do not create samples. Local motion state clears
+on structural workspace changes; observations still travel over Unibus at their
+provider cadence, not at animation cadence.
+
+Android geo-map redraws target 33 ms. Rich-card text and signal values are
+excluded from the structural fingerprint and updated in place, preserving
+map state, scroll position and focus across telemetry updates. Actual layout,
+theme or signal-variant changes still reconstruct the affected workspace.
+`CanvasRetained` logs structural rebuilds; `CanvasMap` logs observation and
+bounded sample/path counts for hardware verification. No tile or photo support
+is implied by this motion layer.
+
+On FireTV the geographic surface defaults to a local kiosk tour: select the
+first visible contact once data is ready, then advance every 15 seconds.
+Next/previous navigation visits stable IDs in sorted order, including contacts
+sharing one position, and excludes off-map contacts. Manual remote navigation
+defers rotation for 60 seconds, then the tour resumes. This is shared Rust
+`Kiosk` timing plus Canvas navigation, not a provider command or animation
+masquerading as new sensor evidence. Detail panels follow the same selected ID
+on the next Unibus observation. The TV renderer polls the kiosk clock at 250 ms
+while the map's independent redraw target remains 33 ms.
+
 ## Initial proof
 
 The inspected real sample at 2026-10-11T03:11:19Z contained 42 current ADS-B

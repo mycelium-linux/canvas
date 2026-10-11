@@ -23,7 +23,7 @@ function M.render(p)
   local altitude_available = p.distribution.state ~= "disconnected"
   local chart_data = {state=altitude_available and "ready" or "disconnected",source=data.source,observed_at=data.observed_at,provenance="live"}
   local distribution_label = altitude_available and string.format("Altitude: %d measured / %d ground / %d unknown",p.distribution.known,p.distribution.ground,p.distribution.unknown) or "Altitude distribution unavailable"
-  local title, body = "Select an aircraft", "Use the map direction keys to choose a contact.\n\nPhoto unavailable: this owner feed supplies no aircraft images."
+  local title, body = "Live contact tour", "Kiosk mode cycles visible contacts every 15 seconds.\nRemote selection pauses the tour for one minute.\n\nPhoto unavailable: this owner feed supplies no aircraft images."
   if p.selection.state == "lost" then
     title = "Contact lost · " .. p.selection.id
     body = "This contact is absent or expired in the current owner result.\nSelection was not silently replaced."
