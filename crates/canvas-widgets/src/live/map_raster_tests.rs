@@ -26,6 +26,15 @@ fn verified_tile_is_cropped_to_plot_and_missing_or_corrupt_assets_fail() {
         &[17, 33, 55, 255]
     );
     assert_eq!(&pixels[..4], &[0, 0, 0, 0]);
+    let Handle::Rgba { pixels: dark, .. } = compose_styled(&map, 500, 300, &root, true).unwrap()
+    else {
+        panic!("expected tactical retained image")
+    };
+    assert_eq!(
+        &dark[(150 * 500 + 250) * 4..(150 * 500 + 250) * 4 + 4],
+        &fpl_gfx::geo_map::raster::tactical_pixel([17, 33, 55, 255])
+    );
+    assert_eq!(&dark[..4], &[0, 0, 0, 0]);
     std::fs::write(root.join(&sha), vec![0; bytes.len()]).unwrap();
     assert!(compose(&map, 500, 300, &root).is_err());
     assert!(compose(&map, 5000, 5000, &root).is_err());

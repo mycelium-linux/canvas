@@ -10,8 +10,12 @@ mod tests;
 pub fn retained(map: &Map, width: u32, height: u32, root: &Path) -> Result<Handle, String> {
     type Entries = std::collections::VecDeque<(String, Handle)>;
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Entries>> = std::sync::OnceLock::new();
+    let style = std::env::var("CANVAS_MAP_STYLE").unwrap_or_else(|_| "source".into());
+    if style != "source" && style != "tactical" {
+        return Err("CANVAS_MAP_STYLE must be source or tactical".into());
+    }
     let key = format!(
-        "{}:{width}:{height}:{}",
+        "{}:{width}:{height}:{style}:{}",
         root.display(),
         serde_json::to_string(&(map.extent, &map.basemap)).map_err(|e| e.to_string())?
     );
@@ -22,7 +26,7 @@ pub fn retained(map: &Map, width: u32, height: u32, root: &Path) -> Result<Handl
     if let Some((_, handle)) = cache.iter().find(|(entry, _)| entry == &key) {
         return Ok(handle.clone());
     }
-    let handle = compose(map, width, height, root)?;
+    let handle = compose_styled(map, width, height, root, style == "tactical")?;
     if cache.len() == 4 {
         cache.pop_front();
     }
@@ -30,7 +34,18 @@ pub fn retained(map: &Map, width: u32, height: u32, root: &Path) -> Result<Handl
     Ok(handle)
 }
 
-pub fn compose(map: &Map, width: u32, height: u32, root: &Path) -> Result<Handle, String> {
+#[cfg(test)]
+fn compose(map: &Map, width: u32, height: u32, root: &Path) -> Result<Handle, String> {
+    compose_styled(map, width, height, root, false)
+}
+
+fn compose_styled(
+    map: &Map,
+    width: u32,
+    height: u32,
+    root: &Path,
+    tactical: bool,
+) -> Result<Handle, String> {
     map.validate().map_err(|e| e.to_string())?;
     if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 4_194_304 {
         return Err("Map image exceeds pixel budget".into());
@@ -94,7 +109,12 @@ pub fn compose(map: &Map, width: u32, height: u32, root: &Path) -> Result<Handle
                     let pixel =
                         tile.get_pixel((tx.fract() * 256.0) as u32, (ty.fract() * 256.0) as u32);
                     let index = ((y as usize) * (width as usize) + x as usize) * 4;
-                    rgba[index..index + 4].copy_from_slice(&pixel.0);
+                    let color = if tactical {
+                        fpl_gfx::geo_map::raster::tactical_pixel(pixel.0)
+                    } else {
+                        pixel.0
+                    };
+                    rgba[index..index + 4].copy_from_slice(&color);
                     break;
                 }
             }

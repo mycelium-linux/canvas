@@ -362,3 +362,11 @@ will select its own scene again. Run Canvas through its LaunchAgent alone so
 the asset environment is applied; a separate manual launch can hold the runtime
 lock without that environment. Never delete the runtime lock to resolve this.
 Desktop interpolation and contact selection remain separate follow-up work.
+
+Desktop `CANVAS_MAP_STYLE=source|tactical` selects a display-only raster treatment
+(default `source`). `tactical` uses GFX's shared charcoal/blue night palette;
+it does not modify verified assets, attribution, geographic registration or
+bright live contact overlays. It is a color treatment of existing light raster
+tiles, not new vector detail or semantic land/water classification. Style joins
+the retained-image cache key. Invalid styles fail visibly. Neo's LaunchAgent
+currently selects `tactical`; changing it needs a supervised Canvas restart.
