@@ -90,3 +90,42 @@ must precede the transient map snapshot: the installed app can recreate views
 after a document edit. The companion exited normally after that proof; this is
 not an always-running deployment or continuous replication claim. A separately
 owned sustained connector remains a follow-up.
+
+## Selected contacts and dashboard instruments
+
+The regional workspace also composes a selected-contact detail panel and a
+shared GFX Plot of aircraft counts in 5,000-foot barometric-altitude bands.
+Counts come from the bounded current query; aircraft reported on the ground and
+aircraft with missing/invalid barometric altitude are counted separately and
+excluded from that distribution. The plot is a distribution of current contacts,
+not a flight path or an invented time series. Its axes are feet and aircraft per
+band. The source panel records the measured/ground/unknown totals.
+
+Declared aircraft metadata comes only from the existing owner's ADS-B payload:
+`alt_baro` in feet, `gs` in knots, `track` in degrees, `r` registration and `t`
+type designator. The string `ground` stays ground, never fabricated zero feet;
+missing values stay unknown. An actual zero ground speed remains zero. The
+entity's `last_update` is the owner's update timestamp (the ADS-B ingest plugin
+sets it when ingesting a response), not an independently measured RF timestamp.
+The current public feed supplies no aircraft image. A visible unavailable-photo
+section is intentional: there is no new third-party photo URL, unaudited fetch,
+asset substitute or attribution claim. Owner-backed photos are a separate gap.
+
+The TV's existing `SurfaceNavigate` map selection is read from the owner
+presentation before each composition. The exact opaque domain/entity ID drives
+the panel; no name matching or automatic choice of a different contact occurs.
+If that contact expires or disappears, the controller retains a lost-contact
+identity and clears the map highlight rather than silently replacing it. A new
+selection can replace that lost identity. Selection and detail are composed from
+the same current observation pool. Document edits for source/detail cards happen
+before both transient map and chart snapshots, so view reconstruction cannot
+leave either instrument without its real source frame.
+
+Hardware proof on APK46: Focus selected `adsb:a0d19e` (AAL506); Right selected
+`adsb:a83876` (JBU263). The latter read back as N629JB / A320, 10,475 feet
+barometric, 302.1 knots and 182 degrees ground track, matching its map highlight.
+The inspected `/private/tmp/panopticon-panels-qa.png` shows the actual selected
+panel and distribution chart. Ten finite observations advanced from
+03:25:23 through 03:26:08 UTC on 2026-10-11, with selection preserved and the
+aircraft pool changing from 33 to 31. That companion exited normally. Shared plot
+tick-density improvements are owned by the renderer, not this projection.

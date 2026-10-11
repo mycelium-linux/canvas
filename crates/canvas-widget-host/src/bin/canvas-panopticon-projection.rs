@@ -63,7 +63,7 @@ fn project(input: &Value, now: u64) -> Result<Value, String> {
                 return Err("label exceeds bound".into());
             }
             markers.push(json!({"id":key,"label":label,"latitude_deg":lat,"longitude_deg":lon,"role":if domain=="adsb" {"primary"} else {"secondary"}}));
-            observations.insert(key,json!({"last_update":observed,"ttl_secs":ttl,"source":e["payload"]["source"].as_str().filter(|s|s.len()<=128)}));
+            observations.insert(key,json!({"last_update":observed,"owner_updated_at":chrono::DateTime::from_timestamp(observed as i64,0).ok_or("invalid owner update time")?.to_rfc3339(),"owner_update_age_secs":now.saturating_sub(observed),"ttl_secs":ttl,"source":e["payload"]["source"].as_str().filter(|s|s.len()<=128),"callsign":label,"latitude_deg":lat,"longitude_deg":lon,"aircraft":if domain=="adsb" {aircraft(&e["payload"]["aircraft"])}else{Value::Null}}));
             accepted += 1;
         }
         sources.push(json!({"domain":domain,"state":if accepted==0 {"empty"} else {"ready"},"visible":accepted,"expired":expired,"owner_entities":rows.len()}));
@@ -72,9 +72,71 @@ fn project(input: &Value, now: u64) -> Result<Value, String> {
     let omitted = markers.len().saturating_sub(512);
     markers.truncate(512);
     observations.retain(|key, _| markers.iter().any(|marker| marker["id"] == *key));
+    let distribution = altitude_distribution(&observations);
     Ok(
-        json!({"schema":"canvas.panopticon-wall.v1","observed_at":chrono::DateTime::from_timestamp(now as i64,0).ok_or("invalid fetch time")?.to_rfc3339(),"observed_at_unix_ms":now.saturating_mul(1000),"observations":observations,"omitted":omitted,"sources":sources,"map":{"extent":{"south_deg":46.8,"north_deg":48.7,"west_deg":-123.5,"east_deg":-121.5},"markers":markers,"paths":[],"selected":null}}),
+        json!({"schema":"canvas.panopticon-wall.v1","observed_at":chrono::DateTime::from_timestamp(now as i64,0).ok_or("invalid fetch time")?.to_rfc3339(),"observed_at_unix_ms":now.saturating_mul(1000),"observations":observations,"omitted":omitted,"sources":sources,"selection":{"state":"none"},"distribution":distribution,"map":{"extent":{"south_deg":46.8,"north_deg":48.7,"west_deg":-123.5,"east_deg":-121.5},"markers":markers,"paths":[],"selected":null}}),
     )
+}
+
+fn bounded_number(value: &Value, minimum: f64, maximum: f64) -> Option<f64> {
+    value
+        .as_f64()
+        .filter(|v| v.is_finite() && *v >= minimum && *v <= maximum)
+}
+fn bounded_text(value: &Value) -> Option<&str> {
+    value.as_str().filter(|s| !s.is_empty() && s.len() <= 128)
+}
+fn aircraft(raw: &Value) -> Value {
+    json!({"barometric_altitude_ft":bounded_number(&raw["alt_baro"],-1500.0,100000.0),"ground":raw["alt_baro"]=="ground","ground_speed_knots":bounded_number(&raw["gs"],0.0,2000.0),"track_deg":bounded_number(&raw["track"],0.0,359.999999),"registration":bounded_text(&raw["r"]),"type_designator":bounded_text(&raw["t"]),"photo":{"state":"unavailable","reason":"No aircraft image is supplied by this owner feed"}})
+}
+fn altitude_distribution(observations: &serde_json::Map<String, Value>) -> Value {
+    let mut bins = [0u32; 21];
+    let mut ground = 0;
+    let mut unknown = 0;
+    let mut known = 0;
+    for (id, observation) in observations {
+        if !id.starts_with("adsb:") {
+            continue;
+        }
+        let a = &observation["aircraft"];
+        if a["ground"] == true {
+            ground += 1;
+            continue;
+        }
+        if let Some(altitude) = a["barometric_altitude_ft"].as_f64() {
+            let slot = ((altitude + 5000.0) / 5000.0).floor().clamp(0.0, 20.0) as usize;
+            bins[slot] += 1;
+            known += 1;
+        } else {
+            unknown += 1;
+        }
+    }
+    let upper = (bins.iter().rposition(|count| *count > 0).unwrap_or(1) + 1).max(2);
+    let points: Vec<_> = bins[..upper]
+        .iter()
+        .enumerate()
+        .map(|(index, count)| json!({"x":-2500.0+index as f64*5000.0,"y":count}))
+        .collect();
+    json!({"known":known,"ground":ground,"unknown":unknown,"band_width_ft":5000,"plot":{"x":{"label":"Barometric altitude","unit":"ft","minimum":-5000.0,"maximum":-5000.0+upper as f64*5000.0},"y":{"label":"Aircraft per band","unit":"count","minimum":0.0,"maximum":bins.iter().copied().max().unwrap_or(0).max(1)},"series":[{"id":"altitude-bands","label":"5,000 ft altitude bands","role":"primary","points":points}],"viewport":null}})
+}
+fn select(projection: &mut Value, selected: Option<&str>) -> Result<(), String> {
+    let Some(id) = selected else {
+        projection["selection"] = json!({"state":"none"});
+        projection["map"]["selected"] = Value::Null;
+        return Ok(());
+    };
+    if id.len() > 192 || id.is_empty() {
+        return Err("invalid selected owner ID".into());
+    }
+    if projection["observations"].get(id).is_some() {
+        projection["selection"] =
+            json!({"state":"ready","id":id,"observation":projection["observations"][id]});
+        projection["map"]["selected"] = json!(id);
+    } else {
+        projection["selection"] = json!({"state":"lost","id":id});
+        projection["map"]["selected"] = Value::Null;
+    }
+    Ok(())
 }
 
 fn fetch(host: &str) -> Result<Value, String> {
@@ -223,6 +285,7 @@ fn watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Err("finite cycles must be 1..120".into());
     }
     let paths = boundaries(&args[2], &args[3])?;
+    let mut lost_selection: Option<String> = None;
     for tick in 0..cycles {
         let start = std::time::Instant::now();
         let input = fetch(&args[1])?;
@@ -233,6 +296,25 @@ fn watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         projection["map"]["paths"] = json!(paths);
         projection["boundary_source"] =
             json!("Panopticon owner Washington state boundary · not terrain");
+        let presentation = canvas_widget_host::presentation::call(
+            &args[6],
+            &args[7],
+            &json!({"schema_version":1,"request_id":"panopticon-selection-read","command":{"command":"read_presentation"}}),
+        )?;
+        if presentation["ok"] != true {
+            return Err("owner selection read rejected".into());
+        }
+        let requested = presentation["data"]["surfaces"]["panopticon-map"]["frame"]["map"]
+            ["selected"]
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| lost_selection.clone());
+        select(&mut projection, requested.as_deref())?;
+        lost_selection = if projection["selection"]["state"] == "lost" {
+            requested
+        } else {
+            None
+        };
         let composed = compose(&args[5], &args[4], &projection)?;
         // Health edits affect only the selected owner workspace, never switch it.
         let current = canvas_widget_host::presentation::call(
@@ -244,8 +326,8 @@ fn watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             let revision = current["data"]["revision"]
                 .as_u64()
                 .ok_or("missing workspace revision")?;
-            let surface = json!({"id":"panopticon-source","title":"Source health","content":{"kind":"widget","spec":composed["evidence"]}});
-            let patch = json!({"schema_version":1,"request_id":format!("panopticon-health-{now}"),"expected_revision":current["revision"],"command":{"command":"apply_patch","patch":{"schema_version":1,"workspace_id":"tv-panopticon-wall","base_revision":revision,"revision":revision+1,"operations":[{"op":"upsert_surface","surface":surface}]}}});
+            let operations:Vec<_>=[("panopticon-source","Source health","evidence"),("panopticon-detail","Selected contact","detail")].iter().map(|(id,title,key)|json!({"op":"upsert_surface","surface":{"id":id,"title":title,"content":{"kind":"widget","spec":composed[*key]}}})).collect();
+            let patch = json!({"schema_version":1,"request_id":format!("panopticon-health-{now}"),"expected_revision":current["revision"],"command":{"command":"apply_patch","patch":{"schema_version":1,"workspace_id":"tv-panopticon-wall","base_revision":revision,"revision":revision+1,"operations":operations}}});
             let receipt = canvas_widget_host::presentation::call(&args[6], &args[7], &patch)?;
             if receipt["ok"] != true {
                 return Err(format!("health patch rejected: {receipt}").into());
@@ -253,14 +335,16 @@ fn watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
         // A platform may recreate views after a document edit: publish the
         // transient after that edit, never leave a rebuilt live view without data.
-        let request = json!({"schema_version":1,"request_id":format!("panopticon-wall-{now}-{tick}"),"command":{"command":"surface_snapshot","workspace_id":"tv-panopticon-wall","surface_id":"panopticon-map","frame":composed["map"]["frame"],"data":composed["map"]["data"]}});
-        let receipt = canvas_widget_host::presentation::call(&args[6], &args[7], &request)?;
-        if receipt["ok"] != true {
-            return Err(format!("map snapshot rejected: {receipt}").into());
+        for (surface, key) in [("panopticon-map", "map"), ("panopticon-chart", "chart")] {
+            let request = json!({"schema_version":1,"request_id":format!("panopticon-{key}-{now}-{tick}"),"command":{"command":"surface_snapshot","workspace_id":"tv-panopticon-wall","surface_id":surface,"frame":composed[key]["frame"],"data":composed[key]["data"]}});
+            let receipt = canvas_widget_host::presentation::call(&args[6], &args[7], &request)?;
+            if receipt["ok"] != true {
+                return Err(format!("{key} snapshot rejected: {receipt}").into());
+            }
         }
         println!(
             "{}",
-            json!({"delivered_at":projection["observed_at"],"sources":projection["sources"],"cycle":tick+1,"cycles":cycles})
+            json!({"delivered_at":projection["observed_at"],"sources":projection["sources"],"selection":projection["selection"]["id"],"distribution":{"known":projection["distribution"]["known"],"ground":projection["distribution"]["ground"],"unknown":projection["distribution"]["unknown"]},"cycle":tick+1,"cycles":cycles})
         );
         if tick + 1 < cycles {
             std::thread::sleep(std::time::Duration::from_secs(5).saturating_sub(start.elapsed()));
@@ -378,5 +462,49 @@ mod tests {
         assert_eq!(points[0]["role"], "outline");
         assert!(boundaries(path.to_str().unwrap(), "incorrect").is_err());
         std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn aircraft_units_ground_and_missing_are_not_invented() {
+        let a = aircraft(&json!({"alt_baro":"ground","gs":0,"track":90,"r":"N123","t":"B738"}));
+        assert_eq!(a["ground"], true);
+        assert!(a["barometric_altitude_ft"].is_null());
+        assert_eq!(a["ground_speed_knots"], 0.0);
+        assert_eq!(a["registration"], "N123");
+        let missing = aircraft(&json!({"gs":-3,"alt_baro":200000,"track":400}));
+        assert!(missing["ground_speed_knots"].is_null());
+        assert!(missing["barometric_altitude_ft"].is_null());
+        assert!(missing["track_deg"].is_null());
+        assert_eq!(missing["photo"]["state"], "unavailable");
+    }
+    #[test]
+    fn distribution_counts_actual_altitudes_not_ground_or_missing() {
+        let pool=serde_json::from_value::<serde_json::Map<String,Value>>(json!({"adsb:a":{"aircraft":{"barometric_altitude_ft":8000,"ground":false}},"adsb:b":{"aircraft":{"barometric_altitude_ft":null,"ground":true}},"adsb:c":{"aircraft":{"barometric_altitude_ft":null,"ground":false}},"ais:d":{"aircraft":null}})).unwrap();
+        let distribution = altitude_distribution(&pool);
+        assert_eq!(distribution["known"], 1);
+        assert_eq!(distribution["ground"], 1);
+        assert_eq!(distribution["unknown"], 1);
+        assert_eq!(distribution["plot"]["x"]["unit"], "ft");
+        assert_eq!(
+            distribution["plot"]["series"][0]["points"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p["y"].as_u64().unwrap())
+                .sum::<u64>(),
+            1
+        );
+    }
+    #[test]
+    fn selection_is_exact_and_lost_contact_never_selects_another() {
+        let mut projection = project(&input(), 101).unwrap();
+        select(&mut projection, Some("adsb:abc")).unwrap();
+        assert_eq!(projection["map"]["selected"], "adsb:abc");
+        assert_eq!(projection["selection"]["observation"]["callsign"], "REAL");
+        select(&mut projection, Some("adsb:missing")).unwrap();
+        assert_eq!(projection["selection"]["state"], "lost");
+        assert_eq!(projection["selection"]["id"], "adsb:missing");
+        assert!(projection["map"]["selected"].is_null());
+        select(&mut projection, None).unwrap();
+        assert_eq!(projection["selection"]["state"], "none");
     }
 }
