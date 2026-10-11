@@ -35,6 +35,7 @@ struct State {
     camera: Camera,
     drag: Option<Point>,
     geometry: CacheState,
+    fetch: super::map_fetch::Client,
 }
 fn image_bounds(
     base: fpl_gfx::geo::Extent,
@@ -164,6 +165,15 @@ impl<Message> Widget<Message, Theme, Renderer> for MapWidget {
         shell: &mut advanced::Shell<'_, Message>,
         _: &Rectangle,
     ) {
+        if matches!(
+            event,
+            Event::Window(iced::window::Event::RedrawRequested(_))
+        ) && std::env::var_os("CANVAS_MAP_FETCH_BIN").is_some()
+        {
+            shell.request_redraw_at(
+                iced::time::Instant::now() + std::time::Duration::from_millis(500),
+            );
+        }
         if shell.is_event_captured() {
             return;
         }
@@ -238,6 +248,9 @@ impl<Message> Widget<Message, Theme, Renderer> for MapWidget {
             Err(_) => base,
         };
         map.extent = view;
+        let fetched = state
+            .fetch
+            .view(view, bounds.width as u32, bounds.height as u32);
         let displayed = if map.basemap.is_some() {
             cropped_extent(view, plot).unwrap_or(view)
         } else {
@@ -286,6 +299,17 @@ impl<Message> Widget<Message, Theme, Renderer> for MapWidget {
                 )
             });
         }
+        if let Some(fetched) = &fetched {
+            if let Some(handle) = &fetched.image {
+                renderer.with_layer(clip, |renderer| {
+                    renderer.draw_image(
+                        image::Image::new(handle.clone()),
+                        image_bounds(fetched.extent, displayed, plot, bounds),
+                        clip,
+                    )
+                });
+            }
+        }
         let fingerprint = match gfx_signals::cache_fingerprint(&frame, &self.theme) {
             Ok(key) => key,
             Err(_) => return,
@@ -297,8 +321,9 @@ impl<Message> Widget<Message, Theme, Renderer> for MapWidget {
         let program = gfx_signals::Program {
             frame,
             theme: self.theme.clone(),
-            fingerprint: fingerprint ^ u64::from(image.is_some()),
-            raster_backed: image.is_some(),
+            fingerprint: fingerprint
+                ^ u64::from(image.is_some() || fetched.as_ref().is_some_and(|f| f.image.is_some())),
+            raster_backed: image.is_some() || fetched.as_ref().is_some_and(|f| f.image.is_some()),
             raster_error: error,
         };
         renderer.with_layer(bounds, |renderer| {
@@ -317,12 +342,16 @@ impl<Message> Widget<Message, Theme, Renderer> for MapWidget {
                 let text = self.theme.color(fpl_gfx::ThemeRole::TextMuted);
                 footer.fill_text(iced::widget::canvas::Text {
                     content: format!(
-                        "Drag to pan · Scroll to zoom · Right-click to reset{}",
-                        if outside && image.is_some() {
+                        "Drag to pan · Scroll to zoom · Right-click to reset{}{}",
+                        if outside && image.is_some() && fetched.is_none() {
                             " · Outside cached coverage"
                         } else {
                             ""
-                        }
+                        },
+                        fetched
+                            .as_ref()
+                            .map(|f| format!(" · {}", f.status))
+                            .unwrap_or_default()
                     ),
                     position: Point::new(8., bounds.height - 16.),
                     size: iced::Pixels(11.),

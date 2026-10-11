@@ -19,14 +19,23 @@ pub fn retained(map: &Map, width: u32, height: u32, root: &Path) -> Result<Handl
         root.display(),
         serde_json::to_string(&(map.extent, &map.basemap)).map_err(|e| e.to_string())?
     );
-    let mut cache = CACHE
+    let cache = CACHE
         .get_or_init(Default::default)
         .lock()
         .map_err(|_| "Map cache poisoned")?;
     if let Some((_, handle)) = cache.iter().find(|(entry, _)| entry == &key) {
         return Ok(handle.clone());
     }
+    drop(cache);
     let handle = compose_styled(map, width, height, root, style == "tactical")?;
+    let mut cache = CACHE
+        .get()
+        .unwrap()
+        .lock()
+        .map_err(|_| "Map cache poisoned")?;
+    if let Some((_, handle)) = cache.iter().find(|(entry, _)| entry == &key) {
+        return Ok(handle.clone());
+    }
     if cache.len() == 4 {
         cache.pop_front();
     }
