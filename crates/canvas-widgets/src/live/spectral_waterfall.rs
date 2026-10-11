@@ -9,57 +9,7 @@ use iced_wgpu::wgpu;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const UNIFORM_BYTES: u64 = 32;
-
-const WGSL: &str = r#"
-struct Uniforms {
-    viewport: vec2<f32>,
-    texture_size: vec2<u32>,
-    head: u32,
-    filled: u32,
-    waterfall_top: f32,
-    _pad: f32,
-};
-@group(0) @binding(0) var field: texture_2d<f32>;
-@group(0) @binding(1) var<uniform> u: Uniforms;
-
-struct VertexOut {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
-@vertex fn vs_main(@builtin(vertex_index) i: u32) -> VertexOut {
-    var p = array<vec2<f32>, 3>(vec2<f32>(-1.0,-1.0), vec2<f32>(3.0,-1.0), vec2<f32>(-1.0,3.0));
-    var t = array<vec2<f32>, 3>(vec2<f32>(0.0,1.0), vec2<f32>(2.0,1.0), vec2<f32>(0.0,-1.0));
-    var out: VertexOut;
-    out.position = vec4(p[i], 0.0, 1.0);
-    out.uv = t[i];
-    return out;
-}
-
-fn palette(v: f32) -> vec3<f32> {
-    // RF floors occupy much of the normalized lower range. A gentle gamma
-    // reveals that structure as traditional deep blue without moving peaks or
-    // inventing samples; hot signals still reach yellow, red and white.
-    let x = pow(clamp(v, 0.0, 1.0), 0.72) * 5.0;
-    if x < 1.0 { return mix(vec3(0.002,0.006,0.035), vec3(0.0,0.02,0.24), x); }
-    if x < 2.0 { return mix(vec3(0.0,0.02,0.24), vec3(0.0,0.72,0.96), x-1.0); }
-    if x < 3.0 { return mix(vec3(0.0,0.72,0.96), vec3(0.98,0.92,0.05), x-2.0); }
-    if x < 4.0 { return mix(vec3(0.98,0.92,0.05), vec3(0.96,0.08,0.01), x-3.0); }
-    return mix(vec3(0.96,0.08,0.01), vec3(1.0), x-4.0);
-}
-
-@fragment fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    if in.uv.y < u.waterfall_top { return vec4(0.0); }
-    let local_y = (in.uv.y - u.waterfall_top) / max(1.0 - u.waterfall_top, 0.001);
-    let logical_y = min(u32(local_y * f32(u.texture_size.y)), u.texture_size.y - 1u);
-    // Unobserved history is opaque and visibly blue-black, but remains
-    // distinct from real low-energy samples. It fills naturally with time.
-    if logical_y >= u.filled { return vec4(0.002, 0.006, 0.025, 1.0); }
-    let physical_y = (u.head + logical_y) % u.texture_size.y;
-    let x = min(u32(clamp(in.uv.x, 0.0, 0.999999) * f32(u.texture_size.x)), u.texture_size.x - 1u);
-    return vec4(palette(textureLoad(field, vec2<i32>(i32(x), i32(physical_y)), 0).r), 1.0);
-}
-"#;
+const UNIFORM_BYTES: u64 = fpl_gfx::retained_waterfall::UNIFORM_BYTES;
 
 #[derive(Debug)]
 struct State {
@@ -156,65 +106,10 @@ impl Default for State {
 
 impl shader::Pipeline for Pipeline {
     fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Canvas spectral waterfall layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(UNIFORM_BYTES),
-                    },
-                    count: None,
-                },
-            ],
-        });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Canvas spectral waterfall pipeline layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
-        });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Canvas spectral waterfall shader"),
-            source: wgpu::ShaderSource::Wgsl(WGSL.into()),
-        });
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Canvas spectral waterfall pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+        let fpl_gfx::retained_waterfall::Pipeline {
+            render_pipeline,
+            bind_group_layout,
+        } = fpl_gfx::retained_waterfall::Pipeline::new(device, format);
         Self {
             render_pipeline,
             bind_group_layout,
@@ -282,7 +177,7 @@ impl Pipeline {
 }
 
 fn row_bytes(row: &[f32]) -> &[u8] {
-    unsafe { std::slice::from_raw_parts(row.as_ptr().cast::<u8>(), std::mem::size_of_val(row)) }
+    bytemuck::cast_slice(row)
 }
 
 fn write_row(queue: &wgpu::Queue, texture: &wgpu::Texture, y: u32, row: &[f32]) {
@@ -312,16 +207,15 @@ fn advance_ring(head: u32, filled: u32, history: u32) -> (u32, u32) {
 }
 
 fn uniform_words(bounds: Rectangle, width: u32, history: u32, head: u32, filled: u32) -> [u32; 8] {
-    [
-        bounds.width.to_bits(),
-        bounds.height.to_bits(),
-        width,
-        history,
+    fpl_gfx::retained_waterfall::Uniforms {
+        viewport: [bounds.width, bounds.height],
+        texture_size: [width, history],
         head,
         filled,
-        0.39_f32.to_bits(),
-        0,
-    ]
+        waterfall_top: 0.39,
+        padding: 0.,
+    }
+    .words()
 }
 
 #[cfg(test)]
@@ -383,9 +277,7 @@ impl shader::Primitive for Primitive {
             state.head,
             state.filled,
         );
-        queue.write_buffer(&state.uniform, 0, unsafe {
-            std::slice::from_raw_parts(uniforms.as_ptr().cast::<u8>(), UNIFORM_BYTES as usize)
-        });
+        queue.write_buffer(&state.uniform, 0, bytemuck::cast_slice(&uniforms));
     }
 
     fn draw(&self, pipeline: &Pipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
