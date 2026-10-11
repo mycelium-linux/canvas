@@ -721,8 +721,9 @@ public final class TvActivity extends Activity {
         HorizontalScrollView scroller = new HorizontalScrollView(this);
         workspaceSelector = scroller;
         scroller.setHorizontalScrollBarEnabled(false);
+        scroller.setFillViewport(true);
         scroller.setClipToPadding(false);
-        scroller.setPadding(dp(8), 0, dp(8), 0);
+        scroller.setPadding(dp(ShellChrome.barPadding()), 0, dp(ShellChrome.barPadding()), 0);
         selector.setClipChildren(false);
         selector.setClipToPadding(false);
         scroller.addView(selector);
@@ -1283,7 +1284,9 @@ public final class TvActivity extends Activity {
             }
         }
         if (key == KeyEvent.KEYCODE_MENU && selector.getChildCount() > 0) {
-            selector.getChildAt(0).requestFocus();
+            for(int i=0;i<selector.getChildCount();i++) if(selector.getChildAt(i).isFocusable()) {
+                selector.getChildAt(i).requestFocus(); break;
+            }
             return true;
         }
         if (key == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE) {
@@ -1293,9 +1296,11 @@ public final class TvActivity extends Activity {
         return super.onKeyDown(key, event);
     }
 
+
     /** Presentation-only grouping; project identity and activation stay in Rust. */
     private JSONObject shellMenu;
     private String menuSection = "", menuProject = "";
+    private boolean menuExpanded = false;
     private JSONObject menuDescriptor() throws Exception {
         if (shellMenu != null) return shellMenu;
         try (java.io.InputStream input = getAssets().open("canvas-menu.json")) {
@@ -1330,7 +1335,7 @@ public final class TvActivity extends Activity {
         if(children == null && project.isEmpty()) throw new IllegalArgumentException("Menu choice needs a project");
         Button button=new Button(this); String tag=children == null ? project : "section:"+section;
         button.setTag(tag); button.setText(item.getString("label")+(children == null ? "" : section.equals(menuSection) ? " ▴" : " ▾"));
-        button.setTextSize(18); ShellChrome.control(button,palette,menuContains(item,selected),true);
+        button.setTextSize(ShellChrome.textSize()); ShellChrome.control(button,palette,menuContains(item,selected),true);
         button.setContentDescription(children == null ? "Open "+item.getString("label") : "Browse "+item.getString("label"));
         button.setOnClickListener(v -> {
             if(children != null) {
@@ -1344,8 +1349,8 @@ public final class TvActivity extends Activity {
             }
         });
         button.setMinHeight(0); button.setMinimumHeight(0);
-        LinearLayout.LayoutParams bounds=new LinearLayout.LayoutParams(-2,barHeight()-dp(4));
-        bounds.setMargins(dp(4),dp(2),0,dp(2)); selector.addView(button,bounds);
+        LinearLayout.LayoutParams bounds=new LinearLayout.LayoutParams(-2,dp(ShellChrome.controlHeight()));
+        bounds.setMargins(dp(4),0,0,0); selector.addView(button,bounds);
         if(tag.equals(focusedTag)) button.requestFocus();
     }
     private void renderWorkspaceMenu(JSONObject projection) throws Exception {
@@ -1381,7 +1386,7 @@ public final class TvActivity extends Activity {
             }
         }
         if(!selected.equals(menuProject)) {
-            menuProject=selected; menuSection="";
+            menuProject=selected; menuSection=""; menuExpanded=false;
             for(int i=0;i<items.length();i++) {
                 JSONObject item=items.getJSONObject(i);
                 if(item.has("children") && menuContains(item,selected)) menuSection=item.getString("id");
@@ -1390,6 +1395,35 @@ public final class TvActivity extends Activity {
         View focused=selector.getFocusedChild();
         String focusedTag=focused != null && focused.getTag()!=null ? focused.getTag().toString() : "";
         selector.removeAllViews();
+        TextView identity=new TextView(this); identity.setText("fungOS");
+        identity.setTextSize(ShellChrome.textSize()); identity.setTextColor(Color.parseColor(palette.getString("primary")));
+        identity.setGravity(Gravity.CENTER_VERTICAL); identity.setPadding(0,0,dp(ShellChrome.barPadding()),0);
+        selector.addView(identity,new LinearLayout.LayoutParams(-2,barHeight()));
+        String selectedName=selected;
+        JSONArray catalogProjects=catalog.getJSONArray("projects");
+        for(int i=0;i<catalogProjects.length();i++) if(catalogProjects.getJSONObject(i).getString("id").equals(selected)) selectedName=catalogProjects.getJSONObject(i).getString("name");
+        Button workspace=new Button(this); workspace.setTag("workspace-menu");
+        workspace.setSingleLine(true);workspace.setEllipsize(android.text.TextUtils.TruncateAt.END);workspace.setMaxWidth(dp(210));
+        workspace.setText(selectedName + (menuExpanded ? " ▴" : " ▾")); workspace.setTextSize(ShellChrome.textSize());
+        ShellChrome.control(workspace,palette,true,true); workspace.setContentDescription((menuExpanded ? "Close" : "Open") + " workspaces. Current workspace " + selectedName);
+        workspace.setOnClickListener(v -> {menuExpanded=!menuExpanded;
+            try {renderWorkspaceMenu(projection);} catch(Exception error) {showStatus("Menu failed: "+error.getMessage());}});
+        selector.addView(workspace,new LinearLayout.LayoutParams(-2,dp(ShellChrome.controlHeight())));
+        if("workspace-menu".equals(focusedTag) || (!menuExpanded && !focusedTag.isEmpty())) workspace.requestFocus();
+        if(!menuExpanded) {
+            String pageName=projection.getJSONObject("document").optInt("active_page",0)==0 ? "Overview" : "";
+            JSONArray pageChoices=projection.getJSONObject("document").optJSONArray("pages");
+            int selectedPage=projection.getJSONObject("document").optInt("active_page",0);
+            if(pageChoices!=null && selectedPage>0 && selectedPage<=pageChoices.length()) pageName=pageChoices.getJSONObject(selectedPage-1).getString("name");
+            if(pageChoices!=null && pageChoices.length()>0) {
+                TextView page=new TextView(this);page.setText(pageName);page.setTextSize(ShellChrome.textSize());page.setGravity(Gravity.CENTER_VERTICAL);page.setTextColor(Color.parseColor(palette.getString("text_muted")));page.setPadding(dp(ShellChrome.barPadding()),0,0,0);
+                selector.addView(page,new LinearLayout.LayoutParams(-2,barHeight()));
+            }
+            View flexible=new View(this);selector.addView(flexible,new LinearLayout.LayoutParams(0,barHeight(),1));
+            android.widget.TextClock clock=new android.widget.TextClock(this);clock.setFormat12Hour("HH:mm");clock.setFormat24Hour("HH:mm");clock.setTextSize(ShellChrome.textSize());clock.setGravity(Gravity.CENTER_VERTICAL);clock.setTextColor(Color.parseColor(palette.getString("text")));
+            selector.addView(clock,new LinearLayout.LayoutParams(-2,barHeight()));
+            return;
+        }
         JSONArray expanded=null;
         for(int i=0;i<items.length();i++) {
             JSONObject item=items.getJSONObject(i); addMenuChoice(item,projection,focusedTag);
@@ -1402,14 +1436,14 @@ public final class TvActivity extends Activity {
             for(int i=0;i<expanded.length();i++) addMenuChoice(expanded.getJSONObject(i),projection,focusedTag);
         }
         if(!libraryEndpoint.isEmpty() && (menu.optString("library_project").isEmpty() || menu.optString("library_project").equals(selected))) {
-            Button library=new Button(this);library.setText("Library");library.setTextSize(18);
+            Button library=new Button(this);library.setText("Library");library.setTextSize(ShellChrome.textSize());
             styleControl(library,palette,libraryScreen!=null);library.setOnClickListener(v -> showLibrary());
             selector.addView(library,new LinearLayout.LayoutParams(-2,barHeight()-dp(4)));
         }
         JSONArray pages=projection.getJSONObject("document").optJSONArray("pages");
         if(pages != null && pages.length()>0) for(int i=0;i<=pages.length();i++) {
             final int page=i; Button button=new Button(this);
-            button.setText(i==0 ? "Overview" : pages.getJSONObject(i-1).getString("name"));button.setTextSize(18);
+            button.setText(i==0 ? "Overview" : pages.getJSONObject(i-1).getString("name"));button.setTextSize(ShellChrome.textSize());
             styleControl(button,palette,i==projection.getJSONObject("document").optInt("active_page",0));
             button.setOnClickListener(v -> {
                 pageRotation.defer(android.os.SystemClock.uptimeMillis(), rotationInterval);
@@ -1668,7 +1702,7 @@ public final class TvActivity extends Activity {
     }
 
     private int barHeight() {
-        return dp(56);
+        return dp(ShellChrome.barHeight());
     }
 
     private int dp(int value) {

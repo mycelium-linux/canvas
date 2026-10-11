@@ -41,3 +41,17 @@ the accessibility description retains the exact source and current mute state.
 `Unmute` means this stream is muted, not that playback or audible signal was
 verified. The ordinary main stream and additional independent streams share
 the same label contract. JVM-only `AudioChromeTest` covers that contract.
+
+## Compact shell hierarchy
+
+GFX owns the shared 44-logical-pixel shell row height. Desktop re-exports that
+constant; Android reads the same compact row metrics through JNI. Android's
+default row is `fungOS / selected workspace / current page / clock`, with a
+single workspace action revealing the retained grouped navigation and page
+choices. Expanded choices stay in the same horizontal row; they never become
+a second stacked toolbar or replace workspace content. Selection collapses the
+menu, while MENU focuses the first actual control rather than the brand label.
+The TV row shrinks from 56 to 44dp; at density 4 on a 2160px panel, its height
+falls from 224px (10.37%) to 176px (8.15%). Desktop's existing 44px row is
+unchanged. D-pad control targets remain 44 logical pixels tall. Page controls
+and the Library launcher remain available in the expanded navigation.

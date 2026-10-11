@@ -9,6 +9,15 @@ import org.json.JSONObject;
 
 /** Raster visitor for shared GFX chrome. Rust owns geometry and visual state. */
 final class ShellChrome {
+    private static native int[] nativeMetrics();
+    private static final class Metrics {
+        static final int[] VALUES=nativeMetrics();
+        static { if(VALUES==null || VALUES.length!=4 || VALUES[0]<32 || VALUES[0]>64 || VALUES[1]<32 || VALUES[1]>64 || VALUES[2]<10 || VALUES[2]>24 || VALUES[3]<0 || VALUES[3]>16) throw new IllegalStateException("Invalid shared shell metrics"); }
+    }
+    static int barHeight() { return Metrics.VALUES[0]; }
+    static int controlHeight() { return Metrics.VALUES[1]; }
+    static int textSize() { return Metrics.VALUES[2]; }
+    static int barPadding() { return Metrics.VALUES[3]; }
     static final int AUDIO_WIDTH_DP=88, AUDIO_HEIGHT_DP=44, AUDIO_INSET_DP=6;
     private static native float[] nativeFrame(float width, float height, int state, boolean bar, boolean quiet);
     private static int color(JSONObject palette, String role) throws Exception {

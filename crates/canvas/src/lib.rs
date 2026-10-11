@@ -51,5 +51,5 @@ pub mod window_cycle;
 pub mod workspace_mirror;
 pub mod workspace_store;
 
-pub const DESKTOP_BAR_HEIGHT: u32 = 44;
+pub const DESKTOP_BAR_HEIGHT: u32 = fpl_gfx::chrome::BAR_HEIGHT;
 pub use canvas_workspace::*;
