@@ -2,6 +2,7 @@
 //! Providers own export and verification; this host owns only ordering/delivery.
 use canvas_widget_host::{carousel::Cursor, presentation::call};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, io::Read, time::Duration};
 fn documents(manifest: Value) -> Result<Vec<Value>, String> {
     if let Some(documents) = manifest.as_array() {
@@ -56,6 +57,47 @@ fn validate(documents: &[Value]) -> Result<Vec<String>, String> {
             return Err("carousel may replace only one workspace".into());
         }
         let surfaces = doc["surfaces"].as_array().ok_or("missing surfaces")?;
+        for surface in surfaces.iter().filter(|s| s["content"]["kind"] == "asset") {
+            let asset = &surface["content"]["asset"];
+            if asset["media_type"] != "application/pdf"
+                || !asset["sha256"].as_str().is_some_and(|id| {
+                    id.len() == 64
+                        && id
+                            .bytes()
+                            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                })
+                || !asset["byte_length"]
+                    .as_u64()
+                    .is_some_and(|n| n > 0 && n <= 64 * 1024 * 1024)
+            {
+                return Err("invalid immutable PDF asset".into());
+            }
+        }
+        if let Some(scope) = surfaces.iter().find(|s| s["id"] == "scope") {
+            let first = documents[0]["surfaces"]
+                .as_array()
+                .and_then(|ss| ss.iter().find(|s| s["id"] == "scope"))
+                .ok_or("missing invariant trace")?;
+            if scope != first {
+                return Err("comparison phases must retain identical source-bound trace".into());
+            }
+            let drawing = surfaces
+                .iter()
+                .find(|s| s["id"] == "drawing")
+                .ok_or("missing comparison drawing")?;
+            let content = &drawing["content"];
+            if content["kind"] != "asset"
+                && !(content["kind"] == "widget"
+                    && content["spec"]["kind"] == "signal_view"
+                    && content["spec"]["frame"]["view"] == "topology")
+            {
+                return Err("unsupported comparison phase".into());
+            }
+            if !ids.insert(identity(doc)?) {
+                return Err("duplicate comparison phase".into());
+            }
+            continue;
+        }
         let assets: Vec<_> = surfaces
             .iter()
             .filter(|s| s["content"]["kind"] == "asset")
@@ -81,6 +123,23 @@ fn validate(documents: &[Value]) -> Result<Vec<String>, String> {
         }
     }
     Ok(ids.into_iter().collect())
+}
+fn identity(doc: &Value) -> Result<String, String> {
+    let surfaces = doc["surfaces"].as_array().ok_or("missing surfaces")?;
+    if surfaces.iter().any(|s| s["id"] == "scope") {
+        let drawing = surfaces
+            .iter()
+            .find(|s| s["id"] == "drawing")
+            .ok_or("missing drawing")?;
+        return Ok(format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&drawing["content"]).map_err(|e| e.to_string())?)
+        ));
+    }
+    surfaces
+        .iter()
+        .find_map(|s| s["content"]["asset"]["sha256"].as_str().map(str::to_owned))
+        .ok_or("missing artifact identity".into())
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
@@ -111,11 +170,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let id = cursor.successor(&order).ok_or("empty catalog")?.to_owned();
         let mut doc = documents
             .iter()
-            .find(|d| {
-                d["surfaces"]
-                    .as_array()
-                    .is_some_and(|ss| ss.iter().any(|s| s["content"]["asset"]["sha256"] == id))
-            })
+            .find(|d| identity(d).is_ok_and(|v| v == id))
             .ok_or("artifact missing")?
             .clone();
         let project = doc["project_id"]
@@ -136,10 +191,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("invalid document revision")?
                 + 1
         );
+        let command = if doc["surfaces"]
+            .as_array()
+            .is_some_and(|ss| ss.iter().any(|s| s["id"] == "scope"))
+        {
+            let drawing = doc["surfaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["id"] == "drawing")
+                .unwrap();
+            json!({"command":"apply_patch","patch":{"schema_version":1,"workspace_id":doc["id"],"base_revision":read["data"]["revision"],"revision":doc["revision"],"operations":[{"op":"upsert_surface","surface":drawing}]}})
+        } else {
+            json!({"command":"workspace_import","document":doc,"activate":false})
+        };
         let receipt = call(
             &args[1],
             &args[2],
-            &json!({"schema_version":1,"request_id":"artifact-carousel","expected_revision":read["revision"],"command":{"command":"workspace_import","document":doc,"activate":false}}),
+            &json!({"schema_version":1,"request_id":"artifact-carousel","expected_revision":read["revision"],"command":command}),
         )?;
         if receipt["ok"] != true {
             return Err("artifact import rejected".into());
@@ -153,6 +222,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn paired_phases_never_replace_trace() {
+        let mut a = doc('a');
+        a["surfaces"][0]["id"] = json!("drawing");
+        a["surfaces"].as_array_mut().unwrap().push(
+            json!({"id":"scope","content":{"kind":"widget","spec":{"frame":{"samples":[0,1]}}}}),
+        );
+        let mut b = a.clone();
+        b["surfaces"][0]["content"]["asset"]["sha256"] = json!("b".repeat(64));
+        assert!(validate(&[a.clone(), b.clone()]).is_ok());
+        b["surfaces"][1]["content"]["spec"]["frame"]["samples"] = json!([1, 0]);
+        assert!(validate(&[a, b]).is_err());
+    }
     fn doc(digest: char) -> Value {
         json!({"id":"workspace","project_id":"project","surfaces":[{"content":{"kind":"asset","asset":{"sha256":digest.to_string().repeat(64),"media_type":"application/pdf","byte_length":100}}}]})
     }

@@ -97,3 +97,51 @@ signals `no_data` unless a transient frame arrives. The shared endpoint fix
 preserves declared sample readiness while retaining missing-live delivery
 semantics. Deployment of that core fix requires the normal app update; do not
 introduce a fake live heartbeat to conceal it.
+
+## Same-circuit LED comparison and modeled transient
+
+The `verk-led` TV workspace pairs the native LED sheet with a **reconstructed
+physical-pin connectivity drawing**, alternating only the drawing. It is not
+a recreated native layout or recovered designer history. The matching finite
+waveform stays retained and unchanged throughout both phases. True replayed
+KiCad drawing export is tracked separately in `dock-z7nh`.
+
+The circuit owner is LoB's `555-led-experiment` example. It uses the existing
+SPICE deck generator with the pinned upstream transistor-level UA555 model,
+a generic red LED model and an explicitly declared 5 V supply at J1.2/J1.1.
+Neither semiconductor model is a characterization of the original part.
+The completed one-second experiment is not a live oscilloscope instrument.
+
+Manual runbook (never put private dataset/model artifacts into Git):
+
+1. Obtain the owner's `source.net`, `experiment.cir`, `models.lib`,
+   `execution.json`, `receipt.json` and `circuit.json`. Keep the completed
+   episode header/footer as independent exact graph evidence.
+2. Run `canvas-spice-projection modeled EXECUTION RECEIPT SOURCE DECK MODELS
+   OUTPUT VERSION`. Each supplied artifact must match its owner receipt digest;
+   the execution must match the receipt and be complete. The version is
+   operator-recorded. Adaptive points are explicitly resampled to 1024 uniform
+   display samples; the declared supply contributes to the voltage range.
+3. Compose the admitted LED observation with `spice-modeled-v1.lua`. The binder
+   rejects another source/probe/supply/timebase rather than mislabeled RC data.
+4. Run `canvas-circuit-comparison TRACE CIRCUIT WIDGETS NATIVE_WORKSPACE PROOF
+   OUTPUT [CONNECTIVITY_SVG [PLOT_SVG]]`. It checks source identity, exact replay
+   completion, physical pin groups and component inventory. Connectivity lines
+   carry actual pin labels and values, with no inferred signal direction.
+5. Convert SVGs using existing `rsvg-convert --format pdf`. These are conventional
+   engineering-paper vector artifacts, not a second copied Canvas theme.
+   The plot includes Time (s), Voltage (V), ticks, graticule and an explicit trace
+   legend. Provision immutable PDF bytes through the established private asset
+   delivery path, then import the owner workspace revision-bound.
+6. Run `canvas-artifact-carousel MANIFEST TVCTL ENDPOINT 20 30` for a bounded
+   roughly ten-minute preview. Drawing-only `apply_patch` operations preserve
+   the exact same plot surface; switching to another workspace ends the command
+   visibly rather than taking over the newly selected project. Repeat manually
+   as desired; this is not an unadvertised forever-running daemon.
+
+The initial verification preview uses the finite plot PDF. This is an interim
+artifact, not the requested richer interactive Canvas plot widget; the shared
+GFX plot/axis/legend primitive replaces it through the normal app update.
+This legitimately avoids the installed false live-sensor footer without a fake
+heartbeat or misrepresenting sample provenance. Private receipts and derived
+assets are retained under `~/.cache/dock/canvas/verk-led-source`.

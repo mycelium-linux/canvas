@@ -113,6 +113,26 @@ fn project(
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "modeled") {
+        if args.len() != 8 {
+            return Err("usage: canvas-spice-projection modeled EXECUTION RECEIPT SOURCE DECK MODELS OUTPUT VERSION".into());
+        }
+        let (bytes, execution) = read(&args[1])?;
+        let (_, receipt) = read(&args[2])?;
+        let source = fs::read(&args[3])?;
+        let deck = fs::read(&args[4])?;
+        let models = fs::read(&args[5])?;
+        let result = modeled(
+            &bytes, &execution, &receipt, &source, &deck, &models, &args[7],
+        )?;
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&args[6])?
+            .write_all(&serde_json::to_vec(&result)?)?;
+        return Ok(());
+    }
     if args.len() != 6 {
         return Err("usage: canvas-spice-projection EXECUTION RECEIPT REQUEST OUTPUT IMAGE_SHA256 NGSPICE_VERSION".into());
     }
@@ -144,9 +164,79 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     Ok(())
 }
+fn modeled(
+    bytes: &[u8],
+    execution: &Value,
+    receipt: &Value,
+    source: &[u8],
+    deck: &[u8],
+    models: &[u8],
+    version: &str,
+) -> Result<Value, String> {
+    if receipt["schema"] != "lob.modeled-transient.v1"
+        || receipt["state"] != "complete"
+        || execution["state"] != "complete"
+        || receipt["execution"] != *execution
+    {
+        return Err("incomplete or mismatched modeled transient".into());
+    }
+    for (field, content) in [
+        ("execution_sha256", bytes),
+        ("source_sha256", source),
+        ("deck_sha256", deck),
+        ("model_sha256", models),
+    ] {
+        if content.len() > 2 * 1024 * 1024 || receipt[field] != digest(content) {
+            return Err(format!("{field} mismatch or oversized artifact"));
+        }
+    }
+    if version.is_empty()
+        || version.len() > 32
+        || receipt["probe"]["part"].as_str().is_none()
+        || receipt["probe"]["pin"].as_str().is_none()
+    {
+        return Err("missing tool/probe provenance".into());
+    }
+    let points: Vec<[f64; 2]> = serde_json::from_value(execution["payload"]["points"].clone())
+        .map_err(|e| e.to_string())?;
+    let samples = resample(&points, 1024)?;
+    let minimum = points.iter().map(|p| p[1]).fold(0.0, f64::min);
+    let maximum = points
+        .iter()
+        .map(|p| p[1])
+        .fold(0.0, f64::max)
+        .max(1.0)
+        .max(
+            receipt["supply"]["volts"]
+                .as_f64()
+                .filter(|v| v.is_finite() && *v > 0. && *v <= 1e6)
+                .unwrap_or(0.),
+        );
+    let mut result = json!({"schema":"canvas.modeled-trace.v1","source_sha256":receipt["source_sha256"],"execution_sha256":receipt["execution_sha256"],"probe":receipt["probe"],"time":receipt["time"],"supply":receipt["supply"],"model":receipt["model"],"led_model":receipt["led_model"],"model_sha256":receipt["model_sha256"],"upstream_sha256":receipt["upstream_sha256"],"simulator_version":version,"frequency_hz":execution["payload"]["frequency_hz"],"rising_edges":execution["payload"]["rising_edges"],"source_points":points.len(),"resampling":"piecewise_linear_uniform","start_s":points[0][0],"stop_s":points.last().unwrap()[0],"sample_period_s":(points.last().unwrap()[0]-points[0][0])/1023.0,"frame":{"view":"scope","range":{"minimum":minimum,"maximum":maximum},"samples":samples}});
+    result["led_current_max_a"] = execution["payload"]["led_current_max_a"].clone();
+    Ok(result)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn modeled_receipt_requires_actual_artifact_digests() {
+        let execution = json!({"state":"complete","payload":{"points":[[0.,0.],[1.,3.]],"frequency_hz":7.0,"rising_edges":7}});
+        let bytes = serde_json::to_vec(&execution).unwrap();
+        let receipt = json!({"schema":"lob.modeled-transient.v1","state":"complete","execution":execution,"execution_sha256":digest(&bytes),"source_sha256":digest(b"source"),"deck_sha256":digest(b"deck"),"model_sha256":digest(b"models"),"probe":{"part":"U1","pin":"3"}});
+        assert!(modeled(&bytes, &execution, &receipt, b"source", b"deck", b"models", "47").is_ok());
+        assert!(modeled(&bytes, &execution, &receipt, b"other", b"deck", b"models", "47").is_err());
+        assert!(modeled(
+            b"tampered",
+            &execution,
+            &receipt,
+            b"source",
+            b"deck",
+            b"models",
+            "47"
+        )
+        .is_err());
+    }
     #[test]
     fn irregular_source_has_explicit_uniform_interpolation() {
         assert_eq!(
