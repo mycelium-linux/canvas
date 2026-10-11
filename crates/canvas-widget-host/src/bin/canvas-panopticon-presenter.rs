@@ -110,6 +110,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     let sha = asset["sha256"]
                                         .as_str()
                                         .ok_or("missing verified digest")?;
+                                    if let Some(root) = std::env::var_os("CANVAS_MAP_ASSETS") {
+                                        std::fs::create_dir_all(&root)?;
+                                        let path = std::path::PathBuf::from(root).join(sha);
+                                        // Bytes have already passed the common identity verifier.
+                                        if !path.exists() {
+                                            std::fs::write(path, &payload)?;
+                                        }
+                                    }
                                     if !tiles.contains(sha) {
                                         if tiles.len() >= 64 {
                                             eprintln!("tile cache admission budget exhausted");
@@ -138,6 +146,47 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                     }
                     if let Some((generation, projection)) = pending {
+                        if let Ok(project) = std::env::var("PANOPTICON_DESKTOP_PROJECT") {
+                            let mut desktop = projection.clone();
+                            panopticon_wall::select(&mut desktop, None)?;
+                            let composed = panopticon_wall::compose(
+                                &config.widget_host,
+                                &config.binder,
+                                &desktop,
+                            )?;
+                            for key in ["map", "evidence", "detail"] {
+                                let spec = &composed[key];
+                                let mut widget = spec.clone();
+                                if let Some(object) = widget.as_object_mut() {
+                                    for field in [
+                                        "schema_version",
+                                        "id",
+                                        "data",
+                                        "chrome",
+                                        "refresh_ms",
+                                        "theme",
+                                    ] {
+                                        object.remove(field);
+                                    }
+                                }
+                                let event = serde_json::json!({"schema_version":1,"owner":"panopticon","stream":spec["id"],"contract":"canvas.widget.snapshot.v1","sequence":generation.1,"emitted_at_ms":unibus::envelope::now_ms(),"project_id":project,"payload":{"widget":widget,"data":spec["data"]}});
+                                use std::io::Write;
+                                let mut child = std::process::Command::new(
+                                    std::env::var_os("CANVAS_WIDGET_INGEST_BIN")
+                                        .unwrap_or_else(|| "canvas-widget-ingest".into()),
+                                )
+                                .stdin(std::process::Stdio::piped())
+                                .spawn()?;
+                                child
+                                    .stdin
+                                    .take()
+                                    .ok_or("missing desktop ingress")?
+                                    .write_all(&serde_json::to_vec(&event)?)?;
+                                if !child.wait()?.success() {
+                                    eprintln!("Neo map ingress rejected event");
+                                }
+                            }
+                        }
                         if let Err(error) = panopticon_wall::present(
                             projection,
                             &config.widget_host,

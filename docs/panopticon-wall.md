@@ -340,3 +340,25 @@ The existing owner connector subscribes globally and lacks automatic websocket
 reconnection, and currently omits standard Class-B position reports. These remain
 owner-side hardening work, not responsibilities to duplicate in Canvas. Retained
 contacts expire according to the owner TTL; do not claim uninterrupted coverage.
+
+## Neo fullscreen desktop
+
+`config/workspaces/neo/panopticon.json` uses a full-size map with small overlaid
+health and contact cards. Its declared widget inputs use the same authenticated
+Unibus owner projection as the TV, not a screenshot or a second provider poller.
+Set `PANOPTICON_DESKTOP_PROJECT=panopticon-neo` on the existing presenter and
+install `canvas-widget-ingest` on its PATH. The generic ingress validates the
+snapshot contract and uses Canvas's existing chunked local delivery.
+
+Both the presenter and desktop Canvas need `CANVAS_MAP_ASSETS` pointing to the
+same private digest-addressed tile directory. Desktop rendering verifies asset
+size, digest and PNG dimensions, then retains up to four viewport composites,
+each bounded to 4,194,304 pixels. Imagery and vector overlays are separate ordered
+Iced layers; contact updates do not rebuild unchanged imagery. This is cached
+GPU image display, not GPU tile reprojection. Missing assets fail visibly.
+
+On Neo, the Tardy mirror must be paused before activating this workspace or it
+will select its own scene again. Run Canvas through its LaunchAgent alone so
+the asset environment is applied; a separate manual launch can hold the runtime
+lock without that environment. Never delete the runtime lock to resolve this.
+Desktop interpolation and contact selection remain separate follow-up work.

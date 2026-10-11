@@ -20,6 +20,8 @@ wasmtime = { version = "24", optional = true, features = ["component-model"] }
 # Iced wgpu for hyperspace shader rendering
 iced_wgpu = { version = "0.14", optional = true }
 bytemuck = { version = "1", optional = true }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+sha2 = { version = "0.10", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
@@ -27,7 +29,7 @@ wasm-bindgen = "0.2"
 
 [features]
 default = []
-live = ["dep:iced", "dep:libc", "dep:coherence-native", "fpl-gfx/wgpu", "dep:iced_wgpu", "dep:bytemuck"]
+live = ["dep:iced", "dep:libc", "dep:coherence-native", "fpl-gfx/wgpu", "dep:iced_wgpu", "dep:bytemuck", "dep:image", "dep:sha2"]
 schema = ["dep:schemars"]
 
 [dev-dependencies]

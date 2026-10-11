@@ -1,9 +1,9 @@
 //! Iced/wGPU paint adapter for renderer-neutral gfx signal geometry.
-use super::{CacheState, Key, gfx_theme};
+use super::{gfx_theme, CacheState, Key};
 use canvas_core::VisualTheme;
-use fpl_gfx::{PrimitiveKind, Rect, Scene, signals::SignalFrame};
-use iced::widget::{Canvas, canvas};
-use iced::{Element, Length, Point, Rectangle, Renderer, Theme, mouse};
+use fpl_gfx::{signals::SignalFrame, PrimitiveKind, Rect, Scene};
+use iced::widget::{canvas, Canvas};
+use iced::{mouse, Element, Length, Point, Rectangle, Renderer, Theme};
 
 pub(super) fn view<'a, Message: 'a>(
     raw: &serde_json::Value,
@@ -23,13 +23,51 @@ pub(super) fn view<'a, Message: 'a>(
             return iced::widget::text(format!("Signal fingerprint error: {error}")).into();
         }
     };
-    Canvas::new(Program {
-        frame,
-        theme,
-        fingerprint,
+    iced::widget::responsive(move |size| {
+        let raster = match &frame {
+            SignalFrame::GeoMap { map } if map.basemap.is_some() => {
+                std::env::var_os("CANVAS_MAP_ASSETS")
+                    .ok_or_else(|| "Map asset directory not configured".to_string())
+                    .and_then(|root| {
+                        super::map_raster::retained(
+                            map,
+                            size.width as u32,
+                            size.height as u32,
+                            std::path::Path::new(&root),
+                        )
+                    })
+                    .map(Some)
+            }
+            _ => Ok(None),
+        };
+        let (image, raster_error) = match raster {
+            Ok(image) => (image, None),
+            Err(error) => (None, Some(error)),
+        };
+        let overlay: Element<'_, Message> = Canvas::new(Program {
+            frame: frame.clone(),
+            theme: theme.clone(),
+            fingerprint: fingerprint ^ u64::from(image.is_some()),
+            raster_backed: image.is_some(),
+            raster_error,
+        })
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into();
+        if let Some(image) = image {
+            iced::widget::stack(vec![
+                iced::widget::image(image)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .content_fit(iced::ContentFit::Fill)
+                    .into(),
+                overlay,
+            ])
+            .into()
+        } else {
+            overlay
+        }
     })
-    .width(Length::Fill)
-    .height(Length::Fill)
     .into()
 }
 fn cache_fingerprint(
@@ -70,6 +108,8 @@ struct Program {
     frame: SignalFrame,
     theme: fpl_gfx::Theme,
     fingerprint: u64,
+    raster_backed: bool,
+    raster_error: Option<String>,
 }
 impl Program {
     fn paint_error(&self, target: &mut canvas::Frame, message: String) {
@@ -102,7 +142,11 @@ impl<Message> canvas::Program<Message> for Program {
                 self.paint_error(target, format!("Signal geometry error: {error}"));
                 return;
             }
-            for p in scene.iter() {
+            for (index, p) in scene.iter().enumerate() {
+                // The image is a separate lower widget layer.
+                if index == 0 && self.raster_backed {
+                    continue;
+                }
                 let c = self.theme.color(p.fill);
                 let color = iced::Color::from_linear_rgba(c.r, c.g, c.b, c.a);
                 match p.kind {
@@ -149,6 +193,40 @@ impl<Message> canvas::Program<Message> for Program {
                     }
                 }
                 Err(error) => self.paint_error(target, format!("Signal labels error: {error}")),
+            }
+            if let Some(error) = &self.raster_error {
+                self.paint_error(target, error.clone());
+            }
+            if let SignalFrame::GeoMap { map } = &self.frame {
+                if let Some(layer) = &map.basemap {
+                    if let Ok(plot) = map.inner(Rect::new(0.0, 0.0, bounds.width, bounds.height)) {
+                        let width =
+                            (layer.attribution.chars().count() as f32 * 7.0 + 12.0).min(plot.width);
+                        let x = plot.right() - width;
+                        let y = plot.bottom() - 18.0;
+                        let background = self.theme.color(fpl_gfx::ThemeRole::SurfaceRecessed);
+                        target.fill(
+                            &canvas::Path::rectangle(
+                                Point::new(x, y),
+                                iced::Size::new(width, 18.0),
+                            ),
+                            iced::Color::from_linear_rgba(
+                                background.r,
+                                background.g,
+                                background.b,
+                                1.0,
+                            ),
+                        );
+                        let text = self.theme.color(fpl_gfx::ThemeRole::Text);
+                        target.fill_text(canvas::Text {
+                            content: layer.attribution.clone(),
+                            position: Point::new(x + 4.0, y + 2.0),
+                            size: iced::Pixels(12.0),
+                            color: iced::Color::from_linear_rgba(text.r, text.g, text.b, 1.0),
+                            ..Default::default()
+                        });
+                    }
+                }
             }
         })
     }
