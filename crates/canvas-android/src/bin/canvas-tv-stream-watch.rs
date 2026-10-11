@@ -1,7 +1,7 @@
 //! Explicit source-health adapter -> revision-bound surface lease. No discovery,
 //! no automatic workspace takeover, and no credentials in the descriptor.
-use canvas_core::stream_lease::{ProgressTracker, failure_content, hls_progress, waiting_content};
-use serde_json::{Value, json};
+use canvas_core::stream_lease::{failure_content, hls_progress, waiting_content, ProgressTracker};
+use serde_json::{json, Value};
 use std::{
     io::{Read, Write},
     process::{Command, Stdio},
@@ -155,7 +155,70 @@ fn control(serial: &str, request: &str) -> Result<Value, Box<dyn std::error::Err
     if !status.success() || bytes.len() > 4 * 1024 * 1024 {
         return Err("TV control request failed".into());
     }
-    Ok(serde_json::from_slice(&bytes)?)
+    checked_receipt(&bytes)
+}
+
+fn checked_receipt(bytes: &[u8]) -> Result<Value, Box<dyn std::error::Error>> {
+    let reply: Value = serde_json::from_slice(bytes)?;
+    if reply["ok"] != true {
+        return Err("TV rejected presentation request; inspect its current revision".into());
+    }
+    Ok(reply)
+}
+
+struct Target<'a> {
+    project: &'a str,
+    surface: &'a str,
+    url: &'a str,
+}
+
+/// Inspect selection first, then confirm producer progress immediately before
+/// delivery. Slow inspection must not consume a newly issued presentation lease.
+fn watch_once(
+    target: &Target<'_>,
+    tracker: &mut ProgressTracker,
+    read_playlist: impl FnOnce() -> Result<String, Box<dyn std::error::Error>>,
+    mut send: impl FnMut(&str) -> Result<Value, Box<dyn std::error::Error>>,
+    clock: impl FnOnce() -> Result<u64, Box<dyn std::error::Error>>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let observed = send("inspect\n")?;
+    if observed["data"]["catalog"]["selected_project"] != target.project {
+        tracker.reset();
+        return Ok(None);
+    }
+    let document = &observed["data"]["document"];
+    let mut surface = document["surfaces"]
+        .as_array()
+        .ok_or("Missing surfaces")?
+        .iter()
+        .find(|surface| surface["id"] == target.surface)
+        .ok_or("Surface not installed")?
+        .clone();
+    let mut failure = None;
+    let content = match read_playlist().and_then(|raw| hls_progress(&raw).map_err(Into::into)) {
+        Ok(marker) => tracker
+            .observe(marker, target.url, clock()?)
+            .map(serde_json::to_value)
+            .transpose()?
+            .unwrap_or_else(waiting_content),
+        Err(error) => {
+            tracker.reset();
+            let message = error.to_string();
+            let content = source_failure(&message);
+            failure = Some(message);
+            content
+        }
+    };
+    if surface["content"] != content {
+        surface["content"] = content;
+        let revision = document["revision"].as_u64().ok_or("Missing revision")?;
+        let request = json!({"schema_version":1,"request_id":"stream-availability","expected_revision":observed["revision"],
+            "command":{"command":"apply_patch","patch":{"schema_version":1,"workspace_id":document["id"],
+                "base_revision":revision,"revision":revision.checked_add(1).ok_or("Revision overflow")?,
+                "operations":[{"op":"upsert_surface","surface":surface}]}}});
+        send(&request.to_string())?;
+    }
+    Ok(failure)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -197,66 +260,149 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     canvas_android::validate_stream(url)?;
     let mut tracker = ProgressTracker::default();
     let mut previous_error = String::new();
+    let target = Target {
+        project,
+        surface: id,
+        url,
+    };
     loop {
-        let content = match host
-            .map_or_else(|| local_source(path), |host| source(host, path))
-            .and_then(|raw| hls_progress(&raw).map_err(Into::into))
-        {
-            Ok(marker) => {
-                previous_error.clear();
-                tracker
-                    .observe(marker, url, now_ms()?)
-                    .map(serde_json::to_value)
-                    .transpose()?
-                    .unwrap_or_else(waiting_content)
-            }
-            Err(error) => {
-                tracker.reset();
-                let message = error.to_string();
-                if message != previous_error {
+        let started = Instant::now();
+        let result = watch_once(
+            &target,
+            &mut tracker,
+            || host.map_or_else(|| local_source(path), |host| source(host, path)),
+            |request| control(&args[1], request),
+            now_ms,
+        );
+        match result {
+            Ok(Some(message)) => {
+                if previous_error != message {
                     eprintln!("canvas-tv-stream-watch: {message}");
-                    previous_error = message.clone();
+                    previous_error = message;
                 }
-                source_failure(&message)
             }
-        };
-        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-            let observed = control(&args[1], "inspect\n")?;
-            // Never steal selection to update a hidden workspace. Its retained
-            // lease expires on the TV even while a different project is active.
-            if observed["data"]["catalog"]["selected_project"] != project {
-                return Ok(());
-            }
-            let document = &observed["data"]["document"];
-            let mut surface = document["surfaces"]
-                .as_array()
-                .ok_or("Missing surfaces")?
-                .iter()
-                .find(|s| s["id"] == id)
-                .ok_or("Surface not installed")?
-                .clone();
-            if surface["content"] == content {
-                return Ok(());
-            }
-            surface["content"] = content;
-            let revision = document["revision"].as_u64().ok_or("Missing revision")?;
-            let request = json!({"schema_version":1,"request_id":"stream-availability","expected_revision":observed["revision"],
-                "command":{"command":"apply_patch","patch":{"schema_version":1,"workspace_id":document["id"],
-                    "base_revision":revision,"revision":revision.checked_add(1).ok_or("Revision overflow")?,
-                    "operations":[{"op":"upsert_surface","surface":surface}]}}});
-            control(&args[1], &request.to_string())?;
-            Ok(())
-        })();
-        if let Err(error) = result {
-            eprintln!("canvas-tv-stream-watch: {error}");
+            Ok(None) => previous_error.clear(),
+            Err(error) => eprintln!("canvas-tv-stream-watch: {error}"),
         }
-        std::thread::sleep(Duration::from_secs(1));
+        if let Some(delay) = Duration::from_secs(1).checked_sub(started.elapsed()) {
+            std::thread::sleep(delay);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::{Cell, RefCell};
+
+    fn inspection(project: &str) -> Value {
+        json!({"ok":true,"revision":10,"data":{
+            "catalog":{"selected_project":project},
+            "document":{"id":"reversal-live","revision":2,"surfaces":[{
+                "id":"preview","title":"Preview","content":{"kind":"scene","scene":{"nodes":[]}}
+            }]}
+        }})
+    }
+
+    fn playlist(sequence: u64) -> String {
+        format!("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:{sequence}\nsegment-{sequence}.ts\n")
+    }
+
+    #[test]
+    fn slow_inspection_does_not_age_new_leases_or_restart_renewals() {
+        let target = Target {
+            project: "reversal",
+            surface: "preview",
+            url: "http://192.168.2.67:18089/preview.m3u8",
+        };
+        let clock = Cell::new(0);
+        let requests = RefCell::new(Vec::<Value>::new());
+        let mut tracker = ProgressTracker::default();
+        for sequence in 0..3 {
+            watch_once(
+                &target,
+                &mut tracker,
+                || Ok(playlist(sequence)),
+                |raw| {
+                    if raw == "inspect\n" {
+                        clock.set(clock.get() + 4000);
+                        Ok(inspection("reversal"))
+                    } else {
+                        requests.borrow_mut().push(serde_json::from_str(raw)?);
+                        Ok(json!({"ok":true}))
+                    }
+                },
+                || Ok(clock.get()),
+            )
+            .unwrap();
+        }
+        let requests = requests.borrow();
+        let content = |index: usize| {
+            &requests[index]["command"]["patch"]["operations"][0]["surface"]["content"]
+        };
+        assert_eq!(content(0)["kind"], "scene"); // Two observations establish progress.
+        assert_eq!(content(1)["issued_at_unix_ms"], 8000);
+        assert_eq!(content(1)["expires_at_unix_ms"], 13000);
+        assert_eq!(content(2)["issued_at_unix_ms"], 12000);
+        assert_eq!(content(1)["generation"], content(2)["generation"]);
+        assert_eq!(
+            canvas_core::stream_lease::present_content(content(1), 8000),
+            canvas_core::stream_lease::present_content(content(2), 12000)
+        );
+        assert_eq!(
+            canvas_core::stream_lease::present_content(content(2), 17000)["kind"],
+            "scene"
+        );
+    }
+
+    #[test]
+    fn hidden_workspace_never_reads_or_writes_preview_source() {
+        let target = Target {
+            project: "reversal",
+            surface: "preview",
+            url: "http://192.168.2.67:18089/preview.m3u8",
+        };
+        let mut tracker = ProgressTracker::default();
+        let result = watch_once(
+            &target,
+            &mut tracker,
+            || panic!("Hidden source must not be polled"),
+            |raw| {
+                assert_eq!(raw, "inspect\n");
+                Ok(inspection("verk-showcase"))
+            },
+            || panic!("Hidden source must not be timestamped"),
+        );
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[test]
+    fn rejected_and_malformed_owner_receipts_fail_loudly() {
+        assert!(checked_receipt(br#"{"ok":false,"error":"stale revision"}"#).is_err());
+        assert!(checked_receipt(br#"{"revision":11}"#).is_err());
+        assert!(checked_receipt(b"not-json").is_err());
+        assert!(checked_receipt(br#"{"ok":true,"revision":11}"#).is_ok());
+        let target = Target {
+            project: "reversal",
+            surface: "preview",
+            url: "http://192.168.2.67:18089/preview.m3u8",
+        };
+        let mut tracker = ProgressTracker::default();
+        assert!(watch_once(
+            &target,
+            &mut tracker,
+            || Ok(playlist(0)),
+            |raw| {
+                if raw == "inspect\n" {
+                    Ok(inspection("reversal"))
+                } else {
+                    checked_receipt(br#"{"ok":false}"#)
+                }
+            },
+            || Ok(1000)
+        )
+        .is_err());
+    }
     #[test]
     fn failures_explain_cause_impact_and_recovery() {
         let stale = source_failure("Producer playlist is stale");
@@ -282,12 +428,10 @@ mod tests {
             "Producer ended"
         );
         std::fs::write(&path, vec![b'a'; 65_537]).unwrap();
-        assert!(
-            local_source(path_str)
-                .unwrap_err()
-                .to_string()
-                .contains("limit")
-        );
+        assert!(local_source(path_str)
+            .unwrap_err()
+            .to_string()
+            .contains("limit"));
         std::fs::remove_file(path).unwrap();
     }
     #[test]
