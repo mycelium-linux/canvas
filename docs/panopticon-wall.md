@@ -370,3 +370,19 @@ bright live contact overlays. It is a color treatment of existing light raster
 tiles, not new vector detail or semantic land/water classification. Style joins
 the retained-image cache key. Invalid styles fail visibly. Neo's LaunchAgent
 currently selects `tactical`; changing it needs a supervised Canvas restart.
+
+### Desktop map interaction
+
+Drag within the plot to pan; scroll/trackpad-wheel zooms around the pointer.
+Right-click the plot to reset. The GFX regional camera is retained in the widget
+tree, not owner telemetry, so incoming contact snapshots do not reset it. It is
+bounded to 0.5–16× with geographic limits. Interaction captures map presses and
+wheel events rather than forwarding them to workspace/browser controls; loss
+of window focus cancels a drag.
+
+The retained image is translated/scaled on the GPU and clipped to the same plot
+as vector overlays. Pan/zoom does not trigger tile decode or provider polling.
+This first camera explores existing owner coverage, not a global tile fetcher;
+outside that coverage, the missing imagery stays blank and a notice appears.
+Zooming magnifies current tiles rather than downloading a higher LOD. Camera
+offsets reset on widget destruction/restart, not on normal feed refresh.

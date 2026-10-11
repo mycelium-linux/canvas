@@ -38,6 +38,7 @@ mod quant;
 mod signal_scene;
 mod gfx_signals;
 mod map_raster;
+mod map_interactive;
 mod spectral_waterfall;
 mod wasm_cdg;
 mod wasm_hyperspace;

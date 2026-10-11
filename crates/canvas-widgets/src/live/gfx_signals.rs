@@ -23,54 +23,21 @@ pub(super) fn view<'a, Message: 'a>(
             return iced::widget::text(format!("Signal fingerprint error: {error}")).into();
         }
     };
-    iced::widget::responsive(move |size| {
-        let raster = match &frame {
-            SignalFrame::GeoMap { map } if map.basemap.is_some() => {
-                std::env::var_os("CANVAS_MAP_ASSETS")
-                    .ok_or_else(|| "Map asset directory not configured".to_string())
-                    .and_then(|root| {
-                        super::map_raster::retained(
-                            map,
-                            size.width as u32,
-                            size.height as u32,
-                            std::path::Path::new(&root),
-                        )
-                    })
-                    .map(Some)
-            }
-            _ => Ok(None),
-        };
-        let (image, raster_error) = match raster {
-            Ok(image) => (image, None),
-            Err(error) => (None, Some(error)),
-        };
-        let overlay: Element<'_, Message> = Canvas::new(Program {
-            frame: frame.clone(),
-            theme: theme.clone(),
-            fingerprint: fingerprint ^ u64::from(image.is_some()),
-            raster_backed: image.is_some(),
-            raster_error,
-        })
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into();
-        if let Some(image) = image {
-            iced::widget::stack(vec![
-                iced::widget::image(image)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .content_fit(iced::ContentFit::Fill)
-                    .into(),
-                overlay,
-            ])
-            .into()
-        } else {
-            overlay
-        }
+    if matches!(&frame, SignalFrame::GeoMap { .. }) {
+        return super::map_interactive::view(frame, theme);
+    }
+    Canvas::new(Program {
+        frame,
+        theme,
+        fingerprint,
+        raster_backed: false,
+        raster_error: None,
     })
+    .width(Length::Fill)
+    .height(Length::Fill)
     .into()
 }
-fn cache_fingerprint(
+pub(super) fn cache_fingerprint(
     frame: &SignalFrame,
     theme: &fpl_gfx::Theme,
 ) -> Result<u64, serde_json::Error> {
@@ -104,12 +71,12 @@ mod tests {
     }
 }
 
-struct Program {
-    frame: SignalFrame,
-    theme: fpl_gfx::Theme,
-    fingerprint: u64,
-    raster_backed: bool,
-    raster_error: Option<String>,
+pub(super) struct Program {
+    pub(super) frame: SignalFrame,
+    pub(super) theme: fpl_gfx::Theme,
+    pub(super) fingerprint: u64,
+    pub(super) raster_backed: bool,
+    pub(super) raster_error: Option<String>,
 }
 impl Program {
     fn paint_error(&self, target: &mut canvas::Frame, message: String) {
