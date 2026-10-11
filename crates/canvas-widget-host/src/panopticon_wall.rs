@@ -69,6 +69,33 @@ pub fn compose(host: &str, binder: &str, projection: &Value) -> Result<Value, Er
 
 /// Never changes workspace selection. Document mutations precede live frames.
 pub fn present(
+    projection: Value,
+    host: &str,
+    binder: &str,
+    tvctl: &str,
+    endpoint: &str,
+    lost: &mut Option<String>,
+) -> Result<(), Error> {
+    for attempt in 0..3 {
+        match present_once(projection.clone(), host, binder, tvctl, endpoint, lost) {
+            Err(error)
+                if attempt < 2
+                    && error
+                        .to_string()
+                        .contains("Stale or missing endpoint revision") =>
+            {
+                eprintln!(
+                    "Panopticon presentation revision changed; re-reading owner (attempt {})",
+                    attempt + 1
+                );
+            }
+            result => return result,
+        }
+    }
+    Err("presentation retry exhausted".into())
+}
+
+fn present_once(
     mut projection: Value,
     host: &str,
     binder: &str,
@@ -111,7 +138,7 @@ pub fn present(
         .ok_or("workspace revision exhausted")?;
     let operations:Vec<_>=[("panopticon-source","Source health","evidence"),("panopticon-detail","Selected contact","detail")].iter().map(|(id,title,key)|json!({"op":"upsert_surface","surface":{"id":id,"title":title,"content":{"kind":"widget","spec":composed[*key]}}})).collect();
     let receipt = call(
-        &json!({"schema_version":1,"request_id":"panopticon-health","expected_revision":current["revision"],"command":{"command":"apply_patch","patch":{"schema_version":1,"workspace_id":"tv-panopticon-wall","base_revision":revision,"revision":next,"operations":operations}}}),
+        &json!({"schema_version":1,"request_id":"panopticon-health","expected_revision":state["revision"],"command":{"command":"apply_patch","patch":{"schema_version":1,"workspace_id":"tv-panopticon-wall","base_revision":revision,"revision":next,"operations":operations}}}),
     )?;
     if receipt["ok"] != true {
         return Err(format!("health patch rejected: {receipt}").into());

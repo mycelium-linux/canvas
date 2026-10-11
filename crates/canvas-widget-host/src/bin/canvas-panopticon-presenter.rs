@@ -53,6 +53,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     config.bus.read_timeout_ms = 500;
     let mut previous = (0, 0);
     let mut lost = None;
+    let mut tiles = std::collections::BTreeSet::new();
     let mut delay = 2;
     loop {
         match Client::connect(config.bus.clone()) {
@@ -73,7 +74,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                     if envelope.producer_id != config.source_producer
                         || envelope.installation_id != config.bus.installation_id
-                        || !payload.is_empty()
+                        || payload.len() > 65536
                         || serde_json::to_vec(&envelope.message.body)?.len() > 65536
                     {
                         eprintln!("rejected unexpected Panopticon sender or payload");
@@ -83,6 +84,38 @@ fn main() -> Result<(), Box<dyn Error>> {
                     match accept(&body, unibus::envelope::now_ms(), previous) {
                         Err(error) => eprintln!("rejected Panopticon observation: {error}"),
                         Ok(generation) => {
+                            let asset = &body["tile_asset"];
+                            if !payload.is_empty() {
+                                if let Err(error) =
+                                    canvas_widget_host::panopticon_tiles::verify(asset, &payload)
+                                {
+                                    eprintln!("rejected tile: {error}");
+                                    continue;
+                                }
+                                let sha =
+                                    asset["sha256"].as_str().ok_or("missing verified digest")?;
+                                if !tiles.contains(sha) {
+                                    if tiles.len() >= 64 {
+                                        eprintln!("tile cache admission budget exhausted");
+                                        continue;
+                                    }
+                                    if let Err(error) =
+                                        canvas_widget_host::panopticon_tiles::provision(
+                                            &config.endpoint,
+                                            asset,
+                                            &payload,
+                                        )
+                                    {
+                                        eprintln!("tile delivery failed: {error}");
+                                        continue;
+                                    }
+                                    tiles.insert(sha.to_owned());
+                                    eprintln!("delivered viewport tile {}", sha);
+                                }
+                            } else if !asset.is_null() {
+                                eprintln!("missing tile payload");
+                                continue;
+                            }
                             previous = generation;
                             if let Err(error) = panopticon_wall::present(
                                 envelope.message.body["projection"].clone(),

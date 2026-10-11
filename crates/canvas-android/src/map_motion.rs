@@ -3,6 +3,10 @@ use fpl_gfx::geo_map::motion::{Config, Kiosk, Motion};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+// Owner updates arrive considerably less often than the five-second fetch loop.
+// Buffer real observations rather than predicting aircraft motion past evidence.
+const OWNER_DELAY_MS: u64 = 45_000;
+
 pub struct SurfaceMotion {
     motion: Motion,
     observed: Option<String>,
@@ -13,7 +17,12 @@ pub struct SurfaceMotion {
 impl SurfaceMotion {
     pub fn new() -> Result<Self, String> {
         Ok(Self {
-            motion: Motion::new(Config::default()).map_err(|e| e.to_string())?,
+            motion: Motion::new(Config {
+                delay_ms: OWNER_DELAY_MS,
+                max_gap_ms: 120_000,
+                ..Config::default()
+            })
+            .map_err(|e| e.to_string())?,
             observed: None,
             received_ms: 0,
             connected: None,
@@ -25,7 +34,7 @@ impl SurfaceMotion {
         if snapshot["frame"]["view"] != "geo_map" {
             return Ok(());
         }
-        let map =
+        let map: fpl_gfx::geo_map::Map =
             serde_json::from_value(snapshot["frame"]["map"].clone()).map_err(|e| e.to_string())?;
         let observed = snapshot["data"]["observed_at"].as_str().map(str::to_owned);
         if observed != self.observed || self.received_ms == 0 {
@@ -40,17 +49,21 @@ impl SurfaceMotion {
             self.received_ms = now_ms;
             self.connected = Some(connected);
         }
-        // This feed carries fetch timestamps, not per-aircraft fix timestamps.
-        // Record explicit receiver sampling times; never claim true fix timing.
+        // Repeated fetches of the same owner revision must not create new samples.
+        let timestamps: BTreeMap<_, _> = map
+            .markers
+            .iter()
+            .filter_map(|marker| marker.observed_at_unix_ms.map(|at| (marker.id.clone(), at)))
+            .collect();
         self.motion
-            .ingest(&map, &BTreeMap::new(), self.received_ms, connected)
+            .ingest(&map, &timestamps, self.received_ms, connected)
             .map_err(|e| e.to_string())?;
         if let Some(map) = self.motion.render(now_ms) {
             snapshot["frame"]["map"] = serde_json::to_value(map).map_err(|e| e.to_string())?;
         }
         snapshot["motion"] = serde_json::json!({
-            "timing":"receiver_sample", "samples":self.motion.sample_count(),
-            "fallback_samples":self.motion.fallback_count(), "delay_ms":5000,
+            "timing":if timestamps.is_empty() {"receiver_sample"} else {"owner_revision"}, "samples":self.motion.sample_count(),
+            "fallback_samples":self.motion.fallback_count(), "delay_ms":OWNER_DELAY_MS,
             "extrapolation":false
         });
         Ok(())
@@ -92,7 +105,7 @@ mod tests {
         let frozen = stale["frame"]["map"]["markers"][0]["latitude_deg"]
             .as_f64()
             .unwrap();
-        assert!((frozen - 47.06).abs() < 1e-8);
+        assert!((frozen - 47.0).abs() < 1e-8);
         let mut later = stale.clone();
         state.present(&mut later, 40000).unwrap();
         assert_eq!(
@@ -103,5 +116,33 @@ mod tests {
         resumed["data"]["observed_at"] = json!("resumed");
         state.present(&mut resumed, 41000).unwrap();
         assert_eq!(resumed["motion"]["samples"], 1);
+    }
+
+    #[test]
+    fn repeated_owner_revision_is_not_a_stationary_fetch_sample() {
+        let mut state = SurfaceMotion::new().unwrap();
+        let mut first = snapshot();
+        first["frame"]["map"]["markers"][0]["observed_at_unix_ms"] = json!(10000);
+        state.present(&mut first, 11000).unwrap();
+        let mut repeated = snapshot();
+        repeated["data"]["observed_at"] = json!("second fetch");
+        repeated["frame"]["map"]["markers"][0]["observed_at_unix_ms"] = json!(10000);
+        state.present(&mut repeated, 16000).unwrap();
+        assert_eq!(repeated["motion"]["samples"], 1);
+        assert_eq!(repeated["motion"]["fallback_samples"], 0);
+        let mut moved = snapshot();
+        moved["data"]["observed_at"] = json!("new owner revision");
+        moved["frame"]["map"]["markers"][0]["observed_at_unix_ms"] = json!(40000);
+        moved["frame"]["map"]["markers"][0]["latitude_deg"] = json!(47.3);
+        state.present(&mut moved, 41000).unwrap();
+        state.present(&mut moved, 70000).unwrap();
+        assert!(
+            (moved["frame"]["map"]["markers"][0]["latitude_deg"]
+                .as_f64()
+                .unwrap()
+                - 47.15)
+                .abs()
+                < 1e-8
+        );
     }
 }

@@ -59,7 +59,7 @@ fn project(input: &Value, now: u64) -> Result<Value, String> {
             if label.len() > 48 {
                 return Err("label exceeds bound".into());
             }
-            markers.push(json!({"id":key,"label":label,"latitude_deg":lat,"longitude_deg":lon,"role":if domain=="adsb" {"primary"} else {"secondary"}}));
+            markers.push(json!({"id":key,"label":label,"latitude_deg":lat,"longitude_deg":lon,"observed_at_unix_ms":observed.saturating_mul(1000),"role":if domain=="adsb" {"primary"} else {"secondary"}}));
             observations.insert(key,json!({"last_update":observed,"owner_updated_at":chrono::DateTime::from_timestamp(observed as i64,0).ok_or("invalid owner update time")?.to_rfc3339(),"owner_update_age_secs":now.saturating_sub(observed),"ttl_secs":ttl,"source":e["payload"]["source"].as_str().filter(|s|s.len()<=128),"callsign":label,"latitude_deg":lat,"longitude_deg":lon,"aircraft":if domain=="adsb" {aircraft(&e["payload"]["aircraft"])}else{Value::Null}}));
             accepted += 1;
         }
@@ -368,7 +368,7 @@ fn source(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             }
         };
         let now = unibus::envelope::now_ms().max(1);
-        let projection = match source_projection(&input, now / 1000, &paths, &args[3]) {
+        let mut projection = match source_projection(&input, now / 1000, &paths, &args[3]) {
             Ok(value) => value,
             Err(error) => {
                 eprintln!("panopticon source: invalid owner observation: {error}");
@@ -385,13 +385,30 @@ fn source(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             .ok_or("sequence exhausted")?
             .max(now);
         let connection = client.as_ref().ok_or("missing connection")?;
-        let body = json!({"sequence":sequence,"observed_at_unix_ms":now,"projection":projection});
+        let mut tile_asset = Value::Null;
+        let mut tile_payload = Vec::new();
+        if let Some(root) = std::env::var_os("PANOPTICON_TILE_CACHE") {
+            match canvas_widget_host::panopticon_tiles::cached(
+                &projection["map"],
+                std::path::Path::new(&root),
+            ) {
+                Ok(canvas_widget_host::panopticon_tiles::CachedViewport { layer, payloads }) => {
+                    let index = cycles as usize % payloads.len();
+                    tile_asset = layer["tiles"][index].clone();
+                    tile_payload = payloads[index].clone();
+                    projection["map"]["basemap"] = layer;
+                }
+                Err(error) => eprintln!("Panopticon viewport cache unavailable: {error}"),
+            }
+        }
+        let body = json!({"sequence":sequence,"observed_at_unix_ms":now,"projection":projection,"tile_asset":tile_asset});
         let delivered = (|| -> Result<(), Box<dyn std::error::Error>> {
-            let envelope = connection.envelope(
+            let mut envelope = connection.envelope(
                 Some("panopticon"),
                 Message::new("panopticon.wall.snapshot.v1", body),
             )?;
-            connection.send(&envelope, &[])?;
+            envelope.payload_bytes = tile_payload.len();
+            connection.send(&envelope, &tile_payload)?;
             while let Some((reply, _)) = connection.try_read()? {
                 if reply.message.body.get("success").and_then(Value::as_bool) == Some(false) {
                     return Err("source publication rejected".into());

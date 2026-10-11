@@ -8,6 +8,9 @@
 <string>/Users/ajmwagar/.local/lib/canvas-panopticon/owner-us-states.geojson</string>
 <string>6f23ed91fce2c25d57c01d83225342ba40258e9571c486c3999bd827c80d193b</string>
 </array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+<key>EnvironmentVariables</key><dict>
+<key>PANOPTICON_TILE_CACHE</key><string>/Users/ajmwagar/Library/Caches/Panopticon/tiles/5eadd9700772b9dc</string>
+</dict>
 <key>ThrottleInterval</key><integer>10</integer>
 <key>StandardOutPath</key><string>/Users/ajmwagar/.config/canvas-panopticon/source.log</string>
 <key>StandardErrorPath</key><string>/Users/ajmwagar/.config/canvas-panopticon/source-error.log</string>

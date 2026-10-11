@@ -133,23 +133,27 @@ Do not treat running launch agents alone as evidence of live data.
 Verified deployment on 2026-10-11: source and viewer registered in the scoped
 hub zone, multiple observations delivered, and hardware screenshot plus TV
 readback showed 28 current contacts and `ready` at 04:08:32 UTC. Photos and
-raster terrain tiles remain unsupported in this slice.
+raster tiles are supported by the bounded viewport delivery below; aircraft
+photos remain a separate, unavailable owner enrichment.
 
 ## Retained trajectories and interpolation
 
 Shared GFX `geo_map::motion::Motion` keeps up to 512 identities and 16 samples
-per identity. It projects known position pairs on a five-second delayed clock
+per identity. Android projects known position pairs on a 45-second delayed clock
 using shortest-longitude linear interpolation. It never extrapolates beyond
 the newest evidence. Missing contacts are pruned; disconnects freeze and
-reconnects, gaps over 30 seconds, or jumps over 250 km start a new segment.
+reconnects, gaps over 120 seconds, or jumps over 250 km start a new segment.
 Observed trails consume only the map's remaining 128-path/8192-point budget.
 Repeated stationary positions do not produce fake movement or extra trail
 segments. The host may configure bounds without changing the map wire schema.
 
-The current Android adapter explicitly uses receiver sample timing: the
-Panopticon map projection has fetch timestamps but not individual fix times.
-This is history of received owner positions, not a claim of precise ADS-B fix
-timing. Selection-only redraws do not create samples. Local motion state clears
+The map carries optional per-marker `observed_at_unix_ms`, taken from the
+owner entity revision time—not an independently measured physical fix time.
+Repeated fetches of an unchanged owner revision do not create stationary
+samples. Missing timestamps explicitly fall back to receiver sampling.
+The 45-second buffer covers the observed sparse owner cadence; it is an honest
+display delay, not prediction. Initial playback must fill that buffer.
+Selection-only redraws do not create samples. Local motion state clears
 on structural workspace changes; observations still travel over Unibus at their
 provider cadence, not at animation cadence.
 
@@ -159,7 +163,52 @@ map state, scroll position and focus across telemetry updates. Actual layout,
 theme or signal-variant changes still reconstruct the affected workspace.
 `CanvasRetained` logs structural rebuilds; `CanvasMap` logs observation and
 bounded sample/path counts for hardware verification. No tile or photo support
-is implied by this motion layer.
+is implied by this motion layer alone.
+
+## Cached current-viewport imagery
+
+APK53 (`0.1.52-panopticon-map-pump`) renders all 20 visible z9 OpenStreetMap
+tiles from Studio's existing Galileo cache. `PANOPTICON_TILE_CACHE` points to
+the inspected provider namespace, not an arbitrary provider: do not repoint it
+to different imagery while retaining OSM attribution. The source computes XYZ
+coverage from the active regional extent, admits at most 64 cached tiles, and
+does not download or prefetch any tiles. OSM attribution stays visible; this is
+active viewing/cache reuse, not an IPFS/offline archive. Respect the official
+[tile usage policy](https://operations.osmfoundation.org/policies/tiles/).
+
+The existing authenticated, zone-restricted Unibus message carries one PNG
+attachment per source cycle and its SHA256 descriptor. Attachments explicitly
+declare their framing length. The presenter pins the same authorized producer,
+checks digest, 64-KiB length and 256×256 PNG dimensions, and provisions only
+digest-named app-private assets through the existing ADB development final hop.
+This is not a native Unibus subscriber on FireTV. The portable map contains
+bounded asset descriptors and attribution, never filesystem paths or URLs.
+At first delivery tiles fill progressively; subsequent app starts reuse them.
+
+Shared GFX reprojects Mercator image rows into the map's linear-latitude plot
+rectangle; it does not stretch only tile corners. Rust rechecks file identity
+before Android decoding. A worker decodes each digest once and composites the
+basemap only when imagery or view dimensions change. Each UI frame draws one
+retained bitmap underneath paths/contacts. The separate bounded `MapFramePump`
+keeps only one geometry computation in flight, publishes coherent snapshot /
+geometry / label revisions, and refuses old-size frames after a resize. Worker
+threads idle out when the surface is not drawn. JSON parsing and Rust geometry
+calls no longer block the map's UI draw callback.
+
+Source/detail patches use the most recently observed endpoint revision and
+retry genuine endpoint-generation conflicts at most three times, re-reading
+document and local selection each time. This does not force a stale generation
+or steal workspace selection. Revision errors remain visible in logs.
+
+Hardware proof: all 20 PNGs loaded; 38 current contacts and advancing owner
+timestamps read back on `tv-panopticon-wall`; `owner_revision` timing had zero
+fallback samples. Kiosk selection continued at its existing 15-second cadence.
+GFX 132 and Android 29 tests passed on Agora, projection/presenter/library 16
+tests passed locally, and strict host Clippy plus Java/D8/signature validation
+passed. Initial Android frame-time p50 fell from 61 ms (per-frame tile meshes)
+to 26 ms after cached imagery and the geometry worker; this is not a claim of
+stable 30 FPS, and startup/source-update jitter still requires measurement.
+Mixed pre-existing Java/JNI platform edits remain outside blanket commits.
 
 On FireTV the geographic surface defaults to a local kiosk tour: select the
 first visible contact once data is ready, then advance every 15 seconds.
