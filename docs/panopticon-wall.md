@@ -296,3 +296,26 @@ panel and distribution chart. Ten finite observations advanced from
 03:25:23 through 03:26:08 UTC on 2026-10-11, with selection preserved and the
 aircraft pool changing from 33 to 31. That companion exited normally. Shared plot
 tick-density improvements are owned by the renderer, not this projection.
+
+## AISStream vessels
+
+Studio's existing Panopticon marine owner can use AISStream instead of the local
+AIS-catcher URL. Keep `AISSTREAM_API_KEY` in its private runtime environment; never
+place it in a Canvas scene, Lua binder, or Unibus message. The current deployment
+uses the existing `dev.fpl.panopticon-ais-local` LaunchAgent with a mode-0600 plist.
+Its pre-switch RF configuration is retained beside it as `.radio-backup`.
+This switches sources; it does not merge RF and AISStream ingestion.
+
+Vessels travel through the same authenticated `panopticon.wall.snapshot.v1`
+projection as aircraft. The detail binder displays MMSI, radio callsign, speed
+over ground in knots, course, and true heading in degrees. Unavailable AIS
+sentinels are null, not invented zeroes; heading is not substituted with course.
+Owner-supplied static vessel names are preferred over numeric IDs where available.
+
+Hardware readback on 2026-10-11 verified MMSIs 338250000 and 367754690 on FireTV.
+Ten projector tests and strict Clippy passed; the Lua binder was exercised against
+an actual owner vessel response. The API's fetch time is not vessel freshness.
+The existing owner connector subscribes globally and lacks automatic websocket
+reconnection, and currently omits standard Class-B position reports. These remain
+owner-side hardening work, not responsibilities to duplicate in Canvas. Retained
+contacts expire according to the owner TTL; do not claim uninterrupted coverage.

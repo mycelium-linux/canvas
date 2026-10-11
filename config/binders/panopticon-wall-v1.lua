@@ -36,6 +36,12 @@ function M.render(p)
       local speed = type(a.ground_speed_knots) == "number" and string.format("%.1f knots ground speed",a.ground_speed_knots) or "Ground speed unknown"
       local track = type(a.track_deg) == "number" and string.format("%.0f° ground track",a.track_deg) or "Ground track unknown"
       body = (type(a.registration) == "string" and a.registration or "Registration unknown") .. " · " .. (type(a.type_designator) == "string" and a.type_designator or "Aircraft type unknown") .. "\n\n" .. altitude .. "\n" .. speed .. "\n" .. track
+    elseif type(o.vessel) == "table" then
+      local v = o.vessel
+      local speed = type(v.speed_knots) == "number" and string.format("%.1f knots speed over ground",v.speed_knots) or "Speed unknown"
+      local course = type(v.course_deg) == "number" and string.format("%.0f° course over ground",v.course_deg) or "Course unknown"
+      local heading = type(v.true_heading_deg) == "number" and string.format("%.0f° true heading",v.true_heading_deg) or "Heading unknown"
+      body = "Vessel · MMSI " .. tostring(v.mmsi) .. "\n" .. (type(v.radio_callsign) == "string" and ("Radio callsign " .. v.radio_callsign) or "Radio callsign unknown") .. "\n\n" .. speed .. "\n" .. course .. "\n" .. heading
     else
       body = "Vessel contact · aircraft details do not apply"
     end

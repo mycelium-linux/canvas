@@ -54,13 +54,24 @@ fn project(input: &Value, now: u64) -> Result<Value, String> {
             }
             let label = e["callsign"]
                 .as_str()
+                .or_else(|| {
+                    if domain == "ais" {
+                        e["payload"]["Static"]["Name"]
+                            .as_str()
+                            .or_else(|| e["payload"]["Name"].as_str())
+                            .or_else(|| e["payload"]["shipname"].as_str())
+                    } else {
+                        None
+                    }
+                })
+                .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .unwrap_or(id);
             if label.len() > 48 {
                 return Err("label exceeds bound".into());
             }
             markers.push(json!({"id":key,"label":label,"latitude_deg":lat,"longitude_deg":lon,"observed_at_unix_ms":observed.saturating_mul(1000),"role":if domain=="adsb" {"primary"} else {"secondary"}}));
-            observations.insert(key,json!({"last_update":observed,"owner_updated_at":chrono::DateTime::from_timestamp(observed as i64,0).ok_or("invalid owner update time")?.to_rfc3339(),"owner_update_age_secs":now.saturating_sub(observed),"ttl_secs":ttl,"source":e["payload"]["source"].as_str().filter(|s|s.len()<=128),"callsign":label,"latitude_deg":lat,"longitude_deg":lon,"aircraft":if domain=="adsb" {aircraft(&e["payload"]["aircraft"])}else{Value::Null}}));
+            observations.insert(key,json!({"last_update":observed,"owner_updated_at":chrono::DateTime::from_timestamp(observed as i64,0).ok_or("invalid owner update time")?.to_rfc3339(),"owner_update_age_secs":now.saturating_sub(observed),"ttl_secs":ttl,"source":e["payload"]["source"].as_str().filter(|s|s.len()<=128),"callsign":label,"latitude_deg":lat,"longitude_deg":lon,"aircraft":if domain=="adsb" {aircraft(&e["payload"]["aircraft"])}else{Value::Null},"vessel":if domain=="ais" {vessel(id,&e["payload"])}else{Value::Null}}));
             accepted += 1;
         }
         sources.push(json!({"domain":domain,"state":if accepted==0 {"empty"} else {"ready"},"visible":accepted,"expired":expired,"owner_entities":rows.len()}));
@@ -97,6 +108,26 @@ fn bounded_number(value: &Value, minimum: f64, maximum: f64) -> Option<f64> {
 fn bounded_text(value: &Value) -> Option<&str> {
     value.as_str().filter(|s| !s.is_empty() && s.len() <= 128)
 }
+fn vessel(id: &str, raw: &Value) -> Value {
+    let speed = raw["Sog"]
+        .as_f64()
+        .or_else(|| raw["speed_knots"].as_f64())
+        .filter(|v| v.is_finite() && *v >= 0.0 && *v < 102.3);
+    let course = raw["Cog"]
+        .as_f64()
+        .or_else(|| raw["course_deg"].as_f64())
+        .filter(|v| v.is_finite() && *v >= 0.0 && *v < 360.0);
+    let heading = raw["TrueHeading"]
+        .as_f64()
+        .filter(|v| v.is_finite() && *v >= 0.0 && *v < 360.0);
+    let call = raw["Static"]["CallSign"]
+        .as_str()
+        .or_else(|| raw["callsign"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.len() <= 48 && !s.chars().any(char::is_control));
+    json!({"mmsi":id,"speed_knots":speed,"course_deg":course,"true_heading_deg":heading,"radio_callsign":call})
+}
+
 fn aircraft(raw: &Value) -> Value {
     json!({"barometric_altitude_ft":bounded_number(&raw["alt_baro"],-1500.0,100000.0),"ground":raw["alt_baro"]=="ground","ground_speed_knots":bounded_number(&raw["gs"],0.0,2000.0),"track_deg":bounded_number(&raw["track"],0.0,359.999999),"registration":bounded_text(&raw["r"]),"type_designator":bounded_text(&raw["t"]),"photo":{"state":"unavailable","reason":"No aircraft image is supplied by this owner feed"}})
 }
@@ -482,6 +513,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn vessel_units_preserve_zero_and_reject_ais_unavailable_sentinels() {
+        let reported = vessel(
+            "338250000",
+            &json!({"Sog":0.0,"Cog":270.5,"TrueHeading":271,"Static":{"CallSign":" TEST "}}),
+        );
+        assert_eq!(reported["speed_knots"], 0.0);
+        assert_eq!(reported["course_deg"], 270.5);
+        assert_eq!(reported["radio_callsign"], "TEST");
+        let unavailable = vessel(
+            "338250000",
+            &json!({"Sog":102.3,"Cog":360,"TrueHeading":511}),
+        );
+        assert!(unavailable["speed_knots"].is_null());
+        assert!(unavailable["course_deg"].is_null());
+        assert!(unavailable["true_heading_deg"].is_null());
+    }
     #[test]
     fn source_has_no_recipient_selection_and_preserves_owner_evidence() {
         let source = source_projection(&input(), 101, &[], "digest").unwrap();
