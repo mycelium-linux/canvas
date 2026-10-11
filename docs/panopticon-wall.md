@@ -101,9 +101,39 @@ every five seconds. This allows a bounded slow source read without normal
 cadence flashing stale. Source-card edits are revision-bound patches only while this workspace
 is selected; the companion never activates a different workspace. A generation
 conflict is a visible error, not permission to override another writer. There is
-no permanent service or unattended scheduler. After it exits, the receiver must
+no permanent service or unattended scheduler in this finite diagnostic mode. After it exits, the receiver must
 show expired/stale delivery rather than claiming an always-live feed. Receiver
 expiry is an actual owner policy, not an unsupported field invented by Lua.
+
+## Persistent Unibus deployment
+
+The approved live deployment uses Studio `canvas-panopticon-projection source`
+and Neo `canvas-panopticon-presenter`, supervised by the launch agents in
+`config/deploy/dev.fpl.panopticon-*.plist`. Source and presenter JSON examples
+are beside them; credentials are private 0600 token files, never in this repo.
+The Studio tunnel forwards loopback 18810 to Agora's existing authenticated hub
+18790. Neo reuses its existing encrypted tunnel on 18810.
+
+The hub's narrow grant/route transform lives in Unibus
+`config/add-panopticon-router.jq`: one `panopticon.wall.snapshot.v1` route to
+`panopticon.wall.viewer`, within the `panopticon` zone. The source cannot control
+Canvas. The consumer pins source identity, validates the projection contract and
+timestamp, rejects replay and oversize snapshots, and applies the same local
+Lua composition as the finite diagnostic. Restart the existing hub only after
+staging and validating its preserved configuration and private token files.
+
+The final hop currently remains the authenticated Canvas control API via
+`canvas-tvctl`; FireTV does not yet subscribe natively to Unibus. Presenter
+launchd PATH explicitly includes Android platform-tools for that helper.
+Selection belongs to the TV and updates never activate another workspace.
+Inspect source/presenter logs under `~/.config/canvas-panopticon/`, then read
+the TV's `read_presentation` response to verify advancing owner timestamps.
+Do not treat running launch agents alone as evidence of live data.
+
+Verified deployment on 2026-10-11: source and viewer registered in the scoped
+hub zone, multiple observations delivered, and hardware screenshot plus TV
+readback showed 28 current contacts and `ready` at 04:08:32 UTC. Photos and
+raster terrain tiles remain unsupported in this slice.
 
 ## Initial proof
 

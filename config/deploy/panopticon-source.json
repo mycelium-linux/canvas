@@ -1,0 +1,1 @@
+{"installation_id":"fpl-cloud","producer_id":"panopticon-studio-source","hub_endpoint":"127.0.0.1:18810","token_file":"source.token","zones":["panopticon"],"capabilities":["panopticon.wall.source"],"schema_version":2,"read_timeout_ms":100}

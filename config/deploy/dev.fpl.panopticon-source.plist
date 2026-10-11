@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>dev.fpl.panopticon-source</string>
+<key>ProgramArguments</key><array>
+<string>/Users/ajmwagar/.local/lib/canvas-panopticon/canvas-panopticon-projection</string><string>source</string>
+<string>/Users/ajmwagar/.config/canvas-panopticon/source.json</string>
+<string>/Users/ajmwagar/.local/lib/canvas-panopticon/owner-us-states.geojson</string>
+<string>6f23ed91fce2c25d57c01d83225342ba40258e9571c486c3999bd827c80d193b</string>
+</array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+<key>ThrottleInterval</key><integer>10</integer>
+<key>StandardOutPath</key><string>/Users/ajmwagar/.config/canvas-panopticon/source.log</string>
+<key>StandardErrorPath</key><string>/Users/ajmwagar/.config/canvas-panopticon/source-error.log</string>
+</dict></plist>
