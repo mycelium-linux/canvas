@@ -51,8 +51,10 @@ conversion is reported and skipped; a failed GPU preload holds the current model
    SSH to Home-Pi loopback UDP. This avoids the unreliable inter-LAN UDP route.
    Home-Pi stream-copies into a rolling bounded HLS playlist served only on its
    private TV-facing address. Do not touch the separate CCTV or Transmog relays.
-6. Install `dev.fpl.canvas-verk-carousel` on Neo. It reads renderer acknowledgements
-   and updates only the provenance card with revision-bound owner imports.
+6. Install `dev.fpl.canvas-verk-carousel` and `dev.fpl.canvas-verk-caption` on Neo.
+   The controller atomically publishes a private bounded observation file; the
+   independently restarted presenter updates only the provenance card with
+   revision-bound owner imports. A TV failure cannot terminate the controller.
    Other workspaces and the selected workspace are preserved.
 7. Import `config/workspaces/shared/verk-showcase.json` through Canvas's owner API.
    Select the showcase only when requested; the model occupies the left two
@@ -65,3 +67,8 @@ merely because it is in the catalog. Source failure must retain the last identit
 with its original renderer timestamp, so the card becomes stale instead of
 pretending to be fresh. A player completion/error requires bounded live-stream
 recovery; it must not blindly loop arbitrary finite video.
+
+Studio and Neo clocks currently differ by several seconds. The projection uses
+Neo's receipt timestamp only when the renderer's observation timestamp advances;
+re-reading a frozen acknowledgement cannot refresh it. Owner reconstruction
+evidence and the catalog generation keep their own separate timestamps.

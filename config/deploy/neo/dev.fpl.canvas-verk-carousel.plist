@@ -2,8 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>dev.fpl.canvas-verk-carousel</string>
-<key>ProgramArguments</key><array><string>/bin/zsh</string><string>-c</string>
-<string>set -o pipefail; /Users/ajmwagar/.local/bin/canvas-model-carousel /Users/ajmwagar/.config/dock/canvas/verk-carousel.json | /Users/ajmwagar/.local/bin/canvas-widget-host stream-tv-retained /Users/ajmwagar/.config/dock/canvas/model-showcase-v1.lua /Users/ajmwagar/.local/bin/canvas-tvctl 192.168.2.97:5555 verk-showcase provenance</string>
+<key>ProgramArguments</key><array>
+<string>/Users/ajmwagar/.local/bin/canvas-model-carousel</string>
+<string>/Users/ajmwagar/.config/dock/canvas/verk-carousel.json</string>
 </array>
 <key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>

@@ -55,6 +55,9 @@ struct RenderState {
     next_ready: bool,
     completed_orbits: u32,
     observed_at_ms: i64,
+    error: Option<String>,
+    #[serde(default)]
+    failed_asset: Option<String>,
 }
 fn read_render_state(config: &Config) -> Result<RenderState, String> {
     let bytes = ssh(
@@ -198,9 +201,8 @@ impl Drop for StagingCleanup {
         }
     }
 }
-fn prepare(config: &Config, asset: &mut Asset) -> Result<String, String> {
-    let sha = &asset.sha256;
-    if sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) || !safe_path(&asset.step) {
+fn load_features(config: &Config, asset: &mut Asset) -> Result<(), String> {
+    if !safe_path(&asset.step) {
         return Err("unsafe owner artifact identity".into());
     }
     let recognition = asset
@@ -250,6 +252,34 @@ fn prepare(config: &Config, asset: &mut Asset) -> Result<String, String> {
             asset.feature_error = Some("Owner recognition metadata unavailable".into());
         }
     }
+    Ok(())
+}
+fn prepare(config: &Config, asset: &mut Asset) -> Result<String, String> {
+    load_features(config, asset)?;
+    let sha = &asset.sha256;
+    if sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("unsafe model digest".into());
+    }
+    let asset_name = format!("model-{sha}.glb");
+    let cached = ssh(
+        &config.studio,
+        format!(
+            "if [ -f {}/{asset_name} ]; then stat -f%z {}/{asset_name}; else printf 0; fi",
+            config.studio_assets, config.studio_assets
+        ),
+        10,
+    )?;
+    let cached_size = std::str::from_utf8(&cached)
+        .map_err(|e| e.to_string())?
+        .trim()
+        .parse::<u64>()
+        .map_err(|e| e.to_string())?;
+    if cached_size > 0 && cached_size <= 32 * 1024 * 1024 {
+        return Ok(asset_name);
+    }
+    if cached_size > 32 * 1024 * 1024 {
+        return Err("existing derived model exceeds cache budget".into());
+    }
     fs::create_dir_all(&config.local_staging).map_err(|e| e.to_string())?;
     let step = config.local_staging.join(format!("{sha}.step"));
     let mut cleanup = StagingCleanup {
@@ -291,7 +321,11 @@ fn prepare(config: &Config, asset: &mut Asset) -> Result<String, String> {
     {
         return Err("owner STEP digest mismatch".into());
     }
-    let stage = format!("{}/staging-{sha}", config.studio_assets);
+    let stage = format!(
+        "{}/staging-{sha}-{}",
+        config.studio_assets,
+        std::process::id()
+    );
     ssh(&config.studio, format!("mkdir -p {stage}"), 10)?;
     cleanup.remote = Some(stage.clone());
     command(
@@ -314,7 +348,6 @@ fn prepare(config: &Config, asset: &mut Asset) -> Result<String, String> {
         ],
         20,
     )?;
-    let asset_name = format!("model-{sha}.glb");
     ssh(
         &config.studio,
         format!(
@@ -379,10 +412,33 @@ fn scene(config: &Config, asset: &str, next: Option<&str>) -> Result<(), String>
     )?;
     Ok(())
 }
-fn emit(catalog: &Catalog, current: Option<&Asset>, pending: Option<&Asset>, failures: usize) {
+fn emit(
+    config: &Config,
+    catalog: &Catalog,
+    current: Option<&Asset>,
+    pending: Option<&Asset>,
+    failures: usize,
+) {
     let value = json!({"schema":"canvas.model-showcase.v1","observed_at_unix_ms":current.and_then(|asset|asset.rendered_at_ms).unwrap_or_else(||chrono::Utc::now().timestamp_millis()),"catalog_observed_at":catalog.observed_at,"catalog_count":catalog.assets.len(),"current":current.map(|a|json!({"step":a.step,"receipt":a.receipt,"sha256":a.sha256,"geometry":a.geometry,"training_admitted":a.training_admitted,"feature_counts":a.feature_counts,"feature_error":a.feature_error})),"pending":pending.map(|a|json!({"step":a.step,"sha256":a.sha256})),"failed_previews":failures,"identity_state":"renderer_acknowledged"});
-    println!("{value}");
-    let _ = std::io::stdout().flush();
+    let path = config.catalog.with_file_name("showcase-state.json");
+    let staged = path.with_extension("pending.json");
+    let saved = (|| -> std::io::Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(&staged)?;
+        file.write_all(value.to_string().as_bytes())?;
+        fs::rename(&staged, &path)
+    })();
+    if let Err(error) = saved {
+        eprintln!("showcase observation publication failed: {error}");
+    }
+    // Presentation consumers are independent: a TV outage must not abort CAD
+    // traversal or reset its cursor through a broken stdout pipe.
+    let _ = writeln!(std::io::stdout(), "{value}");
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = env::args().nth(1).ok_or("operator config required")?;
@@ -412,6 +468,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut current: Option<Asset> = None;
     let mut current_name: Option<String> = None;
     let mut failures = 0usize;
+    let mut last_source_observation = None;
     // Resume from the renderer's acknowledged identity, not an independently
     // maintained counter that might have advanced while the producer was down.
     if let Ok(state) = read_render_state(&config) {
@@ -422,7 +479,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .position(|asset| name == format!("model-{}.glb", asset.sha256))
             {
                 let mut asset = catalog.assets[index].clone();
-                asset.rendered_at_ms = Some(state.observed_at_ms);
+                last_source_observation = Some(state.observed_at_ms);
+                asset.rendered_at_ms = Some(chrono::Utc::now().timestamp_millis());
+                load_features(&config, &mut asset)?;
                 current = Some(asset);
                 current_name = Some(name);
                 cursor = (index + 1) % catalog.assets.len();
@@ -452,7 +511,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             cursor = (cursor + 1) % catalog.assets.len();
             let cloned = config.clone();
             let (tx, rx) = mpsc::sync_channel(1);
-            emit(&catalog, current.as_ref(), Some(&asset), failures);
+            emit(&config, &catalog, current.as_ref(), Some(&asset), failures);
             thread::spawn(move || {
                 let result = prepare(&cloned, &mut asset);
                 let _ = tx.send((asset, result));
@@ -477,21 +536,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         eprintln!("preload failure {}: {detail}", asset.sha256);
                     }
                 }
-                emit(&catalog, current.as_ref(), None, failures);
+                emit(&config, &catalog, current.as_ref(), None, failures);
             }
         }
         if let Ok(state) = read_render_state(&config) {
-            if state.current_asset == current_name {
+            if state.current_asset == current_name
+                && last_source_observation != Some(state.observed_at_ms)
+            {
                 if let Some(asset) = &mut current {
-                    asset.rendered_at_ms = Some(state.observed_at_ms);
+                    asset.rendered_at_ms = Some(chrono::Utc::now().timestamp_millis());
                 }
+            }
+            last_source_observation = Some(state.observed_at_ms);
+            if ready.as_ref().is_some_and(|(_, name)| {
+                state.failed_asset.as_ref() == Some(name)
+                    && !state.next_ready
+                    && state.error.is_some()
+            }) {
+                let (asset, name) = ready.take().expect("checked failed preload");
+                failures += 1;
+                eprintln!(
+                    "GPU preload quarantined {}: {}",
+                    asset.sha256,
+                    state.error.as_deref().unwrap_or("unknown renderer failure")
+                );
+                if let Some(current_name) = &current_name {
+                    scene(&config, current_name, None)?;
+                }
+                ssh(
+                    &config.studio,
+                    format!("rm -f {}/{name}", config.studio_assets),
+                    10,
+                )?;
+                emit(&config, &catalog, current.as_ref(), None, failures);
             }
             if requested
                 .as_ref()
                 .is_some_and(|(_, name)| state.current_asset.as_ref() == Some(name))
             {
                 let (mut asset, name) = requested.take().expect("checked requested model");
-                asset.rendered_at_ms = Some(state.observed_at_ms);
+                asset.rendered_at_ms = Some(chrono::Utc::now().timestamp_millis());
                 // A successor has been baked, uploaded, crossfaded, read back and emitted.
                 // Only now is the former resident derived GLB eligible for eviction.
                 if let Some(old) = current_name.replace(name.clone()) {
@@ -504,7 +588,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 current = Some(asset);
-                emit(&catalog, current.as_ref(), None, failures);
+                emit(&config, &catalog, current.as_ref(), None, failures);
             }
             if requested.is_none()
                 && ready.as_ref().is_some_and(|(_, name)| {
@@ -519,7 +603,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         if last_emit.elapsed() >= Duration::from_secs(10) {
-            emit(&catalog, current.as_ref(), None, failures);
+            emit(&config, &catalog, current.as_ref(), None, failures);
             last_emit = Instant::now();
         }
         thread::sleep(Duration::from_secs(1));

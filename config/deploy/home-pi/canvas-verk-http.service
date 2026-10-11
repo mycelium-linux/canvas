@@ -1,0 +1,19 @@
+[Unit]
+Description=Canvas private TV-facing Verk HLS endpoint
+After=network-online.target canvas-verk-hls.service
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/mkdir -p /tmp/verk-showcase-hls
+ExecStart=/usr/bin/busybox httpd -f -p 192.168.2.74:8099 -h /tmp/verk-showcase-hls
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/tmp
+
+[Install]
+WantedBy=default.target

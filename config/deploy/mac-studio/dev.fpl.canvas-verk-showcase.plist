@@ -3,7 +3,7 @@
 <plist version="1.0"><dict>
 <key>Label</key><string>dev.fpl.canvas-verk-showcase</string>
 <key>ProgramArguments</key><array>
-<string>/Users/ajmwagar/.local/bin/canvas-model-host</string>
+<string>/Users/ajmwagar/.local/bin/canvas-model-host-verk</string>
 <string>/Users/ajmwagar/.cache/dock/canvas/verk-showcase-models/scene.lua</string>
 <string>/Users/ajmwagar/.cache/dock/canvas/verk-showcase-models</string>
 <string>udp://100.120.101.5:55228</string>

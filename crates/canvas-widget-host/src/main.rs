@@ -9,7 +9,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 #[cfg(feature = "luau")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<_> = std::env::args().skip(1).collect();
+    let mut args: Vec<_> = std::env::args().skip(1).collect();
+    let retained_file = if args.first().is_some_and(|s| s == "watch-tv-retained") {
+        if args.len() != 7 {
+            return Err("usage: canvas-widget-host watch-tv-retained INPUT BINDER TVCTL ENDPOINT PROJECT SURFACE".into());
+        }
+        let path = args.remove(1);
+        args[0] = "stream-tv-retained".into();
+        Some(path)
+    } else {
+        None
+    };
     if args.first().is_some_and(|s| s == "stream-tv-retained") {
         if args.len() != 6 {
             return Err("usage: canvas-widget-host stream-tv-retained BINDER TVCTL ENDPOINT PROJECT SURFACE".into());
@@ -17,15 +27,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut stdin = std::io::stdin().lock();
         loop {
             let mut line = Vec::new();
-            let count = stdin
-                .by_ref()
-                .take(64 * 1024 + 1)
-                .read_until(b'\n', &mut line)?;
-            if count == 0 {
-                return Ok(());
-            }
-            if count > 64 * 1024 || !line.ends_with(b"\n") {
-                return Err("oversized/incomplete observation".into());
+            if let Some(path) = &retained_file {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                std::fs::File::open(path)?
+                    .take(64 * 1024 + 1)
+                    .read_to_end(&mut line)?;
+                if line.is_empty() || line.len() > 64 * 1024 {
+                    return Err("invalid retained observation size".into());
+                }
+            } else {
+                let count = stdin
+                    .by_ref()
+                    .take(64 * 1024 + 1)
+                    .read_until(b'\n', &mut line)?;
+                if count == 0 {
+                    return Ok(());
+                }
+                if count > 64 * 1024 || !line.ends_with(b"\n") {
+                    return Err("oversized/incomplete observation".into());
+                }
             }
             let result = compose(&args[1], &line)?;
             let widget = result["widget"]
@@ -181,7 +201,7 @@ fn tv_call(
         .arg(endpoint)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
         .spawn()?;
     child
         .stdin
@@ -276,6 +296,21 @@ mod tests {
         .unwrap();
         assert_eq!(result["data"]["state"], "no_data");
         assert_eq!(result["widget"]["title"], "Verk · preparing geometry");
+    }
+    #[test]
+    fn showcase_projects_recorded_features_without_overwriting_array_schema() {
+        let value = serde_json::json!({"schema":"canvas.model-showcase.v1","catalog_count":954,"observed_at_unix_ms":chrono::Utc::now().timestamp_millis(),"failed_previews":0,"identity_state":"renderer_acknowledged","current":{"sha256":"a".repeat(64),"step":"/owner/holdout-123-ABC/result/rebuilt.step","feature_counts":{"bore":2,"prismatic_pocket":1},"geometry":0,"training_admitted":false}});
+        let result = compose_script(
+            include_bytes!("../../../config/binders/model-showcase-v1.lua"),
+            &serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        assert!(result["widget"]["body"]
+            .as_str()
+            .unwrap()
+            .contains("bore × 2"));
+        assert!(result["widget"].get("citations").is_none());
+        assert_eq!(result["data"]["state"], "ready");
     }
     #[test]
     fn preserves_observation_clock_not_render_time() {

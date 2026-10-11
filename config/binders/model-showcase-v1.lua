@@ -29,13 +29,12 @@ function M.render(value, now_ms)
       end
       if #keys > 6 then details = details .. "\n+ " .. tostring(#keys-6) .. " feature types" end
     else details = details .. "\nMetadata pending / unavailable" end
-    details = details .. "\n\nNative readback verified\n" .. (current.training_admitted and "Owner declared admission" or "Not admitted for training")
+    details = details .. "\n\nNative readback verified\n" .. (current.training_admitted and "Owner declared admission" or "Not training-admitted")
   end
-  local body = details .. "\n\n" .. tostring(value.catalog_count) .. " verified parts\nFull inventory traversal\n" ..
-    "Owner STEP → GLB\nCurrent + next resident"
+  local body = details .. "\n" .. tostring(value.catalog_count) .. " parts · owner catalog"
   if value.failed_previews > 0 then body = body .. "\n" .. tostring(value.failed_previews) .. " failed previews (skipped)" end
   return {
-    widget = {kind="rich_card",title=title,body=body,format="markdown",citations={},chrome="frameless"},
+    widget = {kind="rich_card",title=title,body=body,format="markdown",chrome="frameless"},
     data = {state=fresh and (type(current) == "table" and "ready" or "no_data") or "stale",provenance="live",
       source="Verk reconstruction receipts / Canvas GPU acknowledgement",observed_at_unix_ms=value.observed_at_unix_ms}
   }
