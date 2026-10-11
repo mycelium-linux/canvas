@@ -24,7 +24,7 @@ fn project(input: &Value, now: u64) -> Result<Value, String> {
         let mut accepted = 0;
         for row in rows {
             let id = row["id"].as_str().ok_or("missing owner entity id")?;
-            if id.is_empty() || id.len() > 128 {
+            if id.is_empty() || id.len() > 120 {
                 return Err("invalid owner id".into());
             }
             let e = &row["entity"];
@@ -59,7 +59,7 @@ fn project(input: &Value, now: u64) -> Result<Value, String> {
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .unwrap_or(id);
-            if label.len() > 128 {
+            if label.len() > 48 {
                 return Err("label exceeds bound".into());
             }
             markers.push(json!({"id":key,"label":label,"latitude_deg":lat,"longitude_deg":lon,"role":if domain=="adsb" {"primary"} else {"secondary"}}));
@@ -432,6 +432,9 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .push(duplicate);
+        assert!(project(&input, 101).is_err());
+        input["adsb"]["entities"][0]["entity"]["last_update"] = json!(100);
+        input["adsb"]["entities"][0]["entity"]["callsign"] = json!("x".repeat(49));
         assert!(project(&input, 101).is_err());
         input["adsb"]["entities"].as_array_mut().unwrap().pop();
         input["adsb"]["entities"][0]["entity"]["last_update"] = json!(107);
