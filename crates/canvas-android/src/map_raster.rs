@@ -13,8 +13,15 @@ pub fn frame(root: &Path, map: &Map, width: f32, height: f32) -> Result<Value, S
         return Ok(json!({"tiles":[]}));
     };
     let tiles = layer.tiles.iter().map(|a| a.tile()).collect::<Vec<_>>();
-    let placements =
-        fpl_gfx::geo_map::raster::plan(map.extent, plot, &tiles).map_err(|e| e.to_string())?;
+    let placements = fpl_gfx::geo_map::raster::plan(
+        fpl_gfx::geo_map::raster::cropped_extent(map.extent, plot).map_err(|e| e.to_string())?,
+        plot,
+        &tiles,
+    )
+    .map_err(|e| e.to_string())?;
+    // Cropped-out manifest assets are not pending work. Otherwise a fully
+    // loaded viewport recomposes and rehashes every second forever.
+    let expected = placements.len();
     let mut loaded = Vec::new();
     for p in placements {
         let asset = &layer.tiles[p.tile_index];
@@ -46,7 +53,7 @@ pub fn frame(root: &Path, map: &Map, width: f32, height: f32) -> Result<Value, S
         loaded.push(json!({"sha256":asset.sha256,"path":path.to_string_lossy(),"rows":p.rows,"vertices":p.vertices}));
     }
     Ok(
-        json!({"plot":[plot.x,plot.y,plot.right(),plot.bottom()],"attribution":layer.attribution,"expected":layer.tiles.len(),"tiles":loaded}),
+        json!({"plot":[plot.x,plot.y,plot.right(),plot.bottom()],"attribution":layer.attribution,"expected":expected,"tiles":loaded}),
     )
 }
 
@@ -60,6 +67,10 @@ mod tests {
         let value = frame(&root, &map, 800.0, 600.0).unwrap();
         assert_eq!(value["expected"], 1);
         assert_eq!(value["tiles"].as_array().unwrap().len(), 0);
+        map.basemap.as_mut().unwrap().tiles[0].x = 0;
+        map.basemap.as_mut().unwrap().tiles[0].y = 0;
+        let cropped_out = frame(&root, &map, 800.0, 600.0).unwrap();
+        assert_eq!(cropped_out["expected"], 0);
         map.basemap.as_mut().unwrap().tiles[0].sha256 = "../not-an-asset".into();
         assert!(frame(&root, &map, 800.0, 600.0).is_err());
     }

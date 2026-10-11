@@ -297,7 +297,28 @@ panel and distribution chart. Ten finite observations advanced from
 aircraft pool changing from 33 to 31. That companion exited normally. Shared plot
 tick-density improvements are owned by the renderer, not this projection.
 
-## AISStream vessels
+## Regional tile aspect and cache LOD
+
+Raster-backed GFX maps center-crop the requested regional extent to the actual
+inner plot aspect, correcting longitude distance at the central latitude.
+Markers, paths, labels and raster placement share that cropped extent; fitting
+only the bitmap independently would misregister the overlays. Maps without a
+basemap retain their explicit linear-coordinate plotting behavior. This is a
+regional linear-latitude projection, not a global Mercator camera.
+
+The owner-cache adapter derives XYZ zoom from longitude span and a bounded
+pixel target (`PANOPTICON_TILE_TARGET_WIDTH`, 256–4096, default 1280), limits the
+viewport to 64 tiles, and falls back to coarser existing cache levels. It still
+does not download tiles or invent missing coverage. Detailed-cache population
+and a full Galileo-style dynamic camera remain separate owner work.
+
+Publication now carries up to eight independently digest-verified tile assets
+per five-second owner cycle instead of one. A 20-tile cold view needs three
+publication cycles rather than twenty; actual load time still depends on owner
+fetch, transport and receiver provisioning. The receiver retains its bounded
+latest-snapshot coalescer and validates every attachment before display.
+
+## AISStream configuration
 
 Studio's existing Panopticon marine owner can use AISStream instead of the local
 AIS-catcher URL. Keep `AISSTREAM_API_KEY` in its private runtime environment; never

@@ -418,15 +418,20 @@ fn source(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let connection = client.as_ref().ok_or("missing connection")?;
         let mut tile_asset = Value::Null;
         let mut tile_payload = Vec::new();
+        let mut tile_batch = Vec::new();
         if let Some(root) = std::env::var_os("PANOPTICON_TILE_CACHE") {
             match canvas_widget_host::panopticon_tiles::cached(
                 &projection["map"],
                 std::path::Path::new(&root),
             ) {
                 Ok(canvas_widget_host::panopticon_tiles::CachedViewport { layer, payloads }) => {
-                    let index = cycles as usize % payloads.len();
+                    let index = cycles as usize * 8 % payloads.len();
                     tile_asset = layer["tiles"][index].clone();
                     tile_payload = payloads[index].clone();
+                    for offset in 1..payloads.len().min(8) {
+                        let i = (index + offset) % payloads.len();
+                        tile_batch.push((layer["tiles"][i].clone(), payloads[i].clone()));
+                    }
                     projection["map"]["basemap"] = layer;
                 }
                 Err(error) => eprintln!("Panopticon viewport cache unavailable: {error}"),
@@ -440,6 +445,18 @@ fn source(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             )?;
             envelope.payload_bytes = tile_payload.len();
             connection.send(&envelope, &tile_payload)?;
+            // Bounded warm-up burst: assets are still independently verified and
+            // snapshots coalesced by the receiver, rather than a 100-second
+            // one-tile-per-poll cold start. No unbounded network/GPU queue.
+            for (asset, bytes) in &tile_batch {
+                sequence = sequence.checked_add(1).ok_or("sequence exhausted")?;
+                let mut extra = connection.envelope(
+                    Some("panopticon"),
+                    Message::new("panopticon.wall.snapshot.v1", json!({"sequence":sequence,"observed_at_unix_ms":now,"projection":projection,"tile_asset":asset})),
+                )?;
+                extra.payload_bytes = bytes.len();
+                connection.send(&extra, bytes)?;
+            }
             while let Some((reply, _)) = connection.try_read()? {
                 if reply.message.body.get("success").and_then(Value::as_bool) == Some(false) {
                     return Err("source publication rejected".into());
