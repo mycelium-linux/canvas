@@ -197,37 +197,7 @@ fn tv_call(
     endpoint: &str,
     request: &serde_json::Value,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let mut child = std::process::Command::new(program)
-        .arg(endpoint)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()?;
-    child
-        .stdin
-        .take()
-        .ok_or("missing TV input")?
-        .write_all(&serde_json::to_vec(request)?)?;
-    let stdout = child.stdout.take().ok_or("missing TV output")?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let read = stdout.take(64 * 1024 + 1).read_to_end(&mut bytes);
-        let _ = tx.send(read.map(|_| bytes));
-    });
-    let bytes = match rx.recv_timeout(std::time::Duration::from_secs(5)) {
-        Ok(value) => value?,
-        Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("TV owner deadline exceeded".into());
-        }
-    };
-    let _ = child.wait()?;
-    if bytes.len() > 64 * 1024 {
-        return Err("TV owner response exceeds bound".into());
-    }
-    Ok(serde_json::from_slice(&bytes)?)
+    canvas_widget_host::presentation::call(program, endpoint, request)
 }
 #[cfg(feature = "luau")]
 fn compose(path: &str, input: &[u8]) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
@@ -280,6 +250,18 @@ fn compose_script(
 #[cfg(all(test, feature = "luau"))]
 mod tests {
     use super::*;
+    #[test]
+    fn reference_scope_is_recorded_not_live_and_rejects_other_circuits() {
+        let value = serde_json::json!({"schema":"canvas.spice-trace.v1","reference_id":"owned-rc-lowpass-v1","run_state":"complete","scope":"owner reference circuit, not LED-Blinker-Circuit","source_sha256":"a677e9eb780cd584e88d34e47c010a7b6626dee267a36f4b0a3be2beec373ded","probe":"OUT","samples":[0,1,5],"start_s":0,"stop_s":0.003,"sample_period_s":0.0015,"range":{"minimum":0,"maximum":5.5},"source_points":3018,"rise_time_s":0.000349358,"simulator_version":"42"});
+        let script = include_bytes!("../../../config/binders/spice-reference-v1.lua");
+        let result = compose_script(script, &serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(result["widget"]["frame"]["samples"], value["samples"]);
+        assert_eq!(result["data"]["provenance"], "sample");
+        assert!(result["data"].get("observed_at").is_none());
+        let mut wrong = value;
+        wrong["reference_id"] = serde_json::json!("another-circuit");
+        assert!(compose_script(script, &serde_json::to_vec(&wrong).unwrap()).is_err());
+    }
     #[test]
     fn showcase_does_not_label_an_unacknowledged_request() {
         let script = include_bytes!("../../../config/binders/model-showcase-v1.lua");

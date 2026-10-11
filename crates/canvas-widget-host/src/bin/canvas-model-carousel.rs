@@ -382,11 +382,14 @@ fn prepare(config: &Config, asset: &mut Asset) -> Result<String, String> {
     drop(cleanup);
     Ok(asset_name)
 }
-fn scene(config: &Config, asset: &str, next: Option<&str>) -> Result<(), String> {
+fn scene_text(degrees_per_second: f64, asset: &str, next: Option<&str>) -> String {
     let next_field = next
         .map(|name| format!(",next_asset=\"{name}\""))
         .unwrap_or_default();
-    let text=format!("return {{scene_id=\"verk-recovered-showcase\",asset=\"{asset}\"{next_field},model_rotation_degrees={{-90,0,0}},orbit={{axis={{0,1,0}},degrees_per_second={}}},camera=\"iso\",camera_distance=1.75,crossfade_ms=500,material={{color={{178,196,212}},glow=0,wireframe=false,opacity=1}},transition_ms=500,fly_in=false}}",config.degrees_per_second);
+    format!("return {{scene_id=\"verk-recovered-showcase\",asset=\"{asset}\"{next_field},model_rotation_degrees={{-90,0,0}},orbit={{axis={{0,1,0}},degrees_per_second={degrees_per_second}}},camera=\"iso\",camera_distance=1.75,crossfade_ms=500,material={{color={{178,196,212}},glow=0,wireframe=false,grid=false,opacity=1}},transition_ms=500,fly_in=false}}")
+}
+fn scene(config: &Config, asset: &str, next: Option<&str>) -> Result<(), String> {
+    let text = scene_text(config.degrees_per_second, asset, next);
     let local = config.local_staging.join("scene.lua");
     fs::write(&local, text).map_err(|e| e.to_string())?;
     command(
@@ -412,6 +415,7 @@ fn scene(config: &Config, asset: &str, next: Option<&str>) -> Result<(), String>
     )?;
     Ok(())
 }
+
 fn emit(
     config: &Config,
     catalog: &Catalog,
@@ -609,4 +613,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         thread::sleep(Duration::from_secs(1));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod scene_tests {
+    #[test]
+    fn preview_avoids_grid_aliasing_without_changing_orbit_or_preload() {
+        let scene = super::scene_text(18.0, "model-current.glb", Some("model-next.glb"));
+        for required in ["grid=false", "wireframe=false", "degrees_per_second=18", "next_asset=\"model-next.glb\"", "crossfade_ms=500"] {
+            assert!(scene.contains(required), "missing {required}");
+        }
+    }
 }
