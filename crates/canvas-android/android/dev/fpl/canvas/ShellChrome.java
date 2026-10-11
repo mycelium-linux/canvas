@@ -104,7 +104,7 @@ final class ShellChrome {
         button.setElevation(0); button.setStateListAnimator(null);
         button.setMinWidth(0); button.setMinimumWidth(0);
         button.setMinHeight(0); button.setMinimumHeight(0);
-        int padding=Math.round(14*button.getResources().getDisplayMetrics().density);
+        int padding=Math.round(barPadding()*button.getResources().getDisplayMetrics().density);
         button.setPadding(padding,0,padding,0);
         button.setOnFocusChangeListener((view,focused) -> TvMotion.focus(view,focused));
         button.setSelected(selected);

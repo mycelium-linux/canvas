@@ -54,6 +54,11 @@ objc2-foundation = { version = "0.2", features = ["NSThread"] }
 tempfile.workspace = true
 rmcp = { version = "3.2", default-features = false, features = ["client", "server", "transport-io"] }
 
+[[example]]
+name = "holodeck_ui"
+path = "../../examples/holodeck_ui.rs"
+required-features = ["lua-scenes"]
+
 [[bin]]
 name = "canvas"
 path = "src/main.rs"

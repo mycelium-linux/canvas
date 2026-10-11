@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>dev.fpl.canvas-verk-viewer</string>
+<key>ProcessType</key><string>Interactive</string>
+<key>ProgramArguments</key><array><string>/bin/bash</string><string>-c</string><string>set -o pipefail; unibus-stream subscribe /Users/ajmwagar/.config/unibus/verk/canvas-verk-viewer.json verk/models/cad-recovery verk.model-observation.v1 verk-cad-owner | canvas-widget-host stream-tv /Users/ajmwagar/Documents/src/fpl/dock/config/binders/verk-model-v1.lua /Users/ajmwagar/.local/bin/canvas-tvctl 192.168.2.97:5555 tv-verk-models cad-recovery</string></array>
+<key>EnvironmentVariables</key><dict><key>PATH</key><string>/Users/ajmwagar/.local/bin:/opt/homebrew/bin:/usr/bin:/bin</string></dict>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer>
+<key>StandardErrorPath</key><string>/Users/ajmwagar/.local/share/canvas-android/verk-viewer.log</string>
+<key>StandardOutPath</key><string>/Users/ajmwagar/.local/share/canvas-android/verk-viewer.log</string>
+</dict></plist>

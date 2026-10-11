@@ -1,0 +1,15 @@
+{
+  "schema_version":1,"id":"tv-verk-models","project_id":"verk-models","revision":2,"theme":{"source":"project"},
+  "surfaces":[
+    {"id":"cad-recovery","title":"CAD · teacher replay","inputs":[{"id":"model","contract":"verk.model-observation.v1"}],"content":{"kind":"widget","spec":{"schema_version":2,"id":"cad-recovery","kind":"status_list","title":"CAD · teacher replay","nodes":[],"data":{"state":"loading","provenance":"live","source":"Studio owner batch-progress","detail":"Waiting for explicit owner evidence; not inferred model quality"},"refresh_ms":10000}}},
+    {"id":"cad-checkpoint","title":"CAD · recorded checkpoint","inputs":[],"content":{"kind":"widget","spec":{"schema_version":2,"id":"cad-checkpoint","kind":"rich_card","title":"CAD · recorded checkpoint","body":"Materialize this dated evidence card from an explicitly validated owner training report. Do not infer latest fleet model quality from a sampled smoke checkpoint.","format":"markdown","citations":[],"chrome":"frameless","data":{"state":"no_data","provenance":"live","source":"Verk owner training report","detail":"Awaiting recorded exploratory metrics, not live training"}}}},
+    {"id":"eda-status","title":"EDA · coverage","inputs":[],"content":{"kind":"widget","spec":{"schema_version":2,"id":"eda-status","kind":"rich_card","title":"EDA · model evidence not connected","body":"No validated EDA trained-model feed found. Teacher / circuit checks are not learned-model quality.\n\nCAD: live owner replay evidence + recorded exploratory checkpoint. Dedicated Unibus production integration pending; preview is bounded.","format":"markdown","citations":[],"chrome":"frameless","data":{"state":"no_data","provenance":"live","source":"Verk model evidence coverage","detail":"EDA trained-model source unavailable"}}}},
+    {"id":"clock","title":"Local time","inputs":[],"content":{"kind":"widget","spec":{"schema_version":2,"id":"clock","kind":"clock","mode":"analog"}}}
+  ],
+  "layout":{"kind":"canvas","placements":[
+    {"surface_id":"cad-recovery","bounds":{"x":0.02,"y":0.03,"width":0.48,"height":0.66},"layer":0},
+    {"surface_id":"cad-checkpoint","bounds":{"x":0.51,"y":0.03,"width":0.47,"height":0.66},"layer":0},
+    {"surface_id":"eda-status","bounds":{"x":0.02,"y":0.71,"width":0.74,"height":0.27},"layer":0},
+    {"surface_id":"clock","bounds":{"x":0.79,"y":0.71,"width":0.19,"height":0.27},"layer":0}
+  ]}
+}

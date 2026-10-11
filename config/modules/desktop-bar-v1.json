@@ -5,6 +5,8 @@
   "inputs": [
     {"id":"width","kind":"number","required":true},
     {"id":"height","kind":"number","required":true},
+    {"id":"bar_padding","kind":"number","required":true},
+    {"id":"bar_text_size","kind":"number","required":true},
     {"id":"workspace","kind":"text","required":true},
     {"id":"page","kind":"text","required":false},
     {"id":"clock","kind":"text","required":true},
@@ -15,7 +17,7 @@
   ],
   "capabilities": {
     "write_scene":true,
-    "read_inputs":["width","height","workspace","page","clock","sources","back","forward","create"],
+    "read_inputs":["width","height","bar_padding","bar_text_size","workspace","page","clock","sources","back","forward","create"],
     "read_theme":true
   },
   "actions": [

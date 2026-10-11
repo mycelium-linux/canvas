@@ -3915,8 +3915,10 @@ impl App {
         let values = BTreeMap::from([
             ("width".into(), Value::Number(f64::from(self.frame.width.max(1)))),
             ("height".into(), Value::Number(f64::from(::canvas::DESKTOP_BAR_HEIGHT))),
-            ("workspace".into(), Value::Text(workspace_identity_name(&self.catalog, &self.document.project_id).chars().take(24).collect::<String>().to_uppercase())),
-            ("page".into(), Value::Text(self.document.active_page_name().chars().take(20).collect::<String>().to_uppercase())),
+            ("bar_padding".into(), Value::Number(f64::from(fpl_gfx::chrome::BAR_PADDING))),
+            ("bar_text_size".into(), Value::Number(f64::from(fpl_gfx::chrome::BAR_TEXT_SIZE))),
+            ("workspace".into(), Value::Text(workspace_identity_name(&self.catalog, &self.document.project_id).chars().take(24).collect::<String>())),
+            ("page".into(), Value::Text(self.document.active_page_name().chars().take(20).collect::<String>())),
             ("clock".into(), Value::Text(format!("{:02}:{:02}:{:02}", now.hour, now.minute, now.second))),
             ("sources".into(), Value::Number(sources as f64)),
             ("back".into(), Value::Boolean(self.jump_history.can_go_back())),
@@ -8375,7 +8377,7 @@ impl App {
                     } else { picture };
                     container(content).center(Length::Fill).into()
                 } else {
-                    text(control.label.clone()).size(visual.metrics.small).center().into()
+                    text(control.label.clone()).size(fpl_gfx::chrome::BAR_TEXT_SIZE).center().into()
                 };
                 let item = button(content)
                 .width(width)
@@ -10408,7 +10410,7 @@ impl App {
             // A wall is an appliance, not a tiny Mac. Present stable shell
             // identity and health instead of advertising a keyboard shortcut
             // that does not exist on the target device.
-            let project_label = workspace_name.to_uppercase();
+            let project_label = workspace_name;
             let live_sources = self
                 .decoded
                 .values()
@@ -10436,11 +10438,12 @@ impl App {
                 .style(move |_, status| {
                     canvas_widgets::live::app_chrome::cube_button_style(visual_theme, false, status)
                 });
-            let project = button(text(project_label).size(12))
-                .padding([5, 10])
+            let project = button(text(project_label).size(fpl_gfx::chrome::BAR_TEXT_SIZE))
+                .height(Length::Fixed(fpl_gfx::chrome::BAR_CONTROL_HEIGHT as f32))
+                .padding([0, fpl_gfx::chrome::BAR_PADDING as u16])
                 .on_press(Message::ShellProjects)
                 .style(move |_, status| {
-                    canvas_widgets::live::app_chrome::cube_button_style(visual_theme, true, status)
+                    canvas_widgets::live::app_chrome::quiet_button_style(visual_theme, true, status)
                 });
             let has_creator = self.decoded.values().any(|surface| {
                 matches!(
@@ -10455,23 +10458,23 @@ impl App {
                     canvas_widgets::live::app_chrome::cube_button_style(visual_theme, false, status)
                 });
             let identity = row![
-                text("FPL").size(12).color(Color { a: 0.90, ..primary }),
+                text("fungOS").size(fpl_gfx::chrome::BAR_TEXT_SIZE).color(primary),
                 back,
                 forward,
                 project,
                 text("/").size(11).color(Color { a: 0.40, ..muted }),
-                text(self.document.active_page_name().to_uppercase())
-                    .size(10)
+                text(self.document.active_page_name())
+                    .size(fpl_gfx::chrome::BAR_TEXT_SIZE)
                     .color(Color { a: 0.72, ..muted }),
                 create,
             ]
-            .spacing(7)
+            .spacing(fpl_gfx::chrome::BAR_PADDING)
             .align_y(iced::Alignment::Center);
             let health = row![
                 text(format!("{live_sources} SOURCES"))
                     .size(10)
                     .color(Color { a: 0.72, ..primary }),
-                text(clock).size(12).color(Color {
+                text(clock.chars().take(5).collect::<String>()).size(fpl_gfx::chrome::BAR_TEXT_SIZE).color(Color {
                     a: 0.94,
                     ..text_color
                 }),
@@ -10482,29 +10485,19 @@ impl App {
             let signature = container(bar)
                 .width(Length::Fill)
                 .height(Length::Fixed(shell_bar_height as f32))
-                .padding([0, 20])
+                .padding([0, fpl_gfx::chrome::BAR_PADDING as u16])
                 .align_y(iced::alignment::Vertical::Center)
                 .style(move |_| container::Style {
-                    background: Some(
-                        Color {
-                            a: 0.94,
-                            ..color(visual_theme.surface_raised)
-                        }
-                        .into(),
-                    ),
+                    background: Some(color(visual_theme.surface).into()),
                     border: iced::Border {
                         color: Color {
                             a: 0.64,
                             ..border_color
                         },
-                        width: 1.0,
+                        width: 0.0,
                         radius: 0.0.into(),
                     },
-                    shadow: iced::Shadow {
-                        color: Color::from_rgba8(0, 0, 0, visual_theme.shadow_opacity * 0.35),
-                        offset: iced::Vector::new(0.0, 2.0),
-                        blur_radius: 8.0,
-                    },
+                    shadow: iced::Shadow::default(),
                     ..Default::default()
                 });
             let signature: Element<'static, Message> = signature.into();

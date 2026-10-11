@@ -213,6 +213,8 @@ mod tests {
             s.values = std::collections::BTreeMap::from([
                 ("width".into(), V::Number(width)),
                 ("height".into(), V::Number(44.0)),
+                ("bar_padding".into(), V::Number(f64::from(fpl_gfx::chrome::BAR_PADDING))),
+                ("bar_text_size".into(), V::Number(f64::from(fpl_gfx::chrome::BAR_TEXT_SIZE))),
                 ("workspace".into(), V::Text("HOME".into())),
                 ("page".into(), V::Text("DESKTOP".into())),
                 ("clock".into(), V::Text("12:34:56".into())),
@@ -241,6 +243,8 @@ mod tests {
                 assert!(["back", "forward", "launcher", "create"].contains(&b.id.as_str()));
                 assert!(b.x >= -4.0 && b.x + b.width <= 4.001, "{width}: {b:?}");
                 assert!(b.y <= 4.0 && b.y - b.height >= -4.001);
+                assert_eq!(b.y, 4.0);
+                assert_eq!(b.height, 8.0, "shell controls retain the full logical hit row");
                 if b.id == "back" || b.id == "create" {
                     assert!(!b.enabled);
                 }

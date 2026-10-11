@@ -32,10 +32,7 @@ pub extern "system" fn Java_dev_fpl_canvas_ShellChrome_nativeMetrics(
     env: jni::JNIEnv,
     _class: jni::objects::JClass,
 ) -> jni::sys::jintArray {
-    let values = [fpl_gfx::chrome::BAR_HEIGHT as i32,
-        fpl_gfx::chrome::BAR_CONTROL_HEIGHT as i32,
-        fpl_gfx::chrome::BAR_TEXT_SIZE as i32,
-        fpl_gfx::chrome::BAR_PADDING as i32];
+    let values = fpl_gfx::chrome::metrics().map(|value| value as i32);
     let Ok(array) = env.new_int_array(values.len() as i32) else { return std::ptr::null_mut(); };
     if env.set_int_array_region(&array, 0, &values).is_err() { return std::ptr::null_mut(); }
     array.into_raw()
