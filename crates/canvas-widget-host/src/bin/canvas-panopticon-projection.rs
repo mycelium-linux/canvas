@@ -234,11 +234,6 @@ fn watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         projection["boundary_source"] =
             json!("Panopticon owner Washington state boundary · not terrain");
         let composed = compose(&args[5], &args[4], &projection)?;
-        let request = json!({"schema_version":1,"request_id":format!("panopticon-wall-{now}-{tick}"),"command":{"command":"surface_snapshot","workspace_id":"tv-panopticon-wall","surface_id":"panopticon-map","frame":composed["map"]["frame"],"data":composed["map"]["data"]}});
-        let receipt = canvas_widget_host::presentation::call(&args[6], &args[7], &request)?;
-        if receipt["ok"] != true {
-            return Err(format!("map snapshot rejected: {receipt}").into());
-        }
         // Health edits affect only the selected owner workspace, never switch it.
         let current = canvas_widget_host::presentation::call(
             &args[6],
@@ -253,8 +248,15 @@ fn watch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             let patch = json!({"schema_version":1,"request_id":format!("panopticon-health-{now}"),"expected_revision":current["revision"],"command":{"command":"apply_patch","patch":{"schema_version":1,"workspace_id":"tv-panopticon-wall","base_revision":revision,"revision":revision+1,"operations":[{"op":"upsert_surface","surface":surface}]}}});
             let receipt = canvas_widget_host::presentation::call(&args[6], &args[7], &patch)?;
             if receipt["ok"] != true {
-                return Err("health patch rejected; selection/generation may have changed".into());
+                return Err(format!("health patch rejected: {receipt}").into());
             }
+        }
+        // A platform may recreate views after a document edit: publish the
+        // transient after that edit, never leave a rebuilt live view without data.
+        let request = json!({"schema_version":1,"request_id":format!("panopticon-wall-{now}-{tick}"),"command":{"command":"surface_snapshot","workspace_id":"tv-panopticon-wall","surface_id":"panopticon-map","frame":composed["map"]["frame"],"data":composed["map"]["data"]}});
+        let receipt = canvas_widget_host::presentation::call(&args[6], &args[7], &request)?;
+        if receipt["ok"] != true {
+            return Err(format!("map snapshot rejected: {receipt}").into());
         }
         println!(
             "{}",

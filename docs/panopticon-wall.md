@@ -78,3 +78,15 @@ observations, zero expired observations, and a responding empty AIS source.
 This is evidence of the source and composition, not proof of TV rendering or
 ongoing replication. Hardware rendering, advancing timestamps, and endpoint
 readback must be verified after the compatible app is installed.
+
+FireTV APK45 was installed by the coordinating owner and this workspace was
+activated through its revision-bound API. The three-cycle finite hardware proof
+delivered real source reads at 03:17:00, 03:17:05 and 03:17:10 UTC on 2026-10-11:
+34 current ADS-B entities and an empty responding AIS source. Owner presentation
+readback showed `geo_map`, 34 markers, `ready` and the actual final read timestamp.
+The inspected screenshot `/private/tmp/panopticon-wall-reordered.png` showed
+updated aircraft labels/positions and no erroneous no-data footer. Health edits
+must precede the transient map snapshot: the installed app can recreate views
+after a document edit. The companion exited normally after that proof; this is
+not an always-running deployment or continuous replication claim. A separately
+owned sustained connector remains a follow-up.
