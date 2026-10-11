@@ -320,6 +320,7 @@ fn main() -> Result<()> {
     let bus = Session::connect(serde_json::from_value(config)?)?;
     let mut views = Views::default();
     loop {
+        ensure!(bus.status().connected, "Canvas XR Unibus connection lost");
         views.expire(now());
         while let Some(event) = bus.poll() {
             if event.kind == "reply" && event.body["success"] == false {
