@@ -129,6 +129,22 @@ fn endpoint() -> &'static Mutex<Endpoint> {
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeAmbientState(
+    mut env: jni::JNIEnv, _class: jni::objects::JClass,
+) -> jni::sys::jstring {
+    let value=endpoint().lock().map(|mut endpoint|endpoint.ambient_tick())
+        .unwrap_or_else(|_|serde_json::json!({"error":"Ambient state unavailable"}));
+    string(&mut env,value.to_string())
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeAmbientWake(
+    _env: jni::JNIEnv, _class: jni::objects::JClass,
+) -> jni::sys::jboolean {
+    endpoint().lock().map(|mut endpoint|endpoint.ambient_wake() as u8).unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeTaskNavigate(
     mut env: jni::JNIEnv,
     _class: jni::objects::JClass,

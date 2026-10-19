@@ -9,6 +9,34 @@ use std::{
 #[path = "tvctl/launch.rs"]
 mod launch;
 
+fn ambient_presence(line: &str) -> Result<PresentationCommand, Box<dyn std::error::Error>> {
+    let words:Vec<_>=line.split_whitespace().collect();
+    let ["ambient","presence",room,state,observed,valid]=words.as_slice() else { return Err("Expected ambient presence ROOM STATE OBSERVED_UNIX_MS VALID_FOR_MS".into()); };
+    let state=match *state {
+        "empty"=>canvas_workspace::ambient::Occupancy::Empty,
+        "occupied"=>canvas_workspace::ambient::Occupancy::Occupied,
+        "unknown"=>canvas_workspace::ambient::Occupancy::Unknown,
+        _=>return Err("Invalid occupancy state".into()),
+    };
+    Ok(PresentationCommand::AmbientPresence {frame:canvas_workspace::ambient::PresenceFrame {
+        room:(*room).into(),state,observed_at_unix_ms:observed.parse()?,valid_for_ms:valid.parse()?,
+    }})
+}
+
+#[cfg(test)]
+mod ambient_tests {
+    use super::*;
+    #[test]
+    fn stream_accepts_only_explicit_bounded_occupancy_syntax() {
+        let command=ambient_presence("ambient presence main_room empty 1700000000000 5000\n").unwrap();
+        let PresentationCommand::AmbientPresence {frame}=command else {panic!()};
+        assert_eq!(frame.state,canvas_workspace::ambient::Occupancy::Empty);
+        for raw in ["workspace switch secret", "ambient on", "ambient presence main_room false 1 5000", "ambient presence main_room empty nope 5000", "ambient presence main_room empty 1 5000 extra"] {
+            assert!(ambient_presence(raw).is_err(),"{raw}");
+        }
+    }
+}
+
 fn adb(serial: &str, arguments: &[&str]) -> Result<Vec<u8>, String> {
     let output = Command::new("adb")
         .args(["-s", serial])
@@ -33,6 +61,21 @@ impl Drop for Forward {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments: Vec<String> = std::env::args().collect();
+    if arguments.len()==3 && arguments[2]=="ambient-stream" {
+        let (port,token,_guard)=connect(&arguments[1])?;
+        let mut input=std::io::stdin().lock();
+        loop {
+            let mut line=String::new();
+            let n=std::io::Read::by_ref(&mut input).take(1025).read_line(&mut line)?;
+            if n==0 {break;}
+            if n>1024 || !line.ends_with('\n') {return Err("Invalid ambient stream frame".into());}
+            let request=Request {schema_version:1,request_id:"ambient-presence".into(),expected_revision:None,command:ambient_presence(&line)?};
+            let receipt=exchange(port,&token,&request)?;
+            if receipt["ok"]!=true {return Err(format!("TV rejected ambient observation: {}",receipt["error"]).into());}
+            // The producer needs no copies of the display catalog or credentials.
+        }
+        return Ok(());
+    }
     if arguments.len() == 3 && arguments[2] == "observer-stream" {
         let (port, token, _guard) = connect(&arguments[1])?;
         let mut input = std::io::stdin().lock();
@@ -130,6 +173,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match words.as_slice() {
                 ["inspect"] | ["workspace", "list"] => PresentationCommand::Inspect,
                 ["doc"] => PresentationCommand::ReadDocument,
+                ["ambient","bind",room] => PresentationCommand::AmbientBind {room:Some((*room).into())},
+                ["ambient","unbind"] => PresentationCommand::AmbientBind {room:None},
+                ["ambient","on"] => PresentationCommand::AmbientSet {enabled:true},
+                ["ambient","off"] => PresentationCommand::AmbientSet {enabled:false},
+                ["ambient","presence",..] => ambient_presence(&raw)?,
                 ["workspace", "switch", name] => PresentationCommand::WorkspaceSwitch {
                     name: (*name).into(),
                 },
@@ -167,6 +215,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         && matches!(
             request.command,
             PresentationCommand::Install { .. } | PresentationCommand::WorkspaceSwitch { .. }
+                | PresentationCommand::AmbientBind { .. } | PresentationCommand::AmbientSet { .. }
         )
     {
         let observed = exchange(

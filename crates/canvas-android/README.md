@@ -45,6 +45,51 @@ printf 'workspace switch ipfs-reading\n' | canvas-tvctl 192.168.2.97:5555
 
 ## Shared ownership
 
+### Presence-aware ambient screen
+
+`ambient bind main_room` explicitly binds this physical display to a room.
+The room setting persists; observations and active screensaver state do not.
+Only an authorized owner transport can submit `ambient presence` samples.
+The `ambient-stream` CLI accepts only occupancy lines, not workspace commands:
+
+```text
+ambient presence main_room empty 1792425600000 5000
+```
+
+The timestamp is the actual sensor observation time in Unix milliseconds,
+not a delivery heartbeat. The example timestamp is illustrative. Frames expire
+after at most five seconds on the receiver's monotonic clock. Future, expired,
+conflicting, regressed and wrong-room observations are rejected. Replaying a
+known observation cannot extend its deadline. Empty requires 60 seconds of
+continuous fresh evidence. Unknown evidence or a delivery gap resets that timer.
+Once asleep, losing evidence keeps the screen dark; occupied or human input
+wakes it. Remote wake consumes the complete key gesture and allows two minutes
+before empty observations can start a new absence timer.
+
+The initial ambient rendering is black. It releases local video decoders and
+PDF panels, stops the GPU background, and hides the workspace chrome. It does
+not change the selected workspace, retained document or page. Waking rebuilds
+the selected view. It is a screensaver, not an authentication lock or a command
+to power off the TV. A remote Surf producer may continue running upstream.
+
+Manual owner commands are `ambient on`, `ambient off`, and `ambient unbind`.
+Inspect reports `data.ambient`; acceptance is intent, not a renderer screenshot.
+Use live visual verification after changes. Unbinding disables automatic
+ambient mode and clears transient state.
+
+JARVIS owns the source adapter `jarvis-presence-canvas-watch`. It reads the full
+owner publication, verifies the exact room and evidence quality, then invokes
+the installed Canvas CLI. Do not substitute the older compact presence summary:
+it does not preserve the confidence that distinguishes unavailable from empty.
+No identities or camera images enter this display-only path.
+
+`config/deploy/firetv/ambient-main-room.plist` supervises the adapter on Studio
+using the existing Frigate publication. Install the tested adapter and matching
+CLI, upgrade the TV APK in place, bind the room, then bootstrap that LaunchAgent.
+If delivery fails, inspect the service error log and the source owner's health;
+do not restart or seize another active TV app. For rollback, boot out only that
+LaunchAgent and send `ambient unbind`; keep the prior signed APK.
+
 ### Transient assistant observations
 
 `observer_frame` accepts a bounded renderer-neutral activity frame through the

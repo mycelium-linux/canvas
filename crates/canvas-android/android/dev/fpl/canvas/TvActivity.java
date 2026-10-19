@@ -66,6 +66,66 @@ public final class TvActivity extends Activity {
     private static native boolean nativeIsMuted();
     private static native float[] nativeObserverFrame(float seconds);
     private static native String nativeObserverState();
+    private static native String nativeAmbientState();
+    private static native boolean nativeAmbientWake();
+    private FrameLayout ambientScreen;
+    private boolean ambientShown;
+    private int ambientWakeKey=-1;
+    private View ambientReturnFocus;
+    private final java.util.Map<View,Integer> ambientVisibility=new java.util.HashMap<>();
+
+    /** Platform lifecycle only. Rust owns room evidence, expiry and transitions. */
+    private void refreshAmbient() {
+        try {
+            JSONObject state=new JSONObject(nativeAmbientState());
+            if(state.has("error"))throw new IllegalStateException(state.getString("error"));
+            boolean active=state.getBoolean("active");
+            if(active==ambientShown)return;
+            ambientShown=active;
+            if(active) {
+                ambientReturnFocus=getCurrentFocus();
+                preparedPlayer=null; audioAvailability=DecoderAudio.UNKNOWN;
+                if(libraryScreen!=null)libraryScreen.leave();
+                video.stopPlayback(); disposeExtraStreams(); clearPanelCache();
+                for(View widget:widgets) {
+                    widget.animate().cancel();
+                    if(widget instanceof ConwaysView)((ConwaysView)widget).setActive(false);
+                    if(widget instanceof PdfSurface)((PdfSurface)widget).dispose();
+                    frame.removeView(widget);
+                }
+                widgets.clear(); statusLists.clear(); richCards.clear();
+                background.setActive(false);
+                ambientVisibility.clear();
+                for(int i=0;i<frame.getChildCount();i++) {
+                    View child=frame.getChildAt(i);
+                    ambientVisibility.put(child,child.getVisibility()); child.setVisibility(View.INVISIBLE);
+                }
+                ambientScreen=new FrameLayout(this);
+                ambientScreen.setBackgroundColor(Color.BLACK);
+                ambientScreen.setContentDescription("Screensaver. Press a remote button to return.");
+                ambientScreen.setFocusable(true); ambientScreen.setFocusableInTouchMode(true);
+                // Black pixels avoid fixed bright marks and do not imply activity.
+                frame.addView(ambientScreen,new FrameLayout.LayoutParams(-1,-1));
+                ambientScreen.bringToFront(); ambientScreen.requestFocus();
+            } else {
+                if(ambientScreen!=null)frame.removeView(ambientScreen);
+                ambientScreen=null;
+                for(java.util.Map.Entry<View,Integer> entry:ambientVisibility.entrySet())
+                    if(entry.getKey().getParent()==frame)entry.getKey().setVisibility(entry.getValue());
+                ambientVisibility.clear();
+                lastProjection=""; lastStructure="";
+                if(workspaceMode)currentUrl="";
+                background.setActive(resumed);
+                for(View widget:widgets)if(widget instanceof ConwaysView)((ConwaysView)widget).setActive(resumed);
+                if(libraryScreen==null)refreshWorkspace();
+                else libraryScreen.enter();
+                if(!workspaceMode && !currentUrl.isEmpty()) { video.setVideoURI(Uri.parse(currentUrl)); if(resumed)video.start(); }
+                if(ambientReturnFocus!=null && ambientReturnFocus.isAttachedToWindow())ambientReturnFocus.requestFocus();
+                else if(workspaceSelector!=null)workspaceSelector.requestFocus();
+                ambientReturnFocus=null;
+            }
+        }catch(Exception error){android.util.Log.e("CanvasAmbient","Ambient state failed",error);}
+    }
     private ObserverView observerView;
     private ControlNoticeView controlNoticeView;
     private int audioAvailability=DecoderAudio.UNKNOWN;
@@ -797,9 +857,10 @@ public final class TvActivity extends Activity {
     private final Runnable refresh = new Runnable() {
         @Override public void run() {
             if (!resumed) return;
-            if(libraryScreen==null)refreshWorkspace();
+            refreshAmbient();
+            if(!ambientShown && libraryScreen==null)refreshWorkspace();
             refreshAudioControl();
-            if(observerView!=null)observerView.refresh();
+            if(!ambientShown && observerView!=null)observerView.refresh();
             updates.postDelayed(this, 250);
         }
     };
@@ -1489,6 +1550,7 @@ public final class TvActivity extends Activity {
         JSONObject copy = new JSONObject(projection.toString()); copy.remove("revision");
         copy.remove("header");
         copy.remove("observer"); // Ephemeral state must never reconstruct videos/PDFs.
+        copy.remove("ambient");
         JSONObject document = copy.getJSONObject("document"); document.remove("revision");
         JSONArray surfaces = document.getJSONArray("surfaces");
         for (int i = 0; i < surfaces.length(); i++) stripStatusValues(surfaces.getJSONObject(i));
@@ -1501,17 +1563,19 @@ public final class TvActivity extends Activity {
         super.onResume();
         resumed = true;
         for (View widget : widgets) if(widget instanceof ConwaysView) ((ConwaysView)widget).setActive(true);
-        background.setActive(true);
+        background.setActive(!ambientShown);
         lastProjection = "";
         lastStructure = "";
         if (workspaceMode) currentUrl = "";
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        video.start();
+        refreshAmbient();
+        if(!ambientShown)video.start();
         updates.post(refresh);
     }
 
     @Override protected void onPause() {
         resumed = false;
+        ambientWakeKey=-1;
         clearPanelCache();
         disposeExtraStreams();
         for (View widget : widgets) if(widget instanceof ConwaysView) ((ConwaysView)widget).setActive(false);
@@ -1523,6 +1587,20 @@ public final class TvActivity extends Activity {
         video.stopPlayback(); // Release tuner when the app is no longer visible.
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         super.onPause();
+    }
+
+    @Override public boolean dispatchKeyEvent(KeyEvent event) {
+        if(event.getKeyCode()==ambientWakeKey) {
+            if(event.getAction()==KeyEvent.ACTION_UP)ambientWakeKey=-1;
+            return true; // Consume repeats and release from the wake gesture.
+        }
+        if(event.getAction()==KeyEvent.ACTION_DOWN) {
+            boolean waking=nativeAmbientWake();
+            if(waking || ambientShown) {
+                ambientWakeKey=event.getKeyCode(); refreshAmbient(); return true;
+            }
+        }
+        return super.dispatchKeyEvent(event);
     }
 
     @Override public boolean onKeyDown(int key, KeyEvent event) {

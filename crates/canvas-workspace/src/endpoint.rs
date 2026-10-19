@@ -22,6 +22,9 @@ pub struct Request {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
+    AmbientBind { room: Option<String> },
+    AmbientSet { enabled: bool },
+    AmbientPresence { frame: crate::ambient::PresenceFrame },
     /// Display-only task focus/expansion; never provider execution authority.
     SurfaceNavigate {
         surface_id: String,
@@ -75,6 +78,7 @@ pub enum Command {
 
 #[derive(Clone)]
 pub struct Endpoint {
+    ambient: crate::ambient::Ambient,
     task_selection: std::collections::BTreeMap<(String, String), (Option<String>, bool)>,
     observer: crate::observer::Observation,
     owner: String,
@@ -93,6 +97,7 @@ pub struct Endpoint {
 impl Endpoint {
     pub fn new(owner: &str) -> Self {
         Self {
+            ambient: Default::default(),
             task_selection: Default::default(),
             observer: Default::default(),
             owner: owner.into(),
@@ -105,7 +110,8 @@ impl Endpoint {
     pub fn snapshot(&self) -> serde_json::Value {
         let mut snapshot = serde_json::json!({
             "owner":self.owner, "revision":self.revision,
-            "capabilities":["workspace_read", "workspace_import"],
+            "capabilities":["workspace_read", "workspace_import", "ambient"],
+            "ambient":self.ambient.snapshot(),
             "catalog":self.session.as_ref().map(Workspaces::selector_projection),
             "palette":self.session.as_ref().and_then(|session| session.palette().ok().flatten()),
             "document":self.session.as_ref().and_then(Workspaces::document)
@@ -135,7 +141,7 @@ impl Endpoint {
     }
 
     pub fn checkpoint(&self) -> serde_json::Value {
-        serde_json::json!({"schema_version":1,"owner":self.owner,"revision":self.revision,
+        serde_json::json!({"schema_version":1,"owner":self.owner,"revision":self.revision,"ambient_room":self.ambient.room(),
             "projection":self.session.as_ref().map(Workspaces::retained_projection)})
     }
 
@@ -220,6 +226,8 @@ impl Endpoint {
             owner: String,
             revision: u64,
             projection: Option<Projection>,
+            #[serde(default)]
+            ambient_room: Option<String>,
         }
         let checkpoint: Checkpoint = serde_json::from_str(raw).map_err(|_| "Invalid checkpoint")?;
         if checkpoint.schema_version != 1 || checkpoint.owner != owner || checkpoint.revision == 0 {
@@ -242,10 +250,19 @@ impl Endpoint {
             })?;
         }
         endpoint.revision = checkpoint.revision;
+        endpoint.ambient.bind(checkpoint.ambient_room)?;
         Ok(endpoint)
     }
 
+    pub fn ambient_tick(&mut self) -> serde_json::Value {
+        self.ambient.tick(std::time::Instant::now());
+        self.ambient.snapshot()
+    }
+
+    pub fn ambient_wake(&mut self) -> bool { self.ambient.wake(std::time::Instant::now()) }
+
     pub fn execute(&mut self, request: Request) -> Result<serde_json::Value, String> {
+        self.ambient.tick(std::time::Instant::now());
         if request.schema_version != 1
             || request.request_id.is_empty()
             || request.request_id.len() > 64
@@ -262,6 +279,7 @@ impl Endpoint {
                 | Command::SurfaceSnapshot { .. }
                 | Command::ObserverFrame { .. }
                 | Command::SurfaceNavigate { .. }
+                | Command::AmbientPresence { .. }
         );
         if writes && request.expected_revision != Some(self.revision) {
             return Err("Stale or missing endpoint revision; inspect this target first".into());
@@ -271,6 +289,13 @@ impl Endpoint {
             .checked_add(1)
             .ok_or("Endpoint revision exhausted")?;
         match request.command {
+            Command::AmbientBind { room } => self.ambient.bind(room)?,
+            Command::AmbientSet { enabled } => self.ambient.set(enabled, std::time::Instant::now()),
+            Command::AmbientPresence { frame } => {
+                let unix_ms=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| "Invalid system clock")?.as_millis() as u64;
+                self.ambient.observe(frame,unix_ms,std::time::Instant::now())?;
+                return Ok(self.ambient.snapshot());
+            }
             Command::SurfaceNavigate { surface_id, action } => {
                 let snapshot=self.surface_snapshot(&surface_id).ok_or("Surface is not active")?;
                 let parsed = serde_json::from_value(snapshot["frame"].clone()).map_err(|_| "Invalid navigable frame")?;
@@ -487,6 +512,27 @@ fn surface_frame_expiry(refresh_ms: Option<u64>) -> std::time::Duration {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ambient_preserves_workspace_and_only_persists_room_binding() {
+        use super::*;
+        let mut endpoint=Endpoint::new("firetv-omni");
+        let request:Request=serde_json::from_str(include_str!("../../../config/deploy/firetv/workspaces.json")).unwrap();
+        endpoint.execute(request).unwrap();
+        let document=endpoint.snapshot()["document"].clone();
+        for command in [Command::AmbientBind {room:Some("main_room".into())},Command::AmbientSet {enabled:true}] {
+            endpoint.execute(Request {schema_version:1,request_id:"ambient-test".into(),expected_revision:Some(endpoint.revision),command}).unwrap();
+        }
+        assert_eq!(endpoint.snapshot()["document"],document);
+        assert_eq!(endpoint.ambient_tick()["active"],true);
+        let checkpoint=endpoint.checkpoint();
+        let restored=Endpoint::restore("firetv-omni",&checkpoint.to_string()).unwrap();
+        assert_eq!(restored.ambient.room(),Some("main_room"));
+        assert_eq!(restored.snapshot()["ambient"]["active"],false);
+        assert!(endpoint.ambient_wake());
+        assert_eq!(endpoint.checkpoint(),checkpoint);
+        assert_eq!(endpoint.snapshot()["document"],document);
+    }
+
     #[test]
     fn completed_sample_signal_is_retained_without_a_live_heartbeat() {
         let mut endpoint=super::Endpoint::new("firetv-omni");
