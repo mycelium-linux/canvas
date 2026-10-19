@@ -3535,9 +3535,9 @@ fn data_footer<'a, Message: 'a>(
     }
     let metrics = visual.metrics;
     let muted = color(visual.palette.text_muted);
-    let mut footer = row![].spacing(metrics.space_2);
+    let mut freshness_row = row![].spacing(metrics.space_2);
     if state != WidgetDataState::Ready {
-        footer = footer
+        freshness_row = freshness_row
             .push(status_dot(data_state_color(state, &visual.palette), 6.0))
             .push(
                 text(data_state_label(state))
@@ -3545,33 +3545,39 @@ fn data_footer<'a, Message: 'a>(
                     .color(data_state_color(state, &visual.palette)),
             );
     }
-    if has_metadata || observed.is_some() {
-        footer = footer.push(space::horizontal());
-    }
-    if has_metadata {
-        footer = footer.push(text(metadata).size(metrics.small).color(muted));
-    }
     if let Some(observed) = observed {
-        if has_metadata {
-            footer = footer.push(
-                text(FOOTER_SEPARATOR.trim())
-                    .size(metrics.small)
-                    .color(muted),
-            );
-        }
         // "Stale" is a claim about this time, so the two are drawn as one
         // statement in one colour instead of a state badge at one end of the
         // footer and an unrelated-looking timestamp at the other. A second
         // freshness indicator would be a second thing to keep in agreement.
-        footer = footer.push(text(observed).size(metrics.small).color(
-            if state == WidgetDataState::Stale {
-                data_state_color(state, &visual.palette)
-            } else {
-                muted
-            },
-        ));
+        freshness_row = freshness_row.push(
+            text(observed)
+                .size(metrics.small)
+                .width(Length::Fill)
+                .wrapping(text::Wrapping::WordOrGlyph)
+                .color(if state == WidgetDataState::Stale {
+                    data_state_color(state, &visual.palette)
+                } else {
+                    muted
+                }),
+        );
     }
-    Some(footer.align_y(iced::alignment::Vertical::Center).into())
+    // Freshness and provenance have independent width budgets. A long source
+    // name must not push the observation time outside a narrow dashboard tile.
+    let mut footer = column![].spacing(metrics.space_1).width(Length::Fill);
+    if state != WidgetDataState::Ready || spec.data.observed_at.is_some() {
+        footer = footer.push(freshness_row.align_y(iced::alignment::Vertical::Center));
+    }
+    if has_metadata {
+        footer = footer.push(
+            text(metadata)
+                .size(metrics.small)
+                .color(muted)
+                .width(Length::Fill)
+                .wrapping(text::Wrapping::WordOrGlyph),
+        );
+    }
+    Some(footer.into())
 }
 
 /// Between fields in the footer's metadata run.
