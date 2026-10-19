@@ -1,0 +1,11 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Canvas workspace · demo data</title>
+<style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#17191d}canvas{width:100%;height:100%;display:block}#error{color:#eee;font:16px system-ui;padding:24px}</style>
+<canvas id="workspace"></canvas><div id="error" hidden></div>
+<script type="module">
+import init,{WebPreview} from './pkg/canvas_workspace_ui.js';
+try{await init();const preview=new WebPreview();await preview.start(document.querySelector('canvas'));window.addEventListener('pagehide',()=>preview.destroy(),{once:true});}
+catch(error){document.querySelector('canvas').hidden=true;const message=document.querySelector('#error');message.hidden=false;message.textContent='Workspace preview could not start: '+error;}
+</script>
