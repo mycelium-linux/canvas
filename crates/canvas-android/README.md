@@ -64,15 +64,29 @@ Larger future offsets, expired,
 conflicting, regressed and wrong-room observations are rejected. Replaying a
 known observation cannot extend its deadline. Empty requires 60 seconds of
 continuous fresh evidence. Unknown evidence or a delivery gap resets that timer.
-Once asleep, losing evidence keeps the screen dark; occupied or human input
+Once ambient, losing evidence keeps the screensaver active; occupied or human input
 wakes it. Remote wake consumes the complete key gesture and allows two minutes
 before empty observations can start a new absence timer.
 
-The initial ambient rendering is black. It releases local video decoders and
-PDF panels, stops the GPU background, and hides the workspace chrome. It does
+Ambient rendering uses canonical Star Nest, Aurora Drift, Slow Ripple,
+Tidepool and Dusk Ember shaders. Each runs for five minutes, then blends
+into the next over four seconds with a smoothstep curve. Rust derives both
+shader indexes and the blend weight from one monotonic elapsed time. One
+retained GLES program handles the whole rotation; only the crossfade evaluates
+two scenes. There is no network shader loading, per-transition compilation,
+CPU pixel readback or second EGL surface. The TV adapter caps this path at
+640×360 internal pixels and 20 FPS, upscaled to the full display. Other
+workspace background profiles are unchanged.
+
+It releases local video decoders and PDF panels and hides the workspace chrome. It does
 not change the selected workspace, retained document or page. Waking rebuilds
 the selected view. It is a screensaver, not an authentication lock or a command
 to power off the TV. A remote Surf producer may continue running upstream.
+
+Star Nest is by Pablo Roman Andrioli and uses the original MIT grant, retained
+in `android/assets/THIRD_PARTY_NOTICES.txt`. The shared source records its
+original ShaderToy link and a pinned official-engine sample. Unverified or
+noncommercial shader sources are excluded from this rotation.
 
 Manual owner commands are `ambient on`, `ambient off`, and `ambient unbind`.
 Inspect reports `data.ambient`; acceptance is intent, not a renderer screenshot.
@@ -279,6 +293,7 @@ library from Agora into `$tv_package/lib/armeabi-v7a/`. From this crate director
 ```sh
 mkdir -p "$tv_package/classes" "$tv_package/dex" "$tv_package/assets"
 cp ../../config/deploy/firetv/menu.json "$tv_package/assets/canvas-menu.json"
+cp android/assets/THIRD_PARTY_NOTICES.txt "$tv_package/assets/THIRD_PARTY_NOTICES.txt"
 "$JAVA_HOME/bin/javac" -source 8 -target 8 \
   -classpath "$tv_sdk/platforms/android-33/android.jar" \
   -d "$tv_package/classes" android/dev/fpl/canvas/*.java
@@ -294,7 +309,7 @@ cp ../../config/deploy/firetv/menu.json "$tv_package/assets/canvas-menu.json"
   "$tv_package/resources.zip"
 cp -f "$tv_package/dex/classes.dex" "$tv_package/classes.dex"
 cd "$tv_package"
-zip -q unsigned.apk classes.dex lib/armeabi-v7a/libcanvas_android.so assets/canvas-menu.json
+zip -q unsigned.apk classes.dex lib/armeabi-v7a/libcanvas_android.so assets/canvas-menu.json assets/THIRD_PARTY_NOTICES.txt
 "$tv_sdk/build-tools/33.0.2/zipalign" -f 4 unsigned.apk aligned.apk
 "$tv_sdk/build-tools/33.0.2/apksigner" sign \
   --ks "$tv_keystore" --ks-key-alias canvas-tv-debug \
