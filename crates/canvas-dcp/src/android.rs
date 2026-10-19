@@ -7,6 +7,21 @@ use std::{
 };
 
 pub(super) fn exchange(app: &AppState, request: Value) -> Result<Value> {
+    exchange_payload(app, &serde_json::to_vec(&request)?)
+}
+
+// The owner CLI obtains its required endpoint CAS on the same connection used
+// for switching. Reuse that interface instead of carrying a renderer revision
+// across multiple ADB process launches.
+pub(super) fn switch_workspace(app: &AppState, project_id: &str) -> Result<Value> {
+    ensure!(
+        !project_id.is_empty() && !project_id.chars().any(char::is_whitespace),
+        "TV workspace identifier must be one exact token"
+    );
+    exchange_payload(app, format!("workspace switch {project_id}").as_bytes())
+}
+
+fn exchange_payload(app: &AppState, payload: &[u8]) -> Result<Value> {
     let serial = app
         .android_serial
         .as_ref()
@@ -18,7 +33,7 @@ pub(super) fn exchange(app: &AppState, request: Value) -> Result<Value> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    if let Err(error) = serde_json::to_writer(child.stdin.as_mut().unwrap(), &request) {
+    if let Err(error) = std::io::Write::write_all(child.stdin.as_mut().unwrap(), payload) {
         let _ = child.kill();
         let _ = child.wait();
         return Err(error.into());
@@ -70,4 +85,18 @@ pub(super) fn exchange(app: &AppState, request: Value) -> Result<Value> {
         reply["error"]
     );
     Ok(reply)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_command_rejects_multiple_tokens_before_owner_dispatch() {
+        let (app, _) = super::super::tests::sample();
+        for id in ["", "clock\nworkspace switch studio", "clock studio", "clock\tstudio"] {
+            let error = switch_workspace(&app, id).unwrap_err();
+            assert!(error.to_string().contains("one exact token"));
+        }
+    }
 }

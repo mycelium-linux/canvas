@@ -7,8 +7,9 @@ document with another inspection before acknowledging the DCP action. Workspace
 state revisions cover the active project, installed projects, visibility and
 owner. Renderer ticks and widget focus remain observable but do not invalidate a
 workspace switch. Native Mac dispatch needs no renderer revision precondition.
-The TV owner still requires its freshly observed endpoint revision at dispatch;
-a concurrent TV change rejects the action rather than silently overwriting it.
+The TV owner still requires an endpoint revision at dispatch. The adapter calls
+its existing `workspace switch` CLI, which obtains that CAS on the same owner
+connection; a concurrent TV change rejects the action rather than overwriting it.
 
 ## Install and check
 

@@ -99,12 +99,7 @@ pub(super) fn apply(
     project_id: &str,
 ) -> Receipt {
     let result = (|| -> Result<Catalog> {
-        android::exchange(
-            app,
-            json!({"schema_version":1,"request_id":request.request_id,
-            "expected_revision":observed.state.as_ref().and_then(|state| state.get("canvas_revision")),
-            "command":{"command":"workspace_switch","name":project_id}}),
-        )?;
+        android::switch_workspace(app, project_id)?;
         let resulting = catalog(app)?;
         ensure!(
             activation_verified(&resulting, project_id),
