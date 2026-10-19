@@ -101,6 +101,24 @@ If delivery fails, inspect the service error log and the source owner's health;
 do not restart or seize another active TV app. For rollback, boot out only that
 LaunchAgent and send `ambient unbind`; keep the prior signed APK.
 
+#### Omni verification — 2026-10-19
+
+Installed signed APK version 61 (`0.1.60-tv-ambient`) without clearing data.
+All 31 projects, selected venture deck and document revision 3 survived.
+With the supervised Studio adapter and the owner-approved `main_room` binding,
+the receiver reported `active=true`, `reason=room_empty`, `occupancy=empty`
+after the full 60-second continuous-absence window. A device screenshot showed
+black across the full 1920×1080 display, including the shell and mute control.
+Manual entry followed by a remote Down gesture restored the selected deck;
+presence-driven wake passed policy tests but was not physically exercised with
+someone entering the room. The LaunchAgent remained running without exit after
+the final rollout. Earlier freshness rejections remain in its append-only log.
+
+Validation: 92 shared-workspace tests, 32 Android library tests, the restricted
+CLI parser test, 14 JARVIS adapter tests, ARM check/release build, Java compilation
+and APK signature verification passed. Source commit `812f162` adds further
+timer diagnostics; those extra fields are not included in deployed APK 61.
+
 ### Transient assistant observations
 
 `observer_frame` accepts a bounded renderer-neutral activity frame through the
