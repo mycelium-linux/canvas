@@ -21,10 +21,13 @@ if i["window-cycle"] then
     end
   end
 else
-  widget.label({id="heading",text="Applications",x=p.x(24),y=p.y(22),size=t.title,ink="text"})
+  local scope=i.scope or "all"
+  local heading=scope=="workspaces" and "Workspaces" or scope=="native" and "Native apps" or scope=="canvas" and "Canvas apps" or "Applications"
+  local hint=scope=="workspaces" and "Search workspaces" or scope=="native" and "Search native apps" or scope=="canvas" and "Search Canvas apps" or "Search apps, windows, workspaces"
+  widget.label({id="heading",text=heading,x=p.x(24),y=p.y(22),size=t.title,ink="text"})
   widget.label({id="target",text=i.target or "This screen",x=p.x(w-144),y=p.y(28),size=t.small,ink="muted"})
   widget.panel({id="search-bg",x=p.x(20),y=p.y(62),width=p.w(w-40),height=p.h(38),ink="muted",opacity=0.08,radius=t.radius})
-  widget.label({id="search",text=(i.query or "")=="" and "Search apps, windows, workspaces" or (i.query.."▏"),x=p.x(32),y=p.y(72),size=t.body,ink=(i.query or "")=="" and "muted" or "text"})
+  widget.label({id="search",text=(i.query or "")=="" and hint or (i.query.."▏"),x=p.x(32),y=p.y(72),size=t.body,ink=(i.query or "")=="" and "muted" or "text"})
   for n=0,5 do
     local key="row"..n
     local title=i[key.."-title"]
@@ -38,5 +41,9 @@ else
   end
   if not i.live then
     widget.label({id="health",text=i.health or "Connecting…",x=p.x(24),y=p.y(h-30),size=t.small,ink="warning"})
+  end
+  if scope~="workspaces" then
+    local other=scope=="native" and "canvas-apps" or "native-apps"
+    widget.button({id=other,label=scope=="native" and "Canvas apps · F2" or "Native apps · F2",appearance="quiet",action="select",body={origin="desktop-launcher"},x=p.x(w-170),y=p.y(h-42),width=p.w(146),height=p.h(30),enabled=i.live==true})
   end
 end

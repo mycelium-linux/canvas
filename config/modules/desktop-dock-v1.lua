@@ -7,7 +7,7 @@ local visible=math.max(0,math.min(6,math.floor((w-2*inset-72)/60),i.count))
 local total=2*inset+tile+(visible>0 and 16+visible*(tile+gap)-gap or 0)
 local left=(w-total)/2
 widget.panel({id="ground",x=p.x(left),y=p.y(2),width=p.w(total),height=p.h(h-4),ink="surface",opacity=1,radius=t.radius})
-widget.icon_button({id="launcher",label="Applications",icon="apps",action="launcher",body={origin="desktop-dock"},x=p.x(left+inset),y=p.y(8),width=p.w(tile),height=p.h(48)})
+widget.icon_button({id="launcher",label="Canvas apps",icon="apps",action="launcher",body={origin="desktop-dock"},x=p.x(left+inset),y=p.y(8),width=p.w(tile),height=p.h(48)})
 if visible>0 then
   widget.panel({id="separator",x=p.x(left+inset+tile+8),y=p.y(20),width=p.w(1),height=p.h(28),ink="muted",opacity=0.18,radius=0})
 end

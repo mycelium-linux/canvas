@@ -26,6 +26,35 @@ pub enum Choice {
     Surface { id: String },
     Application { path: PathBuf },
 }
+
+/// Display filtering only. The owner still validates the complete catalog.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Scope {
+    #[default]
+    All,
+    Workspaces,
+    Canvas,
+    Native,
+}
+impl Scope {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Workspaces => "workspaces",
+            Self::Canvas => "canvas",
+            Self::Native => "native",
+        }
+    }
+    fn includes(self, choice: &Choice) -> bool {
+        matches!(self, Self::All)
+            || matches!(
+                (self, choice),
+                (Self::Workspaces, Choice::Workspace { .. })
+                    | (Self::Canvas, Choice::Surface { .. })
+                    | (Self::Native, Choice::Application { .. })
+            )
+    }
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Entry {
@@ -375,6 +404,9 @@ fn remote(
 pub struct Launcher {
     pub viewport: [f32; 2],
     pub window_cycle: bool,
+    pub scope: Scope,
+    /// Local document's application surfaces. Never use these IDs on a remote target.
+    pub canvas_surface_ids: Option<BTreeSet<String>>,
     pub targets: Vec<Target>,
     pub target: usize,
     pub generation: u64,
@@ -397,6 +429,8 @@ impl Launcher {
         Ok(Self {
             viewport: [600.0, 440.0],
             window_cycle: false,
+            scope: Scope::All,
+            canvas_surface_ids: None,
             targets: targets()?,
             target: 0,
             generation: generation(),
@@ -421,6 +455,17 @@ impl Launcher {
             .catalog
             .iter()
             .flat_map(|c| &c.entries)
+            .filter(|e| self.scope.includes(&e.choice))
+            .filter(|e| {
+                if self.scope == Scope::Canvas
+                    && self.targets[self.target].id == "local"
+                    && let (Some(ids), Choice::Surface { id }) =
+                        (&self.canvas_surface_ids, &e.choice)
+                {
+                    return ids.contains(id);
+                }
+                true
+            })
             .filter(|e| {
                 format!("{} {}", e.title, e.detail)
                     .to_lowercase()
@@ -429,6 +474,16 @@ impl Launcher {
             .collect();
         rows.sort_by_key(|e| !e.title.to_lowercase().starts_with(&query));
         rows
+    }
+    /// Change views without changing the owner catalog or its revision.
+    pub fn set_scope(&mut self, scope: Scope) {
+        if self.loading || self.busy || self.window_cycle {
+            return;
+        }
+        self.scope = scope;
+        self.query.clear();
+        self.selected = 0;
+        self.generation = generation();
     }
     pub fn visible_rows(&self) -> usize {
         if self.window_cycle {
@@ -520,6 +575,19 @@ impl Launcher {
         match key {
             Key::Named(Named::Escape) => Input::Cancel,
             Key::Named(Named::Enter) => Input::Apply,
+            Key::Named(Named::F2)
+                if self.scope != Scope::Workspaces
+                    && !self.window_cycle
+                    && !self.busy
+                    && !self.loading =>
+            {
+                self.set_scope(if self.scope == Scope::Native {
+                    Scope::Canvas
+                } else {
+                    Scope::Native
+                });
+                Input::Consumed
+            }
             Key::Named(Named::Tab) => {
                 self.target = (self.target + 1) % self.targets.len();
                 self.generation = generation();
@@ -589,6 +657,10 @@ impl Launcher {
         values.insert(
             "window-cycle".into(),
             ModuleInputValue::Boolean(self.window_cycle),
+        );
+        values.insert(
+            "scope".into(),
+            ModuleInputValue::Text(self.scope.name().into()),
         );
         for (id, value) in [
             ("target", self.targets[self.target].label.clone()),

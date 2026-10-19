@@ -494,6 +494,11 @@ enum Message {
     ShellBack,
     ShellForward,
     ShellProjects,
+    ShellCanvasApps,
+    ShellLauncherScope {
+        generation: u64,
+        scope: ::canvas::shell_launcher::Scope,
+    },
     ShellFocusSurface(String),
     ShellDockActivate(String),
     ShellDockReply(Result<Receipt, String>),
@@ -1800,6 +1805,22 @@ impl App {
                 Task::none()
             }
             Message::ShellProjects => self.toggle_project_switcher(),
+            Message::ShellCanvasApps => {
+                self.toggle_shell_launcher(::canvas::shell_launcher::Scope::Canvas)
+            }
+            Message::ShellLauncherScope { generation, scope } => {
+                if let Some(picker) = self.project_switcher.as_mut()
+                    && picker.generation == generation
+                    && !picker.busy
+                    && !picker.loading
+                    && !picker.window_cycle
+                {
+                    picker.set_scope(scope);
+                    self.refresh_launcher_scene();
+                    self.bump();
+                }
+                Task::none()
+            }
             Message::ShellLauncherPick {
                 generation,
                 revision,
@@ -4008,14 +4029,24 @@ impl App {
     }
 
     fn toggle_project_switcher(&mut self) -> Task<Message> {
-        if self.project_switcher.take().is_some() {
+        self.toggle_shell_launcher(::canvas::shell_launcher::Scope::Workspaces)
+    }
+
+    fn toggle_shell_launcher(&mut self, scope: ::canvas::shell_launcher::Scope) -> Task<Message> {
+        // An explicit shell choice cancels an Alt-Tab preview, not its destination.
+        self.window_cycle.cancel();
+        if self
+            .project_switcher
+            .take()
+            .is_some_and(|picker| picker.scope == scope && !picker.window_cycle)
+        {
             self.bump();
             return Task::none();
         }
         self.background_picker = None;
         self.theme_picker = None;
         self.project_picker = None;
-        let launcher = match ::canvas::shell_launcher::Launcher::new() {
+        let mut launcher = match ::canvas::shell_launcher::Launcher::new() {
             Ok(l) => l,
             Err(e) => {
                 self.status = e;
@@ -4023,6 +4054,12 @@ impl App {
                 return Task::none();
             }
         };
+        launcher.scope = scope;
+        launcher.canvas_surface_ids = Some(
+            ::canvas::shell_launcher::dock_surfaces(&self.document)
+                .map(|s| s.id.clone())
+                .collect(),
+        );
         let target = launcher.targets[launcher.target].clone();
         let generation = launcher.generation;
         self.project_switcher = Some(launcher);
@@ -4063,7 +4100,11 @@ impl App {
             let visual = self.presented_visual_theme();
             let accent = self.effective_theme(&self.document).accent();
             let theme = ::canvas::lua_module::ModuleThemeTokens::from_visual(&visual, accent);
+            let canvas_surface_ids = ::canvas::shell_launcher::dock_surfaces(&self.document)
+                .map(|s| s.id.clone())
+                .collect();
             if let Some(launcher) = self.project_switcher.as_mut() {
+                launcher.canvas_surface_ids = Some(canvas_surface_ids);
                 launcher.viewport = ::canvas::shell_geometry::sheet_size(
                     launcher.window_cycle,
                     launcher.matches().len(),
@@ -4317,36 +4358,17 @@ impl App {
 
     fn dock_entries(&self) -> Vec<::canvas::shell_launcher::Entry> {
         use ::canvas::shell_launcher::{Choice, Entry};
-        let mut entries: Vec<_> = self
-            .dock_pins
-            .0
-            .iter()
-            .map(|id| {
-                self.dock_apps
-                    .iter()
-                    .find(|e| &e.id == id)
-                    .cloned()
-                    .unwrap_or_else(|| Entry {
-                        id: id.clone(),
-                        title: "Missing application".into(),
-                        detail: "PIN · unavailable".into(),
-                        available: false,
-                        choice: Choice::Application {
-                            path: id[4..].into(),
-                        },
-                    })
-            })
-            .collect();
-        entries.extend(
-            ::canvas::shell_launcher::dock_surfaces(&self.document).map(|s| Entry {
+        // Native pins remain saved and available in the explicit native launcher.
+        // The Canvas dock represents Canvas windows, not host applications.
+        ::canvas::shell_launcher::dock_surfaces(&self.document)
+            .map(|s| Entry {
                 id: format!("surface:{}", s.id),
                 title: s.title.clone(),
                 detail: "WINDOW".into(),
                 available: self.decoded.contains_key(&s.id),
                 choice: Choice::Surface { id: s.id.clone() },
-            }),
-        );
-        entries
+            })
+            .collect()
     }
 
     fn focus_shell_surface(&mut self, id: &str) {
@@ -10901,6 +10923,16 @@ impl App {
                         if !control.enabled {
                             return None;
                         }
+                        if control.id == "native-apps" || control.id == "canvas-apps" {
+                            return (!picker.window_cycle).then_some(Message::ShellLauncherScope {
+                                generation: picker.generation,
+                                scope: if control.id == "native-apps" {
+                                    ::canvas::shell_launcher::Scope::Native
+                                } else {
+                                    ::canvas::shell_launcher::Scope::Canvas
+                                },
+                            });
+                        }
                         let slot = control.id.strip_prefix("row")?.parse::<usize>().ok()?;
                         if slot >= 6 {
                             return None;
@@ -11190,7 +11222,7 @@ impl App {
                     &presentation.buttons,
                     size,
                     |control| match control.id.as_str() {
-                        "launcher" => Some(Message::ShellProjects),
+                        "launcher" => Some(Message::ShellCanvasApps),
                         id => id
                             .strip_prefix("item")
                             .and_then(|n| n.parse::<usize>().ok())
@@ -13637,6 +13669,36 @@ mod tests {
         assert!(switcher_requested(
             &browser_key_event(" ", false, true, false, false).unwrap()
         ));
+    }
+
+    #[test]
+    fn shell_navigation_separates_workspaces_and_canvas_windows() {
+        use ::canvas::shell_launcher::{Choice, Scope};
+        let mut app = test_app();
+        let original_pins = app.dock_pins.0.clone();
+        let focused = app.document.focused_surface_id.clone();
+        app.window_cycle.cycle(&["sample".into()], false);
+        assert!(app.window_cycle.active());
+        drop(app.toggle_project_switcher());
+        assert!(!app.window_cycle.active());
+        assert_eq!(app.document.focused_surface_id, focused);
+        assert_eq!(
+            app.project_switcher.as_ref().unwrap().scope,
+            Scope::Workspaces
+        );
+        drop(app.toggle_shell_launcher(Scope::Canvas));
+        let launcher = app.project_switcher.as_ref().unwrap();
+        assert_eq!(launcher.scope, Scope::Canvas);
+        let expected = ::canvas::shell_launcher::dock_surfaces(&app.document)
+            .map(|s| s.id.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(launcher.canvas_surface_ids.as_ref(), Some(&expected));
+        assert!(
+            app.dock_entries()
+                .iter()
+                .all(|e| matches!(e.choice, Choice::Surface { .. }))
+        );
+        assert_eq!(app.dock_pins.0, original_pins);
     }
 
     #[test]

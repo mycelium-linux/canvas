@@ -5,6 +5,7 @@
   "inputs": [
     {"id":"width","kind":"number","required":false},
     {"id":"height","kind":"number","required":false},
+    {"id":"scope","kind":"text","required":false},
     {
       "id": "window-cycle",
       "kind": "boolean",
@@ -159,7 +160,7 @@
   "capabilities": {
     "write_scene": true,
     "read_inputs": [
-      "width", "height",
+      "width", "height", "scope",
       "window-cycle",
       "target",
       "query",
