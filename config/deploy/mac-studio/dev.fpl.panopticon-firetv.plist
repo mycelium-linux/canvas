@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.fpl.panopticon-firetv</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/ajmwagar/.local/lib/canvas-panopticon/canvas-map-stream</string>
+    <string>/Users/ajmwagar/.config/canvas-panopticon/firetv-stream.json</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>3</integer>
+  <key>StandardOutPath</key><string>/Users/ajmwagar/Library/Logs/panopticon-firetv.log</string>
+  <key>StandardErrorPath</key><string>/Users/ajmwagar/Library/Logs/panopticon-firetv.log</string>
+</dict></plist>

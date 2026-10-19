@@ -1,0 +1,16 @@
+{
+  "width": 1280,
+  "height": 720,
+  "frames_per_second": 24,
+  "endpoint": "udp://100.80.85.86:55212?pkt_size=1316",
+  "ffmpeg_binary": "/opt/homebrew/bin/ffmpeg",
+  "raster_path": "/Users/ajmwagar/src/fpl/panopticon/galileo/wasm/assets/earth.jpg",
+  "theme": {"source": "coherence", "mode": "dark", "accent": "info"},
+  "camera": {
+    "latitude": 32.0,
+    "longitude": -118.0,
+    "distance_m": 16000000.0,
+    "pitch_degrees": 8.0,
+    "orbit_degrees_per_second": 1.5
+  }
+}

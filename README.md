@@ -191,6 +191,9 @@ different from the ones shown to the person.
 [Native file actions](docs/file-actions.md) provide a Shift-drag radial menu
 for image conversion and tools, with a `file-actions` control entry point.
 
+[Panopticon on Fire TV](docs/firetv-panopticon.md) documents the supervised globe
+stream, the authorized TV control route, and verification on the physical display.
+
 ## Lua modules
 
 A module is a manifest plus Luau source that turns typed host data into a small

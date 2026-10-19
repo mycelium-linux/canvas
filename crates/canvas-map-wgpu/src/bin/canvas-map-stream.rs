@@ -6,7 +6,7 @@ use canvas::{
         spatial::{SpatialPalette, decode_panopticon_snapshot},
     },
 };
-use canvas_core::ThemePalette;
+use canvas_core::{ThemePalette, ThemeSelection};
 use canvas_map_wgpu::GlobeRenderer;
 use serde::Deserialize;
 use std::{
@@ -29,11 +29,29 @@ struct Config {
     #[serde(default)]
     source_id: Option<String>,
     ffmpeg_binary: String,
-    snapshot_path: String,
+    /// None is an explicit basemap-only presentation, with no synthetic tracks.
+    #[serde(default)]
+    snapshot_path: Option<String>,
     #[serde(default)]
     raster_path: Option<String>,
-    theme: ThemePalette,
+    theme: StreamTheme,
     camera: CameraConfig,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum StreamTheme {
+    Selection(ThemeSelection),
+    Palette(ThemePalette),
+}
+
+impl StreamTheme {
+    fn palette(&self) -> ThemePalette {
+        match self {
+            Self::Selection(selection) => selection.palette(),
+            Self::Palette(palette) => *palette,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -127,11 +145,16 @@ fn main() -> Result<()> {
     )
     .context("parse stream config")?;
     validate(&config)?;
-    let snapshot = decode_panopticon_snapshot(
-        &std::fs::read(&config.snapshot_path)
-            .with_context(|| format!("read {}", config.snapshot_path))?,
-    )
-    .map_err(anyhow::Error::msg)?;
+    let snapshot = config
+        .snapshot_path
+        .as_ref()
+        .map(|path| {
+            decode_panopticon_snapshot(
+                &std::fs::read(path).with_context(|| format!("read {path}"))?,
+            )
+            .map_err(anyhow::Error::msg)
+        })
+        .transpose()?;
 
     pollster::block_on(run(config, snapshot))
 }
@@ -167,7 +190,10 @@ fn validate(config: &Config) -> Result<()> {
     Ok(())
 }
 
-async fn run(config: Config, snapshot: canvas::map::spatial::SpatialFeatureSet) -> Result<()> {
+async fn run(
+    config: Config,
+    snapshot: Option<canvas::map::spatial::SpatialFeatureSet>,
+) -> Result<()> {
     let local_frame_path = config
         .source_id
         .as_deref()
@@ -219,7 +245,16 @@ async fn run(config: Config, snapshot: canvas::map::spatial::SpatialFeatureSet) 
         mapped_at_creation: false,
     });
     let mut renderer = GlobeRenderer::new(&device, format);
-    renderer.set_features(&device, &snapshot)?;
+    if let Some(snapshot) = &snapshot {
+        renderer.set_features(&device, snapshot)?;
+        eprintln!(
+            "canvas-map-stream: snapshot revision={} features={}",
+            snapshot.revision,
+            snapshot.features.len()
+        );
+    } else {
+        eprintln!("canvas-map-stream: basemap only; spatial layers are not connected");
+    }
     if let Some(path) = &config.raster_path {
         let raster = image::open(path)
             .with_context(|| format!("decode raster {path}"))?
@@ -238,7 +273,7 @@ async fn run(config: Config, snapshot: canvas::map::spatial::SpatialFeatureSet) 
             raster.height()
         );
     }
-    let palette = SpatialPalette::from_theme(&config.theme);
+    let palette = SpatialPalette::from_theme(&config.theme.palette());
     let mut encoder_process = config
         .endpoint
         .as_ref()
@@ -354,11 +389,58 @@ fn wrap_longitude(longitude: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::wrap_longitude;
+    use super::*;
 
     #[test]
     fn orbit_wraps_continuously() {
         assert_eq!(wrap_longitude(181.0), -179.0);
         assert_eq!(wrap_longitude(-181.0), 179.0);
+    }
+
+    #[test]
+    fn firetv_stream_uses_canonical_theme_and_explicit_basemap_mode() {
+        let config: Config = serde_json::from_str(include_str!(
+            "../../../../config/deploy/mac-studio/panopticon-firetv-stream.json"
+        ))
+        .unwrap();
+        validate(&config).unwrap();
+        assert!(config.snapshot_path.is_none());
+        assert!(config.source_id.is_none());
+        assert_eq!(
+            config.theme.palette(),
+            serde_json::from_str::<ThemeSelection>(
+                r#"{"source":"coherence","mode":"dark","accent":"info"}"#
+            )
+            .unwrap()
+            .palette()
+        );
+    }
+
+    #[test]
+    fn existing_snapshot_and_palette_config_remains_compatible() {
+        let config: Config = serde_json::from_str(include_str!(
+            "../../../../config/deploy/mac-studio/panopticon-globe-stream.json"
+        ))
+        .unwrap();
+        validate(&config).unwrap();
+        assert!(config.snapshot_path.is_some());
+        assert!(matches!(config.theme, StreamTheme::Palette(_)));
+    }
+
+    #[test]
+    fn firetv_document_uses_the_shared_canvas_stream_contract() {
+        let document: canvas::WorkspaceDocument = serde_json::from_str(include_str!(
+            "../../../../config/deploy/firetv/panopticon.json"
+        ))
+        .unwrap();
+        let catalog: canvas_core::Catalog = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "projects": [{"id":"panopticon", "name":"Panopticon", "theme":{"source":"coherence","mode":"dark","accent":"info"},"resources":[]}]
+        })).unwrap();
+        document.validate(&catalog).unwrap();
+        assert!(
+            matches!(&document.surfaces[0].content, canvas::SurfaceContent::Stream { url } if url.ends_with("/panopticon.m3u8"))
+        );
+        assert_eq!(document.surfaces.len(), 2);
     }
 }

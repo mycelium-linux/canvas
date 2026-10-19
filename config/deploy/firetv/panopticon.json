@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "tv-panopticon",
+  "project_id": "panopticon",
+  "revision": 1,
+  "theme": {"source": "project"},
+  "background": {"kind": "theme"},
+  "chrome": {"canvas_padding": 0, "surface_gap": 0, "title": "hidden"},
+  "surfaces": [
+    {
+      "id": "panopticon-globe",
+      "title": "Panopticon globe",
+      "inputs": [],
+      "content": {"kind": "stream", "url": "http://192.168.2.67:18089/panopticon.m3u8"}
+    },
+    {
+      "id": "panopticon-source-status",
+      "title": "Basemap only · Spatial layers not connected",
+      "inputs": [],
+      "content": {"kind": "scene", "scene": {"nodes": []}}
+    }
+  ],
+  "layout": {"kind": "canvas", "placements": [
+    {"surface_id": "panopticon-globe", "bounds": {"x": 0, "y": 0, "width": 1, "height": 0.90}, "layer": 0},
+    {"surface_id": "panopticon-source-status", "bounds": {"x": 0.02, "y": 0.90, "width": 0.96, "height": 0.10}, "layer": 0}
+  ]},
+  "pages": [],
+  "active_page": 0,
+  "bindings": [],
+  "focused_surface_id": "panopticon-globe"
+}
