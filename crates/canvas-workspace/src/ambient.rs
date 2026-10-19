@@ -162,10 +162,13 @@ impl Ambient {
     }
 
     pub fn snapshot(&self) -> serde_json::Value {
+        let now = Instant::now();
         serde_json::json!({"active":self.active(),"room":self.room,
             "occupancy":self.sample.as_ref().map(|(frame,_)|frame.state).unwrap_or(Occupancy::Unknown),
             "reason":if self.manual {"manual"} else if self.automatic {"room_empty"} else {"awake"},
-            "empty_delay_ms":EMPTY_DELAY.as_millis(),"human_grace_ms":HUMAN_GRACE.as_millis()})
+            "empty_delay_ms":EMPTY_DELAY.as_millis(),"human_grace_ms":HUMAN_GRACE.as_millis(),
+            "empty_for_ms":self.empty_since.map(|since|now.saturating_duration_since(since).as_millis()),
+            "human_grace_remaining_ms":self.human_until.map(|until|until.saturating_duration_since(now).as_millis()).unwrap_or(0)})
     }
 }
 
