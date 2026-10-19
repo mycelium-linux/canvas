@@ -3,27 +3,98 @@
   "id": "tv-panopticon",
   "project_id": "panopticon",
   "revision": 1,
-  "theme": {"source": "project"},
-  "background": {"kind": "theme"},
-  "chrome": {"canvas_padding": 0, "surface_gap": 0, "title": "hidden"},
+  "theme": {
+    "source": "project"
+  },
+  "background": {
+    "kind": "theme"
+  },
+  "chrome": {
+    "canvas_padding": 0,
+    "surface_gap": 0,
+    "title": "hidden"
+  },
   "surfaces": [
     {
       "id": "panopticon-globe",
       "title": "Panopticon globe",
       "inputs": [],
-      "content": {"kind": "stream", "url": "http://192.168.2.67:18089/panopticon.m3u8"}
+      "content": {
+        "kind": "stream",
+        "url": "http://192.168.2.67:18089/panopticon.m3u8"
+      }
     },
     {
       "id": "panopticon-source-status",
-      "title": "Puget Sound ↔ Puerto Rico | Imagery: Esri, Vantor, Earthstar, GIS community",
+      "title": "Imagery: Esri, Vantor, Earthstar Geographics, GIS User Community · Cables: TeleGeography",
       "inputs": [],
-      "content": {"kind": "scene", "scene": {"nodes": []}}
+      "content": {
+        "kind": "scene",
+        "scene": {
+          "nodes": []
+        }
+      }
+    },
+    {
+      "id": "panopticon-map-key",
+      "title": "Map key",
+      "inputs": [],
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "panopticon-map-key",
+          "kind": "rich_card",
+          "title": "Map key",
+          "format": "markdown",
+          "body": "AIS hulls · dim=no heading\nNumbers: traffic groups\nDots: weather / network\nCyan: cable references\nSchematic, depth unknown\nCurrents: particles\nAircraft: feed offline",
+          "citations": [],
+          "chrome": "integrated",
+          "data": {
+            "state": "ready",
+            "source": "panopticon:map-key",
+            "window": "reference",
+            "provenance": "live"
+          }
+        }
+      }
     }
   ],
-  "layout": {"kind": "canvas", "placements": [
-    {"surface_id": "panopticon-globe", "bounds": {"x": 0, "y": 0, "width": 1, "height": 0.90}, "layer": 0},
-    {"surface_id": "panopticon-source-status", "bounds": {"x": 0.02, "y": 0.90, "width": 0.96, "height": 0.10}, "layer": 0}
-  ]},
+  "layout": {
+    "kind": "canvas",
+    "placements": [
+      {
+        "surface_id": "panopticon-globe",
+        "bounds": {
+          "x": 0,
+          "y": 0,
+          "width": 1,
+          "height": 0.9
+        },
+        "layer": 0
+      },
+      {
+        "surface_id": "panopticon-source-status",
+        "bounds": {
+          "x": 0.02,
+          "y": 0.9,
+          "width": 0.96,
+          "height": 0.1
+        },
+        "layer": 0
+      },
+      {
+        "surface_id": "panopticon-map-key",
+        "bounds": {
+          "x": 0.835,
+          "y": 0.17,
+          "width": 0.155,
+          "height": 0.7
+        },
+        "layer": 1
+      }
+    ]
+  },
   "pages": [],
   "active_page": 0,
   "bindings": [],

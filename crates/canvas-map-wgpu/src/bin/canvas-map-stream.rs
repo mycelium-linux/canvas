@@ -38,6 +38,9 @@ struct Config {
     /// None is an explicit basemap-only presentation, with no synthetic tracks.
     #[serde(default)]
     snapshot_path: Option<String>,
+    /// Owner-produced reference geometry, independent of expiring live observations.
+    #[serde(default)]
+    reference_snapshot_path: Option<String>,
     #[serde(default)]
     live_snapshot: Option<live_snapshot::Source>,
     #[serde(default)]
@@ -85,9 +88,7 @@ impl Encoder {
     fn spawn(config: &Config) -> Result<Self> {
         let size = format!("{}x{}", config.width, config.height);
         let rate = config.frames_per_second.to_string();
-        let bitrate =
-            ((config.width as u64 * config.height as u64 * config.frames_per_second as u64) / 85)
-                .clamp(1_500_000, 12_000_000);
+        let bitrate = video_bitrate(config.width, config.height, config.frames_per_second);
         let bitrate = bitrate.to_string();
         let endpoint = config.endpoint.as_deref().context("missing UDP endpoint")?;
         let mut child = Command::new(&config.ffmpeg_binary)
@@ -146,6 +147,12 @@ impl Encoder {
         }
         self.input.write_all(rgba).context("write frame to FFmpeg")
     }
+}
+
+fn video_bitrate(width: u32, height: u32, frames_per_second: u32) -> u64 {
+    // Budget 0.18 bits per pixel per frame for detailed moving satellite imagery.
+    (u64::from(width) * u64::from(height) * u64::from(frames_per_second) * 18 / 100)
+        .clamp(1_500_000, 12_000_000)
 }
 
 fn main() -> Result<()> {
@@ -214,7 +221,31 @@ async fn run(
     snapshot: Option<canvas::map::spatial::SpatialFeatureSet>,
 ) -> Result<()> {
     let live = config.live_snapshot.as_ref().map(live_snapshot::start);
-    let tiles = config.detail_tile_template.clone().map(tile_stream::start);
+    let tiles = config.detail_tile_template.clone().map(|template| {
+        let prewarm = config.camera.tour.as_ref().map_or_else(Vec::new, |tour| {
+            tour.stops
+                .iter()
+                .skip(1)
+                .filter(|stop| stop.distance_m < 4_000_000.0)
+                .map(|stop| {
+                    let camera = GlobeCamera {
+                        latitude: stop.latitude,
+                        longitude: stop.longitude,
+                        distance_m: stop.distance_m,
+                        ..Default::default()
+                    };
+                    galileo::tile_lod::TileView {
+                        latitude: stop.latitude,
+                        longitude: stop.longitude,
+                        meters_per_pixel: camera.meters_per_pixel(config.height),
+                        viewport_width_px: f64::from(config.width),
+                        viewport_height_px: f64::from(config.height),
+                    }
+                })
+                .collect()
+        });
+        tile_stream::start(template, prewarm)
+    });
     let mut next_tile_request = Instant::now();
     let mut active_snapshot = snapshot.clone();
     let local_frame_path = config
@@ -268,6 +299,30 @@ async fn run(
         mapped_at_creation: false,
     });
     let mut renderer = GlobeRenderer::new(&device, format);
+    let mut reference_expires_at = None;
+    if let Some(path) = &config.reference_snapshot_path {
+        ensure!(
+            std::fs::metadata(path)?.len() <= 16 * 1024 * 1024,
+            "reference snapshot exceeds 16 MiB"
+        );
+        let reference =
+            decode_panopticon_snapshot(&std::fs::read(path)?).map_err(anyhow::Error::msg)?;
+        let expiry = reference
+            .generated_at_unix_ms
+            .saturating_add(reference.max_age_secs.saturating_mul(1000));
+        let now = live_snapshot::now_ms();
+        if reference.generated_at_unix_ms <= now.saturating_add(5_000) && now < expiry {
+            eprintln!(
+                "reference: revision={} features={}",
+                reference.revision,
+                reference.features.len()
+            );
+            renderer.set_reference_features(&reference);
+            reference_expires_at = Some(expiry);
+        } else {
+            eprintln!("reference: stale or future-dated; routes omitted");
+        }
+    }
     if let Some(snapshot) = &snapshot {
         renderer.set_features(&device, snapshot)?;
         eprintln!(
@@ -336,6 +391,11 @@ async fn run(
 
     loop {
         let frame_started = Instant::now();
+        if reference_expires_at.is_some_and(|expiry| live_snapshot::now_ms() >= expiry) {
+            renderer.clear_reference_features();
+            reference_expires_at = None;
+            eprintln!("reference: expired; routes cleared");
+        }
         if let Some(live) = &live {
             if let Some(features) = active_snapshot.as_mut() {
                 let count = features.features.len();
@@ -433,7 +493,6 @@ async fn run(
                 next_tile_request = Instant::now() + Duration::from_secs(2);
             }
         }
-        let updates_done = Instant::now();
         let plan = camera.frame_plan(
             SurfaceMetrics {
                 logical_width: f64::from(config.width),
@@ -442,6 +501,8 @@ async fn run(
             },
             palette,
         )?;
+        renderer.set_view_resolution(camera.latitude, camera.meters_per_pixel(config.height));
+        let updates_done = Instant::now();
         let mut commands = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Panopticon globe stream frame"),
         });
@@ -542,6 +603,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn satellite_detail_has_bandwidth_with_a_bounded_encoder_budget() {
+        assert!((3_000_000..=5_000_000).contains(&video_bitrate(1280, 720, 24)));
+        assert_eq!(video_bitrate(7680, 4320, 60), 12_000_000);
+    }
+
+    #[test]
     fn orbit_wraps_continuously() {
         assert_eq!(wrap_longitude(181.0), -179.0);
         assert_eq!(wrap_longitude(-181.0), 179.0);
@@ -592,6 +659,6 @@ mod tests {
         assert!(
             matches!(&document.surfaces[0].content, canvas::SurfaceContent::Stream { url } if url.ends_with("/panopticon.m3u8"))
         );
-        assert_eq!(document.surfaces.len(), 2);
+        assert_eq!(document.surfaces.len(), 3);
     }
 }

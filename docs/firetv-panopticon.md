@@ -10,13 +10,20 @@ The profile uses Panopticon's existing Earth raster and canonical Coherence
 theme. Spatial layers come from the local owner's authenticated
 `/operator/spatial/snapshot` endpoint, refreshed every five seconds on a separate
 thread. The selected domains are vessels, HF radar, NOAA CO-OPS, marine and NWS
-weather, PeeringDB and RIPE Atlas. A deterministic tour holds over Puget Sound,
-pulls out to North America, flies into Puerto Rico, then returns through a
+weather, PeeringDB and RIPE Atlas. Aircraft symbols are supported, but ADS-B is
+currently disabled: the running owner rejects non-ICAO IDs beginning with `~`,
+failing the entire multi-domain snapshot (tracked by `dock-7pi`). The map key
+reports the aircraft feed offline. A deterministic tour visits Puget Sound,
+Lake Union, Fremont and the San Juan Islands, pulls out to North America,
+flies into Puerto Rico, then returns through a
 Caribbean orbital view. Stops, dwell times and travel times live in
 `camera.tour.stops`. Camera travel follows short longitude arcs with eased
 position and geometric distance interpolation, remaining above the surface.
-These are point layers; nautical chart overlays, boundaries and interactive
-camera control remain separate work. Temporal series render when supplied by the owner.
+Vessels and aircraft use shared GFX outlines with projected headings. Dim outlines
+indicate missing heading data. Traffic groups use counted badges at wider zooms;
+Galileo's hysteretic XYZ policy selects presentation LOD, and classes remain separate.
+Temporal series render when supplied by the owner. Nautical chart overlays,
+boundaries and interactive camera control remain separate work.
 
 Detailed imagery uses Galileo's public renderer-neutral `tile_lod` and
 `tile_cache` modules with its desktop feature disabled. Camera ground resolution
@@ -26,7 +33,10 @@ bytes, and uploads a north-up mosaic. `fpl-gfx` samples that mosaic in Web
 Mercator over its retained global basemap, preserving global coverage while new
 regions load. The worker replaces pending camera views with the newest request,
 skips unchanged regions and retains four decoded mosaics (up to 64 MiB of cached
-pixels). Provider failures remain visible in the producer log and keep the
+pixels). Upcoming tour destinations also warm the compressed provider cache on a
+bounded background worker. A retained 32×32 WGS84 surface patch beneath regional
+detail preserves close-up geometry without enlarging the global mesh.
+Provider failures remain visible in the producer log and keep the
 last valid imagery. The TV caption credits the configured Esri World Imagery
 provider: Esri, Vantor, Earthstar Geographics and the GIS User Community.
 
@@ -40,12 +50,39 @@ vessel. Source errors are recorded in the producer log; the TV caption describes
 layer selection and expiry policy, rather than claiming that every feed is healthy.
 The legacy file-snapshot configuration remains supported for offline consumers.
 
+An optional `reference_snapshot_path` carries owner-produced reference geometry
+independently of live observations. The cable profile uses TeleGeography's
+schematic geographic routes, normalized by Panopticon's `submarine_cables_import`.
+It preserves source identity and attribution and supplies no seabed depth.
+GFX renders tessellated, depth-tested surface strokes; a 10 m cartographic offset
+prevents mesh intersections and does not change source altitude. Reference routes
+expire under their own 30-day policy; live feed errors do not clear them. Renew
+the snapshot and restart the dedicated producer when replacing reference data.
+
+To prepare that reference, download the public GeoJSON with a size/time bound,
+then run the owner importer from the Panopticon checkout:
+
+```sh
+curl --fail --proto '=https' --max-time 20 --max-filesize 8388608 \
+  https://www.submarinecablemap.com/api/v3/cable/cable-geo.json \
+  -o /tmp/panopticon-cables.geojson
+cargo run -p panopticon --bin submarine_cables_import -- \
+  /tmp/panopticon-cables.geojson \
+  "$HOME/.config/canvas-panopticon/submarine-cables.json"
+```
+
+The TV's native map key identifies shapes, heading availability, traffic badges,
+reference cable strokes and the tour. Colors remain sourced from Coherence;
+the GPU adapter converts authored sRGB colors through GFX's linear color API.
+The 720p24 stream budgets approximately 4 Mbps for satellite detail, with a
+12 Mbps encoder cap.
+
 ## Stream route
 
 - Producer: `config/deploy/mac-studio/panopticon-firetv-stream.json`.
 - Supervisor: `config/deploy/mac-studio/dev.fpl.panopticon-firetv.plist`.
 - Receiver: `config/deploy/agora-one/canvas-panopticon-firetv.service`.
-- Receiver ingress: Agora's direct LAN address `192.168.2.67`, UDP port 55212.
+- Receiver ingress: Agora's private VPN address `100.80.85.86`, UDP port 55212.
 - TV URL: `http://192.168.2.67:18089/panopticon.m3u8`.
 - Workspace: `config/deploy/firetv/panopticon.json`.
 
@@ -54,6 +91,12 @@ server or change another stream. FFmpeg copies H.264 into a rolling eight-entry
 playlist with atomic updates, bounded segment deletion and independent segments.
 Only the remote stream adapter reads GPU pixels; Studio's native map composition
 continues to use its existing direct GPU path.
+
+The current supervised producer uses the private VPN with 1128-byte UDP payloads
+(six MPEG-TS packets), below its 1280-byte MTU. The rebuilt executable can reach
+Agora's LAN address from an interactive session but receives `No route to host`
+under launchd. This profile avoids that observed macOS local-network restriction
+without changing system permissions; the TV still reads HLS over the LAN.
 
 ## Manual setup and verification
 
@@ -150,8 +193,8 @@ startup and covers elapsed seconds 2–25:
 | Interactive | 547 | 40.26 ms | 0.7% |
 
 Agora subsequently published ten one-second segments in ten wall-clock seconds;
-the earlier measurement advanced only three. The producer and receiver now use
-the direct LAN route, avoiding the VPN's 1280-byte MTU. Live playlists omit the
+the earlier measurement advanced only three. That measurement used the direct
+LAN route, avoiding oversized packets on the VPN's 1280-byte MTU. Live playlists omit the
 end marker so a receiver shutdown cannot permanently end playback on the TV.
 After a receiver restart, wait for a newly advancing live playlist before opening
 it; an old playlist may still contain an end marker from the previous version.
@@ -170,6 +213,24 @@ stalls catch up. The corrected installed producer delivered 24.007 fps over a
 130-second interval containing a complete tour. Raw trace:
 `/tmp/canvas-live-cadence.csv`. This producer measurement alone does not establish
 the TV player's buffering behavior.
+
+The combined symbols, cable routes and neighborhood tour were subsequently
+measured over a complete 208-second circuit. Excluding the first two seconds,
+4944 frames sustained 24.0001 fps, with p99 frame work 32.715 ms, 0.728% above
+the 41.67 ms budget, maximum work 101.852 ms and maximum inter-frame gap
+231.454 ms. Trace: `/tmp/canvas-reference-live.csv`. This was an interactive
+producer using the LAN; the separately installed supervised profile uses the
+smaller VPN packets described above. It is not a controlled before/after
+comparison with the earlier four-stop route.
+
+Actual TV captures show the Lake Union/Fremont close-up, San Juan Islands,
+surface-following cable strokes, and the fitted native map key. Stale vessel
+observations were correctly omitted during this run; ship/aircraft shape and
+heading behavior have GPU/adapter test coverage, not a fresh-aircraft TV proof.
+Scoped native Rust test executables against the cached dependency artifacts
+passed 36 GFX, 4 adapter, 16 stream and 2 owner importer tests. Full-workspace
+validation remains blocked by the unrelated issues recorded in `dock-525`,
+`dock-9y6` and `dock-ulu`.
 
 Measurements used M1 Max / 32 GiB, macOS 15.0.1, Rust 1.98.1, the existing cached
 development dependency artifacts and an `opt-level=3, debuginfo=1` stream host.

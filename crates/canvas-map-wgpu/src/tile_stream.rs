@@ -46,12 +46,26 @@ impl LatestView {
     }
 }
 
-pub fn start(template: String) -> Stream {
+pub fn start(template: String, prewarm: Vec<TileView>) -> Stream {
     let sender = LatestView::default();
     let requests = sender.clone();
     let (results, receiver) = mpsc::sync_channel(1);
+    let cache = TileCache::from_environment(&template);
+    if let Some(prewarm_cache) = cache.clone().filter(|_| !prewarm.is_empty()) {
+        let prewarm_template = template.clone();
+        std::thread::spawn(move || {
+            for view in prewarm {
+                match load(view, &prewarm_template, Some(&prewarm_cache)) {
+                    Ok(raster) => eprintln!(
+                        "tiles: prefetched z={} count={} into provider cache",
+                        raster.zoom, raster.tiles
+                    ),
+                    Err(error) => eprintln!("tiles: destination prefetch unavailable: {error}"),
+                }
+            }
+        });
+    }
     std::thread::spawn(move || {
-        let cache = TileCache::from_environment(&template);
         // Four maximum-sized mosaics retain at most 64 MiB of decoded pixels.
         // Repeated views must not decode and upload the same imagery every two seconds.
         let mut prepared = VecDeque::new();
