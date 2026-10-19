@@ -22,6 +22,7 @@ struct Projection {
 }
 impl Projection {
     fn observe(&mut self, frame: Option<Frame>, now: Instant) -> Result<(), String> {
+        let previous_activity = self.observation.current(now).map(|frame| frame.activity);
         let same_live_session = self.observation.current(now).is_some_and(|previous| {
             frame.as_ref().is_some_and(|next| {
                 previous.source == next.source && previous.session == next.session
@@ -39,10 +40,7 @@ impl Projection {
             return Ok(());
         };
         let active = frame.activity != Activity::Hidden;
-        if active
-            && !self.active
-            && matches!(frame.activity, Activity::Listening | Activity::Resting)
-        {
+        if frame.activity == Activity::Listening && previous_activity != Some(Activity::Listening) {
             self.caption = None;
         }
         if let Some(caption) = frame.caption.filter(|s| !s.is_empty()) {
@@ -257,5 +255,31 @@ mod tests {
                 .is_none()
         );
         assert!(parse(r#"{"schema_version":1,"request_id":"x","command":{"command":"workspace_switch","name":"other"}}"#).is_err());
+    }
+
+    #[test]
+    fn immediate_followup_replaces_the_previous_heard_line_without_requiring_idle() {
+        let now = Instant::now();
+        let mut state = Projection::default();
+        state
+            .observe(
+                Some(frame(1, Activity::Speaking, Some("Jarvis, open Safari"))),
+                now,
+            )
+            .unwrap();
+        state
+            .observe(Some(frame(2, Activity::Listening, None)), now)
+            .unwrap();
+        assert!(state.current(now).unwrap().caption.is_none());
+        state
+            .observe(
+                Some(frame(3, Activity::Listening, Some("Jarvis, switch back"))),
+                now,
+            )
+            .unwrap();
+        assert_eq!(
+            state.current(now).unwrap().caption.as_deref(),
+            Some("Jarvis, switch back")
+        );
     }
 }
