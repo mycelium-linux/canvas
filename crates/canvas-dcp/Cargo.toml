@@ -1,0 +1,17 @@
+[package]
+name = "canvas-dcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+canvas.workspace = true
+canvas-core.workspace = true
+chrono.workspace = true
+dcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+tokio.workspace = true

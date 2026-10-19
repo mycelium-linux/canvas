@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/canvas-workspace", "crates/canvas-browser-host", "crates/canvas-feeds", "crates/canvas-alfalfa", "crates/canvas-bifrost", "crates/canvas-eval", "crates/canvas-fab", "crates/canvas-shroud", "crates/canvas-frigate", "crates/canvas-media-edge", "crates/canvas-model-host", "crates/canvas-model-viewer", "crates/canvas-metrics", "crates/canvas-sse", "crates/canvas", "crates/canvas-core", "crates/canvas-linux", "crates/canvas-mac", "crates/canvas-control", "crates/canvas-web", "crates/canvas-widgets", "crates/canvas-survey", "crates/canvas-agents", "crates/canvas-agent-bridge", ]
+members = ["crates/canvas-workspace", "crates/canvas-browser-host", "crates/canvas-feeds", "crates/canvas-alfalfa", "crates/canvas-bifrost", "crates/canvas-dcp", "crates/canvas-eval", "crates/canvas-fab", "crates/canvas-shroud", "crates/canvas-frigate", "crates/canvas-media-edge", "crates/canvas-model-host", "crates/canvas-model-viewer", "crates/canvas-metrics", "crates/canvas-sse", "crates/canvas", "crates/canvas-core", "crates/canvas-linux", "crates/canvas-mac", "crates/canvas-control", "crates/canvas-web", "crates/canvas-widgets", "crates/canvas-survey", "crates/canvas-agents", "crates/canvas-agent-bridge", ]
 default-members = ["crates/canvas-core", "crates/canvas-linux", "crates/canvas-mac"]
 exclude = ["vendor/coherence-tokens", "vendor/coherence-native", "vendor/iced_wgpu"]
 resolver = "2"
@@ -25,6 +25,10 @@ canvas = { path = "crates/canvas" }
 fpl-gfx = { git = "https://github.com/ajmwagar/gfx.git", rev = "ba980e8251ec65d3fc25bcd9cfa3b882ca0e1034" }
 coherence-native = { path = "vendor/coherence-native", default-features = false, features = ["gfx"] }
 anyhow = "1"
+axum = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+dcp = { git = "https://github.com/FuturePresentLabs/dcp.git", rev = "d3a1335" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 tempfile = "3"
 coherence-tokens = { path = "vendor/coherence-tokens" }
 # The household bus contract, shared with JARVIS (dock marbles dock-pubd).

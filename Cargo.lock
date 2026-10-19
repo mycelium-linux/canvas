@@ -573,6 +573,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "canvas-dcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "canvas",
+ "canvas-core",
+ "chrono",
+ "dcp",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "canvas-eval"
 version = "0.1.0"
 dependencies = [
@@ -1304,6 +1320,15 @@ name = "cursor-icon"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
+
+[[package]]
+name = "dcp"
+version = "0.1.0"
+source = "git+https://github.com/FuturePresentLabs/dcp.git?rev=d3a1335#d3a1335a7b046b06e96daf314a0feb7f85589d27"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "debugid"
