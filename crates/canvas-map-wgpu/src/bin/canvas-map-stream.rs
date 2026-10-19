@@ -510,11 +510,12 @@ async fn run(
             )?;
             trace.flush()?;
         }
+        // FFmpeg timestamps raw frames at the declared fixed rate. Preserve
+        // absolute deadlines after jitter, or production gradually falls behind
+        // that clock and drains the downstream live buffer.
         deadline += interval;
         if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
             std::thread::sleep(remaining);
-        } else {
-            deadline = Instant::now();
         }
     }
 }

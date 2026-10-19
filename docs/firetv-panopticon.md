@@ -162,6 +162,15 @@ budget. The cache change removes repeated decoding/uploads and replaces obsolete
 pending views, but scheduling was the substantial measured delivery problem.
 This distinction matters when diagnosing future regressions.
 
+A remaining cadence bug reset the absolute deadline after a late frame while
+FFmpeg continued assigning fixed-rate timestamps. Over 305 seconds, the running
+producer averaged 23.56 fps; such drift eventually drains a live buffer even
+when most individual frames are cheap. Keeping the absolute deadline lets short
+stalls catch up. The corrected installed producer delivered 24.007 fps over a
+130-second interval containing a complete tour. Raw trace:
+`/tmp/canvas-live-cadence.csv`. This producer measurement alone does not establish
+the TV player's buffering behavior.
+
 Measurements used M1 Max / 32 GiB, macOS 15.0.1, Rust 1.98.1, the existing cached
 development dependency artifacts and an `opt-level=3, debuginfo=1` stream host.
 They do not represent a fully optimized dependency build. Studio was under heavy
