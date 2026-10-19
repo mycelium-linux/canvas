@@ -195,6 +195,11 @@ impl Default for GlobeCamera {
 }
 
 impl GlobeCamera {
+    /// Nadir ground resolution estimate used by the shared tile planner.
+    pub fn meters_per_pixel(&self, viewport_height_px: u32) -> f64 {
+        2.0 * self.distance_m * (FIELD_OF_VIEW_Y_RADIANS * 0.5).tan()
+            / f64::from(viewport_height_px.max(1))
+    }
     pub fn target_ecef_m(self) -> [f64; 3] {
         geodetic_to_ecef(self.latitude, self.longitude, 0.0)
     }
@@ -232,7 +237,8 @@ impl GlobeCamera {
             .round()
             .max(1.0);
         let aspect = physical_width / physical_height;
-        let near = (self.distance_m * 0.000_001).clamp(0.05, 10_000.0);
+        // Keep enough depth precision for sea-level overlays during fly-ins.
+        let near = (self.distance_m * 0.01).clamp(0.05, 10_000.0);
         let far = self.distance_m + WGS84_SEMI_MAJOR_M * 3.0;
         let projection = perspective(FIELD_OF_VIEW_Y_RADIANS, aspect, near, far);
 

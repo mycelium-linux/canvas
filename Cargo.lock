@@ -615,9 +615,10 @@ name = "canvas-map-wgpu"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bytemuck",
  "canvas",
  "canvas-core",
+ "fpl-gfx",
+ "galileo",
  "image",
  "pollster",
  "serde",
@@ -1610,6 +1611,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fpl-gfx"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "serde",
+ "thiserror 2.0.20",
+ "wgpu",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1715,6 +1726,15 @@ dependencies = [
  "bitflags 2.13.1",
  "debugid",
  "fxhash",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "galileo"
+version = "0.1.0"
+dependencies = [
+ "panopticon-render-contract",
  "serde",
  "serde_json",
 ]
@@ -3478,6 +3498,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36820e9051aca1014ddc75770aab4d68bc1e9e632f0f5627c4086bc216fb583b"
 dependencies = [
  "ttf-parser",
+]
+
+[[package]]
+name = "panopticon-render-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

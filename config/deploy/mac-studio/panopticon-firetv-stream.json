@@ -9,11 +9,18 @@
     "key_file": "/Users/ajmwagar/.config/canvas-panopticon/spatial-owner.key"
   },
   "raster_path": "/Users/ajmwagar/src/fpl/panopticon/galileo/wasm/assets/earth.jpg",
+  "detail_tile_template": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
   "theme": {"source": "coherence", "mode": "dark", "accent": "info"},
   "camera": {
-    "latitude": 45.0,
-    "longitude": -125.0,
-    "distance_m": 8000000.0,
+    "tour": {"stops": [
+      {"name":"Puget Sound","latitude":47.6,"longitude":-122.5,"distance_m":180000,"hold_secs":25,"travel_secs":14},
+      {"name":"North America orbit","latitude":33,"longitude":-105,"distance_m":18000000,"hold_secs":3,"travel_secs":16},
+      {"name":"Puerto Rico","latitude":18.3,"longitude":-66.4,"distance_m":240000,"hold_secs":25,"travel_secs":14},
+      {"name":"Caribbean orbit","latitude":25,"longitude":-85,"distance_m":18000000,"hold_secs":4,"travel_secs":16}
+    ]},
+    "latitude": 47.3,
+    "longitude": -123.5,
+    "distance_m": 1000000.0,
     "pitch_degrees": 8.0,
     "orbit_degrees_per_second": 0.0
   }

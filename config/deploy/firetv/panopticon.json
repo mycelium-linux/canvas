@@ -15,7 +15,7 @@
     },
     {
       "id": "panopticon-source-status",
-      "title": "Marine · weather · network sites | 5s refresh · expired overlays hidden",
+      "title": "Puget Sound ↔ Puerto Rico | Imagery: Esri, Vantor, Earthstar, GIS community",
       "inputs": [],
       "content": {"kind": "scene", "scene": {"nodes": []}}
     }

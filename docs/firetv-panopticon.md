@@ -10,9 +10,23 @@ The profile uses Panopticon's existing Earth raster and canonical Coherence
 theme. Spatial layers come from the local owner's authenticated
 `/operator/spatial/snapshot` endpoint, refreshed every five seconds on a separate
 thread. The selected domains are vessels, HF radar, NOAA CO-OPS, marine and NWS
-weather, PeeringDB and RIPE Atlas. The camera holds the Pacific Northwest in view.
-These are point layers; chart tiles, boundaries and interactive camera control
-remain separate work. Temporal series render when supplied by the owner.
+weather, PeeringDB and RIPE Atlas. A deterministic tour holds over Puget Sound,
+pulls out to North America, flies into Puerto Rico, then returns through a
+Caribbean orbital view. Stops, dwell times and travel times live in
+`camera.tour.stops`. Camera travel follows short longitude arcs with eased
+position and geometric distance interpolation, remaining above the surface.
+These are point layers; nautical chart overlays, boundaries and interactive
+camera control remain separate work. Temporal series render when supplied by the owner.
+
+Detailed imagery uses Galileo's public renderer-neutral `tile_lod` and
+`tile_cache` modules with its desktop feature disabled. Camera ground resolution
+selects XYZ detail. A bounded worker fetches at most 64 tiles per region using
+four concurrent requests, validates 256×256 images, caches compressed provider
+bytes, and uploads a north-up mosaic. `fpl-gfx` samples that mosaic in Web
+Mercator over its retained global basemap, preserving global coverage while new
+regions load. Provider failures remain visible in the producer log and keep the
+last valid imagery. The TV caption credits the configured Esri World Imagery
+provider: Esri, Vantor, Earthstar Geographics and the GIS User Community.
 
 The credential lives in an owner-private file referenced by `live_snapshot.key_file`;
 never commit it or pass it in process arguments. The curl transport only accepts

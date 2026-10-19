@@ -26,10 +26,71 @@ pub struct SpatialFeature {
     pub identity: SpatialIdentity,
     pub geometry: SpatialGeometry,
     pub style_role: String,
+    pub temporal: Option<TemporalSeries>,
     pub measures: BTreeMap<String, f64>,
     pub summary: BTreeMap<String, Value>,
     pub provenance: Vec<SpatialProvenance>,
 }
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TemporalSeries {
+    Scalar {
+        role: String,
+        interpolation: TemporalInterpolation,
+        samples: Vec<TemporalScalarSample>,
+    },
+    Vector {
+        role: String,
+        interpolation: TemporalInterpolation,
+        samples: Vec<TemporalVectorSample>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TemporalInterpolation {
+    Step,
+    Linear,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TemporalScalarSample {
+    pub timestamp_unix_ms: u64,
+    pub value: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TemporalVectorSample {
+    pub timestamp_unix_ms: u64,
+    pub magnitude: f64,
+    pub direction_deg: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EvaluatedVector {
+    pub magnitude: f64,
+    pub direction_deg: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EvaluatedScalar {
+    pub value: f64,
+    pub normalized: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpatialDisplayPoint {
+    pub position: GeoPosition,
+    pub style_role: String,
+    pub size_px: f32,
+}
+
+const CURRENT_PARTICLES_PER_STATION: usize = 24;
+const CURRENT_TRAIL_LENGTH_M: f64 = 8_000.0;
+const CURRENT_VISUAL_TIME_SCALE: f64 = 120.0;
+const TIDE_RING_POINTS: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SpatialIdentity {
@@ -167,11 +228,36 @@ struct FeatureWire {
     #[serde(default, rename = "semantic")]
     _semantic: Option<Value>,
     #[serde(default)]
+    temporal: Option<TemporalWire>,
+    #[serde(default)]
     measures: BTreeMap<String, f64>,
     #[serde(default)]
     summary: BTreeMap<String, Value>,
     #[serde(default)]
     provenance: Vec<ProvenanceWire>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum TemporalWire {
+    Scalar {
+        role: String,
+        interpolation: TemporalInterpolation,
+        samples: Vec<TemporalScalarSample>,
+    },
+    Vector {
+        role: String,
+        interpolation: TemporalInterpolation,
+        #[serde(rename = "direction_convention")]
+        _direction_convention: DirectionConventionWire,
+        samples: Vec<TemporalVectorSample>,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DirectionConventionWire {
+    DegreesClockwiseFromTrueNorth,
 }
 
 #[derive(Deserialize)]
@@ -260,10 +346,12 @@ impl TryFrom<SnapshotWire> for SpatialFeatureSet {
                     uri: item.uri,
                 })
                 .collect();
+            let temporal = feature.temporal.map(TemporalSeries::try_from).transpose()?;
             features.push(SpatialFeature {
                 identity,
                 geometry,
                 style_role: feature.style_role,
+                temporal,
                 measures: feature.measures,
                 summary: feature.summary,
                 provenance,
@@ -282,6 +370,268 @@ impl TryFrom<SnapshotWire> for SpatialFeatureSet {
             features,
         })
     }
+}
+
+impl TryFrom<TemporalWire> for TemporalSeries {
+    type Error = MapError;
+
+    fn try_from(wire: TemporalWire) -> Result<Self, Self::Error> {
+        let series = match wire {
+            TemporalWire::Scalar {
+                role,
+                interpolation,
+                samples,
+            } => Self::Scalar {
+                role,
+                interpolation,
+                samples,
+            },
+            TemporalWire::Vector {
+                role,
+                interpolation,
+                _direction_convention: _,
+                samples,
+            } => Self::Vector {
+                role,
+                interpolation,
+                samples,
+            },
+        };
+        let (role, timestamps_valid, values_valid, count) = match &series {
+            Self::Scalar { role, samples, .. } => (
+                role,
+                samples
+                    .windows(2)
+                    .all(|pair| pair[0].timestamp_unix_ms < pair[1].timestamp_unix_ms),
+                samples.iter().all(|sample| sample.value.is_finite()),
+                samples.len(),
+            ),
+            Self::Vector { role, samples, .. } => (
+                role,
+                samples
+                    .windows(2)
+                    .all(|pair| pair[0].timestamp_unix_ms < pair[1].timestamp_unix_ms),
+                samples.iter().all(|sample| {
+                    sample.magnitude.is_finite()
+                        && sample.magnitude >= 0.0
+                        && sample.direction_deg.is_finite()
+                        && (0.0..360.0).contains(&sample.direction_deg)
+                }),
+                samples.len(),
+            ),
+        };
+        if !identifier(role, 128)
+            || count == 0
+            || count > 1_000
+            || !timestamps_valid
+            || !values_valid
+        {
+            return Err(MapError("invalid Panopticon temporal series".into()));
+        }
+        Ok(series)
+    }
+}
+
+impl TemporalSeries {
+    pub fn scalar_at(&self, timestamp_unix_ms: u64) -> Option<EvaluatedScalar> {
+        let Self::Scalar {
+            interpolation,
+            samples,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let value = evaluate_scalar(samples, *interpolation, timestamp_unix_ms)?;
+        let (minimum, maximum) = samples
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |range, sample| {
+                (range.0.min(sample.value), range.1.max(sample.value))
+            });
+        let normalized = if maximum > minimum {
+            ((value - minimum) / (maximum - minimum)).clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+        Some(EvaluatedScalar { value, normalized })
+    }
+
+    pub fn vector_at(&self, timestamp_unix_ms: u64) -> Option<EvaluatedVector> {
+        let Self::Vector {
+            interpolation,
+            samples,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        evaluate_vector(samples, *interpolation, timestamp_unix_ms)
+    }
+}
+
+fn evaluate_scalar(
+    samples: &[TemporalScalarSample],
+    interpolation: TemporalInterpolation,
+    timestamp_unix_ms: u64,
+) -> Option<f64> {
+    let first = *samples.first()?;
+    if timestamp_unix_ms <= first.timestamp_unix_ms {
+        return Some(first.value);
+    }
+    let last = *samples.last()?;
+    if timestamp_unix_ms >= last.timestamp_unix_ms {
+        return Some(last.value);
+    }
+    let upper = samples.partition_point(|sample| sample.timestamp_unix_ms <= timestamp_unix_ms);
+    let before = samples[upper - 1];
+    let after = samples[upper];
+    if interpolation == TemporalInterpolation::Step {
+        return Some(before.value);
+    }
+    let span = (after.timestamp_unix_ms - before.timestamp_unix_ms) as f64;
+    let mix = (timestamp_unix_ms - before.timestamp_unix_ms) as f64 / span;
+    Some(before.value + (after.value - before.value) * mix)
+}
+
+/// Evaluates renderer-neutral features into retained display points.
+///
+/// Current particles are deterministic functions of the explicit presentation
+/// timestamp, so realtime Canvas and fixed-step video renders produce the same
+/// scene without retaining simulation state.
+pub fn display_points_at(
+    features: &SpatialFeatureSet,
+    timestamp_unix_ms: u64,
+) -> Vec<SpatialDisplayPoint> {
+    let mut points = base_display_points(features);
+    points.extend(temporal_display_points_at(features, timestamp_unix_ms));
+    points
+}
+
+pub fn base_display_points(features: &SpatialFeatureSet) -> Vec<SpatialDisplayPoint> {
+    features
+        .features
+        .iter()
+        .filter_map(|feature| {
+            let SpatialGeometry::Point(position) = feature.geometry else {
+                return None;
+            };
+            let count = feature.measures.get("count").copied().unwrap_or(1.0);
+            Some(SpatialDisplayPoint {
+                position,
+                style_role: feature.style_role.clone(),
+                size_px: (5.0 + count.max(0.0).sqrt() as f32).clamp(5.0, 24.0),
+            })
+        })
+        .collect()
+}
+
+pub fn temporal_display_points_at(
+    features: &SpatialFeatureSet,
+    timestamp_unix_ms: u64,
+) -> Vec<SpatialDisplayPoint> {
+    let mut points = Vec::new();
+    for feature in &features.features {
+        let SpatialGeometry::Point(position) = feature.geometry else {
+            continue;
+        };
+        let Some(series) = &feature.temporal else {
+            continue;
+        };
+        match series {
+            TemporalSeries::Vector { role, .. } => {
+                let Some(vector) = series.vector_at(timestamp_unix_ms) else {
+                    continue;
+                };
+                let elapsed_s = timestamp_unix_ms as f64 / 1_000.0;
+                let advected_m = elapsed_s * vector.magnitude * CURRENT_VISUAL_TIME_SCALE;
+                for index in 0..CURRENT_PARTICLES_PER_STATION {
+                    let spacing_m = CURRENT_TRAIL_LENGTH_M / CURRENT_PARTICLES_PER_STATION as f64;
+                    let along_m = (advected_m + index as f64 * spacing_m)
+                        .rem_euclid(CURRENT_TRAIL_LENGTH_M)
+                        - CURRENT_TRAIL_LENGTH_M / 2.0;
+                    points.push(SpatialDisplayPoint {
+                        position: offset_position(position, vector.direction_deg, along_m),
+                        style_role: role.clone(),
+                        size_px: 2.0 + 2.0 * ((index % 6) as f32 / 5.0),
+                    });
+                }
+            }
+            TemporalSeries::Scalar { role, .. } => {
+                let Some(tide) = series.scalar_at(timestamp_unix_ms) else {
+                    continue;
+                };
+                let radius_m = 500.0 + tide.normalized * 1_500.0;
+                for index in 0..TIDE_RING_POINTS {
+                    points.push(SpatialDisplayPoint {
+                        position: offset_position(
+                            position,
+                            index as f64 * 360.0 / TIDE_RING_POINTS as f64,
+                            radius_m,
+                        ),
+                        style_role: role.clone(),
+                        size_px: 2.5,
+                    });
+                }
+            }
+        }
+    }
+    points
+}
+
+fn offset_position(origin: GeoPosition, direction_deg: f64, distance_m: f64) -> GeoPosition {
+    const EARTH_RADIUS_M: f64 = 6_371_008.8;
+    let angular = distance_m / EARTH_RADIUS_M;
+    let bearing = direction_deg.to_radians();
+    let latitude = origin.latitude.to_radians();
+    let longitude = origin.longitude.to_radians();
+    let destination_latitude =
+        (latitude.sin() * angular.cos() + latitude.cos() * angular.sin() * bearing.cos()).asin();
+    let destination_longitude = longitude
+        + (bearing.sin() * angular.sin() * latitude.cos())
+            .atan2(angular.cos() - latitude.sin() * destination_latitude.sin());
+    GeoPosition {
+        latitude: destination_latitude.to_degrees(),
+        longitude: (destination_longitude.to_degrees() + 180.0).rem_euclid(360.0) - 180.0,
+        altitude_m: origin.altitude_m,
+    }
+}
+
+fn evaluate_vector(
+    samples: &[TemporalVectorSample],
+    interpolation: TemporalInterpolation,
+    timestamp_unix_ms: u64,
+) -> Option<EvaluatedVector> {
+    let first = *samples.first()?;
+    if timestamp_unix_ms <= first.timestamp_unix_ms {
+        return Some(EvaluatedVector {
+            magnitude: first.magnitude,
+            direction_deg: first.direction_deg,
+        });
+    }
+    let last = *samples.last()?;
+    if timestamp_unix_ms >= last.timestamp_unix_ms {
+        return Some(EvaluatedVector {
+            magnitude: last.magnitude,
+            direction_deg: last.direction_deg,
+        });
+    }
+    let upper = samples.partition_point(|sample| sample.timestamp_unix_ms <= timestamp_unix_ms);
+    let before = samples[upper - 1];
+    let after = samples[upper];
+    if interpolation == TemporalInterpolation::Step {
+        return Some(EvaluatedVector {
+            magnitude: before.magnitude,
+            direction_deg: before.direction_deg,
+        });
+    }
+    let span = (after.timestamp_unix_ms - before.timestamp_unix_ms) as f64;
+    let mix = (timestamp_unix_ms - before.timestamp_unix_ms) as f64 / span;
+    let direction_delta =
+        (after.direction_deg - before.direction_deg + 540.0).rem_euclid(360.0) - 180.0;
+    Some(EvaluatedVector {
+        magnitude: before.magnitude + (after.magnitude - before.magnitude) * mix,
+        direction_deg: (before.direction_deg + direction_delta * mix).rem_euclid(360.0),
+    })
 }
 
 fn convert_geometry(wire: GeometryWire) -> Result<SpatialGeometry, MapError> {
@@ -416,5 +766,93 @@ mod tests {
             palette.color_for_role("domain.adsb"),
             palette.color_for_role("domain.adsb")
         );
+    }
+
+    #[test]
+    fn vector_interpolation_takes_the_short_path_across_north() {
+        let series = TemporalSeries::Vector {
+            role: "environment.water_current".into(),
+            interpolation: TemporalInterpolation::Linear,
+            samples: vec![
+                TemporalVectorSample {
+                    timestamp_unix_ms: 1_000,
+                    magnitude: 1.0,
+                    direction_deg: 350.0,
+                },
+                TemporalVectorSample {
+                    timestamp_unix_ms: 2_000,
+                    magnitude: 3.0,
+                    direction_deg: 10.0,
+                },
+            ],
+        };
+        let evaluated = series.vector_at(1_500).unwrap();
+        assert_eq!(evaluated.magnitude, 2.0);
+        assert!(evaluated.direction_deg < 0.001 || evaluated.direction_deg > 359.999);
+    }
+
+    #[test]
+    fn scalar_interpolation_reports_daily_range_position() {
+        let series = TemporalSeries::Scalar {
+            role: "environment.tide_height".into(),
+            interpolation: TemporalInterpolation::Linear,
+            samples: vec![
+                TemporalScalarSample {
+                    timestamp_unix_ms: 1_000,
+                    value: -1.0,
+                },
+                TemporalScalarSample {
+                    timestamp_unix_ms: 2_000,
+                    value: 3.0,
+                },
+            ],
+        };
+        let evaluated = series.scalar_at(1_500).unwrap();
+        assert_eq!(evaluated.value, 1.0);
+        assert_eq!(evaluated.normalized, 0.5);
+    }
+
+    #[test]
+    fn current_particles_are_deterministic_and_time_driven() {
+        let set = SpatialFeatureSet {
+            resource: MapResourceRef {
+                owner: "panopticon".into(),
+                id: "marine".into(),
+                contract: PANOPTICON_SNAPSHOT_V1.into(),
+            },
+            revision: 1,
+            generated_at_unix_ms: 1_000,
+            max_age_secs: 60,
+            features: vec![SpatialFeature {
+                identity: SpatialIdentity {
+                    domain: "noaa_coops".into(),
+                    entity_id: "current:test".into(),
+                },
+                geometry: SpatialGeometry::Point(GeoPosition {
+                    latitude: 48.0,
+                    longitude: -123.0,
+                    altitude_m: None,
+                }),
+                style_role: "domain.noaa_coops".into(),
+                temporal: Some(TemporalSeries::Vector {
+                    role: "environment.water_current".into(),
+                    interpolation: TemporalInterpolation::Linear,
+                    samples: vec![TemporalVectorSample {
+                        timestamp_unix_ms: 1_000,
+                        magnitude: 1.0,
+                        direction_deg: 90.0,
+                    }],
+                }),
+                measures: BTreeMap::new(),
+                summary: BTreeMap::new(),
+                provenance: Vec::new(),
+            }],
+        };
+        let first = display_points_at(&set, 1_000);
+        let repeated = display_points_at(&set, 1_000);
+        let later = display_points_at(&set, 2_000);
+        assert_eq!(first, repeated);
+        assert_eq!(first.len(), 1 + CURRENT_PARTICLES_PER_STATION);
+        assert_ne!(first[1].position, later[1].position);
     }
 }

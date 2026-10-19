@@ -17,8 +17,12 @@ use std::{
 };
 
 const BYTES_PER_PIXEL: u32 = 4;
+#[path = "../camera_tour.rs"]
+mod camera_tour;
 #[path = "../live_snapshot.rs"]
 mod live_snapshot;
+#[path = "../tile_stream.rs"]
+mod tile_stream;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -38,6 +42,8 @@ struct Config {
     live_snapshot: Option<live_snapshot::Source>,
     #[serde(default)]
     raster_path: Option<String>,
+    #[serde(default)]
+    detail_tile_template: Option<String>,
     theme: StreamTheme,
     camera: CameraConfig,
 }
@@ -61,6 +67,8 @@ impl StreamTheme {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CameraConfig {
+    #[serde(default)]
+    tour: Option<camera_tour::Tour>,
     latitude: f64,
     longitude: f64,
     distance_m: f64,
@@ -164,6 +172,9 @@ fn main() -> Result<()> {
 }
 
 fn validate(config: &Config) -> Result<()> {
+    if let Some(tour) = &config.camera.tour {
+        tour.validate().map_err(anyhow::Error::msg)?;
+    }
     ensure!(
         config.snapshot_path.is_none() || config.live_snapshot.is_none(),
         "choose a file snapshot or live owner, not both"
@@ -203,6 +214,8 @@ async fn run(
     snapshot: Option<canvas::map::spatial::SpatialFeatureSet>,
 ) -> Result<()> {
     let live = config.live_snapshot.as_ref().map(live_snapshot::start);
+    let tiles = config.detail_tile_template.clone().map(tile_stream::start);
+    let mut next_tile_request = Instant::now();
     let mut active_snapshot = snapshot.clone();
     let local_frame_path = config
         .source_id
@@ -350,18 +363,65 @@ async fn run(
                 eprintln!("spatial: stale; overlays cleared");
             }
         }
-        let longitude = wrap_longitude(
-            config.camera.longitude
-                + started.elapsed().as_secs_f64() * config.camera.orbit_degrees_per_second,
+        let pose = config
+            .camera
+            .tour
+            .as_ref()
+            .map(|tour| tour.sample(started.elapsed().as_secs_f64()));
+        let longitude = pose.as_ref().map_or_else(
+            || {
+                wrap_longitude(
+                    config.camera.longitude
+                        + started.elapsed().as_secs_f64() * config.camera.orbit_degrees_per_second,
+                )
+            },
+            |pose| pose.longitude,
         );
-        let plan = GlobeCamera {
-            latitude: config.camera.latitude,
+        let camera = GlobeCamera {
+            latitude: pose
+                .as_ref()
+                .map_or(config.camera.latitude, |pose| pose.latitude),
             longitude,
-            distance_m: config.camera.distance_m,
+            distance_m: pose
+                .as_ref()
+                .map_or(config.camera.distance_m, |pose| pose.distance_m),
             bearing_degrees: 0.0,
             pitch_degrees: config.camera.pitch_degrees,
+        };
+        if let Some(tiles) = &tiles {
+            if let Ok(result) = tiles.results.try_recv() {
+                match result {
+                    Ok(raster) => {
+                        renderer.set_mercator_detail_rgba8(
+                            &device,
+                            &queue,
+                            raster.image.width(),
+                            raster.image.height(),
+                            raster.bounds,
+                            raster.image.as_raw(),
+                        )?;
+                        eprintln!(
+                            "tiles: uploaded z={} count={} bounds={:?}",
+                            raster.zoom, raster.tiles, raster.bounds
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!("tiles: detail unavailable; retaining basemap: {error}")
+                    }
+                }
+            }
+            if Instant::now() >= next_tile_request && camera.distance_m < 4_000_000.0 {
+                let _ = tiles.requests.try_send(galileo::tile_lod::TileView {
+                    latitude: camera.latitude,
+                    longitude: camera.longitude,
+                    meters_per_pixel: camera.meters_per_pixel(config.height),
+                    viewport_width_px: f64::from(config.width),
+                    viewport_height_px: f64::from(config.height),
+                });
+                next_tile_request = Instant::now() + Duration::from_secs(2);
+            }
         }
-        .frame_plan(
+        let plan = camera.frame_plan(
             SurfaceMetrics {
                 logical_width: f64::from(config.width),
                 logical_height: f64::from(config.height),
@@ -372,7 +432,18 @@ async fn run(
         let mut commands = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Panopticon globe stream frame"),
         });
-        renderer.render_into(&device, &queue, &mut commands, &view, &plan)?;
+        let timestamp_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .context("system clock predates Unix epoch")?
+            .as_millis() as u64;
+        renderer.render_into(
+            &device,
+            &queue,
+            &mut commands,
+            &view,
+            &plan,
+            timestamp_unix_ms,
+        )?;
         commands.copy_texture_to_buffer(
             target.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
