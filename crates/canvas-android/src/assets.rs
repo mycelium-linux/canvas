@@ -189,7 +189,10 @@ mod tests {
         };
         let path = root.join("assets").join(&asset.sha256);
         std::fs::write(&path, bytes).unwrap();
-        assert_eq!(verified_pdf(&root, &asset).unwrap(), path);
+        assert_eq!(
+            verified_pdf(&root, &asset).unwrap(),
+            path.canonicalize().unwrap()
+        );
         assert!(verified_pdf_viewports(&root, &asset).unwrap().is_none());
         let sidecar = root
             .join("assets")

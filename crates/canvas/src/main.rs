@@ -498,7 +498,11 @@ enum Message {
     ShellDockActivate(String),
     ShellDockReply(Result<Receipt, String>),
     ShellPinToggle(String),
-    ShellLauncherPick { generation: u64, revision: String, entry_id: String },
+    ShellLauncherPick {
+        generation: u64,
+        revision: String,
+        entry_id: String,
+    },
     ShellNewTask,
     /// A gesture on a model surface. Carries the stream rather than the
     /// surface: the camera belongs to the thing being rendered, so two
@@ -632,12 +636,31 @@ fn window_action_label(action: WindowAction, maximized: bool) -> &'static str {
 
 /// The surfaces a canvas layout presents, in layer order.
 fn placement_surface_ids(layout: &Layout) -> Vec<String> {
+    ::canvas::layout_tree::placements(layout)
+        .into_iter()
+        .map(|placement| placement.surface_id)
+        .collect()
+}
+
+/// The surfaces a layout is actively showing. Parked stack members remain
+/// part of the document but must not keep media decoders or external streams
+/// alive while another member covers them.
+fn visible_surface_ids(layout: &Layout) -> Vec<String> {
     match layout {
+        Layout::Empty => Vec::new(),
+        Layout::Surface { surface_id } => vec![surface_id.clone()],
+        Layout::Split { first, second, .. } => {
+            let mut ids = visible_surface_ids(first);
+            ids.extend(visible_surface_ids(second));
+            ids
+        }
+        Layout::Stack {
+            active_surface_id, ..
+        } => vec![active_surface_id.clone()],
         Layout::Canvas { placements } => placements
             .iter()
             .map(|placement| placement.surface_id.clone())
             .collect(),
-        _ => Vec::new(),
     }
 }
 
@@ -754,7 +777,12 @@ struct App {
     dock_apps: Vec<::canvas::shell_launcher::Entry>,
     dock_icons: BTreeMap<String, iced::widget::image::Handle>,
     dock_icon_failures: BTreeSet<String>,
-    dock_icon_worker: Option<std::sync::mpsc::Receiver<(Vec<String>, Vec<(String, Result<Option<iced::widget::image::Handle>, String>)>)>>,
+    dock_icon_worker: Option<
+        std::sync::mpsc::Receiver<(
+            Vec<String>,
+            Vec<(String, Result<Option<iced::widget::image::Handle>, String>)>,
+        )>,
+    >,
     #[cfg(feature = "lua-scenes")]
     desktop_bar: ::canvas::shell_presentation::Presentation,
     #[cfg(all(unix, feature = "lua-scenes"))]
@@ -782,6 +810,10 @@ struct App {
     stream_started_at: Instant,
     #[cfg(feature = "lua-scenes")]
     stream_last_applied: BTreeMap<String, Instant>,
+    #[cfg(feature = "lua-scenes")]
+    stream_descriptors: BTreeMap<String, serde_json::Value>,
+    #[cfg(feature = "lua-scenes")]
+    stream_endpoints: BTreeMap<String, serde_json::Value>,
     /// Surface -> stamp of the frame currently being decoded off-thread.
     /// Blocks duplicate spawns and lets a stale arrival be discarded.
     live_pending: BTreeMap<String, (std::time::SystemTime, u64)>,
@@ -822,6 +854,8 @@ struct App {
     presence_preview: Option<PresencePreviewVisual>,
     visible_indicator_id: Option<String>,
     indicator_started: Instant,
+    indicator_dismissing: Option<(StatusIndicator, Instant)>,
+    voice_indicator_seen: Option<Instant>,
     metrics: hud::LocalMetrics,
     metrics_last: Instant,
     system: sysinfo::System,
@@ -1207,6 +1241,10 @@ impl App {
             stream_started_at: Instant::now(),
             #[cfg(feature = "lua-scenes")]
             stream_last_applied: BTreeMap::new(),
+            #[cfg(feature = "lua-scenes")]
+            stream_descriptors: BTreeMap::new(),
+            #[cfg(feature = "lua-scenes")]
+            stream_endpoints: BTreeMap::new(),
             live_pending: BTreeMap::new(),
             live_frame_cache: BTreeMap::new(),
             camera_detections: BTreeMap::new(),
@@ -1230,6 +1268,8 @@ impl App {
             presence_preview: None,
             visible_indicator_id: None,
             indicator_started: Instant::now(),
+            indicator_dismissing: None,
+            voice_indicator_seen: None,
             metrics: hud::LocalMetrics {
                 name: hostname(),
                 cpu_percent: 0.0,
@@ -1678,15 +1718,25 @@ impl App {
             #[cfg(all(unix, feature = "lua-scenes"))]
             Message::NativeSwitcherTick => {
                 let visual = self.presented_visual_theme();
-                let theme = ::canvas::lua_module::ModuleThemeTokens::from_visual(&visual, self.effective_theme(&self.document).accent());
-                let Some(host) = &mut self.native_switcher else { return Task::none(); };
-                if let Err(error) = host.refresh(theme) { eprintln!("native switcher presentation: {error}"); }
+                let theme = ::canvas::lua_module::ModuleThemeTokens::from_visual(
+                    &visual,
+                    self.effective_theme(&self.document).accent(),
+                );
+                let Some(host) = &mut self.native_switcher else {
+                    return Task::none();
+                };
+                if let Err(error) = host.refresh(theme) {
+                    eprintln!("native switcher presentation: {error}");
+                }
                 if host.window.is_none() {
                     if let Some(snapshot) = &host.snapshot {
                         let mut settings = canvas_window_settings(snapshot.switcher.frame);
                         settings.transparent = true;
                         #[cfg(target_os = "linux")]
-                        { settings.platform_specific.application_id = canvas_core::native_control::SWITCHER_APP_ID.into(); }
+                        {
+                            settings.platform_specific.application_id =
+                                canvas_core::native_control::SWITCHER_APP_ID.into();
+                        }
                         let (window, open) = iced::window::open(settings);
                         host.window = Some(window);
                         return open.map(|_| Message::NativeSwitcherTick);
@@ -1750,14 +1800,27 @@ impl App {
                 Task::none()
             }
             Message::ShellProjects => self.toggle_project_switcher(),
-            Message::ShellLauncherPick { generation, revision, entry_id } => {
+            Message::ShellLauncherPick {
+                generation,
+                revision,
+                entry_id,
+            } => {
                 if self.window_cycle.active() {
                     if let Some(id) = entry_id.strip_prefix("surface:") {
-                        let valid = self.project_switcher.as_ref().is_some_and(|picker|
-                            picker.generation == generation && picker.catalog.as_ref()
-                                .is_some_and(|catalog| catalog.revision == revision)
-                                && picker.matches().iter().any(|entry| entry.id == entry_id));
-                        if valid && self.cycle_window_ids().iter().any(|candidate| candidate == id) {
+                        let valid = self.project_switcher.as_ref().is_some_and(|picker| {
+                            picker.generation == generation
+                                && picker
+                                    .catalog
+                                    .as_ref()
+                                    .is_some_and(|catalog| catalog.revision == revision)
+                                && picker.matches().iter().any(|entry| entry.id == entry_id)
+                        });
+                        if valid
+                            && self
+                                .cycle_window_ids()
+                                .iter()
+                                .any(|candidate| candidate == id)
+                        {
                             self.window_cycle.cancel();
                             self.project_switcher = None;
                             self.focus_shell_surface(id);
@@ -1765,7 +1828,9 @@ impl App {
                     }
                     return Task::none();
                 }
-                if self.project_switcher.as_mut().is_some_and(|picker| picker.select_entry(generation, &revision, &entry_id, now_unix_ms())) {
+                if self.project_switcher.as_mut().is_some_and(|picker| {
+                    picker.select_entry(generation, &revision, &entry_id, now_unix_ms())
+                }) {
                     return self.activate_launcher_choice();
                 }
                 Task::none()
@@ -1780,15 +1845,34 @@ impl App {
             }
             Message::ShellDockActivate(id) => {
                 let catalog = self.launcher_catalog();
-                let command = Command::ShellActivate { catalog_revision: catalog.revision, entry_id: id };
-                let target = ::canvas::shell_launcher::Target { id: "local".into(), label: "This screen".into(), mycelium_peer: None, unix_user: None };
+                let command = Command::ShellActivate {
+                    catalog_revision: catalog.revision,
+                    entry_id: id,
+                };
+                let target = ::canvas::shell_launcher::Target {
+                    id: "local".into(),
+                    label: "This screen".into(),
+                    mycelium_peer: None,
+                    unix_user: None,
+                };
                 let (send, receive) = iced::futures::channel::oneshot::channel();
-                std::thread::spawn(move || { let _ = send.send(::canvas::shell_launcher::request(&target, command)); });
-                Task::perform(async move { receive.await.unwrap_or_else(|_| Err("Dock launch worker stopped".into())) }, Message::ShellDockReply)
+                std::thread::spawn(move || {
+                    let _ = send.send(::canvas::shell_launcher::request(&target, command));
+                });
+                Task::perform(
+                    async move {
+                        receive
+                            .await
+                            .unwrap_or_else(|_| Err("Dock launch worker stopped".into()))
+                    },
+                    Message::ShellDockReply,
+                )
             }
             Message::ShellDockReply(result) => {
                 self.status = match result {
-                    Ok(Receipt::ShellActivated { .. }) => "Native application opened; capture remains separate.".into(),
+                    Ok(Receipt::ShellActivated { .. }) => {
+                        "Native application opened; capture remains separate.".into()
+                    }
                     Ok(_) => "Unexpected dock action receipt".into(),
                     Err(error) => format!("Dock action failed: {error}"),
                 };
@@ -1799,7 +1883,12 @@ impl App {
                 let pinned = !self.dock_pins.0.contains(&id);
                 let catalog = self.launcher_catalog();
                 self.status = match self.set_dock_pin(&id, pinned, &catalog.entries) {
-                    Ok(()) => if pinned { "Application pinned to this machine's dock" } else { "Application unpinned" }.into(),
+                    Ok(()) => if pinned {
+                        "Application pinned to this machine's dock"
+                    } else {
+                        "Application unpinned"
+                    }
+                    .into(),
                     Err(error) => format!("Dock pin failed: {error}"),
                 };
                 self.bump();
@@ -1852,6 +1941,14 @@ impl App {
                 self.navigate_pdf(surface_id, target, None)
             }
             Message::Tick => {
+                if self.expire_voice_indicator(Instant::now()) { self.bump(); }
+                if self.indicator_dismissing.as_ref().is_some_and(|(_, since)| {
+                    since.elapsed().as_secs_f32() >= fpl_gfx::voice_popup::DISMISS_SECONDS
+                }) {
+                    self.indicator_dismissing = None;
+                }
+                #[cfg(feature = "lua-scenes")]
+                self.drain_module_bus();
                 let previous_notification_count = self.notifications.len();
                 self.notifications
                     .retain(|item| item.shown_at.elapsed() < NOTIFICATION_LIFETIME);
@@ -1879,8 +1976,6 @@ impl App {
                         self.refresh_interaction_geometry();
                         self.bump();
                     }
-                    #[cfg(feature = "lua-scenes")]
-                    self.drain_module_bus();
                 }
                 let clock_second = now_unix_ms() / 1_000;
                 if clock_second != self.last_clock_second {
@@ -1976,10 +2071,11 @@ impl App {
                     self.refresh_stream_health();
                 }
                 let mut tasks = vec![self.drain_commands(), self.reload_live_images()];
-                if !self.window_cycle.active() && let Some((target, generation)) = self
-                    .project_switcher
-                    .as_mut()
-                    .and_then(|l| l.refresh_due(now_unix_ms()))
+                if !self.window_cycle.active()
+                    && let Some((target, generation)) = self
+                        .project_switcher
+                        .as_mut()
+                        .and_then(|l| l.refresh_due(now_unix_ms()))
                 {
                     tasks.push(launcher_task(
                         target,
@@ -2049,10 +2145,16 @@ impl App {
             }
             Message::WindowEvent(window, event) => {
                 #[cfg(all(unix, feature = "lua-scenes"))]
-                if self.native_switcher.as_ref().is_some_and(|host| host.window == Some(window)) {
+                if self
+                    .native_switcher
+                    .as_ref()
+                    .is_some_and(|host| host.window == Some(window))
+                {
                     // Presentation-only overlay never participates in desktop focus bookkeeping.
                     if matches!(event, iced::window::Event::Closed) {
-                        if let Some(host) = &mut self.native_switcher { host.window = None; }
+                        if let Some(host) = &mut self.native_switcher {
+                            host.window = None;
+                        }
                     }
                     return Task::none();
                 }
@@ -2762,6 +2864,66 @@ impl App {
         if events.is_empty() {
             return;
         }
+        let now = ::canvas::stream_binding::now_ms();
+        self.stream_endpoints.retain(|_, announcement| {
+            announcement
+                .get("valid_until_unix_ms")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|valid_until| valid_until > now)
+        });
+        let descriptor_events = events
+            .extract_if(.., |event| {
+                event.contract == stream_descriptors::STREAM_DESCRIPTOR_KIND
+            })
+            .collect::<Vec<_>>();
+        for event in descriptor_events {
+            match serde_json::from_value::<stream_descriptors::StreamDescriptorV1>(event.payload) {
+                Ok(descriptor) => match descriptor.validate() {
+                    Ok(()) => {
+                        let key = format!("{}/{}", event.owner, descriptor.stream_id);
+                        let mut value = serde_json::to_value(descriptor)
+                            .expect("validated stream descriptor serializes");
+                        value["owner"] = serde_json::Value::String(event.owner);
+                        self.stream_descriptors.insert(key, value);
+                    }
+                    Err(error) => {
+                        eprintln!("Canvas rejected stream descriptor: {error}");
+                        self.emit_event(format!("stream_descriptor_rejected error={error}"));
+                    }
+                },
+                Err(error) => {
+                    eprintln!("Canvas rejected stream descriptor: {error}");
+                    self.emit_event(format!("stream_descriptor_rejected error={error}"));
+                }
+            }
+        }
+        let endpoint_events = events
+            .extract_if(.., |event| {
+                event.contract == stream_descriptors::ENDPOINT_ANNOUNCEMENT_KIND
+            })
+            .collect::<Vec<_>>();
+        for event in endpoint_events {
+            match serde_json::from_value::<stream_descriptors::EndpointAnnouncementV1>(
+                event.payload,
+            ) {
+                Ok(announcement) => match announcement.validate(now) {
+                    Ok(()) => {
+                        let key = format!("{}/{}", event.owner, announcement.stream_id);
+                        self.stream_endpoints.insert(
+                            key,
+                            serde_json::to_value(announcement)
+                                .expect("validated endpoint announcement serializes"),
+                        );
+                    }
+                    Err(error) => {
+                        self.emit_event(format!("stream_endpoints_rejected error={error}"));
+                    }
+                },
+                Err(error) => {
+                    self.emit_event(format!("stream_endpoints_rejected error={error}"));
+                }
+            }
+        }
         // Task lifecycle is Canvas chrome rather than a widget presentation.
         // Consume the generic status contract before Lua-bound widget events;
         // tool-specific build facts still flow through their Lua binders.
@@ -2818,7 +2980,6 @@ impl App {
         if events.is_empty() {
             return;
         }
-        let now = ::canvas::stream_binding::now_ms();
         let bindings = self.document.bindings.clone();
         let mut applied = 0_u64;
         let mut rejected = 0_u64;
@@ -3874,15 +4035,26 @@ impl App {
     }
 
     fn activate_launcher_choice(&mut self) -> Task<Message> {
-        let Some(picker) = self.project_switcher.as_mut() else { return Task::none(); };
-        if picker.busy { return Task::none(); }
+        let Some(picker) = self.project_switcher.as_mut() else {
+            return Task::none();
+        };
+        if picker.busy {
+            return Task::none();
+        }
         let action = picker.action(now_unix_ms());
         let generation = picker.generation;
         picker.busy = action.is_some();
-        picker.status = if action.is_some() { "Opening on selected screen…" } else { "Unavailable / stale · F5 to refresh" }.into();
+        picker.status = if action.is_some() {
+            "Opening on selected screen…"
+        } else {
+            "Unavailable / stale · F5 to refresh"
+        }
+        .into();
         self.refresh_launcher_scene();
         self.bump();
-        action.map(|(target, command)| launcher_task(target, command, generation, true)).unwrap_or_else(Task::none)
+        action
+            .map(|(target, command)| launcher_task(target, command, generation, true))
+            .unwrap_or_else(Task::none)
     }
 
     fn refresh_launcher_scene(&mut self) {
@@ -3893,8 +4065,10 @@ impl App {
             let theme = ::canvas::lua_module::ModuleThemeTokens::from_visual(&visual, accent);
             if let Some(launcher) = self.project_switcher.as_mut() {
                 launcher.viewport = ::canvas::shell_geometry::sheet_size(
-                    launcher.window_cycle, launcher.matches().len(),
-                    [self.frame.width as f32, self.frame.height as f32]);
+                    launcher.window_cycle,
+                    launcher.matches().len(),
+                    [self.frame.width as f32, self.frame.height as f32],
+                );
                 if let Err(error) = launcher.render(theme, now_unix_ms()) {
                     launcher.status = format!("Launcher Lua error: {error}");
                     self.status = launcher.status.clone();
@@ -3906,26 +4080,77 @@ impl App {
     #[cfg(feature = "lua-scenes")]
     fn refresh_desktop_bar(&mut self, poll_files: bool) {
         self.cache_dock_icons();
-        use ::canvas::lua_module::{ModuleInputSnapshot, ModuleInputValue as Value, ModuleThemeTokens};
+        use ::canvas::lua_module::{
+            ModuleInputSnapshot, ModuleInputValue as Value, ModuleThemeTokens,
+        };
         let visual = self.presented_visual_theme();
         let accent = self.effective_theme(&self.document).accent();
         let now = canvas_widgets::live::chrono_now();
-        let sources = self.decoded.values().filter(|s| matches!(s.source, ContentSource::LiveVideo { .. })).count();
+        let sources = self
+            .decoded
+            .values()
+            .filter(|s| matches!(s.source, ContentSource::LiveVideo { .. }))
+            .count();
         let creator = self.decoded.values().any(|s| matches!(&s.source, ContentSource::Prompt { task_kinds, .. } if !task_kinds.is_empty()));
         let values = BTreeMap::from([
-            ("width".into(), Value::Number(f64::from(self.frame.width.max(1)))),
-            ("height".into(), Value::Number(f64::from(::canvas::DESKTOP_BAR_HEIGHT))),
-            ("bar_padding".into(), Value::Number(f64::from(fpl_gfx::chrome::BAR_PADDING))),
-            ("bar_text_size".into(), Value::Number(f64::from(fpl_gfx::chrome::BAR_TEXT_SIZE))),
-            ("workspace".into(), Value::Text(workspace_identity_name(&self.catalog, &self.document.project_id).chars().take(24).collect::<String>())),
-            ("page".into(), Value::Text(self.document.active_page_name().chars().take(20).collect::<String>())),
-            ("clock".into(), Value::Text(format!("{:02}:{:02}:{:02}", now.hour, now.minute, now.second))),
+            (
+                "width".into(),
+                Value::Number(f64::from(self.frame.width.max(1))),
+            ),
+            (
+                "height".into(),
+                Value::Number(f64::from(::canvas::DESKTOP_BAR_HEIGHT)),
+            ),
+            (
+                "padding".into(),
+                Value::Number(f64::from(fpl_gfx::chrome::BAR_PADDING)),
+            ),
+            (
+                "labelsize".into(),
+                Value::Number(f64::from(fpl_gfx::chrome::BAR_TEXT_SIZE)),
+            ),
+            (
+                "workspace".into(),
+                Value::Text(
+                    workspace_identity_name(&self.catalog, &self.document.project_id)
+                        .chars()
+                        .take(24)
+                        .collect::<String>(),
+                ),
+            ),
+            (
+                "page".into(),
+                Value::Text(
+                    self.document
+                        .active_page_name()
+                        .chars()
+                        .take(20)
+                        .collect::<String>(),
+                ),
+            ),
+            (
+                "clock".into(),
+                Value::Text(format!(
+                    "{:02}:{:02}:{:02}",
+                    now.hour, now.minute, now.second
+                )),
+            ),
             ("sources".into(), Value::Number(sources as f64)),
-            ("back".into(), Value::Boolean(self.jump_history.can_go_back())),
-            ("forward".into(), Value::Boolean(self.jump_history.can_go_forward())),
+            (
+                "back".into(),
+                Value::Boolean(self.jump_history.can_go_back()),
+            ),
+            (
+                "forward".into(),
+                Value::Boolean(self.jump_history.can_go_forward()),
+            ),
             ("create".into(), Value::Boolean(creator)),
         ]);
-        let snapshot = ModuleInputSnapshot { revision: 1, now_ms: (now_unix_ms() / 1000 * 1000).max(1), values };
+        let snapshot = ModuleInputSnapshot {
+            revision: 1,
+            now_ms: (now_unix_ms() / 1000 * 1000).max(1),
+            values,
+        };
         let theme = ModuleThemeTokens::from_visual(&visual, accent);
         let artifact = ::canvas::shell_presentation::DESKTOP_BAR;
         let result = if poll_files {
@@ -3941,35 +4166,69 @@ impl App {
 
     #[cfg(feature = "lua-scenes")]
     fn refresh_desktop_dock(&mut self, poll_files: bool) {
-        use ::canvas::lua_module::{ModuleInputSnapshot, ModuleInputValue as Value, ModuleThemeTokens};
+        use ::canvas::lua_module::{
+            ModuleInputSnapshot, ModuleInputValue as Value, ModuleThemeTokens,
+        };
         let entries = self.dock_entries();
         let mut values = BTreeMap::from([
-            ("width".into(), Value::Number(f64::from(self.frame.width.max(1)))),
-            ("height".into(), Value::Number(f64::from(::canvas::shell_geometry::DOCK_HEIGHT))),
+            (
+                "width".into(),
+                Value::Number(f64::from(self.frame.width.max(1))),
+            ),
+            (
+                "height".into(),
+                Value::Number(f64::from(::canvas::shell_geometry::DOCK_HEIGHT)),
+            ),
             ("count".into(), Value::Number(entries.len() as f64)),
         ]);
         for (n, entry) in entries.iter().take(6).enumerate() {
             let key = format!("item{n}");
             let surface_id = entry.id.strip_prefix("surface:");
             values.insert(format!("{key}-id"), Value::Text(entry.id.clone()));
-            values.insert(format!("{key}-title"), Value::Text(entry.title.chars().take(16).collect()));
-            values.insert(format!("{key}-focused"), Value::Boolean(!self.desktop_focused && surface_id.is_some_and(|id| self.document.focused_surface_id.as_deref() == Some(id))));
-            values.insert(format!("{key}-minimized"), Value::Boolean(surface_id.is_some_and(|id| self.minimized_surfaces.contains(id))));
+            values.insert(
+                format!("{key}-title"),
+                Value::Text(entry.title.chars().take(16).collect()),
+            );
+            values.insert(
+                format!("{key}-focused"),
+                Value::Boolean(
+                    !self.desktop_focused
+                        && surface_id.is_some_and(|id| {
+                            self.document.focused_surface_id.as_deref() == Some(id)
+                        }),
+                ),
+            );
+            values.insert(
+                format!("{key}-minimized"),
+                Value::Boolean(surface_id.is_some_and(|id| self.minimized_surfaces.contains(id))),
+            );
             values.insert(format!("{key}-available"), Value::Boolean(entry.available));
             values.insert(format!("{key}-open"), Value::Boolean(surface_id.is_some()));
         }
         let visual = self.presented_visual_theme();
-        let theme = ModuleThemeTokens::from_visual(&visual, self.effective_theme(&self.document).accent());
-        let snapshot = ModuleInputSnapshot { revision: 1, now_ms: 1, values };
+        let theme =
+            ModuleThemeTokens::from_visual(&visual, self.effective_theme(&self.document).accent());
+        let snapshot = ModuleInputSnapshot {
+            revision: 1,
+            now_ms: 1,
+            values,
+        };
         let artifact = ::canvas::shell_presentation::DESKTOP_DOCK;
-        let result = if poll_files { self.desktop_dock.refresh_files(artifact, snapshot, theme) }
-            else { self.desktop_dock.refresh_current(artifact, snapshot, theme) };
-        if let Err(error) = result { self.status = format!("Desktop dock Lua error (last good retained): {error}"); }
+        let result = if poll_files {
+            self.desktop_dock.refresh_files(artifact, snapshot, theme)
+        } else {
+            self.desktop_dock.refresh_current(artifact, snapshot, theme)
+        };
+        if let Err(error) = result {
+            self.status = format!("Desktop dock Lua error (last good retained): {error}");
+        }
     }
 
     fn cache_dock_icons(&mut self) {
-        self.dock_icons.retain(|id, _| self.dock_pins.0.contains(id));
-        self.dock_icon_failures.retain(|id| self.dock_pins.0.contains(id));
+        self.dock_icons
+            .retain(|id, _| self.dock_pins.0.contains(id));
+        self.dock_icon_failures
+            .retain(|id| self.dock_pins.0.contains(id));
         if let Some(worker) = &self.dock_icon_worker {
             match worker.try_recv() {
                 Ok((pins, results)) => {
@@ -3978,8 +4237,12 @@ impl App {
                     if pins == self.dock_pins.0 {
                         for (id, result) in results {
                             match result {
-                                Ok(Some(icon)) => { self.dock_icons.insert(id, icon); }
-                                Ok(None) => { self.dock_icon_failures.insert(id); }
+                                Ok(Some(icon)) => {
+                                    self.dock_icons.insert(id, icon);
+                                }
+                                Ok(None) => {
+                                    self.dock_icon_failures.insert(id);
+                                }
                                 Err(error) => {
                                     eprintln!("Dock icon unavailable for {id}: {error}");
                                     self.dock_icon_failures.insert(id);
@@ -3991,33 +4254,61 @@ impl App {
                 Err(std::sync::mpsc::TryRecvError::Empty) => return,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.dock_icon_worker = None;
-                    self.dock_icon_failures.extend(self.dock_pins.0.iter().cloned());
+                    self.dock_icon_failures
+                        .extend(self.dock_pins.0.iter().cloned());
                     self.status = "Dock icon worker stopped; semantic icons retained".into();
                 }
             }
         }
-        let jobs: Vec<_> = self.dock_apps.iter().filter(|entry| self.dock_pins.0.contains(&entry.id)
-            && !self.dock_icons.contains_key(&entry.id) && !self.dock_icon_failures.contains(&entry.id)).cloned().collect();
-        if jobs.is_empty() { return; }
+        let jobs: Vec<_> = self
+            .dock_apps
+            .iter()
+            .filter(|entry| {
+                self.dock_pins.0.contains(&entry.id)
+                    && !self.dock_icons.contains_key(&entry.id)
+                    && !self.dock_icon_failures.contains(&entry.id)
+            })
+            .cloned()
+            .collect();
+        if jobs.is_empty() {
+            return;
+        }
         let pins = self.dock_pins.0.clone();
         let (send, receive) = std::sync::mpsc::channel();
         self.dock_icon_worker = Some(receive);
         // Exactly one lookup job may be outstanding. No AppKit or decoding work
         // runs in the update/view thread; failed lookups are negatively cached.
         std::thread::spawn(move || {
-            let results = jobs.into_iter().map(|entry| {
-                let result = ::canvas::shell_dock::icon(&entry);
-                (entry.id, result)
-            }).collect();
+            let results = jobs
+                .into_iter()
+                .map(|entry| {
+                    let result = ::canvas::shell_dock::icon(&entry);
+                    (entry.id, result)
+                })
+                .collect();
             let _ = send.send((pins, results));
         });
     }
 
-    fn set_dock_pin(&mut self, id: &str, pinned: bool, entries: &[::canvas::shell_launcher::Entry]) -> Result<(), String> {
+    fn set_dock_pin(
+        &mut self,
+        id: &str,
+        pinned: bool,
+        entries: &[::canvas::shell_launcher::Entry],
+    ) -> Result<(), String> {
         let next = self.dock_pins.updated(id, pinned, entries)?;
         next.save()?; // Durable write before visible mutation.
         self.dock_pins = next;
-        self.dock_apps = entries.iter().filter(|e| matches!(e.choice, ::canvas::shell_launcher::Choice::Application { .. })).cloned().collect();
+        self.dock_apps = entries
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.choice,
+                    ::canvas::shell_launcher::Choice::Application { .. }
+                )
+            })
+            .cloned()
+            .collect();
         self.cache_dock_icons();
         #[cfg(feature = "lua-scenes")]
         self.refresh_desktop_dock(false);
@@ -4026,24 +4317,58 @@ impl App {
 
     fn dock_entries(&self) -> Vec<::canvas::shell_launcher::Entry> {
         use ::canvas::shell_launcher::{Choice, Entry};
-        let mut entries: Vec<_> = self.dock_pins.0.iter().map(|id| self.dock_apps.iter().find(|e| &e.id == id).cloned()
-            .unwrap_or_else(|| Entry { id: id.clone(), title: "Missing application".into(), detail: "PIN · unavailable".into(), available: false,
-                choice: Choice::Application { path: id[4..].into() } })).collect();
-        entries.extend(::canvas::shell_launcher::dock_surfaces(&self.document).map(|s| Entry {
-            id: format!("surface:{}", s.id), title: s.title.clone(), detail: "WINDOW".into(), available: self.decoded.contains_key(&s.id), choice: Choice::Surface { id: s.id.clone() },
-        }));
+        let mut entries: Vec<_> = self
+            .dock_pins
+            .0
+            .iter()
+            .map(|id| {
+                self.dock_apps
+                    .iter()
+                    .find(|e| &e.id == id)
+                    .cloned()
+                    .unwrap_or_else(|| Entry {
+                        id: id.clone(),
+                        title: "Missing application".into(),
+                        detail: "PIN · unavailable".into(),
+                        available: false,
+                        choice: Choice::Application {
+                            path: id[4..].into(),
+                        },
+                    })
+            })
+            .collect();
+        entries.extend(
+            ::canvas::shell_launcher::dock_surfaces(&self.document).map(|s| Entry {
+                id: format!("surface:{}", s.id),
+                title: s.title.clone(),
+                detail: "WINDOW".into(),
+                available: self.decoded.contains_key(&s.id),
+                choice: Choice::Surface { id: s.id.clone() },
+            }),
+        );
         entries
     }
 
     fn focus_shell_surface(&mut self, id: &str) {
-        if !self.decoded.contains_key(id) { return; }
+        if !self.decoded.contains_key(id) {
+            return;
+        }
         self.minimized_surfaces.remove(id);
-        let page = self.document.layouts().position(|layout| flatten_layout(layout).iter().any(|p| p.surface_id == id));
-        if let Some(page) = page { self.document.active_page = page; }
+        let page = self
+            .document
+            .layouts()
+            .position(|layout| flatten_layout(layout).iter().any(|p| p.surface_id == id));
+        if let Some(page) = page {
+            self.document.active_page = page;
+        }
         self.desktop_focused = false;
         self.apply_interaction_intents(vec![
-            InteractionIntent::Focus { surface_id: id.into() },
-            InteractionIntent::PromoteToFront { surface_id: id.into() },
+            InteractionIntent::Focus {
+                surface_id: id.into(),
+            },
+            InteractionIntent::PromoteToFront {
+                surface_id: id.into(),
+            },
         ]);
         self.bump();
     }
@@ -4051,7 +4376,8 @@ impl App {
     fn cycle_window_ids(&self) -> Vec<String> {
         ::canvas::shell_launcher::dock_surfaces(&self.document)
             .filter(|surface| self.decoded.contains_key(&surface.id))
-            .map(|surface| surface.id.clone()).collect()
+            .map(|surface| surface.id.clone())
+            .collect()
     }
 
     fn handle_window_cycle(&mut self, event: &iced::keyboard::Event) -> bool {
@@ -4061,11 +4387,19 @@ impl App {
         } if modifiers.alt() && !modifiers.control() && !modifiers.logo());
         if cycle {
             // Never commandeer an existing modal picker.
-            if !self.window_cycle.active() && (self.project_switcher.is_some()
-                || self.background_picker.is_some() || self.theme_picker.is_some()
-                || self.project_picker.is_some() || self.jarvis_text_visible) { return false; }
+            if !self.window_cycle.active()
+                && (self.project_switcher.is_some()
+                    || self.background_picker.is_some()
+                    || self.theme_picker.is_some()
+                    || self.project_picker.is_some()
+                    || self.jarvis_text_visible)
+            {
+                return false;
+            }
             let reverse = matches!(event, Event::KeyPressed { modifiers, .. } if modifiers.shift());
-            if !self.window_cycle.active() && let Some(target) = self.focused_hid_target() {
+            if !self.window_cycle.active()
+                && let Some(target) = self.focused_hid_target()
+            {
                 // Alt may already have reached the old target before Tab arrived.
                 if let Err(error) = self.hid_output.release(&target) {
                     self.status = format!("Cannot switch windows: HID release failed: {error}");
@@ -4076,48 +4410,92 @@ impl App {
             if !self.window_cycle.active() {
                 self.window_cycle_workspace = Some(self.document.project_id.clone());
             }
-            let Some(selected) = self.window_cycle.cycle(&ids, reverse).map(str::to_owned)
-                else { return true; };
+            let Some(selected) = self.window_cycle.cycle(&ids, reverse).map(str::to_owned) else {
+                return true;
+            };
             if self.project_switcher.is_none() {
                 let mut launcher = match ::canvas::shell_launcher::Launcher::new() {
                     Ok(launcher) => launcher,
-                    Err(error) => { self.window_cycle.cancel(); self.status = error; return true; }
+                    Err(error) => {
+                        self.window_cycle.cancel();
+                        self.status = error;
+                        return true;
+                    }
                 };
-                let entries = self.window_cycle.order().iter().filter_map(|id| {
-                    let surface = self.document.surfaces.iter().find(|surface| &surface.id == id)?;
-                    Some(::canvas::shell_launcher::Entry {
-                        id: format!("surface:{id}"), title: surface.title.clone(),
-                        detail: "WINDOW · recent".into(), available: true,
-                        choice: ::canvas::shell_launcher::Choice::Surface { id: id.clone() },
+                let entries = self
+                    .window_cycle
+                    .order()
+                    .iter()
+                    .filter_map(|id| {
+                        let surface = self
+                            .document
+                            .surfaces
+                            .iter()
+                            .find(|surface| &surface.id == id)?;
+                        Some(::canvas::shell_launcher::Entry {
+                            id: format!("surface:{id}"),
+                            title: surface.title.clone(),
+                            detail: "WINDOW · recent".into(),
+                            available: true,
+                            choice: ::canvas::shell_launcher::Choice::Surface { id: id.clone() },
+                        })
                     })
-                }).collect();
+                    .collect();
                 launcher.window_cycle = true;
-                launcher.accept(launcher.generation, Ok(::canvas::shell_launcher::Catalog {
-                    revision: "window-cycle".into(), entries,
-                }), now_unix_ms());
+                launcher.accept(
+                    launcher.generation,
+                    Ok(::canvas::shell_launcher::Catalog {
+                        revision: "window-cycle".into(),
+                        entries,
+                    }),
+                    now_unix_ms(),
+                );
                 self.project_switcher = Some(launcher);
             }
             if let Some(launcher) = self.project_switcher.as_mut() {
-                launcher.selected = launcher.matches().iter().position(|entry|
-                    entry.id == format!("surface:{selected}")).unwrap_or(0);
-                launcher.status = "Alt-Tab · Shift reverses · release Alt to focus · Esc cancels".into();
+                launcher.selected = launcher
+                    .matches()
+                    .iter()
+                    .position(|entry| entry.id == format!("surface:{selected}"))
+                    .unwrap_or(0);
+                launcher.status =
+                    "Alt-Tab · Shift reverses · release Alt to focus · Esc cancels".into();
             }
             self.refresh_launcher_scene();
             self.bump();
             return true;
         }
-        if !self.window_cycle.active() { return false; }
-        if matches!(event, Event::KeyPressed { key: Key::Named(Named::Escape), .. }) {
+        if !self.window_cycle.active() {
+            return false;
+        }
+        if matches!(
+            event,
+            Event::KeyPressed {
+                key: Key::Named(Named::Escape),
+                ..
+            }
+        ) {
             self.window_cycle.cancel();
             self.project_switcher = None;
             self.bump();
         } else if matches!(event, Event::ModifiersChanged(modifiers) if !modifiers.alt())
-            || matches!(event, Event::KeyPressed { key: Key::Named(Named::Enter), .. }) {
+            || matches!(
+                event,
+                Event::KeyPressed {
+                    key: Key::Named(Named::Enter),
+                    ..
+                }
+            )
+        {
             let ids = self.cycle_window_ids();
             let selected = self.window_cycle.commit(&ids);
             self.project_switcher = None;
-            if let Some(id) = selected { self.focus_shell_surface(&id); }
-            else { self.status = "Selected window closed; focus unchanged.".into(); self.bump(); }
+            if let Some(id) = selected {
+                self.focus_shell_surface(&id);
+            } else {
+                self.status = "Selected window closed; focus unchanged.".into();
+                self.bump();
+            }
         }
         true
     }
@@ -4320,7 +4698,12 @@ impl App {
         }
         if !matches!(
             pending.request.command,
-            Command::Inspect | Command::ShellCatalog | Command::ShellDockPins | Command::Performance | Command::ReadDocument
+            Command::Inspect
+                | Command::ShellCatalog
+                | Command::ShellDockPins
+                | Command::Performance
+                | Command::StreamDescriptors
+                | Command::ReadDocument
         ) && pending
             .request
             .expected_revision
@@ -4354,19 +4737,40 @@ impl App {
             }
             Command::ShellDockPins => {
                 let pins = self.dock_pins.0.clone();
-                self.answer(pending, Outcome::Ok { receipt: Receipt::ShellDockPins { pins } });
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::ShellDockPins { pins },
+                    },
+                );
                 Task::none()
             }
-            Command::ShellDockPin { catalog_revision, entry_id, pinned } => {
+            Command::ShellDockPin {
+                catalog_revision,
+                entry_id,
+                pinned,
+            } => {
                 let catalog = self.launcher_catalog();
                 if catalog.revision != catalog_revision {
-                    self.fail(pending, Failure { code: ErrorCode::Conflict, message: "Dock catalog changed; refresh this target before pinning.".into() });
+                    self.fail(
+                        pending,
+                        Failure {
+                            code: ErrorCode::Conflict,
+                            message: "Dock catalog changed; refresh this target before pinning."
+                                .into(),
+                        },
+                    );
                 } else if let Err(error) = self.set_dock_pin(&entry_id, pinned, &catalog.entries) {
                     self.fail(pending, Failure::resource(error));
                 } else {
                     self.bump();
                     let pins = self.dock_pins.0.clone();
-                    self.answer(pending, Outcome::Ok { receipt: Receipt::ShellDockPins { pins } });
+                    self.answer(
+                        pending,
+                        Outcome::Ok {
+                            receipt: Receipt::ShellDockPins { pins },
+                        },
+                    );
                 }
                 Task::none()
             }
@@ -4469,6 +4873,32 @@ impl App {
                     pending,
                     Outcome::Ok {
                         receipt: Receipt::Performance { metrics },
+                    },
+                );
+                Task::none()
+            }
+            Command::StreamDescriptors => {
+                #[cfg(feature = "lua-scenes")]
+                let descriptors = self
+                    .stream_descriptors
+                    .iter()
+                    .map(|(key, descriptor)| {
+                        let mut descriptor = descriptor.clone();
+                        descriptor["endpoints"] = self
+                            .stream_endpoints
+                            .get(key)
+                            .and_then(|value| value.get("endpoints"))
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!([]));
+                        descriptor
+                    })
+                    .collect();
+                #[cfg(not(feature = "lua-scenes"))]
+                let descriptors = Vec::new();
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::StreamDescriptors { descriptors },
                     },
                 );
                 Task::none()
@@ -4929,10 +5359,17 @@ impl App {
 
                 let changed = self.indicators.get(&indicator_id) != Some(&indicator)
                     || self.visible_indicator_id.as_ref() != Some(&indicator_id);
+                let was_visible = self.visible_indicator_id.is_some();
+                if indicator_id == canvas_workspace::observer::VOICE_INDICATOR_ID {
+                    // Freshness is independent of reveal and caption changes.
+                    self.voice_indicator_seen = Some(Instant::now());
+                }
                 self.indicators.insert(indicator_id.clone(), indicator);
                 self.visible_indicator_id = Some(indicator_id.clone());
+                self.indicator_dismissing = None;
                 if changed {
-                    self.indicator_started = Instant::now();
+                    // A partial caption/state update must not restart the reveal.
+                    if !was_visible { self.indicator_started = Instant::now(); }
                     self.bump();
                     self.status = format!("Updated indicator {indicator_id}.");
                 }
@@ -4945,11 +5382,7 @@ impl App {
                 Task::none()
             }
             Command::DismissIndicator { indicator_id } => {
-                let removed = self.indicators.remove(&indicator_id).is_some();
-                if self.visible_indicator_id.as_ref() == Some(&indicator_id) {
-                    self.visible_indicator_id = self.indicators.keys().next_back().cloned();
-                    self.indicator_started = Instant::now();
-                }
+                let removed = self.dismiss_status_indicator(&indicator_id, Instant::now());
                 if removed {
                     self.bump();
                     self.status = format!("Dismissed indicator {indicator_id}.");
@@ -6270,6 +6703,27 @@ impl App {
         catalog
     }
 
+    fn dismiss_status_indicator(&mut self, id: &str, now: Instant) -> bool {
+        let removed = self.indicators.remove(id);
+        let did_remove = removed.is_some();
+        if self.visible_indicator_id.as_deref() == Some(id) {
+            self.visible_indicator_id = self.indicators.keys().next_back().cloned();
+            if self.visible_indicator_id.is_none() {
+                self.indicator_dismissing = removed.map(|value| (value, now));
+            }
+        }
+        if id == canvas_workspace::observer::VOICE_INDICATOR_ID { self.voice_indicator_seen = None; }
+        did_remove
+    }
+
+    fn expire_voice_indicator(&mut self, now: Instant) -> bool {
+        let expiry = Duration::from_millis(u64::from(canvas_workspace::observer::MAX_TTL_MS));
+        if self.voice_indicator_seen.is_some_and(|seen| now.saturating_duration_since(seen) >= expiry) {
+            return self.dismiss_status_indicator(canvas_workspace::observer::VOICE_INDICATOR_ID, now);
+        }
+        false
+    }
+
     fn snapshot(&self) -> RuntimeSnapshot {
         RuntimeSnapshot {
             workspace_id: self.document.id.clone(),
@@ -7109,8 +7563,9 @@ impl App {
     }
 
     fn bump(&mut self) {
-        if self.window_cycle.active() && self.window_cycle_workspace.as_deref()
-            != Some(self.document.project_id.as_str()) {
+        if self.window_cycle.active()
+            && self.window_cycle_workspace.as_deref() != Some(self.document.project_id.as_str())
+        {
             self.window_cycle.cancel();
             self.project_switcher = None;
         }
@@ -7843,7 +8298,7 @@ impl App {
         let Some(root) = canvas_core::runtime_root() else {
             return;
         };
-        let placed = placement_surface_ids(self.document.active_layout());
+        let placed = visible_surface_ids(self.document.active_layout());
         let mut wanted: Vec<&str> = self
             .document
             .surfaces
@@ -7872,7 +8327,7 @@ impl App {
 
     fn reconcile_external_stream_visibility(&mut self) {
         let placed = if self.canvas_visible {
-            placement_surface_ids(self.document.active_layout())
+            visible_surface_ids(self.document.active_layout())
         } else {
             Vec::new()
         };
@@ -8333,15 +8788,25 @@ impl App {
         let visual = self.presented_visual_theme();
         let children = self.native_module_buttons(buttons, viewport, |control| {
             (control.enabled && self.module_bus.connected()).then(|| Message::ModuleActivate {
-                surface_id: surface_id.to_owned(), target_id: control.id.clone(),
+                surface_id: surface_id.to_owned(),
+                target_id: control.id.clone(),
             })
         });
         let mut children = children;
         if !buttons.is_empty() && !self.module_bus.connected() {
             children.push(
-                container(text("CONTROLS OFFLINE · Unibus session unavailable")
-                    .size(visual.metrics.micro).color(color(visual.palette.warning)))
-                    .padding(iced::Padding { top: (viewport.height as f32 - 22.0).max(0.0), left: 12.0, right: 0.0, bottom: 0.0 }).into(),
+                container(
+                    text("CONTROLS OFFLINE · Unibus session unavailable")
+                        .size(visual.metrics.micro)
+                        .color(color(visual.palette.warning)),
+                )
+                .padding(iced::Padding {
+                    top: (viewport.height as f32 - 22.0).max(0.0),
+                    left: 12.0,
+                    right: 0.0,
+                    bottom: 0.0,
+                })
+                .into(),
             );
         }
         stack(children).into()
@@ -8378,57 +8843,126 @@ impl App {
                 let content: Element<'static, Message> = if let Some(icon) = control.icon {
                     let id = match &message {
                         Some(Message::ShellFocusSurface(id)) => Some(id.as_str()),
-                        Some(Message::ShellLauncherPick { entry_id, .. }) => entry_id.strip_prefix("surface:"),
+                        Some(Message::ShellLauncherPick { entry_id, .. }) => {
+                            entry_id.strip_prefix("surface:")
+                        }
                         _ => None,
                     };
                     let preview = match &message {
-                        Some(Message::ShellDockActivate(id)) => self.dock_icons.get(id).map(|handle| image_widget(handle.clone()).content_fit(ContentFit::Contain).width(Length::Fill).height(Length::Fill).into()),
-                        _ => None,
-                    }.or_else(|| id.and_then(|id| self.decoded.get(id)).and_then(|surface| {
-                        match &surface.source {
-                            ContentSource::ExternalSurface { source_id } => self.external_surfaces.frame(source_id)
-                                .map(canvas_model_viewer::video::external_view),
-                            ContentSource::Image { .. } | ContentSource::LiveImage { .. } => Some(image_widget(surface.handle.clone())
-                                .content_fit(ContentFit::Contain).width(Length::Fill).height(Length::Fill).into()),
-                            _ => None,
+                        Some(Message::ShellDockActivate(id)) => {
+                            self.dock_icons.get(id).map(|handle| {
+                                image_widget(handle.clone())
+                                    .content_fit(ContentFit::Contain)
+                                    .width(Length::Fill)
+                                    .height(Length::Fill)
+                                    .into()
+                            })
                         }
-                    }));
-                    let picture: Element<'static, Message> = container(preview.unwrap_or_else(|| canvas_widgets::live::app_chrome::shell_icon(
-                        icon, control.icon_size, color(if control.enabled { visual.palette.text } else { visual.palette.text_muted }))))
+                        _ => None,
+                    }
+                    .or_else(|| {
+                        id.and_then(|id| self.decoded.get(id)).and_then(|surface| {
+                            match &surface.source {
+                                ContentSource::ExternalSurface { source_id } => self
+                                    .external_surfaces
+                                    .frame(source_id)
+                                    .map(canvas_model_viewer::video::external_view),
+                                ContentSource::Image { .. } | ContentSource::LiveImage { .. } => {
+                                    Some(
+                                        image_widget(surface.handle.clone())
+                                            .content_fit(ContentFit::Contain)
+                                            .width(Length::Fill)
+                                            .height(Length::Fill)
+                                            .into(),
+                                    )
+                                }
+                                _ => None,
+                            }
+                        })
+                    });
+                    let picture: Element<'static, Message> =
+                        container(preview.unwrap_or_else(|| {
+                            canvas_widgets::live::app_chrome::shell_icon(
+                                icon,
+                                control.icon_size,
+                                color(if control.enabled {
+                                    visual.palette.text
+                                } else {
+                                    visual.palette.text_muted
+                                }),
+                            )
+                        }))
                         .width(control.icon_size.min(width - 8.0).max(8.0))
                         .height(control.icon_size.min(height - 8.0).max(8.0))
                         .align_x(iced::alignment::Horizontal::Center)
-                        .align_y(iced::alignment::Vertical::Center).into();
+                        .align_y(iced::alignment::Vertical::Center)
+                        .into();
                     let content = if control.icon_caption {
                         let mut caption: String = control.label.chars().take(10).collect();
-                        if control.label.chars().count() > 10 { caption.push('…'); }
+                        if control.label.chars().count() > 10 {
+                            caption.push('…');
+                        }
                         column![picture, text(caption).size(visual.metrics.small).center()]
-                            .spacing(10).align_x(iced::Alignment::Center).into()
-                    } else { picture };
+                            .spacing(10)
+                            .align_x(iced::Alignment::Center)
+                            .into()
+                    } else {
+                        picture
+                    };
                     container(content).center(Length::Fill).into()
                 } else {
-                    text(control.label.clone()).size(fpl_gfx::chrome::BAR_TEXT_SIZE).center().into()
+                    text(control.label.clone())
+                        .size(fpl_gfx::chrome::BAR_TEXT_SIZE)
+                        .center()
+                        .into()
                 };
                 let item = button(content)
-                .width(width)
-                .height(height)
-                .on_press_maybe(control.enabled.then(|| message.clone()).flatten())
-                .style(move |_, status| {
-                    match appearance {
-                        ::canvas::lua_module::ModuleButtonAppearance::Standard => canvas_widgets::live::app_chrome::cube_button_style(visual, selected, status),
-                        ::canvas::lua_module::ModuleButtonAppearance::Quiet => canvas_widgets::live::app_chrome::quiet_button_style(visual, selected, status),
-                    }
-                });
+                    .width(width)
+                    .height(height)
+                    .on_press_maybe(control.enabled.then(|| message.clone()).flatten())
+                    .style(move |_, status| match appearance {
+                        ::canvas::lua_module::ModuleButtonAppearance::Standard => {
+                            canvas_widgets::live::app_chrome::cube_button_style(
+                                visual, selected, status,
+                            )
+                        }
+                        ::canvas::lua_module::ModuleButtonAppearance::Quiet => {
+                            canvas_widgets::live::app_chrome::quiet_button_style(
+                                visual, selected, status,
+                            )
+                        }
+                    });
                 let pin_id = match &message {
                     Some(Message::ShellDockActivate(id)) => Some(id.clone()),
-                    Some(Message::ShellLauncherPick { entry_id, .. }) if entry_id.starts_with("app:") && self.project_switcher.as_ref().is_some_and(|p| p.targets[p.target].id == "local") => Some(entry_id.clone()),
+                    Some(Message::ShellLauncherPick { entry_id, .. })
+                        if entry_id.starts_with("app:")
+                            && self
+                                .project_switcher
+                                .as_ref()
+                                .is_some_and(|p| p.targets[p.target].id == "local") =>
+                    {
+                        Some(entry_id.clone())
+                    }
                     _ => None,
                 };
                 let item: Element<'static, Message> = if control.icon.is_some() {
-                    iced::widget::tooltip(item, text(control.label.clone()).size(visual.metrics.small),
-                        iced::widget::tooltip::Position::Top).delay(Duration::from_millis(450)).into()
-                } else { item.into() };
-                let item = if let Some(id) = pin_id { iced::widget::mouse_area(item).on_right_press(Message::ShellPinToggle(id)).into() } else { item };
+                    iced::widget::tooltip(
+                        item,
+                        text(control.label.clone()).size(visual.metrics.small),
+                        iced::widget::tooltip::Position::Top,
+                    )
+                    .delay(Duration::from_millis(450))
+                    .into()
+                } else {
+                    item.into()
+                };
+                let item = if let Some(id) = pin_id {
+                    iced::widget::mouse_area(item)
+                        .on_right_press(Message::ShellPinToggle(id))
+                        .into()
+                } else {
+                    item
+                };
                 container(item)
                     .padding(iced::Padding {
                         top: y,
@@ -8519,7 +9053,12 @@ impl App {
         let Some(node) = scene.nodes.iter().find(|node| node.id == "ground") else {
             return self.scene_layer(scene, viewport);
         };
-        let NodeContent::Rect { ink, opacity, radius } = node.content else {
+        let NodeContent::Rect {
+            ink,
+            opacity,
+            radius,
+        } = node.content
+        else {
             return self.scene_layer(scene, viewport);
         };
         let [x, y] = scene_node_position(node.transform.translation, viewport);
@@ -8532,16 +9071,35 @@ impl App {
             .height(node.transform.scale[1].abs() * viewport.height as f32 / 8.0)
             .style(move |_| container::Style {
                 background: Some(fill.into()),
-                border: iced::Border { color: border, width: 1.0, radius: radius.into() },
-                shadow: iced::Shadow { color: Color::from_rgba(0.0, 0.0, 0.0, 0.24),
-                    offset: iced::Vector::new(0.0, 4.0), blur_radius: 18.0 },
+                border: iced::Border {
+                    color: border,
+                    width: 1.0,
+                    radius: radius.into(),
+                },
+                shadow: iced::Shadow {
+                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.24),
+                    offset: iced::Vector::new(0.0, 4.0),
+                    blur_radius: 18.0,
+                },
                 ..Default::default()
             });
-        stack![container(panel).padding(iced::Padding { top: y, left: x, ..Default::default() }),
-            self.scene_layer_filtered(scene, viewport, true)].into()
+        stack![
+            container(panel).padding(iced::Padding {
+                top: y,
+                left: x,
+                ..Default::default()
+            }),
+            self.scene_layer_filtered(scene, viewport, true)
+        ]
+        .into()
     }
 
-    fn scene_layer_filtered(&self, scene: &Scene, viewport: LogicalSize, shell_ground: bool) -> Element<'static, Message> {
+    fn scene_layer_filtered(
+        &self,
+        scene: &Scene,
+        viewport: LogicalSize,
+        shell_ground: bool,
+    ) -> Element<'static, Message> {
         let visual = self.presented_visual_theme();
         let palette = visual.palette;
         let metrics = visual.metrics;
@@ -8552,10 +9110,11 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, node)| {
-                (!shell_ground || node.id != "ground") && matches!(
-                    node.content,
-                    NodeContent::Text { .. } | NodeContent::Rect { .. }
-                )
+                (!shell_ground || node.id != "ground")
+                    && matches!(
+                        node.content,
+                        NodeContent::Text { .. } | NodeContent::Rect { .. }
+                    )
             })
             .map(|(index, _)| index)
             .collect();
@@ -9129,7 +9688,8 @@ impl App {
                 let visual: Element<'_, Message> = if matches!(
                     &surface.source,
                     ContentSource::LiveVideo { .. } | ContentSource::ExternalSurface { .. }
-                ) && !native_alpha {
+                ) && !native_alpha
+                {
                     container(visual)
                         .width(Length::Fill)
                         .height(Length::Fill)
@@ -9914,10 +10474,21 @@ impl App {
 
     fn view(&self, window: iced::window::Id) -> Element<'_, Message> {
         #[cfg(all(unix, feature = "lua-scenes"))]
-        if let Some(host) = self.native_switcher.as_ref().filter(|host| host.window == Some(window)) {
-            if let (Some(snapshot), Some(retained)) = (&host.snapshot, host.presentation.retained()) {
+        if let Some(host) = self
+            .native_switcher
+            .as_ref()
+            .filter(|host| host.window == Some(window))
+        {
+            if let (Some(snapshot), Some(retained)) = (&host.snapshot, host.presentation.retained())
+            {
                 let frame = snapshot.switcher.frame;
-                return self.shell_scene_layer(&retained.scene, LogicalSize { width: f64::from(frame.width), height: f64::from(frame.height) });
+                return self.shell_scene_layer(
+                    &retained.scene,
+                    LogicalSize {
+                        width: f64::from(frame.width),
+                        height: f64::from(frame.height),
+                    },
+                );
             }
             return container(space::horizontal()).into();
         }
@@ -10316,22 +10887,39 @@ impl App {
             #[cfg(feature = "lua-scenes")]
             if let Some(scene) = &picker.scene {
                 let [width, height] = picker.viewport;
-                let size = LogicalSize { width: width as f64, height: height as f64 };
-                let mut sheet_layers = vec![self.shell_scene_layer(
-                    scene,
-                    size,
-                )];
+                let size = LogicalSize {
+                    width: width as f64,
+                    height: height as f64,
+                };
+                let mut sheet_layers = vec![self.shell_scene_layer(scene, size)];
                 let rows = picker.matches();
                 let start = picker.row_start();
-                sheet_layers.extend(self.native_module_buttons_selected(&picker.buttons, size, |control| {
-                    if !control.enabled { return None; }
-                    let slot = control.id.strip_prefix("row")?.parse::<usize>().ok()?;
-                    if slot >= 6 { return None; }
-                    let entry = rows.get(start + slot)?;
-                    Some(Message::ShellLauncherPick { generation: picker.generation,
-                        revision: picker.catalog.as_ref()?.revision.clone(), entry_id: entry.id.clone() })
-                }, |control| control.id.strip_prefix("row").and_then(|n| n.parse::<usize>().ok())
-                    .is_some_and(|slot| start + slot == picker.selected)));
+                sheet_layers.extend(self.native_module_buttons_selected(
+                    &picker.buttons,
+                    size,
+                    |control| {
+                        if !control.enabled {
+                            return None;
+                        }
+                        let slot = control.id.strip_prefix("row")?.parse::<usize>().ok()?;
+                        if slot >= 6 {
+                            return None;
+                        }
+                        let entry = rows.get(start + slot)?;
+                        Some(Message::ShellLauncherPick {
+                            generation: picker.generation,
+                            revision: picker.catalog.as_ref()?.revision.clone(),
+                            entry_id: entry.id.clone(),
+                        })
+                    },
+                    |control| {
+                        control
+                            .id
+                            .strip_prefix("row")
+                            .and_then(|n| n.parse::<usize>().ok())
+                            .is_some_and(|slot| start + slot == picker.selected)
+                    },
+                ));
                 let sheet = stack(sheet_layers);
                 layers.push(
                     container(container(sheet).width(width).height(height))
@@ -10440,7 +11028,7 @@ impl App {
             // A wall is an appliance, not a tiny Mac. Present stable shell
             // identity and health instead of advertising a keyboard shortcut
             // that does not exist on the target device.
-            let project_label = workspace_name;
+            let project_label = format!("{workspace_name} ▾");
             let live_sources = self
                 .decoded
                 .values()
@@ -10488,12 +11076,14 @@ impl App {
                     canvas_widgets::live::app_chrome::cube_button_style(visual_theme, false, status)
                 });
             let identity = row![
-                text("fungOS").size(fpl_gfx::chrome::BAR_TEXT_SIZE).color(primary),
+                text("fungOS")
+                    .size(fpl_gfx::chrome::BAR_TEXT_SIZE)
+                    .color(primary),
                 back,
                 forward,
                 project,
                 text("/").size(11).color(Color { a: 0.40, ..muted }),
-                text(self.document.active_page_name())
+                text(self.document.active_page_name().to_owned())
                     .size(fpl_gfx::chrome::BAR_TEXT_SIZE)
                     .color(Color { a: 0.72, ..muted }),
                 create,
@@ -10504,10 +11094,12 @@ impl App {
                 text(format!("{live_sources} SOURCES"))
                     .size(10)
                     .color(Color { a: 0.72, ..primary }),
-                text(clock.chars().take(5).collect::<String>()).size(fpl_gfx::chrome::BAR_TEXT_SIZE).color(Color {
-                    a: 0.94,
-                    ..text_color
-                }),
+                text(clock.chars().take(5).collect::<String>())
+                    .size(fpl_gfx::chrome::BAR_TEXT_SIZE)
+                    .color(Color {
+                        a: 0.94,
+                        ..text_color
+                    }),
             ]
             .spacing(10)
             .align_y(iced::Alignment::Center);
@@ -10518,7 +11110,7 @@ impl App {
                 .padding([0, fpl_gfx::chrome::BAR_PADDING as u16])
                 .align_y(iced::alignment::Vertical::Center)
                 .style(move |_| container::Style {
-                    background: Some(color(visual_theme.surface).into()),
+                    background: Some(color(visual_theme.palette.surface).into()),
                     border: iced::Border {
                         color: Color {
                             a: 0.64,
@@ -10533,22 +11125,43 @@ impl App {
             let signature: Element<'static, Message> = signature.into();
             #[cfg(feature = "lua-scenes")]
             let signature = if let Some(presentation) = self.desktop_bar.retained() {
-                let size = LogicalSize { width: f64::from(viewport.width), height: f64::from(shell_bar_height) };
-                let controls = self.native_module_buttons(&presentation.buttons, size, |control| {
-                    if !control.enabled { return None; }
-                    match control.id.as_str() {
-                        "back" => self.jump_history.can_go_back().then_some(Message::ShellBack),
-                        "forward" => self.jump_history.can_go_forward().then_some(Message::ShellForward),
-                        "launcher" => Some(Message::ShellProjects),
-                        "create" => has_creator.then_some(Message::ShellNewTask),
-                        _ => None,
-                    }
-                });
+                let size = LogicalSize {
+                    width: f64::from(viewport.width),
+                    height: f64::from(shell_bar_height),
+                };
+                let controls = self.native_module_buttons_selected(
+                    &presentation.buttons,
+                    size,
+                    |control| {
+                        if !control.enabled {
+                            return None;
+                        }
+                        match control.id.as_str() {
+                            "back" => self
+                                .jump_history
+                                .can_go_back()
+                                .then_some(Message::ShellBack),
+                            "forward" => self
+                                .jump_history
+                                .can_go_forward()
+                                .then_some(Message::ShellForward),
+                            "launcher" => Some(Message::ShellProjects),
+                            "create" => has_creator.then_some(Message::ShellNewTask),
+                            _ => None,
+                        }
+                    },
+                    |control| control.id == "launcher",
+                );
                 let mut children = vec![self.scene_layer(&presentation.scene, size)];
                 children.extend(controls);
-                container(stack(children)).width(Length::Fill)
-                    .height(Length::Fixed(shell_bar_height as f32)).clip(true).into()
-            } else { signature };
+                container(stack(children))
+                    .width(Length::Fill)
+                    .height(Length::Fixed(shell_bar_height as f32))
+                    .clip(true)
+                    .into()
+            } else {
+                signature
+            };
             layers.push(
                 container(signature)
                     .width(Length::Fill)
@@ -10560,30 +11173,63 @@ impl App {
         }
 
         #[cfg(feature = "lua-scenes")]
-        if shell_bar_height > 0 && self.project_switcher.as_ref().is_none_or(|picker| picker.window_cycle) {
+        if shell_bar_height > 0
+            && self
+                .project_switcher
+                .as_ref()
+                .is_none_or(|picker| picker.window_cycle)
+        {
             if let Some(presentation) = self.desktop_dock.retained() {
                 let dock_height = ::canvas::shell_geometry::DOCK_HEIGHT;
-                let size = LogicalSize { width: f64::from(viewport.width), height: f64::from(dock_height) };
+                let size = LogicalSize {
+                    width: f64::from(viewport.width),
+                    height: f64::from(dock_height),
+                };
                 let entries = self.dock_entries();
-                let controls = self.native_module_buttons_selected(&presentation.buttons, size, |control| {
-                    match control.id.as_str() {
+                let controls = self.native_module_buttons_selected(
+                    &presentation.buttons,
+                    size,
+                    |control| match control.id.as_str() {
                         "launcher" => Some(Message::ShellProjects),
-                        id => id.strip_prefix("item").and_then(|n| n.parse::<usize>().ok())
-                            .filter(|n| *n < 6).and_then(|n| entries.get(n).cloned())
+                        id => id
+                            .strip_prefix("item")
+                            .and_then(|n| n.parse::<usize>().ok())
+                            .filter(|n| *n < 6)
+                            .and_then(|n| entries.get(n).cloned())
                             .map(|entry| match entry.choice {
-                                ::canvas::shell_launcher::Choice::Surface { id } => Message::ShellFocusSurface(id),
+                                ::canvas::shell_launcher::Choice::Surface { id } => {
+                                    Message::ShellFocusSurface(id)
+                                }
                                 _ => Message::ShellDockActivate(entry.id),
                             }),
-                    }
-                }, |control| control.id.strip_prefix("item").and_then(|n| n.parse::<usize>().ok())
-                    .and_then(|n| entries.get(n))
-                    .is_some_and(|entry| !self.desktop_focused && entry.id.strip_prefix("surface:").is_some_and(|id| self.document.focused_surface_id.as_deref() == Some(id))));
+                    },
+                    |control| {
+                        control
+                            .id
+                            .strip_prefix("item")
+                            .and_then(|n| n.parse::<usize>().ok())
+                            .and_then(|n| entries.get(n))
+                            .is_some_and(|entry| {
+                                !self.desktop_focused
+                                    && entry.id.strip_prefix("surface:").is_some_and(|id| {
+                                        self.document.focused_surface_id.as_deref() == Some(id)
+                                    })
+                            })
+                    },
+                );
                 let mut children = vec![self.shell_scene_layer(&presentation.scene, size)];
                 children.extend(controls);
-                layers.push(container(container(stack(children)).height(Length::Fixed(dock_height)))
-                    .width(Length::Fill).height(Length::Fill)
-                    .padding(iced::Padding { bottom: 12.0, ..Default::default() })
-                    .align_y(iced::alignment::Vertical::Bottom).into());
+                layers.push(
+                    container(container(stack(children)).height(Length::Fixed(dock_height)))
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .padding(iced::Padding {
+                            bottom: 12.0,
+                            ..Default::default()
+                        })
+                        .align_y(iced::alignment::Vertical::Bottom)
+                        .into(),
+                );
             }
         }
 
@@ -10674,6 +11320,7 @@ impl App {
             layers.push(indicator::view(
                 active,
                 self.indicator_started.elapsed(),
+                (self.indicator_started.elapsed().as_secs_f32() / fpl_gfx::voice_popup::REVEAL_SECONDS).min(1.0),
                 indicator::IndicatorPalette {
                     panel: Color {
                         a: 0.94,
@@ -10683,6 +11330,13 @@ impl App {
                     text: text_color,
                     muted,
                 },
+            ));
+        } else if let Some((active, since)) = &self.indicator_dismissing {
+            layers.push(indicator::view(
+                active,
+                self.indicator_started.elapsed(),
+                (1.0 - since.elapsed().as_secs_f32() / fpl_gfx::voice_popup::DISMISS_SECONDS).max(0.0),
+                indicator::IndicatorPalette { panel: surface_color, border: border_color, text: text_color, muted },
             ));
         }
 
@@ -12766,6 +13420,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .subscription(|app| {
         let animated = app.visible_indicator_id.is_some()
+            || app.indicator_dismissing.is_some()
             || !app.notifications.is_empty()
             || app.presence_preview.is_some()
             || app.transition.is_some()
@@ -12799,12 +13454,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         Subscription::batch([
             #[cfg(all(unix, feature = "lua-scenes"))]
-            if app.native_switcher.is_some() { iced::time::every(Duration::from_millis(40)).map(|_| Message::NativeSwitcherTick) } else { Subscription::none() },
+            if app.native_switcher.is_some() {
+                iced::time::every(Duration::from_millis(40)).map(|_| Message::NativeSwitcherTick)
+            } else {
+                Subscription::none()
+            },
             iced::time::every(cadence).map(|_| Message::Tick),
             iced::event::listen_with(|event, status, window| match event {
                 iced::Event::Window(event) => Some(Message::WindowEvent(window, event)),
-                iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_) | iced::mouse::Event::WheelScrolled { .. })
-                    if status == iced::event::Status::Captured => None,
+                iced::Event::Mouse(
+                    iced::mouse::Event::ButtonPressed(_) | iced::mouse::Event::WheelScrolled { .. },
+                ) if status == iced::event::Status::Captured => None,
                 iced::Event::Mouse(event) => Some(Message::MouseEvent(window, event)),
                 iced::Event::Keyboard(event) => Some(Message::TerminalInput(event)),
                 _ => None,
@@ -13002,6 +13662,25 @@ mod tests {
         assert_eq!(app.focused_hid_target().as_deref(), Some("guest"));
         app.desktop_focused = true;
         assert_eq!(app.focused_hid_target(), None);
+    }
+
+    #[test]
+    fn visibility_includes_surface_layout() {
+        let layout = Layout::Surface {
+            surface_id: "qemu".into(),
+        };
+        assert_eq!(placement_surface_ids(&layout), ["qemu"]);
+        assert_eq!(visible_surface_ids(&layout), ["qemu"]);
+    }
+
+    #[test]
+    fn visibility_keeps_only_the_active_stack_member() {
+        let layout = Layout::Stack {
+            surface_ids: vec!["camera".into(), "qemu".into()],
+            active_surface_id: "qemu".into(),
+        };
+        assert_eq!(placement_surface_ids(&layout), ["camera", "qemu"]);
+        assert_eq!(visible_surface_ids(&layout), ["qemu"]);
     }
 
     #[test]
@@ -13778,6 +14457,28 @@ mod tests {
             detail: None,
             diagnostic: None,
         }
+    }
+
+    #[test]
+    fn voice_indicator_lease_renews_without_reveal_reset_and_expires_at_the_owner() {
+        use ::canvas::control::IndicatorState;
+        let mut app = test_app();
+        let document = app.document.clone();
+        execute(&mut app, "generic", Command::UpsertIndicator { indicator: indicator("other", IndicatorState::Thinking) });
+        let voice = canvas_workspace::observer::VOICE_INDICATOR_ID;
+        execute(&mut app, "voice", Command::UpsertIndicator { indicator: indicator(voice, IndicatorState::Listening) });
+        let reveal = app.indicator_started;
+        let revision = app.runtime_revision;
+        execute(&mut app, "heartbeat", Command::UpsertIndicator { indicator: indicator(voice, IndicatorState::Listening) });
+        assert_eq!(app.indicator_started, reveal);
+        assert_eq!(app.runtime_revision, revision);
+        let seen = app.voice_indicator_seen.unwrap();
+        assert!(!app.expire_voice_indicator(seen + Duration::from_millis(4999)));
+        assert!(app.expire_voice_indicator(seen + Duration::from_millis(5000)));
+        assert!(!app.indicators.contains_key(voice));
+        assert!(app.indicators.contains_key("other"));
+        assert_eq!(app.visible_indicator_id.as_deref(), Some("other"));
+        assert_eq!(app.document, document);
     }
 
     #[test]
@@ -14830,7 +15531,7 @@ mod tests {
                 title: id.into(),
                 content: SurfaceContent::Stream {
                     url: format!("https://example.com/{id}"),
-                matte: None,
+                    matte: None,
                 },
                 inputs: Vec::new(),
             })

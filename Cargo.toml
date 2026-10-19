@@ -28,12 +28,13 @@ anyhow = "1"
 axum = "0.8"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 dcp = { git = "https://github.com/FuturePresentLabs/dcp.git", rev = "d3a1335" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 tempfile = "3"
 coherence-tokens = { path = "vendor/coherence-tokens" }
 # The household bus contract, shared with JARVIS (dock marbles dock-pubd).
 # Pinned by rev; bump deliberately alongside unibus releases.
 unibus = { git = "ssh://git@github.com/FuturePresentLabs/unibus.git", rev = "b47a6cc15a6246296ac34136d513533d21dd11c1" }
+stream-descriptors = { path = "../unibus/crates/stream-descriptors" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 
 # Canvas runs directly from dev artifacts during local UI iteration. Keep the
 # JPEG hot path representative of deployed performance without optimizing the

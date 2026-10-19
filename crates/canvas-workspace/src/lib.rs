@@ -11,6 +11,8 @@ use std::{
 };
 
 pub mod chart;
+pub mod audio;
+pub mod observer;
 pub mod background_shaders;
 pub mod session;
 pub mod endpoint;

@@ -33,6 +33,33 @@ impl Drop for Forward {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments: Vec<String> = std::env::args().collect();
+    if arguments.len() == 3 && arguments[2] == "observer-stream" {
+        let (port, token, _guard) = connect(&arguments[1])?;
+        let mut input = std::io::stdin().lock();
+        loop {
+            let mut line = String::new();
+            let n = std::io::Read::by_ref(&mut input)
+                .take(4097)
+                .read_line(&mut line)?;
+            if n == 0 {
+                break;
+            }
+            if n > 4096 || !line.ends_with('\n') {
+                return Err("Invalid observer stream frame".into());
+            }
+            let request: Request = serde_json::from_str(&line)?;
+            if !matches!(request.command, PresentationCommand::ObserverFrame { .. }) {
+                return Err("Observer stream accepts display observations only".into());
+            }
+            let receipt = exchange(port, &token, &request)?;
+            println!("{}", serde_json::to_string(&receipt)?);
+            std::io::stdout().flush()?;
+            if receipt["ok"] != true {
+                return Err("TV rejected observation".into());
+            }
+        }
+        return Ok(());
+    }
     // Explicit loopback-only development tunnel. Credential remains operator-
     // local; this never grants LAN access or bypasses the app's authentication.
     if arguments.len() == 6 && arguments[1] == "--tunnel" && arguments[4] == "signal-stream" {
@@ -45,6 +72,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if arguments.len() == 4 && arguments[2] == "signal-stream" {
         return signal_stream(&arguments[1], &arguments[3]);
+    }
+    if arguments.get(2).is_some_and(|arg| arg == "widget-watch") {
+        if arguments.len() < 6 {
+            return Err(
+                "usage: canvas-tvctl SERIAL widget-watch WORKSPACE SURFACE SOURCE [ARGS]".into(),
+            );
+        }
+        return watch_widget(&arguments[1], &arguments[3], &arguments[4], &arguments[5..]);
     }
     let serial = std::env::args()
         .nth(1)
@@ -71,6 +106,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
     }
+    if raw.trim_start().starts_with('{') {
+        let value: serde_json::Value = serde_json::from_str(&raw)?;
+        if value["command"]["command"]
+            .as_str()
+            .is_some_and(|command| command == "audio_inspect" || command == "audio_set_muted")
+        {
+            let _: canvas_workspace::audio::Request = serde_json::from_value(value.clone())?;
+            let (port, token, guard) = connect(&serial)?;
+            let receipt = exchange_value(port, &token, &value)?;
+            println!("{}", serde_json::to_string(&receipt)?);
+            drop(guard);
+            if receipt["ok"] != true {
+                return Err("TV rejected audio request".into());
+            }
+            return Ok(());
+        }
+    }
     let text_mode = !raw.trim_start().starts_with('{');
     let mut request: Request = if text_mode {
         let words: Vec<&str> = raw.split_whitespace().collect();
@@ -82,6 +134,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     name: (*name).into(),
                 },
                 ["workspace", "read", name] => PresentationCommand::WorkspaceRead {
+                    name: (*name).into(),
+                },
+                ["workspace", "presentation", name] => PresentationCommand::WorkspacePresentation {
                     name: (*name).into(),
                 },
                 ["workspace", "install", path] => {
@@ -297,10 +352,118 @@ fn stream_at(
     Ok(())
 }
 
+/// Generic host source -> existing revision-bound widget patch. No agent protocol here.
+fn watch_widget(
+    serial: &str,
+    workspace: &str,
+    surface_id: &str,
+    source: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let invoke = |request: &str| -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let mut child = Command::new(std::env::current_exe()?)
+            .arg(serial)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .ok_or("No TV request pipe")?
+            .write_all(request.as_bytes())?;
+        let output = child.wait_with_output()?;
+        if !output.status.success() {
+            return Err("TV control request failed".into());
+        }
+        Ok(serde_json::from_slice(&output.stdout)?)
+    };
+    loop {
+        let update = (|| -> Result<(), Box<dyn std::error::Error>> {
+            let observed = invoke("inspect\n")?;
+            if observed["data"]["catalog"]["selected_project"] != workspace {
+                return Ok(());
+            }
+            let mut document: canvas_workspace::WorkspaceDocument =
+                serde_json::from_value(observed["data"]["document"].clone())?;
+            let Some(surface) = document.surfaces.iter_mut().find(|s| s.id == surface_id) else {
+                return Err("Named widget surface is not installed".into());
+            };
+            let canvas_workspace::SurfaceContent::Widget { spec } = &mut surface.content else {
+                return Err("Named surface is not a widget".into());
+            };
+            let output = Command::new(&source[0]).args(&source[1..]).output()?;
+            if output.stdout.len() > MAX_FRAME {
+                return Err("Source snapshot exceeds limit".into());
+            }
+            if output.status.success() {
+                let payload: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+                let mut encoded = serde_json::to_value(&*spec)?;
+                let kind = payload["widget"].as_object().ok_or("Missing widget kind")?;
+                // Replace kind body, preserving surface/spec identity and theme.
+                let common = [
+                    "schema_version",
+                    "id",
+                    "chrome",
+                    "data",
+                    "refresh_ms",
+                    "theme",
+                ];
+                encoded
+                    .as_object_mut()
+                    .ok_or("Invalid widget spec")?
+                    .retain(|key, _| common.contains(&key.as_str()));
+                for (key, value) in kind {
+                    encoded[key] = value.clone();
+                }
+                encoded["data"] = payload["data"].clone();
+                *spec = serde_json::from_value(encoded)?;
+            } else {
+                // Preserve last values, but do not pretend a failed read is live.
+                let mut encoded = serde_json::to_value(&*spec)?;
+                encoded["data"]["state"] = serde_json::json!("disconnected");
+                encoded["data"]["detail"] = serde_json::json!("Owner telemetry unavailable");
+                *spec = serde_json::from_value(encoded)?;
+                eprintln!("canvas-tvctl: widget source failed; marking disconnected");
+            }
+            let patch = canvas_workspace::WorkspacePatch {
+                schema_version: 1,
+                workspace_id: document.id.clone(),
+                base_revision: document.revision,
+                revision: document
+                    .revision
+                    .checked_add(1)
+                    .ok_or("Revision overflow")?,
+                operations: vec![canvas_workspace::PatchOperation::UpsertSurface {
+                    surface: surface.clone(),
+                }],
+            };
+            let request = Request {
+                schema_version: 1,
+                request_id: "widget-watch".into(),
+                expected_revision: observed["revision"].as_u64(),
+                command: PresentationCommand::ApplyPatch { patch },
+            };
+            invoke(&serde_json::to_string(&request)?)?;
+            Ok(())
+        })();
+        if let Err(error) = update {
+            eprintln!("canvas-tvctl: widget-watch: {error}");
+        }
+        std::thread::sleep(std::time::Duration::from_secs(10));
+    }
+}
+
 fn exchange(
     port: u16,
     token: &[u8],
     request: &Request,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    exchange_value(port, token, &serde_json::to_value(request)?)
+}
+
+fn exchange_value(
+    port: u16,
+    token: &[u8],
+    request: &serde_json::Value,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let mut stream = TcpStream::connect_timeout(
         &std::net::SocketAddr::from(([127, 0, 0, 1], port)),

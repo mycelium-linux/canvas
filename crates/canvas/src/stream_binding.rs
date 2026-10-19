@@ -555,6 +555,10 @@ const BUILT_IN_BINDERS: &[(&str, &str)] = &[
         include_str!("../../../config/binders/synesthesia-quality-v1.lua"),
     ),
     (
+        "synesthesia-mix-field-v1",
+        include_str!("../../../config/binders/synesthesia-mix-field-v1.lua"),
+    ),
+    (
         "span-timeline-v1",
         include_str!("../../../config/binders/span-timeline-v1.lua"),
     ),
@@ -1870,6 +1874,48 @@ mod tests {
         assert!(
             matches!(quality.kind, WidgetKind::MetricBoard { ref metrics, .. } if metrics.len() == 1)
         );
+    }
+
+    #[test]
+    fn synesthesia_mix_field_binder_preserves_controller_energy() {
+        let mut target = test_spec(WidgetKind::MixField {
+            title: "Waiting".into(),
+            surface: "unknown".into(),
+            strips: vec![canvas_widgets::MixFieldStrip {
+                index: 1,
+                cc: 0,
+                label: "Waiting".into(),
+                gain: 0.0,
+                active: false,
+                peak: 0.0,
+                stereo_position: 0.0,
+                left_peak: 0.0,
+                right_peak: 0.0,
+                bands: vec![],
+            }],
+        });
+        let event = StreamEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            owner: "synesthesia".into(),
+            stream: "mix-field".into(),
+            contract: "canvas.widget.snapshot.v1".into(),
+            project_id: Some("home".into()),
+            sequence: 1,
+            emitted_at_ms: now_ms(),
+            payload: serde_json::json!({"title":"Studio mix field","surface":"launchkey","strips":[{"index":1,"cc":21,"label":"modular","gain":0.5,"active":true,"peak":0.75,"stereo_position":-0.25,"left_peak":0.75,"right_peak":0.5,"bands":[0.8,0.2]}]}),
+        };
+        apply_named_adapter("synesthesia-mix-field-v1", &event, &mut target)
+            .expect("mix field renders");
+        let WidgetKind::MixField {
+            surface, strips, ..
+        } = target.kind
+        else {
+            panic!("mix field binder changed widget family")
+        };
+        assert_eq!(surface, "launchkey");
+        assert_eq!(strips[0].cc, 21);
+        assert_eq!(strips[0].stereo_position, -0.25);
+        assert_eq!(strips[0].bands, vec![0.8, 0.2]);
     }
 
     #[test]

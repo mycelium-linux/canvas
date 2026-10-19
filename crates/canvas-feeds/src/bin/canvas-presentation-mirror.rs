@@ -433,18 +433,17 @@ fn receive() -> Result<(), String> {
     }
 }
 
-fn follow(serial: &str) -> Result<(), String> {
+fn follow(serial: &str, project: &str) -> Result<(), String> {
     loop {
         match call(
             "canvas-tvctl",
             &[serial],
-            &request(json!({"command":"read_presentation"}), None),
+            &request(json!({"command":"workspace_presentation","name":project}), None),
         ) {
             Ok(reply) => {
                 let presentation = &reply["data"];
-                if presentation["document"]["project_id"] != "tardy" {
-                    std::thread::sleep(Duration::from_secs(2));
-                    continue;
+                if presentation["document"]["project_id"] != project {
+                    return Err("presentation owner returned a different workspace".into());
                 }
                 layout(presentation)?;
                 let bytes = serde_json::to_vec(presentation).map_err(|e| e.to_string())?;
@@ -467,8 +466,9 @@ fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
         [mode] if mode == "receive" => receive(),
-        [mode, serial] if mode == "follow" => follow(serial),
-        _ => Err("usage: canvas-presentation-mirror follow ADB_SERIAL | canvas-presentation-mirror receive".into()),
+        [mode, serial] if mode == "follow" => follow(serial, "tardy"),
+        [mode, serial, project] if mode == "follow" => follow(serial, project),
+        _ => Err("usage: canvas-presentation-mirror follow ADB_SERIAL [PROJECT] | canvas-presentation-mirror receive".into()),
     }
 }
 

@@ -288,7 +288,11 @@ pub fn format_local(parts: &LocalParts) -> (String, String) {
 }
 
 pub fn now_local() -> (String, String) {
-    format_local(&local_parts(crate::stream_binding::now_ms()))
+    let epoch_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    format_local(&local_parts(epoch_ms))
 }
 
 fn node_row<'a, Message: 'a>(

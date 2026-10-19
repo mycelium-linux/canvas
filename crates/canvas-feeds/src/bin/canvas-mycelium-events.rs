@@ -62,10 +62,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut options = MqttOptions::new(client_id, host, port);
     options.set_keep_alive(Duration::from_secs(30));
-    if let (Some(username), Some(password)) = (
-        env("MYCELIUM_MQTT_USERNAME"),
-        env("MYCELIUM_MQTT_PASSWORD"),
-    ) {
+    if let (Some(username), Some(password)) =
+        (env("MYCELIUM_MQTT_USERNAME"), env("MYCELIUM_MQTT_PASSWORD"))
+    {
         options.set_credentials(username, password);
     }
 
@@ -113,7 +112,10 @@ fn narrow(record: ExportRecord) -> Notification {
     Notification {
         id: record.delivery_id,
         project_id: None,
-        title: format!("{} · {} · {}", record.hostname, record.site, record.category),
+        title: format!(
+            "{} · {} · {}",
+            record.hostname, record.site, record.category
+        ),
         message: record.message,
         level,
         created_at_ms: record.observed_at.saturating_mul(1_000).max(1),

@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read};
 use std::process::id;
+#[path = "canvasctl/observer.rs"]
+mod observer;
 
 use canvas::control::{
     self, CONTROL_VERSION, Command, ControlReply, ControlRequest, ErrorCode, Outcome,
@@ -16,6 +18,7 @@ use canvas::{
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if arguments.as_slice() == ["observer-stream"] { return observer::run(); }
     if arguments.first().is_some_and(|argument| argument == "--android") {
         if arguments.len() != 2 { return Err("usage: canvasctl --android ADB_SERIAL < presentation-request.json".into()); }
         let status = std::process::Command::new("canvas-tvctl").arg(&arguments[1]).status()?;
@@ -1053,6 +1056,7 @@ fn is_mutation(cmd: &Command) -> bool {
         cmd,
         Command::Inspect
             | Command::Performance
+            | Command::StreamDescriptors
             | Command::ReadDocument
             | Command::WorkspaceRead { .. }
     )

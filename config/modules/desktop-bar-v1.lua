@@ -2,7 +2,7 @@
 local i,t = module.inputs,module.theme
 local w,h = math.max(i.width,1),math.max(i.height,1)
 -- The host supplies GFX's logical metrics; Lua owns only composition.
-local pad,size=i.bar_padding,i.bar_text_size
+local pad,size=i.padding,i.labelsize
 local function x(px) return -4+8*px/w end
 local function y(px) return 4-8*px/h end
 local function label(id,value,px,ink)
@@ -22,7 +22,7 @@ if w>=600 then
 end
 local clock_width=w>=360 and 112 or 0
 local project_width=math.max(32,math.min(210,w-left-clock_width-pad))
-control("launcher",i.workspace,left,project_width,true)
+control("launcher",i.workspace.." ▾",left,project_width,true)
 left=left+project_width+pad
 if w>=1000 and i.page then label("page",i.page,left) left=left+180 end
 if w>=850 and i.create then control("create","＋ New",left,84,true) end

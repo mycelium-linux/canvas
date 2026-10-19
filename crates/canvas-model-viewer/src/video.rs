@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+use unibus_media::VideoAlphaMask;
 
 use canvas_core::external_surface::SurfaceTransport;
 
@@ -22,7 +23,7 @@ const REDRAW_INTERVAL: std::time::Duration = std::time::Duration::from_millis(42
 /// The WGSL struct, this buffer and the bind group layout's `min_binding_size`
 /// must agree. Growing the struct without the layout aborts the process on
 /// pipeline creation rather than failing soft.
-const UNIFORM_BYTES: u64 = 32;
+const UNIFORM_BYTES: u64 = fpl_gfx::retained_video::UNIFORM_BYTES;
 
 /// A producer at 24 fps that misses this much is not merely between frames.
 const FRESH_SECONDS: f32 = 3.0;
@@ -38,91 +39,6 @@ fn staleness_of(age: std::time::Duration) -> f32 {
     let seconds = age.as_secs_f32();
     ((seconds - FRESH_SECONDS) / (STALE_SECONDS - FRESH_SECONDS)).clamp(0.0, 1.0)
 }
-
-const SHADER: &str = r#"
-struct Uniforms {
-    viewport: vec2<f32>,
-    source: vec2<f32>,
-    // 0 while the producer is writing frames, rising to 1 once it has stopped
-    // for long enough that nothing on screen should be read as current.
-    staleness: f32,
-    // Scalars, not a vec3: a vec3 here aligns the struct to 16 and grows it to
-    // 48 bytes against a 32-byte binding, which wgpu rejects outright.
-    _pad0: f32,
-    premultiplied: f32,
-    native_alpha: f32,
-};
-
-@group(0) @binding(0) var frame: texture_2d<f32>;
-@group(0) @binding(1) var frame_sampler: sampler;
-@group(0) @binding(2) var<uniform> u: Uniforms;
-
-struct VertexOut {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
-
-@vertex
-fn vs_main(@builtin(vertex_index) index: u32) -> VertexOut {
-    var positions = array<vec2<f32>, 3>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(3.0, -1.0),
-        vec2<f32>(-1.0, 3.0),
-    );
-    var uvs = array<vec2<f32>, 3>(
-        vec2<f32>(0.0, 1.0),
-        vec2<f32>(2.0, 1.0),
-        vec2<f32>(0.0, -1.0),
-    );
-    var out: VertexOut;
-    out.position = vec4<f32>(positions[index], 0.0, 1.0);
-    out.uv = uvs[index];
-    return out;
-}
-
-@fragment
-fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    let viewport_aspect = u.viewport.x / max(u.viewport.y, 1.0);
-    let source_aspect = u.source.x / max(u.source.y, 1.0);
-    var uv = in.uv;
-    var content_size = u.viewport;
-    if viewport_aspect > source_aspect {
-        let width = source_aspect / viewport_aspect;
-        if abs(uv.x - 0.5) > width * 0.5 { return vec4<f32>(0.0); }
-        uv.x = (uv.x - 0.5) / width + 0.5;
-        content_size.x = u.viewport.y * source_aspect;
-    } else {
-        let height = viewport_aspect / source_aspect;
-        if abs(uv.y - 0.5) > height * 0.5 { return vec4<f32>(0.0); }
-        uv.y = (uv.y - 0.5) / height + 0.5;
-        content_size.y = u.viewport.x / source_aspect;
-    }
-    let frame_color = textureSample(frame, frame_sampler, uv);
-    // H.264 has no alpha channel. A macOS window's transparent outer corners
-    // therefore arrive as black pixels unless the compositor restores the
-    // window silhouette. Clip at the fitted content boundary (not the widget
-    // boundary) with a resolution-independent, softly antialiased radius.
-    // The same restrained treatment makes camera/video surfaces sit cleanly
-    // in Canvas without baking chrome into any producer.
-    let radius = clamp(min(content_size.x, content_size.y) * 0.06, 8.0, 30.0);
-    let point = uv * content_size;
-    let q = abs(point - content_size * 0.5) - (content_size * 0.5 - vec2<f32>(radius));
-    let distance = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - radius;
-    let mask = select(1.0 - smoothstep(-1.25, 1.25, distance), 1.0, u.native_alpha > 0.5);
-    // A camera that has stopped keeps its last frame on the texture forever, so
-    // a dead feed has to be marked. NOT by draining colour: these cameras
-    // switch to infrared at night and produce legitimately black-and-white
-    // video, so a greyscale picture is normal exactly when it matters most.
-    // Diagonal banding cannot come out of a camera, so it cannot be mistaken
-    // for the scene. Computed in framebuffer space to keep the bands an even
-    // width whatever size the surface is.
-    let band = step(0.5, fract((in.position.x + in.position.y) / 24.0));
-    let rgb = select(frame_color.rgb, frame_color.rgb / max(frame_color.a, 0.00001), u.premultiplied > 0.5);
-    let dimmed = rgb * (1.0 - 0.45 * u.staleness);
-    let barred = dimmed * (1.0 - 0.35 * u.staleness * band);
-    return vec4<f32>(barred, frame_color.a * mask);
-}
-"#;
 
 /// What the surface saw, in surface coordinates. The widget reports gestures
 /// and refuses to interpret them: where the camera ends up is decided by the
@@ -200,6 +116,7 @@ enum FrameSource {
 
 struct TextureState {
     texture: wgpu::Texture,
+    alpha_texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     uniform: wgpu::Buffer,
     width: u32,
@@ -211,6 +128,7 @@ struct TextureState {
     /// is one line rather than one per frame.
     reported_mismatch: Option<(usize, usize)>,
     source_generation: u64,
+    alpha_stamp: Option<(SystemTime, SystemTime, u64)>,
     native_hold: Option<DeferredNativeHold>,
 }
 
@@ -264,6 +182,21 @@ impl Pipeline {
             })
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let alpha_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Canvas retained video alpha plane"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let alpha_view = alpha_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Canvas retained video uniforms"),
             size: UNIFORM_BYTES,
@@ -286,10 +219,15 @@ impl Pipeline {
                     binding: 2,
                     resource: uniform.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&alpha_view),
+                },
             ],
         });
         TextureState {
             texture,
+            alpha_texture,
             bind_group,
             uniform,
             width,
@@ -299,6 +237,7 @@ impl Pipeline {
             generation: self.generation,
             reported_mismatch: None,
             source_generation,
+            alpha_stamp: None,
             native_hold: None,
         }
     }
@@ -392,81 +331,11 @@ impl<Message> shader::Program<Message> for Program<Message> {
 
 impl shader::Pipeline for Pipeline {
     fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Canvas retained video layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        // Must match the uniform struct and the buffer exactly; wgpu
-                        // refuses the pipeline outright if the layout promises less.
-                        min_binding_size: wgpu::BufferSize::new(UNIFORM_BYTES),
-                    },
-                    count: None,
-                },
-            ],
-        });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Canvas retained video pipeline layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
-        });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Canvas retained video shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
-        });
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Canvas retained video pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Canvas retained video linear sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            min_filter: wgpu::FilterMode::Linear,
-            mag_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
+        let fpl_gfx::retained_video::Pipeline {
+            render_pipeline,
+            bind_group_layout,
+            sampler,
+        } = fpl_gfx::retained_video::Pipeline::new(device, format);
         Self {
             render_pipeline,
             bind_group_layout,
@@ -621,19 +490,77 @@ impl shader::Primitive for Primitive {
                 .map(std::time::Duration::from_nanos)
                 .map_or(1.0, staleness_of),
         };
-        let uniforms = [
-            bounds.width,
-            bounds.height,
-            source_width as f32,
-            source_height as f32,
+        let mut has_alpha = false;
+        if let FrameSource::File { path, .. } = &self.source {
+            let alpha_path = path.with_extension("alpha");
+            let alpha_metadata_path = path.with_extension("alpha.json");
+            let descriptor = std::fs::read(&alpha_metadata_path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<VideoAlphaMask>(&bytes).ok());
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+                .unwrap_or(u64::MAX);
+            if let Some(descriptor) = descriptor.filter(|descriptor| {
+                descriptor.width == source_width
+                    && descriptor.height == source_height
+                    && descriptor.valid_until_unix_ms > now_ms
+            }) {
+                let alpha_metadata = std::fs::metadata(&alpha_path).ok();
+                let descriptor_metadata = std::fs::metadata(&alpha_metadata_path).ok();
+                let stamp = alpha_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .zip(
+                        descriptor_metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.modified().ok()),
+                    )
+                    .map(|(alpha_time, descriptor_time)| {
+                        (alpha_time, descriptor_time, descriptor.generation)
+                    });
+                let expected = source_width as usize * source_height as usize;
+                if let Some(stamp) = stamp {
+                    if state.alpha_stamp != Some(stamp) {
+                        if let Ok(bytes) = std::fs::read(&alpha_path)
+                            && bytes.len() == expected
+                        {
+                            queue.write_texture(
+                                wgpu::TexelCopyTextureInfo {
+                                    texture: &state.alpha_texture,
+                                    mip_level: 0,
+                                    origin: wgpu::Origin3d::ZERO,
+                                    aspect: wgpu::TextureAspect::All,
+                                },
+                                &bytes,
+                                wgpu::TexelCopyBufferLayout {
+                                    offset: 0,
+                                    bytes_per_row: Some(source_width),
+                                    rows_per_image: Some(source_height),
+                                },
+                                wgpu::Extent3d {
+                                    width: source_width,
+                                    height: source_height,
+                                    depth_or_array_layers: 1,
+                                },
+                            );
+                            state.alpha_stamp = Some(stamp);
+                        }
+                    }
+                    has_alpha = state.alpha_stamp == Some(stamp);
+                }
+            }
+        }
+        let uniforms = fpl_gfx::retained_video::Uniforms {
+            viewport: [bounds.width, bounds.height],
+            source: [source_width as f32, source_height as f32],
             staleness,
-            0.0,
-            if matches!(&self.source, FrameSource::External(frame) if frame.descriptor.alpha_mode == canvas_core::external_surface::AlphaMode::Premultiplied) { 1.0 } else { 0.0 },
-            if matches!(&self.source, FrameSource::External(frame) if frame.descriptor.alpha_mode != canvas_core::external_surface::AlphaMode::Opaque) { 1.0 } else { 0.0 },
-        ];
-        queue.write_buffer(&state.uniform, 0, unsafe {
-            std::slice::from_raw_parts(uniforms.as_ptr().cast::<u8>(), UNIFORM_BYTES as usize)
-        });
+            has_alpha: if has_alpha { 1.0 } else { 0.0 },
+            premultiplied: if matches!(&self.source, FrameSource::External(frame) if frame.descriptor.alpha_mode == canvas_core::external_surface::AlphaMode::Premultiplied) { 1.0 } else { 0.0 },
+            native_alpha: if matches!(&self.source, FrameSource::External(frame) if frame.descriptor.alpha_mode != canvas_core::external_surface::AlphaMode::Opaque) { 1.0 } else { 0.0 },
+        };
+        queue.write_buffer(&state.uniform, 0, &uniforms.to_bytes());
 
         if let FrameSource::External(frame) = &self.source {
             if state.external_stamp == Some(frame.presented_at_unix_ns) {

@@ -33,17 +33,28 @@
         "theme": null, "refresh_ms": 50, "chrome": "integrated",
         "data": { "state": "loading", "source": "synesthesia/daw", "observed_at": null, "window": "live", "detail": "Awaiting peaks", "provenance": "live" }
       }}, "inputs": [{ "id": "quality", "contract": "canvas.widget.snapshot.v1" }]
+    },
+    {
+      "id": "mix-field", "title": "Mix field",
+      "content": { "kind": "widget", "spec": {
+        "schema_version": 2, "id": "mix-field", "kind": "mix_field", "title": "Studio mix field", "surface": "launchkey",
+        "strips": [{"index":1,"cc":21,"label":"Awaiting sources","gain":0.0,"active":false,"peak":0.0,"stereo_position":0.0,"left_peak":0.0,"right_peak":0.0,"bands":[]}],
+        "theme": null, "refresh_ms": 50, "chrome": "integrated",
+        "data": { "state": "loading", "source": "synesthesia/mix-field", "observed_at": null, "window": "live", "detail": "Awaiting controller telemetry", "provenance": "live" }
+      }}, "inputs": [{ "id": "mix-field", "contract": "canvas.widget.snapshot.v1" }]
     }
   ],
   "layout": { "kind": "canvas", "placements": [
-    { "surface_id": "transport", "bounds": { "x": 0.0, "y": 0.0, "width": 0.68, "height": 1.0 }, "layer": 0 },
+    { "surface_id": "transport", "bounds": { "x": 0.0, "y": 0.0, "width": 0.68, "height": 0.49 }, "layer": 0 },
+    { "surface_id": "mix-field", "bounds": { "x": 0.0, "y": 0.51, "width": 0.68, "height": 0.49 }, "layer": 0 },
     { "surface_id": "routing", "bounds": { "x": 0.69, "y": 0.0, "width": 0.31, "height": 0.62 }, "layer": 0 },
     { "surface_id": "quality", "bounds": { "x": 0.69, "y": 0.64, "width": 0.31, "height": 0.36 }, "layer": 0 }
   ]},
   "bindings": [
     { "id": "studio-transport", "source": { "owner": "synesthesia", "stream": "daw", "contract": "canvas.widget.snapshot.v1" }, "target": { "surface_id": "transport", "input_id": "daw" }, "adapter": "synesthesia-daw-v1", "delivery": { "mode": "latest" } },
     { "id": "studio-routing", "source": { "owner": "synesthesia", "stream": "studio-routing", "contract": "canvas.widget.snapshot.v1" }, "target": { "surface_id": "routing", "input_id": "routing" }, "adapter": "synesthesia-routing-v1", "delivery": { "mode": "latest" } },
-    { "id": "studio-quality", "source": { "owner": "synesthesia", "stream": "studio-quality", "contract": "canvas.widget.snapshot.v1" }, "target": { "surface_id": "quality", "input_id": "quality" }, "adapter": "synesthesia-quality-v1", "delivery": { "mode": "latest" } }
+    { "id": "studio-quality", "source": { "owner": "synesthesia", "stream": "studio-quality", "contract": "canvas.widget.snapshot.v1" }, "target": { "surface_id": "quality", "input_id": "quality" }, "adapter": "synesthesia-quality-v1", "delivery": { "mode": "latest" } },
+    { "id": "studio-mix-field", "source": { "owner": "synesthesia", "stream": "mix-field", "contract": "canvas.widget.snapshot.v1" }, "target": { "surface_id": "mix-field", "input_id": "mix-field" }, "adapter": "synesthesia-mix-field-v1", "delivery": { "mode": "latest" } }
   ],
   "pages": [], "active_page": 0, "focused_surface_id": null
 }

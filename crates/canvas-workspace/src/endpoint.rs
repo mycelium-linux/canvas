@@ -27,6 +27,10 @@ pub enum Command {
         surface_id: String,
         action: fpl_gfx::panels::TaskNavigation,
     },
+    /// Transient graphics only; not control authority or a persisted edit.
+    ObserverFrame {
+        frame: Option<crate::observer::Frame>,
+    },
     /// Transient display data, not a document edit or a persisted checkpoint.
     SurfaceSnapshot {
         workspace_id: String,
@@ -36,8 +40,11 @@ pub enum Command {
     },
     Inspect,
     ReadDocument,
-    /// Read current transient presentation; not a persisted checkpoint.
+    /// Read the current presentation including transient frames and selection.
+    /// This is not a checkpoint: receivers must expire delivery independently.
     ReadPresentation,
+    /// Read a declared workspace without changing the display's selection.
+    WorkspacePresentation { name: String },
     Install {
         catalog: Catalog,
         documents: Vec<WorkspaceDocument>,
@@ -68,12 +75,13 @@ pub enum Command {
 
 #[derive(Clone)]
 pub struct Endpoint {
-    task_selection: std::collections::BTreeMap<String, (Option<String>, bool)>,
+    task_selection: std::collections::BTreeMap<(String, String), (Option<String>, bool)>,
+    observer: crate::observer::Observation,
     owner: String,
     revision: u64,
     session: Option<Workspaces>,
     frames: std::collections::BTreeMap<
-        String,
+        (String, String),
         (
             serde_json::Value,
             canvas_widgets::WidgetData,
@@ -86,6 +94,7 @@ impl Endpoint {
     pub fn new(owner: &str) -> Self {
         Self {
             task_selection: Default::default(),
+            observer: Default::default(),
             owner: owner.into(),
             revision: 1,
             session: None,
@@ -101,6 +110,9 @@ impl Endpoint {
             "palette":self.session.as_ref().and_then(|session| session.palette().ok().flatten()),
             "document":self.session.as_ref().and_then(Workspaces::document)
         });
+        snapshot["observer"] =
+            serde_json::to_value(self.observer.current(std::time::Instant::now()))
+                .unwrap_or(serde_json::Value::Null);
         snapshot["header"] = self
             .surface_snapshot(HEADER_SURFACE_ID)
             .unwrap_or(serde_json::Value::Null);
@@ -127,10 +139,19 @@ impl Endpoint {
             "projection":self.session.as_ref().map(Workspaces::retained_projection)})
     }
 
+    pub fn observer_frame(&self) -> Option<&crate::observer::Frame> {
+        self.observer.current(std::time::Instant::now())
+    }
+
     /// Latest transient frame for a declared signal or status surface. The
     /// receiver's monotonic clock owns staleness; frames never survive restart.
     pub fn surface_snapshot(&self, surface_id: &str) -> Option<serde_json::Value> {
         let document = self.session.as_ref()?.document()?;
+        self.workspace_surface_snapshot(document, surface_id)
+    }
+
+    fn workspace_surface_snapshot(&self, document: &WorkspaceDocument, surface_id: &str) -> Option<serde_json::Value> {
+        let key = (document.id.clone(), surface_id.to_owned());
         let surface = document.surfaces.iter().find(|s| s.id == surface_id)?;
         let crate::SurfaceContent::Widget { spec } = &surface.content else {
             return None;
@@ -142,7 +163,7 @@ impl Endpoint {
             }
             _ => return None,
         };
-        let (mut frame, mut data) = self.frames.get(surface_id).map_or_else(
+        let (mut frame, mut data) = self.frames.get(&key).map_or_else(
             || (declared, spec.data.clone()),
             |(frame, data, received)| {
                 let mut data = data.clone();
@@ -157,30 +178,26 @@ impl Endpoint {
         // A declared completed sample is retained evidence, not a live sensor
         // awaiting a transient heartbeat. Only live sources lose readiness on
         // restart/missing delivery. Do not invent a receipt time for artifacts.
-        if !self.frames.contains_key(surface_id)
+        if !self.frames.contains_key(&key)
             && spec.data.provenance == canvas_widgets::Provenance::Live
         {
             data.state = canvas_widgets::WidgetDataState::NoData;
         }
         if frame["view"] == "task_deck" {
-            if let Some((selected, expanded)) = self.task_selection.get(surface_id) {
-                let present = selected.as_ref().is_some_and(|id| {
-                    frame["panel"]["items"]
-                        .as_array()
-                        .is_some_and(|items| items.iter().any(|i| i["id"].as_str() == Some(id)))
-                });
-                if present {
-                    frame["panel"]["selected"] = serde_json::json!(selected);
-                    frame["panel"]["expanded"] = serde_json::json!(expanded);
-                }
+            if let Some((selected, expanded)) = self.task_selection.get(&key) {
+                let present = selected.as_ref().is_some_and(|id| frame["panel"]["items"].as_array().is_some_and(|items| items.iter().any(|i| i["id"].as_str()==Some(id))));
+                if present { frame["panel"]["selected"]=serde_json::json!(selected); frame["panel"]["expanded"]=serde_json::json!(expanded); }
             }
         }
-        if matches!(
-            data.state,
-            canvas_widgets::WidgetDataState::Stale | canvas_widgets::WidgetDataState::NoData
-        ) && matches!(frame["view"].as_str(), Some("attention" | "task_deck"))
-        {
-            frame["panel"]["fresh"] = serde_json::json!(false);
+        if frame["view"] == "geo_map" {
+            if let Some((selected, _)) = self.task_selection.get(&key) {
+                let present = selected.as_ref().is_some_and(|id| frame["map"]["markers"].as_array().is_some_and(|items| items.iter().any(|i| i["id"].as_str() == Some(id))));
+                frame["map"]["selected"] = if present { serde_json::json!(selected) } else { serde_json::Value::Null };
+            }
+        }
+        if matches!(data.state, canvas_widgets::WidgetDataState::Stale | canvas_widgets::WidgetDataState::NoData)
+            && matches!(frame["view"].as_str(),Some("attention" | "task_deck")) {
+            frame["panel"]["fresh"]=serde_json::json!(false);
         }
         Some(serde_json::json!({"frame":frame, "data":data}))
     }
@@ -240,8 +257,10 @@ impl Endpoint {
             Command::Inspect
                 | Command::ReadDocument
                 | Command::ReadPresentation
+                | Command::WorkspacePresentation { .. }
                 | Command::WorkspaceRead { .. }
                 | Command::SurfaceSnapshot { .. }
+                | Command::ObserverFrame { .. }
                 | Command::SurfaceNavigate { .. }
         );
         if writes && request.expected_revision != Some(self.revision) {
@@ -253,23 +272,23 @@ impl Endpoint {
             .ok_or("Endpoint revision exhausted")?;
         match request.command {
             Command::SurfaceNavigate { surface_id, action } => {
-                let snapshot = self
-                    .surface_snapshot(&surface_id)
-                    .ok_or("Surface is not active")?;
-                let fpl_gfx::signals::SignalFrame::TaskDeck { mut panel } =
-                    serde_json::from_value(snapshot["frame"].clone())
-                        .map_err(|_| "Invalid task deck")?
-                else {
-                    return Err("Surface does not support task navigation".into());
-                };
-                let handled = panel
-                    .navigate(action)
-                    .map_err(|_| "Invalid task navigation")?;
-                self.task_selection
-                    .insert(surface_id, (panel.selected.clone(), panel.expanded));
-                return Ok(
-                    serde_json::json!({"handled":handled,"selected":panel.selected,"expanded":panel.expanded}),
-                );
+                let snapshot=self.surface_snapshot(&surface_id).ok_or("Surface is not active")?;
+                let parsed = serde_json::from_value(snapshot["frame"].clone()).map_err(|_| "Invalid navigable frame")?;
+                if let fpl_gfx::signals::SignalFrame::GeoMap { mut map } = parsed {
+                    let handled = map.navigate(action).map_err(|_| "Invalid map navigation")?;
+                    let workspace_id = self.session.as_ref().and_then(Workspaces::document).ok_or("No active workspace")?.id.clone();
+                    self.task_selection.insert((workspace_id, surface_id), (map.selected.clone(), false));
+                    return Ok(serde_json::json!({"handled":handled,"selected":map.selected}));
+                }
+                let fpl_gfx::signals::SignalFrame::TaskDeck { mut panel } = parsed else { return Err("Surface does not support navigation".into()); };
+                let handled=panel.navigate(action).map_err(|_| "Invalid task navigation")?;
+                let workspace_id = self.session.as_ref().and_then(Workspaces::document).ok_or("No active workspace")?.id.clone();
+                self.task_selection.insert((workspace_id, surface_id),(panel.selected.clone(),panel.expanded));
+                return Ok(serde_json::json!({"handled":handled,"selected":panel.selected,"expanded":panel.expanded}));
+            }
+            Command::ObserverFrame { frame } => {
+                self.observer.observe(frame, std::time::Instant::now())?;
+                return Ok(serde_json::json!({"accepted":true}));
             }
             Command::SurfaceSnapshot {
                 workspace_id,
@@ -280,11 +299,8 @@ impl Endpoint {
                 let document = self
                     .session
                     .as_ref()
-                    .and_then(Workspaces::document)
-                    .ok_or("No active workspace")?;
-                if document.id != workspace_id {
-                    return Err("Snapshot target is not active".into());
-                }
+                    .and_then(|session| session.document_by_id(&workspace_id))
+                    .ok_or("Snapshot workspace is not declared")?;
                 let surface = document
                     .surfaces
                     .iter()
@@ -319,15 +335,15 @@ impl Endpoint {
                 };
                 next.data = data.clone();
                 next.validate().map_err(|e| e.to_string())?;
-                if let Some((Some(selected), _)) = self.task_selection.get(&surface_id) {
-                    if !frame["panel"]["items"].as_array().is_some_and(|items| {
-                        items.iter().any(|i| i["id"].as_str() == Some(selected))
-                    }) {
-                        self.task_selection.remove(&surface_id);
+                let key = (workspace_id, surface_id);
+                if let Some((Some(selected), _)) = self.task_selection.get(&key) {
+                    let items = if frame["view"] == "geo_map" { &frame["map"]["markers"] } else { &frame["panel"]["items"] };
+                    if !items.as_array().is_some_and(|items| items.iter().any(|i| i["id"].as_str()==Some(selected))) {
+                        self.task_selection.remove(&key);
                     }
                 }
                 self.frames
-                    .insert(surface_id, (frame, data, std::time::Instant::now()));
+                    .insert(key, (frame, data, std::time::Instant::now()));
                 return Ok(serde_json::json!({"accepted":true}));
             }
             Command::Inspect => {}
@@ -335,19 +351,25 @@ impl Endpoint {
                 return serde_json::to_value(self.session.as_ref().and_then(Workspaces::document))
                     .map_err(|error| error.to_string());
             }
-            Command::ReadPresentation => {
-                let document = self.session.as_ref().and_then(Workspaces::document);
+            command @ (Command::ReadPresentation | Command::WorkspacePresentation { .. }) => {
+                let session = self.session.as_ref().ok_or("Endpoint has no catalog")?;
+                let document = match command {
+                    Command::WorkspacePresentation { name } => session.document_for(&name),
+                    _ => session.document(),
+                }.ok_or("Presentation workspace is not declared")?;
                 let mut surfaces = std::collections::BTreeMap::new();
-                if let Some(document) = document {
                     for surface in &document.surfaces {
-                        if let Some(snapshot) = self.surface_snapshot(&surface.id) {
+                        if let Some(snapshot) = self.workspace_surface_snapshot(document, &surface.id) {
                             surfaces.insert(surface.id.clone(), snapshot);
                         }
                     }
-                }
-                return Ok(
-                    serde_json::json!({"schema_version":1,"owner":self.owner,"revision":self.revision,"document":document,"surfaces":surfaces}),
-                );
+                return Ok(serde_json::json!({
+                    "schema_version": 1,
+                    "owner": self.owner,
+                    "revision": self.revision,
+                    "document": document,
+                    "surfaces": surfaces,
+                }));
             }
             Command::WorkspaceRead { name } => {
                 let session = self.session.as_ref().ok_or("Endpoint has no catalog")?;
@@ -397,8 +419,6 @@ impl Endpoint {
                     return Err("Project has no retained document".into());
                 }
                 session.select(Actor::Human, &name)?;
-                self.frames.clear();
-                self.task_selection.clear();
             }
             Command::WorkspacePages { pages } => {
                 self.session
@@ -413,53 +433,25 @@ impl Endpoint {
                     .select_page(index)?;
             }
             Command::ApplyPatch { patch } => {
-                let previous = self
-                    .session
-                    .as_ref()
-                    .and_then(Workspaces::document)
-                    .cloned();
+                let previous=self.session.as_ref().and_then(|session| session.document_by_id(&patch.workspace_id)).cloned();
                 self.session
                     .as_mut()
                     .ok_or("Endpoint has no catalog")?
                     .apply_document_patch(&patch)?;
-                let current = self.session.as_ref().and_then(Workspaces::document);
+                let current=self.session.as_ref().and_then(|session| session.document_by_id(&patch.workspace_id));
                 let compatible = |id: &str| {
-                    let old = previous
-                        .as_ref()
-                        .and_then(|d| d.surfaces.iter().find(|s| s.id == id));
-                    let new = current
-                        .as_ref()
-                        .and_then(|d| d.surfaces.iter().find(|s| s.id == id));
-                    let (
-                        Some(crate::Surface {
-                            content: crate::SurfaceContent::Widget { spec: old },
-                            ..
-                        }),
-                        Some(crate::Surface {
-                            content: crate::SurfaceContent::Widget { spec: new },
-                            ..
-                        }),
-                    ) = (old, new)
-                    else {
-                        return false;
-                    };
-                    if old.data.source != new.data.source {
-                        return false;
-                    }
-                    match (&old.kind, &new.kind) {
-                        (
-                            canvas_widgets::WidgetKind::SignalView { frame: a, .. },
-                            canvas_widgets::WidgetKind::SignalView { frame: b, .. },
-                        ) => a["view"] == b["view"],
-                        (
-                            canvas_widgets::WidgetKind::StatusList { .. },
-                            canvas_widgets::WidgetKind::StatusList { .. },
-                        ) => true,
-                        _ => false,
+                    let old=previous.as_ref().and_then(|d| d.surfaces.iter().find(|s| s.id==id));
+                    let new=current.as_ref().and_then(|d| d.surfaces.iter().find(|s| s.id==id));
+                    let (Some(crate::Surface {content:crate::SurfaceContent::Widget {spec:old},..}),Some(crate::Surface {content:crate::SurfaceContent::Widget {spec:new},..}))=(old,new) else {return false};
+                    if old.data.source!=new.data.source {return false;}
+                    match (&old.kind,&new.kind) {
+                        (canvas_widgets::WidgetKind::SignalView {frame:a,..},canvas_widgets::WidgetKind::SignalView {frame:b,..}) => a["view"]==b["view"],
+                        (canvas_widgets::WidgetKind::StatusList {..},canvas_widgets::WidgetKind::StatusList {..})=>true,
+                        _=>false,
                     }
                 };
-                self.frames.retain(|id, _| compatible(id));
-                self.task_selection.retain(|id, _| compatible(id));
+                self.frames.retain(|(workspace,id),_|workspace != &patch.workspace_id || compatible(id));
+                self.task_selection.retain(|(workspace,id),_|workspace != &patch.workspace_id || compatible(id));
             }
         }
         if writes {
@@ -489,9 +481,7 @@ impl Endpoint {
 
 fn surface_frame_expiry(refresh_ms: Option<u64>) -> std::time::Duration {
     std::time::Duration::from_millis(refresh_ms.map_or(3000, |ms| {
-        ms.saturating_mul(3)
-            .saturating_add(1000)
-            .clamp(3000, 300000)
+        ms.saturating_mul(3).saturating_add(1000).clamp(3000, 300000)
     }))
 }
 
@@ -518,137 +508,120 @@ mod tests {
         assert_eq!(endpoint.surface_snapshot("clock").unwrap()["data"]["state"],"no_data");
     }
     #[test]
-    fn task_navigation_survives_refresh_but_not_removed_identity_or_restart() {
+    fn background_presentation_is_scoped_and_does_not_select_workspace() {
         let mut endpoint = Endpoint::new("firetv-omni");
-        let mut request: Request = serde_json::from_str(include_str!(
-            "../../../config/deploy/firetv/workspaces.json"
-        ))
-        .unwrap();
-        let Command::Install { documents, .. } = &mut request.command else {
-            panic!()
+        let mut install: Request = serde_json::from_str(include_str!("../../../config/deploy/firetv/workspaces.json")).unwrap();
+        let Command::Install { documents, .. } = &mut install.command else { panic!() };
+        documents[0].surfaces[1].content = crate::SurfaceContent::Widget {
+            spec: canvas_widgets::WidgetSpec::from_json(br#"{"schema_version":2,"id":"clock","kind":"status_list","title":"Waiting","nodes":[]}"#).unwrap()
         };
+        let mut other = documents[0].clone();
+        other.id = "tv-clock".into();
+        other.project_id = "clock".into();
+        documents.retain(|document| document.project_id != "clock");
+        documents.push(other);
+        endpoint.execute(install).unwrap();
+        let saved = endpoint.checkpoint();
+        let frame = serde_json::json!({"title":"Background owner","nodes":[]});
+        endpoint.execute(Request { schema_version:1, request_id:"background-frame".into(), expected_revision:None,
+            command:Command::SurfaceSnapshot { workspace_id:"tv-clock".into(), surface_id:"clock".into(), frame:frame.clone(), data:Default::default() } }).unwrap();
+        let read = |name:&str| Request { schema_version:1, request_id:"named-read".into(), expected_revision:None,
+            command:Command::WorkspacePresentation { name:name.into() } };
+        let background = endpoint.execute(read("clock")).unwrap();
+        assert_eq!(background["surfaces"]["clock"]["frame"], frame);
+        assert_eq!(endpoint.checkpoint(), saved);
+        assert_ne!(endpoint.execute(read("television")).unwrap()["surfaces"]["clock"]["frame"], frame);
+        assert!(endpoint.execute(read("not-declared")).is_err());
+        let document = endpoint.session.as_ref().unwrap().document_for("clock").unwrap().clone();
+        endpoint.execute(Request { schema_version:1, request_id:"background-layout".into(), expected_revision:Some(endpoint.revision),
+            command:Command::ApplyPatch { patch:WorkspacePatch { schema_version:1, workspace_id:document.id,
+                base_revision:document.revision, revision:document.revision+1,
+                operations:vec![crate::PatchOperation::SetFocus { surface_id:Some("clock".into()) }] } } }).unwrap();
+        assert_eq!(endpoint.snapshot()["catalog"]["selected_project"], "television");
+        assert_eq!(endpoint.execute(read("clock")).unwrap()["surfaces"]["clock"]["frame"], frame);
+        endpoint.execute(Request { schema_version:1, request_id:"switch".into(), expected_revision:Some(endpoint.revision),
+            command:Command::WorkspaceSwitch { name:"clock".into() } }).unwrap();
+        assert_eq!(endpoint.surface_snapshot("clock").unwrap()["frame"], frame);
+        let restored = Endpoint::restore("firetv-omni", &endpoint.checkpoint().to_string()).unwrap();
+        assert_eq!(restored.surface_snapshot("clock").unwrap()["data"]["state"], "no_data");
+    }
+
+    #[test]
+    fn task_navigation_survives_refresh_but_not_removed_identity_or_restart() {
+        let mut endpoint=Endpoint::new("firetv-omni");
+        let mut request:Request=serde_json::from_str(include_str!("../../../config/deploy/firetv/workspaces.json")).unwrap();
+        let Command::Install { documents,.. }=&mut request.command else {panic!()};
         documents[0].surfaces[1].content=crate::SurfaceContent::Widget { spec: canvas_widgets::WidgetSpec::from_json(br#"{"schema_version":2,"id":"tasks","kind":"signal_view","title":"Tasks","refresh_ms":2000,"frame":{"view":"task_deck","panel":{"items":[],"fresh":false}}}"#).unwrap() };
         endpoint.execute(request).unwrap();
-        let before = endpoint.checkpoint();
-        let a = serde_json::json!({"id":"a","project":"Canvas","title":"Task A","meta":"neo","state":"active"});
-        let b = serde_json::json!({"id":"b","project":"Bus","title":"Task B","meta":"neo","state":"input"});
-        let snapshot = |items: Vec<serde_json::Value>| Request {
+        let before=endpoint.checkpoint();
+        let a=serde_json::json!({"id":"a","project":"Canvas","title":"Task A","meta":"neo","state":"active"});
+        let b=serde_json::json!({"id":"b","project":"Bus","title":"Task B","meta":"neo","state":"input"});
+        let snapshot=|items:Vec<serde_json::Value>| Request { schema_version:1,request_id:"tasks".into(),expected_revision:None,command:Command::SurfaceSnapshot {workspace_id:"tv-television".into(),surface_id:"clock".into(),frame:serde_json::json!({"view":"task_deck","panel":{"items":items,"fresh":true}}),data:Default::default()} };
+        endpoint.execute(snapshot(vec![a.clone(),b.clone()])).unwrap();
+        let navigate=|action| Request {schema_version:1,request_id:"navigation".into(),expected_revision:None,command:Command::SurfaceNavigate {surface_id:"clock".into(),action}};
+        endpoint.execute(navigate(fpl_gfx::panels::TaskNavigation::Open)).unwrap();
+        endpoint.execute(snapshot(vec![b,a.clone()])).unwrap();
+        assert_eq!(endpoint.surface_snapshot("clock").unwrap()["frame"]["panel"]["selected"],"a");
+        assert_eq!(endpoint.checkpoint(),before);
+        let presentation = endpoint.execute(Request {
             schema_version: 1,
-            request_id: "tasks".into(),
+            request_id: "mirror-read".into(),
             expected_revision: None,
-            command: Command::SurfaceSnapshot {
-                workspace_id: "tv-television".into(),
-                surface_id: "clock".into(),
-                frame: serde_json::json!({"view":"task_deck","panel":{"items":items,"fresh":true}}),
-                data: Default::default(),
-            },
-        };
-        endpoint
-            .execute(snapshot(vec![a.clone(), b.clone()]))
-            .unwrap();
-        let navigate = |action| Request {
-            schema_version: 1,
-            request_id: "navigation".into(),
-            expected_revision: None,
-            command: Command::SurfaceNavigate {
-                surface_id: "clock".into(),
-                action,
-            },
-        };
-        endpoint
-            .execute(navigate(fpl_gfx::panels::TaskNavigation::Open))
-            .unwrap();
-        endpoint.execute(snapshot(vec![b, a.clone()])).unwrap();
-        assert_eq!(
-            endpoint.surface_snapshot("clock").unwrap()["frame"]["panel"]["selected"],
-            "a"
-        );
-        assert_eq!(endpoint.checkpoint(), before);
-        let presentation = endpoint
-            .execute(Request {
-                schema_version: 1,
-                request_id: "mirror-read".into(),
-                expected_revision: None,
-                command: Command::ReadPresentation,
-            })
-            .unwrap();
+            command: Command::ReadPresentation,
+        }).unwrap();
         assert_eq!(presentation["owner"], "firetv-omni");
-        assert_eq!(
-            presentation["surfaces"]["clock"]["frame"]["panel"]["selected"],
-            "a"
-        );
-        assert_eq!(
-            presentation["surfaces"]["clock"]["frame"]["panel"]["expanded"],
-            true
-        );
+        assert_eq!(presentation["surfaces"]["clock"]["frame"]["panel"]["selected"], "a");
+        assert_eq!(presentation["surfaces"]["clock"]["frame"]["panel"]["expanded"], true);
         assert_eq!(endpoint.checkpoint(), before);
-        let doc = endpoint.session.as_ref().unwrap().document().unwrap();
-        let patch = WorkspacePatch {
+        let doc=endpoint.session.as_ref().unwrap().document().unwrap();
+        let patch=WorkspacePatch {schema_version:1,workspace_id:doc.id.clone(),base_revision:doc.revision,revision:doc.revision+1,
+            operations:vec![crate::PatchOperation::SetFocus {surface_id:Some("clock".into())}]};
+        endpoint.execute(Request {schema_version:1,request_id:"layout-only".into(),expected_revision:Some(endpoint.revision),command:Command::ApplyPatch {patch}}).unwrap();
+        assert_eq!(endpoint.surface_snapshot("clock").unwrap()["frame"]["panel"]["selected"],"a");
+        assert!(endpoint.frames.contains_key(&("tv-television".into(), "clock".into())));
+        endpoint.frames.get_mut(&("tv-television".into(), "clock".into())).unwrap().2=std::time::Instant::now()-std::time::Duration::from_secs(4);
+        assert_ne!(endpoint.surface_snapshot("clock").unwrap()["data"]["state"],"stale");
+        endpoint.frames.get_mut(&("tv-television".into(), "clock".into())).unwrap().2=std::time::Instant::now()-std::time::Duration::from_secs(8);
+        assert_eq!(endpoint.surface_snapshot("clock").unwrap()["frame"]["panel"]["fresh"],false);
+        let presentation = endpoint.execute(Request {
             schema_version: 1,
-            workspace_id: doc.id.clone(),
-            base_revision: doc.revision,
-            revision: doc.revision + 1,
-            operations: vec![crate::PatchOperation::SetFocus {
-                surface_id: Some("clock".into()),
-            }],
-        };
-        endpoint
-            .execute(Request {
-                schema_version: 1,
-                request_id: "layout-only".into(),
-                expected_revision: Some(endpoint.revision),
-                command: Command::ApplyPatch { patch },
-            })
-            .unwrap();
-        assert_eq!(
-            endpoint.surface_snapshot("clock").unwrap()["frame"]["panel"]["selected"],
-            "a"
-        );
-        assert!(endpoint.frames.contains_key("clock"));
-        endpoint.frames.get_mut("clock").unwrap().2 =
-            std::time::Instant::now() - std::time::Duration::from_secs(4);
-        assert_ne!(
-            endpoint.surface_snapshot("clock").unwrap()["data"]["state"],
-            "stale"
-        );
-        endpoint.frames.get_mut("clock").unwrap().2 =
-            std::time::Instant::now() - std::time::Duration::from_secs(8);
-        assert_eq!(
-            endpoint.surface_snapshot("clock").unwrap()["frame"]["panel"]["fresh"],
-            false
-        );
+            request_id: "mirror-expired".into(),
+            expected_revision: None,
+            command: Command::ReadPresentation,
+        }).unwrap();
+        assert_eq!(presentation["surfaces"]["clock"]["data"]["state"], "stale");
+        assert_eq!(presentation["surfaces"]["clock"]["frame"]["panel"]["fresh"], false);
         endpoint.execute(snapshot(vec![])).unwrap();
         endpoint.execute(snapshot(vec![a])).unwrap();
-        assert!(
-            endpoint.surface_snapshot("clock").unwrap()["frame"]["panel"]["selected"].is_null()
-        );
-        assert!(
-            Endpoint::restore("firetv-omni", &before.to_string())
-                .unwrap()
-                .task_selection
-                .is_empty()
-        );
-        let doc = endpoint.session.as_ref().unwrap().document().unwrap();
-        let mut surface = doc.surfaces[1].clone();
-        if let crate::SurfaceContent::Widget { spec } = &mut surface.content {
-            spec.data.source = Some("unibus:other-owner".into());
-        }
-        let patch = WorkspacePatch {
-            schema_version: 1,
-            workspace_id: doc.id.clone(),
-            base_revision: doc.revision,
-            revision: doc.revision + 1,
-            operations: vec![crate::PatchOperation::UpsertSurface { surface }],
-        };
-        endpoint
-            .execute(Request {
-                schema_version: 1,
-                request_id: "new-source".into(),
-                expected_revision: Some(endpoint.revision),
-                command: Command::ApplyPatch { patch },
-            })
-            .unwrap();
-        assert!(!endpoint.frames.contains_key("clock"));
+        assert!(endpoint.surface_snapshot("clock").unwrap()["frame"]["panel"]["selected"].is_null());
+        assert!(Endpoint::restore("firetv-omni",&before.to_string()).unwrap().task_selection.is_empty());
+        let doc=endpoint.session.as_ref().unwrap().document().unwrap();
+        let mut surface=doc.surfaces[1].clone();
+        if let crate::SurfaceContent::Widget {spec}=&mut surface.content {spec.data.source=Some("unibus:other-owner".into());}
+        let patch=WorkspacePatch {schema_version:1,workspace_id:doc.id.clone(),base_revision:doc.revision,revision:doc.revision+1,
+            operations:vec![crate::PatchOperation::UpsertSurface {surface}]};
+        endpoint.execute(Request {schema_version:1,request_id:"new-source".into(),expected_revision:Some(endpoint.revision),command:Command::ApplyPatch {patch}}).unwrap();
+        assert!(!endpoint.frames.contains_key(&("tv-television".into(), "clock".into())));
+    }
+    #[test]
+    fn map_navigation_survives_updates_without_persisting_or_resurrecting_selection() {
+        let mut endpoint = Endpoint::new("firetv-omni");
+        let mut request: Request = serde_json::from_str(include_str!("../../../config/deploy/firetv/workspaces.json")).unwrap();
+        let Command::Install { documents, .. } = &mut request.command else { panic!() };
+        let frame = serde_json::json!({"view":"geo_map","map":{"extent":{"south_deg":46.0,"north_deg":49.0,"west_deg":-124.0,"east_deg":-121.0},"markers":[{"id":"adsb:one","label":"ONE","latitude_deg":47.0,"longitude_deg":-123.0,"role":"primary"}],"paths":[],"selected":null}});
+        documents[0].surfaces[1].content = crate::SurfaceContent::Widget { spec:canvas_widgets::WidgetSpec::from_json(&serde_json::to_vec(&serde_json::json!({"schema_version":2,"id":"clock","kind":"signal_view","title":"Map","frame":frame})).unwrap()).unwrap() };
+        endpoint.execute(request).unwrap();
+        let before = endpoint.checkpoint();
+        let refresh = |frame| Request { schema_version:1, request_id:"map-refresh".into(), expected_revision:None, command:Command::SurfaceSnapshot {workspace_id:"tv-television".into(),surface_id:"clock".into(),frame,data:Default::default()} };
+        endpoint.execute(refresh(frame.clone())).unwrap();
+        endpoint.execute(Request {schema_version:1,request_id:"map-focus".into(),expected_revision:None,command:Command::SurfaceNavigate {surface_id:"clock".into(),action:fpl_gfx::panels::TaskNavigation::Focus}}).unwrap();
+        endpoint.execute(refresh(frame.clone())).unwrap();
+        assert_eq!(endpoint.surface_snapshot("clock").unwrap()["frame"]["map"]["selected"], "adsb:one");
+        assert_eq!(endpoint.checkpoint(), before);
+        let mut empty = frame.clone(); empty["map"]["markers"] = serde_json::json!([]);
+        endpoint.execute(refresh(empty)).unwrap();
+        endpoint.execute(refresh(frame)).unwrap();
+        assert!(endpoint.surface_snapshot("clock").unwrap()["frame"]["map"]["selected"].is_null());
     }
     #[test]
     fn frame_expiry_tracks_refresh_and_bounds_jitter_budget() {
@@ -656,12 +629,45 @@ mod tests {
         assert_eq!(super::surface_frame_expiry(Some(33)).as_millis(), 3000);
         assert_eq!(super::surface_frame_expiry(Some(2000)).as_millis(), 7000);
         assert_eq!(super::surface_frame_expiry(Some(30000)).as_millis(), 91000);
-        assert_eq!(
-            super::surface_frame_expiry(Some(u64::MAX)).as_millis(),
-            300000
-        );
+        assert_eq!(super::surface_frame_expiry(Some(u64::MAX)).as_millis(), 300000);
     }
     use super::*;
+    #[test]
+    fn observer_is_transient_and_does_not_require_a_workspace() {
+        let mut endpoint = Endpoint::new("firetv-omni");
+        let before = endpoint.checkpoint();
+        let frame = crate::observer::Frame {
+            source: "state-producer".into(),
+            session: "session".into(),
+            revision: 1,
+            activity: fpl_gfx::reactor::Activity::Thinking,
+            ttl_ms: 1000,
+            caption: None,
+            playback_level: None,
+        };
+        endpoint
+            .execute(Request {
+                schema_version: 1,
+                request_id: "observer".into(),
+                expected_revision: None,
+                command: Command::ObserverFrame {
+                    frame: Some(frame.clone()),
+                },
+            })
+            .unwrap();
+        assert_eq!(endpoint.observer_frame(), Some(&frame));
+        assert_eq!(endpoint.checkpoint(), before);
+        endpoint
+            .execute(Request {
+                schema_version: 1,
+                request_id: "clear".into(),
+                expected_revision: None,
+                command: Command::ObserverFrame { frame: None },
+            })
+            .unwrap();
+        assert!(endpoint.observer_frame().is_none());
+        assert_eq!(endpoint.checkpoint(), before);
+    }
     #[test]
     fn named_views_are_revision_bound_and_invalid_selection_is_atomic() {
         let mut endpoint = Endpoint::new("firetv-omni");
@@ -771,7 +777,7 @@ mod tests {
             "Album · Song"
         );
         assert_eq!(endpoint.checkpoint(), saved);
-        endpoint.frames.get_mut(HEADER_SURFACE_ID).unwrap().2 =
+        endpoint.frames.get_mut(&("tv-television".into(), HEADER_SURFACE_ID.into())).unwrap().2 =
             std::time::Instant::now() - std::time::Duration::from_secs(4);
         assert_eq!(endpoint.snapshot()["header"]["data"]["state"], "stale");
         let restored = Endpoint::restore("firetv-omni", &saved.to_string()).unwrap();
@@ -813,7 +819,7 @@ mod tests {
             endpoint.snapshot()["document"]["surfaces"][1]["content"]["spec"]["nodes"],
             frame["nodes"]
         );
-        endpoint.frames.get_mut("clock").unwrap().2 =
+        endpoint.frames.get_mut(&("tv-television".into(), "clock".into())).unwrap().2 =
             std::time::Instant::now() - std::time::Duration::from_secs(4);
         assert_eq!(
             endpoint.snapshot()["document"]["surfaces"][1]["content"]["spec"]["data"]["state"],
@@ -862,7 +868,7 @@ mod tests {
             .unwrap();
         assert_eq!(endpoint.checkpoint(), before);
         assert_eq!(endpoint.surface_snapshot("clock").unwrap()["frame"], frame);
-        endpoint.frames.get_mut("clock").unwrap().2 =
+        endpoint.frames.get_mut(&("tv-television".into(), "clock".into())).unwrap().2 =
             std::time::Instant::now() - std::time::Duration::from_secs(4);
         assert_eq!(
             endpoint.surface_snapshot("clock").unwrap()["data"]["state"],

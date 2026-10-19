@@ -219,6 +219,7 @@ const PIXEL_EPSILON: f32 = 0.5;
 fn appetite(kind: &WidgetKind) -> f32 {
     match kind {
         WidgetKind::TimeSeries { .. }
+        | WidgetKind::SignalView { .. }
         | WidgetKind::Histogram { .. }
         | WidgetKind::SpectralWaterfall { .. }
         | WidgetKind::Heatmap { .. }

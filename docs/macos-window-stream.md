@@ -5,6 +5,12 @@ ScreenCaptureKit, encodes it with VideoToolbox H.264, and advertises the
 existing `media.video_stream.v1` lease over Unibus. Canvas continues to own
 window chrome, placement, focus, and composition.
 
+H.264 remains the high-rate RGB media plane. The producer separately sends a
+complete RLE-compressed 8-bit alpha plane as `media.video_alpha_mask.v1` only
+when the captured silhouette changes and when its lease renews. The message
+names the stream, dimensions, generation, SHA-256 payload digest, and expiry;
+the compressed bytes use the Unibus binary payload rather than JSON.
+
 This is the shared producer for Simulator, scrcpy, Blender, Ghidra, Surf, and
 other native windows. Applications do not gain a Canvas dependency.
 
@@ -67,5 +73,10 @@ the app bundle and re-sign the bundle before restarting the agent.
   it.
 - Unibus leases expire if capture stops, so Canvas does not present a stale
   producer as healthy.
+- The media edge verifies the alpha payload digest and decoded size, rejects
+  stale generations and dimensions that do not match its decoder, then
+  atomically retains the complete plane. Canvas uses it only while its lease
+  and dimensions still match; otherwise the existing rounded geometric mask
+  remains the safe fallback.
 - Status-only ScreenCaptureKit samples are ignored; malformed image buffers and
   encoder write failures are fatal.

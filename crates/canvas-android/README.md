@@ -45,6 +45,40 @@ printf 'workspace switch ipfs-reading\n' | canvas-tvctl 192.168.2.97:5555
 
 ## Shared ownership
 
+### Transient assistant observations
+
+`observer_frame` accepts a bounded renderer-neutral activity frame through the
+existing authenticated endpoint. It neither mutates the workspace nor grants
+control authority. Freshness expires on the receiver's monotonic clock (at most
+five seconds); `frame: null` clears it. Same-session revisions cannot regress or
+conflict. Shared `fpl_gfx::voice_popup` owns the same 340×54 capsule proportions,
+colors, heard-text bounds and reveal/dismiss timing as the native Mac popup;
+the shared reactor visitor owns its animated geometry. Android owns only the
+platform painting and lifecycle. The capsule shows one verbatim heard-text line,
+never route, reply or diagnostic text, and briefly retains the final line on
+idle. It stays above the selected workspace rather than replacing it.
+Observer updates are excluded from the layout
+fingerprint so they do not restart video players or reconstruct PDF views.
+
+This renderer change requires a native-video APK containing both the Rust
+descriptor export and Java painting adapter. Merely streaming an observation
+to an older installed APK does not upgrade its chrome or make its caption visible.
+
+`canvas-tvctl SERIAL observer-stream` consumes newline-delimited observer-only
+requests with one retained authorized ADB forward. Pair it with JARVIS's
+`jarvis-reactor-watch CLIENT_CONFIG --canvas-source PRODUCER` projection.
+This does not itself configure UniBus grants or enable the JARVIS publisher.
+
+Desktop `canvasctl observer-stream` accepts those same bounded JSON lines and
+uses its existing owner socket to present the shared capsule. It rejects all
+workspace/control commands on that input. Fresh observation heartbeats renew
+the `jarvis-voice` display slot once per second without restarting the reveal;
+the desktop renderer independently removes that slot five seconds after its
+last upsert. EOF, expiry and invalid input clear the presentation. Idle retains
+the final heard line for 1.4 seconds, once per activity transition; repeated
+idle heartbeats do not show it again. Updating either renderer preserves the
+current workspace selection and documents.
+
 ### Workspace header slot
 
 A workspace may declare an unplaced `status_list` surface with the reserved ID
@@ -55,6 +89,42 @@ persisted as live state; stale or disconnected producers remain visibly marked.
 No app-specific track lookup or playback logic lives in the TV shell. Workspaces
 without the surface retain the full-width selector. Header updates do not rebuild
 signal views or PDFs.
+
+### Renderer-confirmed source audio control
+
+The authenticated app-private endpoint also accepts `audio_inspect` and
+`audio_set_muted`. These are source-local gain controls, not Android master
+volume. `audio_inspect` reports the renderer's current surface, opaque stream
+identity, title, readiness, applied mute state, revision and pending request.
+For example, send this JSON through `canvas-tvctl SERIAL`:
+
+```json
+{"schema_version":1,"request_id":"audio-observe","expected_revision":null,"command":{"command":"audio_inspect"}}
+```
+
+To set gain, use `audio_set_muted` with `source` copied exactly from that
+observation, a boolean `muted`, and the observed `expected_revision`. Unknown
+fields and stale sources are rejected. Requests remain pending until the UI
+thread applies gain to that player and acknowledges the same request/revision.
+Switching streams, losing the player, leaving the app, or human gain changes
+invalidate pending work. A timeout is an unknown outcome, not permission to
+retry a mutation automatically. Always inspect again for confirmation.
+
+The native shell outlines the exact current player while an admitted audio
+operation is pending, then briefly marks a renderer acknowledgement. Confirmed
+notices expire after two seconds and are revoked by source, readiness or human
+gain changes. This is owner evidence, never inferred from assistant captions.
+
+The existing `canvas-dcp` binary has an explicit Android audio backend selected
+by `CANVAS_DCP_ANDROID_SERIAL`; `CANVAS_TVCTL_BIN` selects the installed owner
+transport helper. Configure a distinct `CANVAS_DCP_PROVIDER_ID` and
+`CANVAS_DCP_INSTANCE` for this physical target. Do not reuse Home-Pi's
+`canvas-tv` identity or present its workspace state as Fire TV evidence.
+The action schema derives exact surface/stream options and semantic title
+from live app state. Only final-transcript commit requests are eligible.
+`Applied` requires a correlated owner acknowledgement and fresh renderer
+readback of the requested mute state. An old app without these endpoints
+fails explicitly; it must be upgraded before publishing this provider.
 
 `canvas-core::workspace_layout` owns durable layout types and validation;
 `canvas-core::layout_tree` owns the BSP solver and mutations. Desktop's old
@@ -122,8 +192,10 @@ disk-backed Cargo target directory:
 
 ```sh
 CARGO_TARGET_DIR=/home/ajmwagar/src/fpl/dock/target/canvas-android \
+CC_armv7_linux_androideabi=/home/ajmwagar/.local/share/canvas-android-toolchain/android-ndk-r26d/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang \
+AR_armv7_linux_androideabi=/home/ajmwagar/.local/share/canvas-android-toolchain/android-ndk-r26d/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar \
 CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER=/home/ajmwagar/.local/share/canvas-android-toolchain/android-ndk-r26d/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang \
-cargo build --release --target armv7-linux-androideabi --features android-native-video
+cargo build --release --lib --target armv7-linux-androideabi --features android-native-video
 ```
 
 On the Mac, use a fresh packaging directory. Set `tv_package` to its path,
@@ -134,7 +206,7 @@ library from Agora into `$tv_package/lib/armeabi-v7a/`. From this crate director
 mkdir -p "$tv_package/classes" "$tv_package/dex"
 "$JAVA_HOME/bin/javac" -source 8 -target 8 \
   -classpath "$tv_sdk/platforms/android-33/android.jar" \
-  -d "$tv_package/classes" android/dev/fpl/canvas/TvActivity.java
+  -d "$tv_package/classes" android/dev/fpl/canvas/*.java
 "$tv_sdk/build-tools/33.0.2/d8" --min-api 24 \
   --lib "$tv_sdk/platforms/android-33/android.jar" \
   --output "$tv_package/dex" "$tv_package/classes/dev/fpl/canvas/"*.class
@@ -165,6 +237,15 @@ Do not give javac the Android JAR as `-bootclasspath`: its API stubs lack Java's
 lambda compiler runtime. D8 desugars the compiled listeners for the minimum API.
 
 ### Hardware verification (2026-10-06)
+
+Reactor upgrade `0.1.28-reactor` (version code 29) was installed in-place on the
+Omni using the existing development certificate. The selected Taig Simulator
+workspace and endpoint revision 255 survived the upgrade. Authenticated owner
+observations painted the shared reactor on the actual TV, then expired without
+advancing the workspace revision. Restoring the pre-upgrade source-local mute
+produced renderer-confirmed readback and a visible exact-player confirmation
+outline. The latest Android suite passed 18 tests. Live JARVIS UniBus publication
+is a separate deployment step; this smoke used explicitly labelled test frames.
 
 Installed successfully on Omni `AFTTIFF43`, API 28, ARMv7. An ADB screenshot
 verified full-screen KOMO playback. `dumpsys media.player` identified
@@ -257,10 +338,14 @@ loop pauses offscreen and releases EGL resources when its surface disappears.
 `adb logcat -s CanvasBackground` reports the GPU, buffer extent, achieved FPS,
 and mean frame work (including completion wait, not a GPU timestamp query).
 
-For crisp PDFs on a 4K TV, inspect `adb shell wm size`: a forced 1920×1080
-override makes the entire app upscale. `adb shell wm size reset` restores the
-panel's native resolution; this is device-wide, not a Canvas setting. Restore
-the previous override with `adb shell wm size 1920x1080` if needed.
+Preserve the TV's existing logical display size when deploying Canvas. Do not
+run `adb shell wm size reset` to sharpen PDFs: this device-wide change can make
+other streaming apps render 1080p video in the top-left quarter of a 4K screen.
+On the qualified FireTV, `adb shell wm size 1920x1080` restores the compatible
+UI size while the physical panel remains 3840×2160. Improve PDF framing within
+Canvas instead. Inspect both the logical window and the hardware video display
+frame when verifying playback; a successful Canvas screenshot is insufficient
+to qualify unrelated streaming apps.
 
 The endpoint's response confirms accepted presentation state, not completed
 hardware presentation. Verify the visible surface separately. A future

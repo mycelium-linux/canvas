@@ -1,0 +1,17 @@
+{
+  "host_id": "neo",
+  "stream_id": "agents/neo/sessions",
+  "publisher": {
+    "installation_id": "fpl-cloud", "producer_id": "neo-agent-telemetry",
+    "hub_endpoint": "127.0.0.1:18810", "token_file": "/private/path/source.token",
+    "zones": ["agents"], "capabilities": ["unibus.stream.source"], "schema_version": 2
+  },
+  "consumer": {
+    "installation_id": "fpl-cloud", "producer_id": "neo-agent-dashboard",
+    "hub_endpoint": "127.0.0.1:18810", "token_file": "/private/path/viewer.token",
+    "zones": ["agents"], "capabilities": ["agent.sessions.viewer"], "schema_version": 2
+  },
+  "sources": [{"command": ["/private/path/agent_source_codex", "/private/path/app-server-control.sock"]}],
+  "consumer_script": "/private/path/agent-dashboard-v1.lua",
+  "output": "/private/path/agent-widget.json"
+}

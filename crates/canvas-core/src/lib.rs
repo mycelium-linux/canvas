@@ -31,6 +31,7 @@ pub mod notification;
 pub mod stream_lease;
 pub mod part_inspector;
 pub mod project_browser;
+pub mod workbench;
 pub mod task;
 pub mod theme_file;
 pub mod unibus;
@@ -73,6 +74,8 @@ pub const DECLARED_CONTRACTS: &[&str] = &[
     "panopticon.map.v1",
     "radioman.spectrum.v1",
     "transmog.build.status.v1",
+    "stream.descriptor.v1",
+    "stream.endpoints.v1",
 ];
 
 /// Whether a contract name is declared in the registry. Used by both

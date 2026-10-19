@@ -11,10 +11,11 @@ use std::{
     borrow::Cow,
     fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use unibus_media::{
-    CameraDetections, CameraStream, MEDIA_SCHEMA_VERSION, TransportRole, VideoCodec, VideoTransport,
+    CameraDetections, CameraStream, MEDIA_SCHEMA_VERSION, TransportRole, VideoAlphaMask,
+    VideoCodec, VideoTransport, decode_alpha_rle,
 };
 
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -30,6 +31,9 @@ pub struct RawVideoPlan {
     /// Bytes between adjacent visible rows in the serialized frame.
     pub stride_bytes: usize,
     pub allocation_bytes: usize,
+    /// Minimum cadence between atomically published frames. Decoding remains
+    /// continuous so hardware pipelines never accumulate a backlog.
+    pub publish_interval: Duration,
 }
 
 impl RawVideoPlan {
@@ -93,6 +97,8 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
         .min(height_limit)
         .max(16)
         & !1;
+    let source_fps = f64::from(stream.frame_rate_millihz) / 1_000.0;
+    let max_rate = source_fps.min(policy.max_fps).ceil().max(1.0) as u32;
     let mut argv = vec!["-q".into()];
     match stream.transport {
         VideoTransport::UdpMpegTs => {
@@ -188,7 +194,9 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
             // If it returns it will present as a stream that decodes and
             // then stops producing frames rather than as an error, so it is
             // worth knowing that videoconvert is the fallback and costs
-            // roughly four times as much.
+            // roughly four times as much. Publication cadence is enforced by
+            // the host reader instead of videorate: the latter can stall this
+            // V4L2 surface pipeline without reporting an error.
             "v4l2convert".into(),
         ]),
         // GStreamer 1.28's vtdec_hw stalls on this live MPEG-TS stream, while
@@ -231,6 +239,7 @@ pub fn gstreamer_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result
         height,
         stride_bytes: row_bytes,
         allocation_bytes,
+        publish_interval: Duration::from_secs_f64(1.0 / f64::from(max_rate)),
         argv,
     })
 }
@@ -299,6 +308,7 @@ pub fn ffmpeg_raw_plan(stream: &CameraStream, policy: DecodePolicy) -> Result<Ra
         height,
         stride_bytes: width as usize * 4,
         allocation_bytes: frame_bytes,
+        publish_interval: Duration::from_secs_f64(1.0 / fps),
     })
 }
 
@@ -322,6 +332,45 @@ pub fn write_raw_frame(source_id: &str, expected_bytes: usize, bytes: &[u8]) -> 
     let path = canvas_core::video_frame_file(source_id).context("unsafe video source id")?;
     write_atomic(&path, bytes)?;
     Ok(path)
+}
+
+/// Verify and atomically retain one complete alpha generation beside its RGB
+/// frame. A mask never becomes visible unless its digest, RLE length, lease,
+/// and current decoder dimensions all agree.
+pub fn write_alpha_mask(
+    mask: &VideoAlphaMask,
+    payload: &[u8],
+    now_unix_ms: u64,
+) -> Result<Option<PathBuf>> {
+    mask.validate(payload).map_err(anyhow::Error::msg)?;
+    ensure!(
+        mask.valid_until_unix_ms > now_unix_ms,
+        "alpha mask is expired"
+    );
+    let frame = canvas_core::video_frame_file(&mask.stream_id).context("unsafe video source id")?;
+    let size_path = canvas_core::video_frame_size_file_for(&frame)
+        .context("video frame has no size sidecar")?;
+    let current_size = fs::read_to_string(&size_path)
+        .ok()
+        .and_then(|text| canvas_core::parse_frame_size(&text));
+    if current_size != Some((mask.width, mask.height)) {
+        return Ok(None);
+    }
+    let metadata_path = frame.with_extension("alpha.json");
+    if let Ok(bytes) = fs::read(&metadata_path)
+        && let Ok(current) = serde_json::from_slice::<VideoAlphaMask>(&bytes)
+        && current.generation > mask.generation
+    {
+        return Ok(None);
+    }
+    let decoded = decode_alpha_rle(payload, mask.width, mask.height).map_err(anyhow::Error::msg)?;
+    let alpha_path = frame.with_extension("alpha");
+    // Data first, metadata last: metadata is the publication point. A reader
+    // can see the old complete generation or the new complete generation,
+    // never a metadata record for bytes that have not landed yet.
+    write_atomic(&alpha_path, &decoded)?;
+    write_atomic(&metadata_path, &serde_json::to_vec(mask)?)?;
+    Ok(Some(alpha_path))
 }
 
 /// Host-owned hardware decoder. There is deliberately no software variant:
@@ -699,6 +748,8 @@ mod tests {
         assert_eq!(visible.len(), 832 * 468 * 4);
         assert!(visible.iter().all(|byte| *byte == 7));
         assert!(plan.argv.iter().any(|arg| arg == "v4l2h264dec"));
+        assert!(!plan.argv.iter().any(|arg| arg == "videorate"));
+        assert_eq!(plan.publish_interval, Duration::from_secs_f64(1.0 / 24.0));
         assert!(plan.argv.iter().any(|arg| arg == "buffer-size=2097152"));
         assert!(plan.argv.iter().any(|arg| arg == "sync=false"));
         assert!(plan.argv.iter().any(|arg| arg == "max-size-buffers=1"));
@@ -721,6 +772,7 @@ mod tests {
         )
         .unwrap();
         assert!(rtsp.argv.iter().any(|arg| arg == "rtph264depay"));
+        assert_eq!(rtsp.publish_interval, Duration::from_millis(100));
 
         let tcp = gstreamer_raw_plan(
             &stream(VideoTransport::TcpMpegTs, "tcp://127.0.0.1:5004"),

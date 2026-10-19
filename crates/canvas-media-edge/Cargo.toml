@@ -44,6 +44,10 @@ name = "canvas-simulator-stream"
 path = "src/bin/simulator.rs"
 
 [[bin]]
+name = "canvas-android-stream"
+path = "src/bin/android.rs"
+
+[[bin]]
 name = "canvas-window-stream"
 path = "src/bin/window.rs"
 required-features = ["native-window-capture"]

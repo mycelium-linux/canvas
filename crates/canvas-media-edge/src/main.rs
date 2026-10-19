@@ -4,8 +4,8 @@ use anyhow::{Context, Result, ensure};
 use canvas::bus::{Bus, BusConfig};
 use canvas::stream_contract::{BRIEFING_CONTRACT, STREAM_SCHEMA_VERSION, StreamEnvelope};
 use canvas_media_edge::{
-    DecodePolicy, HardwareDecoder, gstreamer_raw_plan, now_unix_ms, write_detections,
-    write_raw_frame,
+    DecodePolicy, HardwareDecoder, gstreamer_raw_plan, now_unix_ms, write_alpha_mask,
+    write_detections, write_raw_frame,
 };
 use serde::Deserialize;
 use std::{
@@ -20,11 +20,11 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use unibus_media::{
     CAMERA_DETECTIONS_CONTRACT, CAMERA_STREAM_CONTRACT, CameraDetections, CameraStream,
-    VIDEO_STREAM_CONTRACT, VideoStream,
+    VIDEO_ALPHA_MASK_CONTRACT, VIDEO_STREAM_CONTRACT, VideoAlphaMask, VideoStream,
 };
 
 #[derive(Debug, Deserialize)]
@@ -199,6 +199,22 @@ fn run(config: &EdgeConfig, root: &Path, policy: DecodePolicy) -> Result<()> {
                         // board once it is actually producing frames, which the
                         // next pass notices.
                     }
+                }
+            }
+            Some((envelope, payload)) if envelope.message.kind == VIDEO_ALPHA_MASK_CONTRACT => {
+                let mask: VideoAlphaMask =
+                    serde_json::from_value(serde_json::Value::Object(envelope.message.body))
+                        .context("decode media.video_alpha_mask.v1")?;
+                let stream_id = mask.stream_id.clone();
+                match write_alpha_mask(&mask, &payload, now_unix_ms())? {
+                    Some(_) => eprintln!(
+                        "canvas-media-edge: retained {stream_id} alpha generation {}",
+                        mask.generation
+                    ),
+                    None => eprintln!(
+                        "canvas-media-edge: ignored {stream_id} alpha generation {}: dimensions or generation do not match",
+                        mask.generation
+                    ),
                 }
             }
             Some((envelope, _payload)) if envelope.message.kind == CAMERA_DETECTIONS_CONTRACT => {
@@ -470,11 +486,19 @@ impl DecoderWorker {
             .spawn(move || {
                 let mut reader = BufReader::new(stdout);
                 let mut allocation = vec![0_u8; plan.allocation_bytes];
+                let mut next_publish = Instant::now();
                 while !stop_for_thread.load(Ordering::Acquire)
                     && valid_for_thread.load(Ordering::Acquire) > now_unix_ms()
                 {
                     match reader.read_exact(&mut allocation) {
                         Ok(()) => {
+                            let now = Instant::now();
+                            if now < next_publish {
+                                continue;
+                            }
+                            while next_publish <= now {
+                                next_publish += plan.publish_interval;
+                            }
                             let result = plan.visible_frame(&allocation).and_then(|frame| {
                                 write_raw_frame(&id, frame_bytes, frame.as_ref()).map(|_| ())
                             });

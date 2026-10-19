@@ -30,7 +30,10 @@ pub(crate) fn view<'a, Message: 'a>(
             .style(move |_| {
                 container::Style {
                     background: Some(accent.into()),
-                    border: iced::Border { radius: 2.0.into(), ..Default::default() },
+                    border: iced::Border {
+                        radius: 2.0.into(),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 }
             }),
@@ -101,7 +104,10 @@ fn accent(level: Level, alpha: f32) -> Color {
 }
 
 fn with_alpha(color: Color, alpha: f32) -> Color {
-    Color { a: color.a * alpha, ..color }
+    Color {
+        a: color.a * alpha,
+        ..color
+    }
 }
 
 #[cfg(test)]

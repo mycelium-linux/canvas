@@ -1,0 +1,33 @@
+#!/bin/sh
+# Compatibility launcher for Pi streams that the stateless V4L2 decoder
+# cannot negotiate. Keep the media-edge argv contract and substitute only the
+# decoder/converter elements; transport, sizing, pacing, and the RGBA boundary
+# remain owned by canvas-media-edge.
+set -eu
+
+rewritten=""
+for argument in "$@"; do
+    case "$argument" in
+        v4l2h264dec) argument=avdec_h264 ;;
+        v4l2convert)
+            rewritten="$rewritten
+videoconvert
+!
+videoscale"
+            continue
+            ;;
+    esac
+    rewritten="$rewritten
+$argument"
+done
+
+set --
+old_ifs=$IFS
+IFS='
+'
+for argument in $rewritten; do
+    [ -n "$argument" ] && set -- "$@" "$argument"
+done
+IFS=$old_ifs
+
+exec /usr/bin/gst-launch-1.0 "$@"

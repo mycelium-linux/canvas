@@ -12,6 +12,29 @@ struct Snapshot {
     transport: Transport,
     meters: Meters,
     recording: Recording,
+    #[serde(default)]
+    mix_fields: Vec<MixField>,
+}
+
+#[derive(Deserialize)]
+struct MixField {
+    surface: String,
+    strips: Vec<MixStrip>,
+}
+
+#[derive(Deserialize)]
+struct MixStrip {
+    index: usize,
+    cc: u8,
+    sources: Vec<String>,
+    gain: f32,
+    active: bool,
+    peak: f32,
+    stereo_position: f32,
+    left_peak: f32,
+    right_peak: f32,
+    #[serde(default)]
+    bands: Vec<f32>,
 }
 
 #[derive(Deserialize)]
@@ -126,6 +149,30 @@ fn quality_payload(snapshot: &Snapshot) -> serde_json::Value {
     ],"detail":format!("{} input clips · {} output clips", snapshot.meters.input_clips, snapshot.meters.output_clips)})
 }
 
+fn mix_field_payload(fields: &[MixField]) -> serde_json::Value {
+    let Some(field) = fields.first() else {
+        return json!({"title":"Studio mix field","surface":"unavailable","strips":[],"degraded":true,"error":"Synesthesia reported no control surfaces"});
+    };
+    let strips = field
+        .strips
+        .iter()
+        .take(8)
+        .map(|strip| json!({
+            "index":strip.index,
+            "cc":strip.cc,
+            "label":strip.sources.join(" + "),
+            "gain":strip.gain.clamp(0.0, 2.0),
+            "active":strip.active,
+            "peak":strip.peak.clamp(0.0, 2.0),
+            "stereo_position":strip.stereo_position.clamp(-1.0, 1.0),
+            "left_peak":strip.left_peak.clamp(0.0, 2.0),
+            "right_peak":strip.right_peak.clamp(0.0, 2.0),
+            "bands":strip.bands.iter().copied().take(64).map(|value| value.clamp(0.0, 1.0)).collect::<Vec<_>>()
+        }))
+        .collect::<Vec<_>>();
+    json!({"title":"Studio mix field","surface":field.surface,"strips":strips})
+}
+
 fn headroom_db(peak: f32) -> f32 {
     (-20.0 * peak.max(0.001).log10()).clamp(0.0, 60.0)
 }
@@ -193,7 +240,11 @@ fn fit(mut event: serde_json::Value) -> serde_json::Value {
             || event
                 .pointer_mut("/payload/metrics")
                 .and_then(|value| value.as_array_mut())
-                .is_some_and(|metrics| metrics.len() > 1 && metrics.pop().is_some());
+                .is_some_and(|metrics| metrics.len() > 1 && metrics.pop().is_some())
+            || event
+                .pointer_mut("/payload/strips")
+                .and_then(|value| value.as_array_mut())
+                .is_some_and(|strips| strips.len() > 1 && strips.pop().is_some());
         if !removed {
             break;
         }
@@ -230,6 +281,7 @@ mod tests {
                 output_clips: 0,
             },
             recording: Recording { active: true },
+            mix_fields: vec![],
         });
         assert_eq!(value["recording"], true);
         assert_eq!(value["tracks"].as_array().unwrap().len(), 4);
@@ -280,6 +332,7 @@ mod tests {
                 output_clips: 1,
             },
             recording: Recording { active: false },
+            mix_fields: vec![],
         };
         let value = quality_payload(&snapshot);
         assert!((value["metrics"][0]["value"].as_f64().unwrap() - 6.0206).abs() < 0.01);
@@ -295,6 +348,29 @@ mod tests {
                 <= canvas_feeds::MAX_DATAGRAM - canvas_feeds::ENVELOPE_OVERHEAD
         );
         assert_eq!(event["payload"]["truncated"], true);
+    }
+
+    #[test]
+    fn mix_field_preserves_graph_derived_knob_and_stereo_state() {
+        let payload = mix_field_payload(&[MixField {
+            surface: "launchkey".into(),
+            strips: vec![MixStrip {
+                index: 1,
+                cc: 21,
+                sources: vec!["modular".into()],
+                gain: 0.5,
+                active: true,
+                peak: 0.75,
+                stereo_position: -0.25,
+                left_peak: 0.75,
+                right_peak: 0.5,
+                bands: vec![0.8, 0.2],
+            }],
+        }]);
+        assert_eq!(payload["surface"], "launchkey");
+        assert_eq!(payload["strips"][0]["label"], "modular");
+        assert_eq!(payload["strips"][0]["cc"], 21);
+        assert!((payload["strips"][0]["bands"][0].as_f64().unwrap() - 0.8).abs() < 0.0001);
     }
 }
 
@@ -321,10 +397,16 @@ fn main() -> ExitCode {
             .send()
             .and_then(|response| response.error_for_status())
             .and_then(|response| response.json::<Snapshot>());
-        let (daw_event, quality_event) = match daw {
+        let (daw_event, quality_event, mix_field_event) = match daw {
             Ok(snapshot) => {
                 let quality = stream_envelope("studio-quality", quality_payload(&snapshot), now);
-                (stream_envelope("daw", payload(snapshot), now), quality)
+                let mix_field =
+                    stream_envelope("mix-field", mix_field_payload(&snapshot.mix_fields), now);
+                (
+                    stream_envelope("daw", payload(snapshot), now),
+                    quality,
+                    mix_field,
+                )
             }
             Err(error) => {
                 let detail = error.to_string().chars().take(120).collect::<String>();
@@ -335,6 +417,7 @@ fn main() -> ExitCode {
                         json!({"degraded":true,"error":detail}),
                         now,
                     ),
+                    stream_envelope("mix-field", json!({"degraded":true,"error":detail}), now),
                 )
             }
         };
@@ -342,6 +425,9 @@ fn main() -> ExitCode {
             eprintln!("canvas-synesthesia-observer: {error}");
         }
         if let Err(error) = canvas_feeds::send_raw(&quality_event) {
+            eprintln!("canvas-synesthesia-observer: {error}");
+        }
+        if let Err(error) = canvas_feeds::send_raw(&mix_field_event) {
             eprintln!("canvas-synesthesia-observer: {error}");
         }
         if last_routing.elapsed() >= Duration::from_secs(1) {

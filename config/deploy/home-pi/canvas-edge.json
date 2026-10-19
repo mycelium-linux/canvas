@@ -12,7 +12,7 @@
     {
       "producer": "canvas-central-studio",
       "id": "alfalfa:workspace-presentation",
-      "commands": ["workspace_sync", "workspace_switch", "workspace_reset"]
+      "commands": ["inspect", "stream_descriptors", "apply_document", "workspace_sync", "workspace_switch", "workspace_reset"]
     },
     {
       "producer": "sound-neo-status",

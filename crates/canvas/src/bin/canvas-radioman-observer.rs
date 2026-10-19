@@ -6,6 +6,9 @@ use std::{
 
 use anyhow::{Context, Result};
 use canvas::stream_binding::{STREAM_SCHEMA_VERSION, StreamEnvelope};
+use stream_descriptors::{
+    ENDPOINT_ANNOUNCEMENT_KIND, EndpointAnnouncementV1, STREAM_DESCRIPTOR_KIND, StreamDescriptorV1,
+};
 
 fn main() -> Result<()> {
     let bind = std::env::args()
@@ -40,14 +43,30 @@ fn main() -> Result<()> {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
+        let descriptor = serde_json::from_value::<StreamDescriptorV1>(payload.clone())
+            .ok()
+            .filter(|descriptor| descriptor.validate().is_ok());
+        let endpoints = serde_json::from_value::<EndpointAnnouncementV1>(payload.clone())
+            .ok()
+            .filter(|announcement| announcement.validate(emitted_at_ms).is_ok());
+        let (stream, contract) = if let Some(descriptor) = &descriptor {
+            (descriptor.stream_id.clone(), STREAM_DESCRIPTOR_KIND.into())
+        } else if let Some(endpoints) = &endpoints {
+            (
+                endpoints.stream_id.clone(),
+                ENDPOINT_ANNOUNCEMENT_KIND.into(),
+            )
+        } else {
+            ("spectrum".into(), "radioman.spectrum.v1".into())
+        };
         let envelope = StreamEnvelope {
             schema_version: STREAM_SCHEMA_VERSION,
             owner: "radioman".into(),
-            stream: "spectrum".into(),
-            contract: "radioman.spectrum.v1".into(),
+            stream,
+            contract,
             sequence,
             emitted_at_ms,
-            project_id: Some("home".into()),
+            project_id: None,
             payload,
         };
         if let Err(error) = envelope.validate() {

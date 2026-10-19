@@ -205,8 +205,9 @@ Manual recovery (installed paths):
    capture can omit protected windows. Check mirror logs for rejected frames.
 
 Do not put transient snapshots into `workspaces.json`, or mark a repeated
-delivery as a new owner observation. Switching the TV away from Tardy pauses
-this mirror and leaves the retained desktop agent panels visibly stale.
+delivery as a new owner observation. The publisher reads the named Tardy
+workspace, independently of the TV's selected workspace. TV selection no longer
+pauses the desktop feed or clears another workspace's transient frames.
 
 The authenticated presentation endpoint accepts `read_presentation` without a
 mutation revision. It returns the active document plus a `surfaces` map of
@@ -215,6 +216,15 @@ Unlike `read_document`, this represents the view currently being rendered.
 It does not change the endpoint revision or checkpoint; restarted receivers
 must not restore its live data as fresh. Receivers must independently track
 delivery expiry and preserve the exported owner observation/stale metadata.
+
+`workspace_presentation` with `name` (a catalog project ID) returns the same
+contract for a declared workspace without selecting it. The CLI equivalent is
+`workspace presentation tardy`. `canvas-presentation-mirror follow SERIAL
+[PROJECT]` subscribes to that named projection (default: `tardy`). Unknown
+projects fail explicitly. Surface snapshots target declared workspace IDs,
+not the active display; retention keys include both workspace and surface IDs.
+Revision-bound patches can update declared background workspaces, but preserve
+the selected project. None of this expands the existing transport authorization.
 
 The transport runbook is in Unibus's `docs/stream-json.md`. Video remains on
 the existing private HLS/media path; only presentation/layout/task state moved
@@ -225,7 +235,7 @@ in this slice. Desktop navigation is still read-only relative to the TV.
 Check Home-Pi's `unibus-router.service` (not `unibusd`) and its loopback
 listener on 18790. On Neo, restart only the presentation tunnel, publisher,
 and dashboard mirror LaunchAgents if their connections are broken. The source
-must have Tardy selected: another TV workspace intentionally pauses publication.
+uses `workspace_presentation`: switching the TV must not pause publication.
 Restart `dev.fpl.canvas-tv-tardy` if captions stop updating after ADB reconnects.
 Verify Canvas's event count increases and capture a renderer screenshot; an
 owner's transient snapshot can still report `no_data` while the document renders

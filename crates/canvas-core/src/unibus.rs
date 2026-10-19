@@ -26,12 +26,25 @@ pub const VISIBILITY_KIND: &str = "canvas.visibility";
 /// `ControlRequest` the edge executed. The hub routes this by producer back
 /// to the central that sent the command.
 pub fn result_message(request_id: &str, ok: bool, error: Option<String>) -> Message {
+    result_message_with_data(request_id, ok, error, None)
+}
+
+/// A correlated execution receipt with an optional bounded command result.
+/// Read commands such as `inspect` need to return Canvas-owned state; mutation
+/// callers may continue using [`result_message`] and omit it.
+pub fn result_message_with_data(
+    request_id: &str,
+    ok: bool,
+    error: Option<String>,
+    data: Option<serde_json::Value>,
+) -> Message {
     Message::new(
         RESULT_KIND,
         serde_json::json!({
             "request_id": request_id,
             "ok": ok,
             "error": error,
+            "data": data,
         }),
     )
 }
@@ -41,6 +54,7 @@ pub struct ResultFrame {
     pub request_id: String,
     pub ok: bool,
     pub error: Option<String>,
+    pub data: Option<serde_json::Value>,
 }
 
 /// Parse a receipt body that an edge emitted for a canvas_command envelope.
@@ -56,6 +70,11 @@ pub fn parse_result(message: &Message) -> Option<ResultFrame> {
             .get("error")
             .and_then(|v| v.as_str())
             .map(str::to_owned),
+        data: message
+            .body
+            .get("data")
+            .filter(|value| !value.is_null())
+            .cloned(),
     })
 }
 /// v1 capability tag; the v2 namespaced spelling for new grants.

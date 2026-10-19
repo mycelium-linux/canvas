@@ -9,13 +9,208 @@ use std::{
 use subtle::ConstantTimeEq;
 
 static ENDPOINT: OnceLock<Mutex<Endpoint>> = OnceLock::new();
+static MAP_MOTION: OnceLock<Mutex<std::collections::BTreeMap<String, crate::map_motion::SurfaceMotion>>> = OnceLock::new();
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeResetMapMotion(
+    _env: jni::JNIEnv, _class: jni::objects::JClass,
+) {
+    if let Some(states) = MAP_MOTION.get() {
+        if let Ok(mut states) = states.lock() { states.clear(); }
+    }
+}
 static STORE: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeMapManual(
+    mut env: jni::JNIEnv, _class: jni::objects::JClass, id: jni::objects::JString,
+) {
+    let Ok(id) = env.get_string(&id).map(String::from) else { return; };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64);
+    if let Some(states) = MAP_MOTION.get() {
+        if let Ok(mut states) = states.lock() {
+            if let Some(state) = states.get_mut(&id) { state.kiosk.manual(now); }
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeMapKiosk(
+    mut env: jni::JNIEnv, _class: jni::objects::JClass, id: jni::objects::JString,
+) -> jni::sys::jstring {
+    let result = (|| -> Result<serde_json::Value, String> {
+        let id: String = env.get_string(&id).map_err(|e| e.to_string())?.into();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?.as_millis() as u64;
+        let mut endpoint = endpoint().lock().map_err(|_| "map endpoint unavailable")?;
+        let snapshot = endpoint.surface_snapshot(&id).ok_or("map snapshot unavailable")?;
+        if snapshot["frame"]["view"] != "geo_map"
+            || !matches!(snapshot["data"]["state"].as_str(), Some("ready" | "partial")) {
+            return Ok(serde_json::json!({"advanced":false}));
+        }
+        let selected = snapshot["frame"]["map"]["selected"].as_str();
+        let mut states = MAP_MOTION.get_or_init(|| Mutex::new(Default::default())).lock()
+            .map_err(|_| "map motion unavailable")?;
+        let Some(state) = states.get_mut(&id) else { return Ok(serde_json::json!({"advanced":false})); };
+        if !state.kiosk.due(now, selected) { return Ok(serde_json::json!({"advanced":false})); }
+        let reply = endpoint.execute(canvas_workspace::endpoint::Request {
+            schema_version:1, request_id:"map-kiosk-next".into(), expected_revision:None,
+            command:canvas_workspace::endpoint::Command::SurfaceNavigate {
+                surface_id:id, action:fpl_gfx::panels::TaskNavigation::Next,
+            },
+        })?;
+        if reply["handled"] == true { state.kiosk.mark_advanced(now); }
+        Ok(serde_json::json!({"advanced":reply["handled"],"selected":reply["selected"]}))
+    })();
+    string(&mut env, result.unwrap_or_else(|error| serde_json::json!({"error":error})).to_string())
+}
+static AUDIO: OnceLock<(
+    Mutex<canvas_workspace::audio::AudioControl>,
+    std::sync::Condvar,
+)> = OnceLock::new();
+
+fn audio() -> &'static (
+    Mutex<canvas_workspace::audio::AudioControl>,
+    std::sync::Condvar,
+) {
+    AUDIO.get_or_init(|| (Mutex::new(Default::default()), std::sync::Condvar::new()))
+}
+
+fn dispatch_audio(raw: &str) -> String {
+    use canvas_workspace::audio::{Command, Request};
+    let result = (|| -> Result<serde_json::Value, String> {
+        let request: Request = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+        if request.schema_version != 1 {
+            return Err("unsupported_audio_version".into());
+        }
+        let (lock, changed) = audio();
+        let mut control = lock.lock().map_err(|_| "audio_state_unavailable")?;
+        if let Command::AudioSetMuted { source, muted } = request.command {
+            let revision = request
+                .expected_revision
+                .ok_or("expected_revision_required")?;
+            control.request(&request.request_id, revision, &source, muted)?;
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while control
+                .snapshot()
+                .pending
+                .as_ref()
+                .is_some_and(|p| p.request_id == request.request_id)
+            {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err("renderer_acknowledgement_timeout; outcome_unknown".into());
+                }
+                control = changed
+                    .wait_timeout(control, remaining)
+                    .map_err(|_| "audio_state_unavailable")?
+                    .0;
+            }
+            let observed = control.snapshot();
+            if observed.source.as_ref() != Some(&source)
+                || !observed.ready
+                || observed.muted != muted
+            {
+                return Err("renderer_did_not_confirm_requested_gain".into());
+            }
+        }
+        Ok(
+            serde_json::json!({"ok":true,"schema_version":1,"request_id":request.request_id,"audio":control.snapshot()}),
+        )
+    })();
+    result
+        .unwrap_or_else(|error| serde_json::json!({"ok":false,"error":error}))
+        .to_string()
+}
 
 fn endpoint() -> &'static Mutex<Endpoint> {
     ENDPOINT.get_or_init(|| Mutex::new(Endpoint::new("firetv-omni")))
 }
 
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeTaskNavigate(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    id: jni::objects::JString,
+    action: jni::objects::JString,
+) -> jni::sys::jstring {
+    let result = (|| -> Result<serde_json::Value, String> {
+        let id = String::from(env.get_string(&id).map_err(|e| e.to_string())?);
+        let action = String::from(env.get_string(&action).map_err(|e| e.to_string())?);
+        let action =
+            serde_json::from_value(serde_json::json!(action)).map_err(|_| "Invalid navigation")?;
+        endpoint()
+            .lock()
+            .map_err(|_| "Presentation unavailable")?
+            .execute(canvas_workspace::endpoint::Request {
+                schema_version: 1,
+                request_id: "remote-task-navigation".into(),
+                expected_revision: None,
+                command: canvas_workspace::endpoint::Command::SurfaceNavigate {
+                    surface_id: id,
+                    action,
+                },
+            })
+    })();
+    string(
+        &mut env,
+        result
+            .unwrap_or_else(|error| serde_json::json!({"error":error}))
+            .to_string(),
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeObserverFrame(
+    env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    seconds: jni::sys::jfloat,
+) -> jni::sys::jfloatArray {
+    let records = endpoint()
+        .lock()
+        .ok()
+        .and_then(|e| e.observer_frame().cloned())
+        .map(|f| crate::reactor::records(
+            if f.activity == fpl_gfx::reactor::Activity::Hidden {
+                // The platform adapter owns the shared 1.4s idle readback.
+                fpl_gfx::reactor::Activity::Resting
+            } else { f.activity }, seconds, f.playback_level))
+        .unwrap_or_default();
+    let result = (|| -> jni::errors::Result<jni::sys::jfloatArray> {
+        let array = env.new_float_array(records.len() as i32)?;
+        env.set_float_array_region(&array, 0, &records)?;
+        Ok(array.into_raw())
+    })();
+    result.unwrap_or(std::ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeObserverState(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+) -> jni::sys::jstring {
+    let value = endpoint()
+        .lock()
+        .ok()
+        .and_then(|e| e.observer_frame().cloned());
+    let value = value.map(|frame| {
+        let popup = crate::reactor::popup_descriptor(frame.activity, frame.caption.as_deref());
+        let mut value = serde_json::to_value(frame).expect("display observation is serializable");
+        value.as_object_mut().expect("display observation is an object").insert("popup".into(), popup);
+        value
+    });
+    string(&mut env, serde_json::to_string(&value).unwrap_or_else(|_| "null".into()))
+}
+
 fn dispatch(raw: &str) -> String {
+    if serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|v| v["command"]["command"].as_str().map(str::to_owned))
+        .is_some_and(|command| command == "audio_inspect" || command == "audio_set_muted")
+    {
+        return dispatch_audio(raw);
+    }
     match endpoint().lock() {
         Ok(mut endpoint) => {
             let mut next = endpoint.clone();
@@ -140,36 +335,70 @@ fn string(env: &mut jni::JNIEnv, value: String) -> jni::sys::jstring {
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeTaskNavigate(
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeAudioUpdate(
     mut env: jni::JNIEnv,
     _class: jni::objects::JClass,
     id: jni::objects::JString,
-    action: jni::objects::JString,
+    title: jni::objects::JString,
+    stream: jni::objects::JString,
+    ready: jni::sys::jboolean,
+    muted: jni::sys::jboolean,
 ) -> jni::sys::jstring {
-    let result = (|| -> Result<serde_json::Value, String> {
-        let id = String::from(env.get_string(&id).map_err(|e| e.to_string())?);
-        let action = String::from(env.get_string(&action).map_err(|e| e.to_string())?);
-        let action =
-            serde_json::from_value(serde_json::json!(action)).map_err(|_| "Invalid navigation")?;
-        endpoint()
-            .lock()
-            .map_err(|_| "Presentation unavailable")?
-            .execute(canvas_workspace::endpoint::Request {
-                schema_version: 1,
-                request_id: "remote-task-navigation".into(),
-                expected_revision: None,
-                command: canvas_workspace::endpoint::Command::SurfaceNavigate {
-                    surface_id: id,
-                    action,
-                },
+    use sha2::{Digest, Sha256};
+    let result = (|| -> Result<String, String> {
+        let id: String = env.get_string(&id).map_err(|e| e.to_string())?.into();
+        let title: String = env.get_string(&title).map_err(|e| e.to_string())?.into();
+        let stream: String = env.get_string(&stream).map_err(|e| e.to_string())?.into();
+        let source = if id.is_empty() || stream.is_empty() {
+            None
+        } else {
+            Some(canvas_workspace::audio::Source {
+                surface_id: id,
+                title,
+                stream_id: format!("sha256:{:x}", Sha256::digest(stream.as_bytes())),
             })
+        };
+        let (lock, changed) = audio();
+        let mut control = lock.lock().map_err(|_| "audio_state_unavailable")?;
+        control.observe(source, ready != 0, muted != 0);
+        changed.notify_all();
+        let mut snapshot = serde_json::to_value(control.snapshot()).map_err(|e| e.to_string())?;
+        snapshot["control_notice"] =
+            serde_json::to_value(control.notice(std::time::Instant::now()))
+                .map_err(|e| e.to_string())?;
+        serde_json::to_string(&snapshot).map_err(|e| e.to_string())
     })();
     string(
         &mut env,
-        result
-            .unwrap_or_else(|error| serde_json::json!({"error":error}))
-            .to_string(),
+        result.unwrap_or_else(|error| serde_json::json!({"error":error}).to_string()),
     )
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeAudioAcknowledge(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    id: jni::objects::JString,
+    revision: jni::sys::jlong,
+    muted: jni::sys::jboolean,
+) -> jni::sys::jboolean {
+    let success = (|| -> Result<(), String> {
+        let id: String = env.get_string(&id).map_err(|e| e.to_string())?.into();
+        let (lock, changed) = audio();
+        let mut control = lock.lock().map_err(|_| "audio_state_unavailable")?;
+        let source = control.snapshot().source.ok_or("source_unavailable")?;
+        control.acknowledge(
+            &id,
+            revision.try_into().map_err(|_| "invalid_revision")?,
+            &source,
+            muted != 0,
+        )?;
+        crate::SURFACE_MUTED.store(muted != 0, std::sync::atomic::Ordering::Relaxed);
+        changed.notify_all();
+        Ok(())
+    })()
+    .is_ok();
+    success as jni::sys::jboolean
 }
 
 #[unsafe(no_mangle)]
@@ -178,10 +407,27 @@ pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeSignalSnapshot(
     _class: jni::objects::JClass,
     id: jni::objects::JString,
 ) -> jni::sys::jstring {
-    let snapshot = env
+    let mut snapshot = env
         .get_string(&id)
         .ok()
         .and_then(|s| endpoint().lock().ok()?.surface_snapshot(&String::from(s)));
+    if let Some(ref mut snapshot) = snapshot {
+        if snapshot["frame"]["view"] == "geo_map" {
+            let result = (|| -> Result<(), String> {
+                let id: String = env.get_string(&id).map_err(|e| e.to_string())?.into();
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|e| e.to_string())?.as_millis() as u64;
+                let mut states = MAP_MOTION.get_or_init(|| Mutex::new(Default::default()))
+                    .lock().map_err(|_| "map motion lock unavailable")?;
+                if !states.contains_key(&id) {
+                    if states.len() >= 8 { return Err("map motion surface budget exceeded".into()); }
+                    states.insert(id.clone(), crate::map_motion::SurfaceMotion::new()?);
+                }
+                states.get_mut(&id).ok_or("missing map motion")?.present(snapshot, now)
+            })();
+            if let Err(error) = result { *snapshot = serde_json::json!({"error":error}); }
+        }
+    }
     string(
         &mut env,
         snapshot
@@ -379,6 +625,24 @@ pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativePdfAsset(
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeMapRaster(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    raw: jni::objects::JString,
+    width: jni::sys::jint,
+    height: jni::sys::jint,
+) -> jni::sys::jstring {
+    let result = (|| -> Result<serde_json::Value,String> {
+        let raw:String=env.get_string(&raw).map_err(|e|e.to_string())?.into();
+        if raw.len()>65536 {return Err("Raster map exceeds contract budget".into());}
+        let map=serde_json::from_str(&raw).map_err(|e|e.to_string())?;
+        let root=STORE.get().and_then(|path|path.parent()).ok_or("App asset store unavailable")?;
+        crate::map_raster::frame(root,&map,width as f32,height as f32)
+    })();
+    string(&mut env, match result {Ok(v)=>v,Err(e)=>serde_json::json!({"error":e})}.to_string())
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeStartControl(
     mut env: jni::JNIEnv,
     _class: jni::objects::JClass,
@@ -473,6 +737,7 @@ pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeProjection(
     };
     string(&mut env, output)
 }
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeSelectPage(
     mut env: jni::JNIEnv,

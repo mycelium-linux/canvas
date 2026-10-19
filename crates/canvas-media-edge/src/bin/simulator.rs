@@ -31,6 +31,15 @@ struct Config {
     fps: u32,
     #[serde(default = "default_ttl_ms")]
     ttl_ms: u64,
+    #[serde(default)]
+    screen_capture: Option<ScreenCapture>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScreenCapture {
+    device: String,
+    crop: [u32; 4],
 }
 
 fn default_width() -> u32 {
@@ -76,6 +85,16 @@ impl Config {
             "simulator stream must use UDP MPEG-TS"
         );
         ensure!(!config.destination.is_empty(), "destination is required");
+        if let Some(capture) = &config.screen_capture {
+            ensure!(
+                !capture.device.is_empty(),
+                "screen capture device is required"
+            );
+            ensure!(
+                capture.crop.iter().all(|dimension| *dimension > 0),
+                "screen capture crop must be non-zero"
+            );
+        }
         Ok(config)
     }
 }
@@ -88,6 +107,18 @@ fn main() -> Result<()> {
     ensure_booted(&config.xcrun)?;
     let bus = Bus::connect(config.bus.clone())?;
     let mut encoder = spawn_encoder(&config)?;
+    if config.screen_capture.is_some() {
+        loop {
+            announce(&bus, &config)?;
+            let until_renewal = Instant::now() + Duration::from_millis(config.ttl_ms / 2);
+            while Instant::now() < until_renewal {
+                if encoder.try_wait()?.is_some() {
+                    bail!("ffmpeg screen encoder exited");
+                }
+                thread::sleep(Duration::from_millis(250));
+            }
+        }
+    }
     let mut input = encoder.stdin.take().context("ffmpeg stdin unavailable")?;
     let interval = Duration::from_secs_f64(1.0 / f64::from(config.fps));
     let mut next_announcement = Instant::now();
@@ -170,12 +201,49 @@ fn spawn_encoder(config: &Config) -> Result<Child> {
         "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2",
         config.width, config.height, config.width, config.height
     );
-    Command::new(&config.ffmpeg)
+    let mut command = Command::new(&config.ffmpeg);
+    command.args(["-hide_banner", "-loglevel", "error", "-nostdin"]);
+    if let Some(capture) = &config.screen_capture {
+        let [width, height, x, y] = capture.crop;
+        let filter = format!(
+            "crop={width}:{height}:{x}:{y},scale={}:{}",
+            config.width, config.height
+        );
+        return command
+            .args([
+                "-f",
+                "avfoundation",
+                "-pixel_format",
+                "nv12",
+                "-framerate",
+                &config.fps.to_string(),
+                "-i",
+                &capture.device,
+                "-an",
+                "-vf",
+                &filter,
+                "-c:v",
+                "h264_videotoolbox",
+                "-realtime",
+                "1",
+                "-b:v",
+                "3M",
+                "-g",
+                &config.fps.to_string(),
+                "-bf",
+                "0",
+                "-f",
+                "mpegts",
+                &config.stream_endpoint,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .with_context(|| format!("spawn {} screen capture", config.ffmpeg.display()));
+    }
+    command
         .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-nostdin",
             "-f",
             "image2pipe",
             "-framerate",

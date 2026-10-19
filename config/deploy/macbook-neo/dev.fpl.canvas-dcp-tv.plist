@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.fpl.canvas-dcp-tv</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/ajmwagar/.local/bin/canvas-dcp</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CANVAS_DCP_LISTEN</key><string>127.0.0.1:7895</string>
+    <key>CANVAS_DCP_PROVIDER_ID</key><string>canvas-tv</string>
+    <key>CANVAS_DCP_INSTANCE</key><string>urn:fpl:canvas:firetv-omni</string>
+    <key>CANVAS_DCP_ANDROID_SERIAL</key><string>192.168.2.97:5555</string>
+    <key>CANVAS_DCP_ANDROID_MODE</key><string>workspace</string>
+    <key>CANVAS_TVCTL_BIN</key><string>/Users/ajmwagar/.local/bin/canvas-tvctl</string>
+    <key>HOME</key><string>/Users/ajmwagar</string>
+    <key>PATH</key><string>/Users/ajmwagar/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>ThrottleInterval</key><integer>3</integer>
+  <key>StandardOutPath</key><string>/Users/ajmwagar/Library/Logs/canvas-dcp-tv.log</string>
+  <key>StandardErrorPath</key><string>/Users/ajmwagar/Library/Logs/canvas-dcp-tv.err.log</string>
+</dict>
+</plist>

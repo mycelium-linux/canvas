@@ -61,7 +61,13 @@ public final class TvActivity extends Activity {
     }
     private static native String nativeValidate(String url);
     private static native float nativeSetMuted(boolean muted);
+    private static native String nativeAudioUpdate(String surface, String title, String stream, boolean ready, boolean muted);
+    private static native boolean nativeAudioAcknowledge(String request, long revision, boolean muted);
     private static native boolean nativeIsMuted();
+    private static native float[] nativeObserverFrame(float seconds);
+    private static native String nativeObserverState();
+    private ObserverView observerView;
+    private ControlNoticeView controlNoticeView;
     private static native int[] nativeVideoFrame(int width, int height, boolean windowed);
     private static native String nativeStartControl(String directory);
     private static native String nativeProjection(int width, int height);
@@ -71,10 +77,14 @@ public final class TvActivity extends Activity {
     private static native float[] nativeClockFrame(int width, int height, int hour, int minute, float second);
     private static native String nativeBackgroundProgram(String id);
     private static native float[] nativeBoidsFrame(int width, int height, float elapsed, boolean aquarium);
-    private static native String nativeSignalSnapshot(String id);
+    static native String nativeSignalSnapshot(String id);
+    static native String nativeMapRaster(String map, int width, int height);
+    private static native void nativeResetMapMotion();
+    private static native void nativeMapManual(String id);
+    static native String nativeMapKiosk(String id);
     private static native String nativeTaskNavigate(String id, String action);
-    private static native float[] nativeSignalFrame(int width, int height, String frame, String appearance);
-    private static native String nativeSignalLabels(int width, int height, String frame);
+    static native float[] nativeSignalFrame(int width, int height, String frame, String appearance);
+    static native String nativeSignalLabels(int width, int height, String frame);
     private static native String nativeTunerControl(String base, String channel, String surface, String directory);
     private String tunerEndpoint = "", videoSurfaceId = "";
     private Button channelButton;
@@ -111,7 +121,12 @@ public final class TvActivity extends Activity {
         JSONObject content = tile.getJSONObject("surface").getJSONObject("content");
         boolean pdf = content.getString("kind").equals("asset") && content.getJSONObject("asset").getString("media_type").equals("application/pdf");
         boolean card = content.getString("kind").equals("widget") && content.getJSONObject("spec").getString("kind").equals("rich_card");
-        return pdf || card ? tile.toString() + palette.toString() : "";
+        if (card) {
+            JSONObject stable = new JSONObject(tile.toString());
+            stripStatusValues(stable.getJSONObject("surface"));
+            return stable.toString() + palette.toString();
+        }
+        return pdf ? tile.toString() + palette.toString() : "";
     }
     private void disposeExtraStreams() {
         for (StreamTileView tile : extraStreams.values()) { tile.dispose(); frame.removeView(tile); }
@@ -183,6 +198,7 @@ public final class TvActivity extends Activity {
     private HorizontalScrollView workspaceSelector;
     private final ArrayList<View> widgets = new ArrayList<>();
     private final java.util.HashMap<String, StatusListView> statusLists = new java.util.HashMap<>();
+    private final java.util.HashMap<String, RichCardView> richCards = new java.util.HashMap<>();
     private final ThreadPoolExecutor pdfJobs = new ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS,
         new ArrayBlockingQueue<Runnable>(8));
 
@@ -353,6 +369,124 @@ public final class TvActivity extends Activity {
             gpu.post(() -> { width = w; height = h; schedule(); });
         }
         void dispose() { active = false; gpu.post(() -> { release(); worker.quitSafely(); }); }
+    }
+
+    /** Paints canonical gfx primitives; no duplicate clock geometry in Java. */
+    /** Platform adapter for the same renderer-neutral chrome as the native Mac popup. */
+    private final class ObserverView extends View {
+        final Paint ink=new Paint(Paint.ANTI_ALIAS_FLAG);
+        final android.graphics.RectF arc=new android.graphics.RectF();
+        final long started=System.nanoTime();
+        int[] colors={0xff101820,0xff55ccee,0xff051719};
+        JSONObject chrome;
+        String caption="";
+        float progress=0;
+        long lastDraw=0, hideAt=0;
+        boolean active=false;
+        float[] retainedRecords=new float[0];
+        void palette(JSONObject palette) { /* Voice chrome comes from shared GFX, not workspace theme. */ }
+        int rgba(org.json.JSONArray rgba) throws Exception {
+            return Color.argb(rgba.length()>3 ? Math.round((float)rgba.getDouble(3)*255) : 255,
+                Math.round((float)rgba.getDouble(0)*255), Math.round((float)rgba.getDouble(1)*255),
+                Math.round((float)rgba.getDouble(2)*255));
+        }
+        float metric(String name) throws Exception { return (float)chrome.getDouble(name); }
+        ObserverView(){super(TvActivity.this);setVisibility(View.GONE);setFocusable(false);setClickable(false);}
+        void refresh(){
+            String raw=nativeObserverState();
+            try{
+                long now=android.os.SystemClock.elapsedRealtime();
+                if(raw==null || raw.equals("null")){
+                    // Expiry/disconnect dismisses immediately, without claiming idle success.
+                    active=false;hideAt=0;
+                } else {
+                    JSONObject state=new JSONObject(raw);
+                    JSONObject next=state.getJSONObject("popup");
+                    boolean nextActive=!state.getString("activity").equals("hidden");
+                    if(active && !nextActive)hideAt=now+Math.round(next.getDouble("linger_seconds")*1000);
+                    if(nextActive)hideAt=0;
+                    // Keep the final heard line while the idle readback fades.
+                    if(nextActive || active || progress==0){
+                        chrome=next;
+                        if(nextActive || progress==0 || (!state.isNull("caption") && !state.getString("caption").isEmpty()))caption=next.getString("label");
+                    }
+                    active=nextActive;
+                    colors=new int[]{rgba(next.getJSONArray("surface")),rgba(next.getJSONArray("accent")),rgba(next.getJSONArray("ink"))};
+                }
+                if(chrome!=null && (active || hideAt>now || progress>0)){
+                    setContentDescription(caption);setVisibility(View.VISIBLE);invalidate();
+                }
+            }catch(Exception error){active=false;hideAt=0;invalidate();android.util.Log.e("CanvasObserver","Invalid observer state",error);}
+        }
+        @Override protected void onDraw(android.graphics.Canvas target){
+            if(!resumed || chrome==null)return;
+            try {
+                long now=android.os.SystemClock.elapsedRealtime();
+                float dt=lastDraw==0 ? 1f/60 : Math.min(.05f,(now-lastDraw)/1000f);lastDraw=now;
+                boolean visible=active || now<hideAt;
+                progress=visible ? Math.min(1,progress+dt/metric("reveal_seconds")) : Math.max(0,progress-dt/metric("dismiss_seconds"));
+                if(progress==0){setVisibility(View.GONE);lastDraw=0;return;}
+                float opacity=1-(float)Math.pow(1-progress,3);
+                float[] records=nativeObserverFrame((System.nanoTime()-started)/1000000000f);
+                if(records==null || records.length%9!=0 || records.length>38*9)throw new IllegalStateException("Invalid reactor records");
+                if(records.length>0)retainedRecords=records;else records=retainedRecords;
+                org.json.JSONArray size=chrome.getJSONArray("size");
+                float width=(float)size.getDouble(0),height=(float)size.getDouble(1);
+                float scale=getWidth()/width;
+                target.save();target.scale(scale,scale);
+                target.translate(0,metric("slide")*(1-opacity));
+                int layer=target.saveLayerAlpha(0,0,width,height,Math.round(255*opacity));
+                ink.setColor(rgba(chrome.getJSONArray("surface")));ink.setStyle(Paint.Style.FILL);
+                arc.set(0,0,width,height);target.drawRoundRect(arc,metric("radius"),metric("radius"),ink);
+                ink.setColor(rgba(chrome.getJSONArray("border")));ink.setStyle(Paint.Style.STROKE);ink.setStrokeWidth(1);
+                target.drawRoundRect(arc,metric("radius"),metric("radius"),ink);
+                ink.setColor(rgba(chrome.getJSONArray("text")));ink.setStyle(Paint.Style.FILL);
+                ink.setTypeface(android.graphics.Typeface.create("sans-serif",android.graphics.Typeface.NORMAL));
+                ink.setTextSize(metric("font_size"));
+                org.json.JSONArray text=chrome.getJSONArray("text_rect");
+                target.save();target.clipRect((float)text.getDouble(0),0,(float)(text.getDouble(0)+text.getDouble(2)),height);
+                Paint.FontMetrics fm=ink.getFontMetrics();
+                target.drawText(caption,(float)text.getDouble(0),height/2-(fm.ascent+fm.descent)/2,ink);target.restore();
+                org.json.JSONArray center=chrome.getJSONArray("reactor_center");
+                float reactorScale=metric("reactor_width")/176f;
+                target.translate((float)center.getDouble(0)-88*reactorScale,(float)center.getDouble(1)-83*reactorScale);
+                target.scale(reactorScale,reactorScale);
+                for(int i=0;i<records.length;i+=9){
+                    float x=records[i+1],y=records[i+2],r=records[i+3];
+                    ink.setColor(colors[(int)records[i+7]]);ink.setAlpha(Math.round(records[i+8]*255));
+                    ink.setStyle(records[i]==2 || records[i]==3 ? Paint.Style.STROKE : Paint.Style.FILL);ink.setStrokeWidth(records[i+4]);
+                    if(records[i]==1 || records[i]==2)target.drawCircle(x,y,r,ink);
+                    else if(records[i]==3){arc.set(x-r,y-r,x+r,y+r);target.drawArc(arc,records[i+5],records[i+6],false,ink);}
+                    else if(records[i]==4)target.drawRect(x,y,x+r,y+records[i+4],ink);
+                    else throw new IllegalStateException("Unsupported reactor mark");
+                }
+                target.restoreToCount(layer);target.restore();postInvalidateOnAnimation();
+            }catch(Exception error){setVisibility(View.GONE);android.util.Log.e("CanvasObserver","Invalid popup frame",error);}
+        }
+    }
+
+    /** Exact player target; only native owner pending/ack state supplies notices. */
+    private final class ControlNoticeView extends View {
+        final Paint ink = new Paint(Paint.ANTI_ALIAS_FLAG);
+        String state = "";
+        long received;
+        ControlNoticeView() { super(TvActivity.this); setFocusable(false); setClickable(false); }
+        void update(JSONObject snapshot) throws Exception {
+            JSONObject notice = snapshot.optJSONObject("control_notice");
+            state = notice == null ? "" : notice.getString("state");
+            received = android.os.SystemClock.elapsedRealtime();
+            setContentDescription(state.isEmpty() ? "" : "Audio control " + state);
+            invalidate();
+        }
+        @Override protected void onDraw(android.graphics.Canvas target) {
+            if (!resumed || state.isEmpty() || state.equals("confirmed") || video.getVisibility() != View.VISIBLE
+                || android.os.SystemClock.elapsedRealtime()-received >= 500) return;
+            ink.setColor(observerView.colors[1]);
+            ink.setStyle(Paint.Style.FILL); ink.setTextSize(dp(12));
+            target.drawText("Audio pending…",
+                video.getLeft()+dp(12),video.getBottom()-dp(12),ink);
+            postInvalidateDelayed(250);
+        }
     }
 
     /** Paints canonical gfx primitives; no duplicate clock geometry in Java. */
@@ -663,6 +797,8 @@ public final class TvActivity extends Activity {
         @Override public void run() {
             if (!resumed) return;
             if(libraryScreen==null)refreshWorkspace();
+            refreshAudioControl();
+            if(observerView!=null)observerView.refresh();
             updates.postDelayed(this, 250);
         }
     };
@@ -737,6 +873,12 @@ public final class TvActivity extends Activity {
         workspaceHeader.setPadding(dp(12), 0, dp(16), 0);
         workspaceHeader.setVisibility(View.GONE);
         frame.addView(workspaceHeader, new FrameLayout.LayoutParams(0, barHeight(), Gravity.TOP | Gravity.RIGHT));
+        observerView=new ObserverView();
+        FrameLayout.LayoutParams observerBounds=new FrameLayout.LayoutParams(dp(340),dp(62),Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL);
+        observerBounds.bottomMargin=dp(24);
+        frame.addView(observerView,observerBounds);
+        controlNoticeView=new ControlNoticeView();
+        frame.addView(controlNoticeView,new FrameLayout.LayoutParams(-1,-1));
         String controlError = nativeStartControl(getFilesDir().getAbsolutePath());
         if (controlError == null || !controlError.isEmpty()) {
             showStatus("Control unavailable: " + controlError);
@@ -893,6 +1035,28 @@ public final class TvActivity extends Activity {
         ShellChrome.audioState(muteButton, surfaceTitle, muted);
     }
 
+    private void refreshAudioControl() {
+        try {
+            String id = videoSurfaceId == null || videoSurfaceId.isEmpty() ? "standalone-video" : videoSurfaceId;
+            JSONObject snapshot = new JSONObject(nativeAudioUpdate(id, surfaceTitle, currentUrl,
+                preparedPlayer != null && resumed && video.getVisibility() == View.VISIBLE, nativeIsMuted()));
+            if (snapshot.has("error")) throw new IllegalStateException(snapshot.getString("error"));
+            if (controlNoticeView != null) controlNoticeView.update(snapshot);
+            if (snapshot.isNull("pending")) return;
+            JSONObject pending = snapshot.getJSONObject("pending");
+            boolean muted = pending.getBoolean("muted");
+            // The UI thread owns this exact player. Report applied only after
+            // MediaPlayer accepts source-local gain; never touch master volume.
+            float gain = muted ? 0.0f : 1.0f;
+            preparedPlayer.setVolume(gain, gain);
+            if (!nativeAudioAcknowledge(pending.getString("request_id"), pending.getLong("revision"), muted))
+                throw new IllegalStateException("Audio acknowledgement rejected");
+            setSurfaceMuted(muted);
+        } catch (Exception error) {
+            showStatus("Audio control failed: " + error.getMessage());
+        }
+    }
+
     // Rust's shared Canvas layout solver owns geometry. Android only applies
     // pixel bounds and preserves decoded video aspect ratio within them.
     private void applySurfaceGeometry() {
@@ -927,9 +1091,11 @@ public final class TvActivity extends Activity {
         private final TextView footer;
         private final String surfaceId;
         private final boolean taskDeck;
+        private final boolean geoMap;
         private View taskPlot;
         boolean navigate(String action) {
             try {
+                if (geoMap && !action.equals("focus")) nativeMapManual(surfaceId);
                 JSONObject result = new JSONObject(nativeTaskNavigate(surfaceId, action));
                 if (result.has("error")) throw new IllegalStateException(result.getString("error"));
                 if (taskPlot != null) taskPlot.invalidate();
@@ -939,7 +1105,8 @@ public final class TvActivity extends Activity {
         SignalView(String id, JSONObject spec, JSONObject palette) throws Exception {
             super(TvActivity.this);
             surfaceId=id;
-            taskDeck=spec.optJSONObject("frame") != null && spec.getJSONObject("frame").optString("view").equals("task_deck");
+            geoMap=spec.optJSONObject("frame") != null && spec.getJSONObject("frame").optString("view").equals("geo_map");
+            taskDeck=spec.optJSONObject("frame") != null && (spec.getJSONObject("frame").optString("view").equals("task_deck") || spec.getJSONObject("frame").optString("view").equals("geo_map"));
             setOrientation(VERTICAL);
             setBackgroundColor(Color.parseColor(palette.getString("surface")));
             int pad = Math.round(16 * getResources().getDisplayMetrics().density);
@@ -952,7 +1119,11 @@ public final class TvActivity extends Activity {
                 addView(title, new LinearLayout.LayoutParams(-1, -2));
             footer = new TextView(TvActivity.this); footer.setTextSize(13);
             footer.setTextColor(Color.parseColor(palette.getString("text_muted")));
-            final long interval = Math.max(33L, Math.min(5000L, spec.optLong("refresh_ms", 250L)));
+            // Provider cadence governs freshness, not how quickly an accepted
+            // frame or local selection becomes visible. Geometry remains cached.
+            final long interval = spec.optJSONObject("frame") != null
+                && spec.getJSONObject("frame").optString("view").equals("geo_map")
+                ? 33L : Math.max(33L, Math.min(250L, spec.optLong("refresh_ms", 250L)));
             final String appearance = !consoleAppearance.isEmpty() ? consoleAppearance : palette.optJSONObject("console_appearance") != null ? palette.getJSONObject("console_appearance").toString() : "{}";
             final int[] inks = new int[]{
                 Color.parseColor(palette.getString("background")), Color.parseColor(palette.getString("surface")),
@@ -965,24 +1136,46 @@ public final class TvActivity extends Activity {
                 Color.BLACK, Color.parseColor(palette.getString("text"))};
             View plot = new View(TvActivity.this) {
                 final Paint ink = new Paint(Paint.ANTI_ALIAS_FLAG);
+                final android.graphics.Path lineBatch = new android.graphics.Path();
                 String previous = "";
                 float[] records;
                 JSONArray labels;
                 int oldWidth, oldHeight;
                 final java.util.HashMap<String, Float> needleLevels = new java.util.HashMap<>();
                 long lastNeedleFrame;
+                String lastMapObservation = "";
+                long lastKioskPoll;
+                final MapRasterLayer raster = new MapRasterLayer();
+                final MapFramePump mapPump = geoMap ? new MapFramePump(id,appearance) : null;
                 @Override protected void onDraw(android.graphics.Canvas target) {
                     super.onDraw(target);
                     if (!resumed || libraryScreen!=null || getWidth() < 2 || getHeight() < 2) return;
                     try {
-                        JSONObject snapshot = new JSONObject(nativeSignalSnapshot(id));
+                        // GFX geometry is logical pixels, like the shared analog clock.
+                        // Shell text/padding already use density-scaled Android units.
+                        final float density = getResources().getDisplayMetrics().density;
+                        if (Float.isNaN(density) || Float.isInfinite(density) || density <= 0f)
+                            throw new IllegalStateException("Invalid signal display density");
+                        final int logicalWidth = Math.max(2, Math.round(getWidth() / density));
+                        final int logicalHeight = Math.max(2, Math.round(getHeight() / density));
+                        long paintTime = android.os.SystemClock.elapsedRealtime();
+                        MapFramePump.Ready mapReady = geoMap ? mapPump.request(logicalWidth,logicalHeight) : null;
+                        if(geoMap && mapReady==null) {postInvalidateDelayed(interval);return;}
+                        JSONObject snapshot = geoMap ? mapReady.snapshot : new JSONObject(nativeSignalSnapshot(id));
                         if (snapshot.has("error")) throw new IllegalStateException(snapshot.getString("error"));
                         JSONObject data = snapshot.getJSONObject("data");
                         String state = data.getString("state");
                         String label = state + " · " + data.optString("detail", "");
                         if (!footer.getText().toString().equals(label)) footer.setText(label);
                         JSONObject frame = snapshot.getJSONObject("frame");
+                        if (geoMap) raster.request(frame.getJSONObject("map"),logicalWidth,logicalHeight);
                         String viewKind = frame.optString("view");
+                        if (viewKind.equals("geo_map") && !data.optString("observed_at").equals(lastMapObservation)) {
+                            lastMapObservation = data.optString("observed_at");
+                            android.util.Log.i("CanvasMap", "observation=" + lastMapObservation
+                                + " motion=" + snapshot.optJSONObject("motion")
+                                + " paths=" + frame.getJSONObject("map").getJSONArray("paths").length());
+                        }
                         if ((state.equals("stale") || state.equals("no_data"))
                             && (viewKind.equals("attention") || viewKind.equals("task_deck")))
                             frame.getJSONObject("panel").put("fresh", false);
@@ -990,7 +1183,7 @@ public final class TvActivity extends Activity {
                         boolean staticBrief = frame.optString("view").equals("brief");
                         footer.setVisibility(frameless && (state.equals("ready")
                             || (staticBrief && state.equals("no_data"))) ? View.GONE : View.VISIBLE);
-                        String raw = frame.toString();
+                        String raw = geoMap ? mapReady.raw : frame.toString();
                         String paintRaw = raw;
                         int[] frameInks = inks;
                         boolean needleAnimation = false;
@@ -1020,43 +1213,69 @@ public final class TvActivity extends Activity {
                                 paintRaw = animated.toString(); needleAnimation = true;
                             }
                         }
-                        if (needleAnimation || !raw.equals(previous) || oldWidth != getWidth() || oldHeight != getHeight()) {
-                            records = nativeSignalFrame(getWidth(), getHeight(), paintRaw, appearance);
-                            if (!raw.equals(previous) || oldWidth != getWidth() || oldHeight != getHeight())
-                            labels = new JSONArray(nativeSignalLabels(getWidth(), getHeight(), raw));
+                        if (needleAnimation || !raw.equals(previous) || oldWidth != logicalWidth || oldHeight != logicalHeight) {
+                            records = geoMap ? mapReady.records : nativeSignalFrame(logicalWidth, logicalHeight, paintRaw, appearance);
+                            if (!raw.equals(previous) || oldWidth != logicalWidth || oldHeight != logicalHeight)
+                            labels = geoMap ? mapReady.labels : new JSONArray(nativeSignalLabels(logicalWidth, logicalHeight, raw));
                             if (records == null || records.length % 8 != 0) throw new IllegalStateException("Invalid signal paint records");
-                            previous = raw; oldWidth = getWidth(); oldHeight = getHeight();
+                            previous = raw; oldWidth = logicalWidth; oldHeight = logicalHeight;
                         }
-                        // Freshness is explicit in the footer and frame, never whole-panel opacity.
-                        ink.setAlpha(255);
-                        for (int i = 0; i < records.length; i += 8) {
-                            ink.setColor(frameInks[(int)records[i+6]]);
+                        final int paintSave = target.save();
+                        try {
+                            target.scale(density, density);
+                            // Freshness is explicit in the footer and frame, never whole-panel opacity.
                             ink.setAlpha(255);
-                            if (records[i] == 0f) {
-                                ink.setStyle(Paint.Style.FILL);
-                                target.drawRoundRect(records[i+1], records[i+2], records[i+1]+records[i+3],
-                                    records[i+2]+records[i+4], records[i+5], records[i+5], ink);
-                            } else if (records[i] == 5f) {
-                                ink.setStyle(Paint.Style.STROKE); ink.setStrokeCap(Paint.Cap.ROUND);
-                                ink.setStrokeWidth(records[i+5]);
-                                target.drawLine(records[i+1], records[i+2], records[i+3], records[i+4], ink);
-                            } else throw new IllegalStateException("Unsupported signal primitive");
-                        }
-                        ink.setStyle(Paint.Style.FILL);
-                        for (int i = 0; i < labels.length(); i++) {
-                            JSONObject text = labels.getJSONObject(i), box = text.getJSONObject("bounds");
-                            float x = (float)box.getDouble("x"), y = (float)box.getDouble("y");
-                            float width = (float)box.getDouble("width"), height = (float)box.getDouble("height");
-                            // Shared label geometry supplies hierarchy; allow headings beyond body size.
-                            ink.setTextSize(Math.max(10f, Math.min(48f, height * 0.8f)));
-                            ink.setColor(frameInks[text.getInt("role")]); ink.setAlpha(255);
-                            String value = text.getString("text");
-                            if (ink.measureText(value) > width) {
-                                int count = ink.breakText(value, true, Math.max(0f, width-ink.measureText("…")), null);
-                                value = value.substring(0, count) + "…";
+                            for (int i = 0; i < records.length; i += 8) {
+                                ink.setColor(frameInks[(int)records[i+6]]);
+                                ink.setAlpha(255);
+                                if (records[i] == 0f) {
+                                    ink.setStyle(Paint.Style.FILL);
+                                    target.drawRoundRect(records[i+1], records[i+2], records[i+1]+records[i+3],
+                                        records[i+2]+records[i+4], records[i+5], records[i+5], ink);
+                                } else if (records[i] == 5f) {
+                                    ink.setStyle(Paint.Style.STROKE); ink.setStrokeCap(Paint.Cap.ROUND);
+                                    ink.setStrokeWidth(records[i+5]);
+                                    // Preserve ordering while batching consecutive equal-style
+                                    // independent segments into one retained GPU path command.
+                                    lineBatch.reset();
+                                    int end=i;
+                                    while(true) {
+                                        lineBatch.moveTo(records[end+1],records[end+2]);
+                                        lineBatch.lineTo(records[end+3],records[end+4]);
+                                        int next=end+8;
+                                        if(next>=records.length || records[next]!=5f
+                                            || records[next+5]!=records[i+5]
+                                            || records[next+6]!=records[i+6])break;
+                                        end=next;
+                                    }
+                                    target.drawPath(lineBatch,ink); i=end;
+                                } else throw new IllegalStateException("Unsupported signal primitive");
+                                if (geoMap && i == 0) raster.draw(target);
                             }
-                            target.save(); target.clipRect(x, y, x+width, y+height);
-                            target.drawText(value, x, y-ink.ascent(), ink); target.restore();
+                            if (geoMap) raster.attribution(target);
+                            ink.setStyle(Paint.Style.FILL);
+                            // The shared CodeGrid column geometry owns alignment; the
+                            // host supplies glyphs without turning it into a new layout.
+                            ink.setTypeface(viewKind.equals("code_grid")
+                                ? android.graphics.Typeface.MONOSPACE : android.graphics.Typeface.DEFAULT);
+                            for (int i = 0; i < labels.length(); i++) {
+                                JSONObject text = labels.getJSONObject(i), box = text.getJSONObject("bounds");
+                                float x = (float)box.getDouble("x"), y = (float)box.getDouble("y");
+                                float width = (float)box.getDouble("width"), height = (float)box.getDouble("height");
+                                // Shared label geometry supplies hierarchy; allow headings beyond body size.
+                                ink.setTextSize(Math.max(10f, Math.min(48f, height * 0.8f)));
+                                ink.setColor(frameInks[text.getInt("role")]); ink.setAlpha(255);
+                                String value = text.getString("text");
+                                if (ink.measureText(value) > width) {
+                                    int count = ink.breakText(value, true, Math.max(0f, width-ink.measureText("…")), null);
+                                    value = value.substring(0, count) + "…";
+                                }
+                                target.save(); target.clipRect(x, y, x+width, y+height);
+                                target.drawText(value, x, y-ink.ascent(), ink); target.restore();
+                            }
+                        } finally {
+                            // Unwind nested label clipping too, before the error UI.
+                            target.restoreToCount(paintSave);
                         }
                     } catch (Exception error) {
                         footer.setVisibility(View.VISIBLE);
@@ -1070,7 +1289,7 @@ public final class TvActivity extends Activity {
             taskPlot=plot;
             if (taskDeck) {
                 setFocusable(true); setFocusableInTouchMode(true);
-                setContentDescription("Agent tasks. Direction keys select. OK opens details. Back returns.");
+                setContentDescription("Interactive surface. Direction keys select. OK opens details. Back returns.");
                 setOnFocusChangeListener((view, focused) -> { if (focused) navigate("focus"); });
                 setOnKeyListener((view, key, event) -> {
                     if (event.getAction()!=KeyEvent.ACTION_DOWN) return false;
@@ -1227,12 +1446,24 @@ public final class TvActivity extends Activity {
         JSONObject content = surface.getJSONObject("content");
         if (!content.optString("kind").equals("widget")) return;
         JSONObject spec = content.getJSONObject("spec");
+        if (spec.optString("kind").equals("rich_card")) {
+            spec.remove("title"); spec.remove("body"); spec.remove("data"); spec.remove("citations");
+            return;
+        }
+        if (spec.optString("kind").equals("signal_view")) {
+            spec.remove("data");
+            // A frame is live content; its variant is structural.
+            JSONObject signal = spec.optJSONObject("frame");
+            if (signal != null) spec.put("frame", new JSONObject().put("view", signal.optString("view")));
+            return;
+        }
         if (!spec.optString("kind").equals("status_list") && !spec.optString("kind").equals("time_series")) return;
         spec.remove("nodes"); spec.remove("series"); spec.remove("unit"); spec.remove("data"); spec.remove("title");
     }
     private String structuralProjection(JSONObject projection) throws Exception {
         JSONObject copy = new JSONObject(projection.toString()); copy.remove("revision");
         copy.remove("header");
+        copy.remove("observer"); // Ephemeral state must never reconstruct videos/PDFs.
         JSONObject document = copy.getJSONObject("document"); document.remove("revision");
         JSONArray surfaces = document.getJSONArray("surfaces");
         for (int i = 0; i < surfaces.length(); i++) stripStatusValues(surfaces.getJSONObject(i));
@@ -1259,6 +1490,7 @@ public final class TvActivity extends Activity {
         clearPanelCache();
         disposeExtraStreams();
         for (View widget : widgets) if(widget instanceof ConwaysView) ((ConwaysView)widget).setActive(false);
+        refreshAudioControl(); // Revoke pending work before releasing the player.
         background.setActive(false);
         updates.removeCallbacks(refresh);
         preparedPlayer = null;
@@ -1507,16 +1739,21 @@ public final class TvActivity extends Activity {
                 ShellChrome.bar(workspaceHeader, palette);
             }
             String structure = structuralProjection(projection);
+            if (observerView != null) observerView.palette(palette);
             if (structure.equals(lastStructure)) {
                 JSONArray tiles = projection.getJSONArray("tiles");
                 for (int i = 0; i < tiles.length(); i++) {
                     JSONObject surface = tiles.getJSONObject(i).getJSONObject("surface");
                     StatusListView view = statusLists.get(surface.getString("id"));
                     if (view != null) view.update(surface.getJSONObject("content").getJSONObject("spec"), palette);
+                    RichCardView card = richCards.get(surface.getString("id"));
+                    if (card != null) card.update(surface.getJSONObject("content").getJSONObject("spec"), palette);
                 }
                 lastProjection = raw;
                 return;
             }
+            nativeResetMapMotion();
+            android.util.Log.i("CanvasRetained", "rebuild workspace=" + currentWorkspaceId);
             frame.setBackgroundColor(Color.parseColor(palette.getString("background")));
             JSONObject document = projection.getJSONObject("document");
             JSONObject backgroundSpec = document.optJSONObject("background");
@@ -1551,6 +1788,7 @@ public final class TvActivity extends Activity {
             }
             widgets.clear();
             statusLists.clear();
+            richCards.clear();
             boolean hasVideo = false;
             java.util.Set<String> visibleExtraStreams = new java.util.HashSet<>();
             for (int i = 0; i < tiles.length(); i++) {
@@ -1570,6 +1808,11 @@ public final class TvActivity extends Activity {
                         cached.setAlpha(0); cached.animate().alpha(1).setDuration(450).start();
                     } else cached.setAlpha(1);
                     widgets.add(cached);
+                    if (cached instanceof RichCardView) {
+                        RichCardView card = (RichCardView)cached;
+                        card.update(content.getJSONObject("spec"), palette);
+                        richCards.put(surface.getString("id"), card);
+                    }
                     continue;
                 }
                 int beforeWidgets = widgets.size();
@@ -1608,6 +1851,11 @@ public final class TvActivity extends Activity {
                 } else if (content.getString("kind").equals("conways")) {
                     ConwaysView life = new ConwaysView(this, palette);
                     frame.addView(life, geometry); widgets.add(life);
+                } else if (content.getString("kind").equals("widget")
+                    && content.getJSONObject("spec").getString("kind").equals("rich_card")) {
+                    RichCardView card = new RichCardView(this, content.getJSONObject("spec"), palette);
+                    frame.addView(card, geometry); widgets.add(card);
+                    richCards.put(surface.getString("id"), card);
                 } else if (content.getString("kind").equals("widget")
                     && (content.getJSONObject("spec").getString("kind").equals("status_list")
                         || content.getJSONObject("spec").getString("kind").equals("time_series"))) {

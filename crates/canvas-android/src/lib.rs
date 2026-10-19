@@ -2,6 +2,33 @@
 use std::net::IpAddr;
 pub const CONTROL_PORT: u16 = 27841;
 
+#[cfg(feature = "shared-workspaces")]
+pub mod assets;
+#[cfg(feature = "android-native-video")]
+pub mod background;
+#[cfg(feature = "android-native-video")]
+pub mod boids;
+#[cfg(feature = "android-native-video")]
+pub mod clock;
+#[cfg(feature = "shared-workspaces")]
+pub mod geometry;
+#[cfg(feature = "android-native-video")]
+pub mod music;
+#[cfg(feature = "android-native-video")]
+pub mod map_motion;
+#[cfg(feature = "android-native-video")]
+pub mod map_raster;
+#[cfg(all(target_os = "android", feature = "android-native-video"))]
+mod native_control;
+#[cfg(feature = "android-native-video")]
+pub mod reactor;
+#[cfg(feature = "android-native-video")]
+pub mod signals;
+#[cfg(any(feature = "android-native-video", feature = "android-tuner-control"))]
+pub mod tuner;
+#[cfg(feature = "shared-workspaces")]
+pub mod workspaces;
+
 #[cfg(all(test, feature = "android-native-video"))]
 mod chrome_tests {
     #[test]
@@ -144,27 +171,6 @@ pub extern "system" fn Java_dev_fpl_canvas_ShellChrome_nativeFrame(
     }
     array.into_raw()
 }
-
-#[cfg(feature = "shared-workspaces")]
-pub mod assets;
-#[cfg(feature = "android-native-video")]
-pub mod background;
-#[cfg(feature = "android-native-video")]
-pub mod clock;
-#[cfg(feature = "android-native-video")]
-pub mod boids;
-#[cfg(feature = "android-native-video")]
-pub mod signals;
-#[cfg(feature = "android-native-video")]
-pub mod music;
-#[cfg(any(feature = "android-native-video", feature = "android-tuner-control"))]
-pub mod tuner;
-#[cfg(feature = "shared-workspaces")]
-pub mod geometry;
-#[cfg(all(target_os = "android", feature = "android-native-video"))]
-mod native_control;
-#[cfg(feature = "shared-workspaces")]
-pub mod workspaces;
 
 #[cfg(all(target_os = "android", feature = "android-native-video"))]
 #[unsafe(no_mangle)]

@@ -112,6 +112,7 @@ fn main() -> Result<()> {
                             "request_id": receipt.request_id,
                             "ok": receipt.ok,
                             "error": receipt.error,
+                            "data": receipt.data,
                         }))
                         .unwrap()
                     );

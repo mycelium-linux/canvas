@@ -190,11 +190,16 @@ fn relay(
     Ok(())
 }
 
+fn tardy_presentation(serial: &str) -> Result<Value, String> {
+    control(
+        serial,
+        &json!({"schema_version":1,"request_id":"tardy-source",
+            "command":{"command":"workspace_presentation","name":"tardy"}}).to_string(),
+    )
+}
+
 fn patch(serial: &str, reel: Option<&Reel>, error: Option<&str>) -> Result<(), String> {
-    let state = control(serial, "inspect\n")?;
-    if state["data"]["catalog"]["selected_project"] != "tardy" {
-        return Ok(());
-    }
+    let state = tardy_presentation(serial)?;
     let doc = &state["data"]["document"];
     if doc["project_id"] != "tardy" {
         return Err("Canvas catalog/document disagree".into());
@@ -383,10 +388,7 @@ fn agents(serial: &str) -> Result<(), String> {
     loop {
         let next_refresh = Instant::now() + Duration::from_secs(2);
         let result: Result<(), String> = (|| {
-            let state = control(serial, "inspect\n")?;
-            if state["data"]["catalog"]["selected_project"] != "tardy" {
-                return Ok(());
-            }
+            let state = tardy_presentation(serial)?;
             let file = std::fs::File::open(
                 "/Users/ajmwagar/.local/share/agent-telemetry/agent-widget.json",
             )
@@ -495,10 +497,7 @@ fn main() -> Result<(), String> {
     let mut pending: Option<Reel> = None;
     loop {
         let result = (|| {
-            let state = control(&serial, "inspect\n")?;
-            if state["data"]["catalog"]["selected_project"] != "tardy" {
-                return Ok(());
-            }
+            tardy_presentation(&serial)?;
             if let Some(reel) = pending.as_ref() {
                 patch(&serial, Some(reel), None)?;
                 pending = None;

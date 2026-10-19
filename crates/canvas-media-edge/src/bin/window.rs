@@ -30,13 +30,14 @@ mod macos {
         sync::{
             Arc, Mutex,
             atomic::{AtomicU64, Ordering},
+            mpsc::{self, Receiver, SyncSender, TryRecvError},
         },
         thread,
         time::{Duration, Instant},
     };
     use unibus_media::{
-        MEDIA_SCHEMA_VERSION, TransportRole, VIDEO_STREAM_CONTRACT, VideoCodec, VideoStream,
-        VideoTransport,
+        MEDIA_SCHEMA_VERSION, TransportRole, VIDEO_ALPHA_MASK_CONTRACT, VIDEO_STREAM_CONTRACT,
+        VideoAlphaMask, VideoCodec, VideoStream, VideoTransport, encode_alpha_rle, payload_sha256,
     };
 
     #[derive(Debug, Deserialize)]
@@ -111,10 +112,17 @@ mod macos {
         width: usize,
         height: usize,
         frames: AtomicU64,
+        alpha_tx: SyncSender<Vec<u8>>,
+        last_alpha: Mutex<Vec<u8>>,
     }
 
     impl Encoder {
-        fn new(config: &Config, width: u32, height: u32) -> Result<Self> {
+        fn new(
+            config: &Config,
+            width: u32,
+            height: u32,
+            alpha_tx: SyncSender<Vec<u8>>,
+        ) -> Result<Self> {
             let child = Command::new(&config.ffmpeg)
                 .args([
                     "-hide_banner",
@@ -157,6 +165,8 @@ mod macos {
                 width: width as usize,
                 height: height as usize,
                 frames: AtomicU64::new(0),
+                alpha_tx,
+                last_alpha: Mutex::new(Vec::new()),
             })
         }
 
@@ -184,6 +194,18 @@ mod macos {
                     self.height
                 ));
                 return;
+            }
+            // RGB stays on H.264. Alpha is retained state and only crosses
+            // Unibus when the complete plane changes (plus lease renewal).
+            let mut alpha = Vec::with_capacity(self.width * self.height);
+            for row in data.chunks_exact(stride).take(self.height) {
+                alpha.extend(row[..row_bytes].chunks_exact(4).map(|pixel| pixel[3]));
+            }
+            if let Ok(mut last) = self.last_alpha.lock()
+                && *last != alpha
+                && self.alpha_tx.try_send(alpha.clone()).is_ok()
+            {
+                *last = alpha;
             }
             let Ok(mut child) = self.child.lock() else {
                 self.fail("encoder lock poisoned");
@@ -271,7 +293,8 @@ mod macos {
             config.capture_scale,
             config.max_height,
         );
-        let encoder = Arc::new(Encoder::new(&config, width, height)?);
+        let (alpha_tx, alpha_rx) = mpsc::sync_channel(1);
+        let encoder = Arc::new(Encoder::new(&config, width, height, alpha_tx)?);
         let filter = SCContentFilter::create().with_window(&window).build()?;
         let interval = CMTime::new(1, i32::try_from(config.fps)?);
         let stream_config = SCStreamConfiguration::new()
@@ -288,12 +311,46 @@ mod macos {
             candidate.app_name, candidate.bundle_id, candidate.title, width, height
         );
         let bus = Bus::connect(config.bus.clone())?;
+        let mut alpha_generation = 0_u64;
+        let mut latest_alpha: Option<Vec<u8>> = None;
         loop {
             announce(&bus, &config, width, height)?;
             let renewal = Instant::now() + Duration::from_millis(config.ttl_ms / 2);
             while Instant::now() < renewal {
                 encoder.check_health()?;
+                drain_alpha(
+                    &alpha_rx,
+                    &mut latest_alpha,
+                    &mut alpha_generation,
+                    |generation, alpha| {
+                        announce_alpha(&bus, &config, width, height, generation, alpha)
+                    },
+                )?;
                 thread::sleep(Duration::from_millis(250));
+            }
+            if let Some(alpha) = latest_alpha.as_deref() {
+                announce_alpha(&bus, &config, width, height, alpha_generation, alpha)?;
+            }
+        }
+    }
+
+    fn drain_alpha(
+        receiver: &Receiver<Vec<u8>>,
+        latest: &mut Option<Vec<u8>>,
+        generation: &mut u64,
+        mut publish: impl FnMut(u64, &[u8]) -> Result<()>,
+    ) -> Result<()> {
+        loop {
+            match receiver.try_recv() {
+                Ok(alpha) => {
+                    *generation = generation.saturating_add(1).max(1);
+                    publish(*generation, &alpha)?;
+                    *latest = Some(alpha);
+                }
+                Err(TryRecvError::Empty) => return Ok(()),
+                Err(TryRecvError::Disconnected) => {
+                    anyhow::bail!("alpha-mask producer disconnected")
+                }
             }
         }
     }
@@ -322,6 +379,36 @@ mod macos {
             Message::new(VIDEO_STREAM_CONTRACT, serde_json::to_value(stream)?),
         )?;
         bus.send(&envelope, &[]).context("announce window stream")
+    }
+
+    fn announce_alpha(
+        bus: &Bus,
+        config: &Config,
+        width: u32,
+        height: u32,
+        generation: u64,
+        alpha: &[u8],
+    ) -> Result<()> {
+        let payload = encode_alpha_rle(alpha).map_err(anyhow::Error::msg)?;
+        let now = canvas_media_edge::now_unix_ms();
+        let mask = VideoAlphaMask {
+            schema_version: MEDIA_SCHEMA_VERSION,
+            stream_id: config.stream_id.clone(),
+            width,
+            height,
+            generation,
+            payload_sha256: payload_sha256(&payload),
+            observed_at_unix_ms: now,
+            valid_until_unix_ms: now + config.ttl_ms,
+        };
+        mask.validate(&payload).map_err(anyhow::Error::msg)?;
+        let mut envelope = bus.to_destination(
+            &config.destination,
+            Message::new(VIDEO_ALPHA_MASK_CONTRACT, serde_json::to_value(mask)?),
+        )?;
+        envelope.payload_bytes = payload.len();
+        bus.send(&envelope, &payload)
+            .context("announce window alpha mask")
     }
 
     fn initialize_core_graphics() {

@@ -87,6 +87,8 @@ pub enum Command {
     },
     Inspect,
     Performance,
+    /// Return fresh provider-authored stream descriptions retained by Canvas.
+    StreamDescriptors,
     ReadDocument,
     ApplyDocument {
         document: WorkspaceDocument,
@@ -694,6 +696,9 @@ pub enum Receipt {
     Snapshot {
         snapshot: RuntimeSnapshot,
     },
+    StreamDescriptors {
+        descriptors: Vec<serde_json::Value>,
+    },
     DocumentApplied {
         workspace_id: String,
     },
@@ -1255,6 +1260,7 @@ impl ControlRequest {
             | Command::ShellCatalog
             | Command::ShellDockPins
             | Command::Performance
+            | Command::StreamDescriptors
             | Command::ReadDocument
             | Command::Focus
             | Command::DismissPresencePreview
@@ -1876,6 +1882,11 @@ pub mod text {
                         snapshot.display_frames.len(),
                         snapshot.visible
                     ),
+                    Receipt::StreamDescriptors { descriptors } => {
+                        serde_json::to_string(descriptors).unwrap_or_else(|error| {
+                            format!("stream descriptors unavailable: {error}")
+                        })
+                    }
                     Receipt::BrowserKeyAccepted => "browser key accepted".to_string(),
                     Receipt::BrowserPointerAccepted => "browser pointer accepted".to_string(),
                     Receipt::DocumentApplied { workspace_id } => {

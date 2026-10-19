@@ -11,6 +11,7 @@ use canvas::control::{
     Outcome as CanvasOutcome, ProjectWorkspaceSpec, Receipt as CanvasReceipt, RuntimeSnapshot,
     CONTROL_VERSION as CANVAS_CONTROL_VERSION, MAX_PROJECT_WORKSPACES,
 };
+use canvas::{ThemeRef, WorkspaceDocument};
 use canvas_core::{Accent, ThemeMode, ThemeSelection};
 use rmcp::{
     model::{
@@ -49,11 +50,31 @@ struct Arguments {
     project: Option<String>,
     resource: Option<String>,
     name: Option<String>,
+    stream_owner: Option<String>,
+    stream_id: Option<String>,
     target: Target,
 }
 
 fn tools() -> Vec<Tool> {
     [
+        (
+            "canvas_streams_list",
+            "List fresh provider-authored stream descriptions available to Canvas. These descriptions, not phrase aliases, supply the semantic context used to choose compatible workspace materializers.",
+            json!({"target":{"type":"string","enum":["primary","presence"]}}),
+            vec![],
+        ),
+        (
+            "canvas_stream_workspace_materialize",
+            "Create and activate a Canvas workspace from one exact live stream descriptor and a compatible Canvas-owned view template. Refuses unknown, expired, or unsupported streams.",
+            json!({
+                "stream_owner":{"type":"string","maxLength":96},
+                "stream_id":{"type":"string","maxLength":96},
+                "workspace_id":{"type":"string","maxLength":64},
+                "name":{"type":"string","maxLength":96},
+                "target":{"type":"string","enum":["primary","presence"]}
+            }),
+            vec!["stream_owner", "stream_id", "workspace_id", "name"],
+        ),
         (
             "displays_list",
             "List live displays on this Dock host using Dock Control. Read-only; does not list other machines or change visibility.",
@@ -179,6 +200,18 @@ fn arguments(name: &str, args: &Value) -> Result<Arguments, String> {
         {
             Ok(Arguments::default())
         }
+        "canvas_streams_list" if object.len() <= 1 => Ok(Arguments {
+            target,
+            ..Arguments::default()
+        }),
+        "canvas_stream_workspace_materialize" => Ok(Arguments {
+            project: Some(value("workspace_id", 64)?),
+            name: Some(value("name", 96)?),
+            stream_owner: Some(value("stream_owner", 96)?),
+            stream_id: Some(value("stream_id", 96)?),
+            target,
+            ..Arguments::default()
+        }),
         "project_resources" => Ok(Arguments {
             project: Some(value("project_id", 64)?),
             ..Arguments::default()
@@ -508,6 +541,116 @@ fn canvas_snapshot() -> Result<RuntimeSnapshot, String> {
     }
 }
 
+fn stream_descriptors(target: Target) -> Result<Vec<Value>, String> {
+    let receipt = match target {
+        Target::Primary => {
+            let reply = canvas_socket::send(&CanvasRequest {
+                schema_version: CANVAS_CONTROL_VERSION,
+                request_id: "dock-stream-descriptors".into(),
+                expected_revision: None,
+                actor: None,
+                command: CanvasCommand::StreamDescriptors,
+            })?;
+            return match reply.outcome {
+                CanvasOutcome::Ok {
+                    receipt: CanvasReceipt::StreamDescriptors { descriptors },
+                } => Ok(descriptors),
+                CanvasOutcome::Error { message, .. } => Err(message),
+                _ => Err("Canvas returned an unexpected stream descriptor receipt".into()),
+            };
+        }
+        Target::Presence => {
+            let (program, config, screen) =
+                remote_presence_screen().ok_or("No remote Canvas presence screen is configured")?;
+            remote_canvas_request(
+                &program,
+                &config,
+                &screen,
+                &json!({
+                    "schema_version":CANVAS_CONTROL_VERSION,
+                    "request_id":"dock-stream-descriptors",
+                    "command":{"command":"stream_descriptors"}
+                }),
+            )?
+        }
+    };
+    receipt["outcome"]["descriptors"]
+        .as_array()
+        .cloned()
+        .or_else(|| {
+            receipt["outcome"]["receipt"]["descriptors"]
+                .as_array()
+                .cloned()
+        })
+        .ok_or_else(|| "Remote Canvas returned an unexpected stream descriptor receipt".into())
+}
+
+fn radioman_workspace(id: &str) -> Result<WorkspaceDocument, String> {
+    let mut document: WorkspaceDocument =
+        serde_json::from_str(include_str!("../../../config/workspaces/neo/radioman.json"))
+            .map_err(|error| format!("Bundled Radioman workspace is invalid: {error}"))?;
+    document.id = format!("{id}-live");
+    document.project_id = id.into();
+    document.revision = 1;
+    document.theme = ThemeRef::Selection {
+        theme: ThemeSelection::Coherence {
+            mode: ThemeMode::Dark,
+            accent: Accent::Brand,
+        },
+    };
+    Ok(document)
+}
+
+fn materialize_stream_workspace(arguments: &Arguments) -> Result<Value, String> {
+    let owner = arguments.stream_owner.as_deref().unwrap();
+    let stream_id = arguments.stream_id.as_deref().unwrap();
+    let workspace_id = arguments.project.as_deref().unwrap();
+    let descriptors = stream_descriptors(arguments.target)?;
+    let descriptor = descriptors
+        .iter()
+        .find(|entry| entry["owner"] == owner && entry["stream_id"] == stream_id)
+        .ok_or("That live stream is not currently advertised by Canvas")?;
+    let semantic_type = descriptor["semantic_type"]
+        .as_str()
+        .ok_or("Stream descriptor omitted its semantic type")?;
+    if descriptor["endpoints"].as_array().is_none_or(Vec::is_empty) {
+        return Err("That stream is known but has no current consumable endpoint".into());
+    }
+    let document = match semantic_type {
+        "rf.spectrum" => radioman_workspace(workspace_id)?,
+        _ => {
+            return Err(format!(
+                "Canvas has no workspace materializer for {semantic_type}"
+            ))
+        }
+    };
+    let reply = match arguments.target {
+        Target::Primary => serde_json::to_value(canvas_socket::send(&CanvasRequest {
+            schema_version: CANVAS_CONTROL_VERSION,
+            request_id: format!("dock-materialize-{workspace_id}"),
+            expected_revision: None,
+            actor: None,
+            command: CanvasCommand::ApplyDocument { document },
+        })?)
+        .map_err(|error| error.to_string())?,
+        Target::Presence => {
+            let (program, config, screen) =
+                remote_presence_screen().ok_or("No remote Canvas presence screen is configured")?;
+            remote_canvas_request(
+                &program,
+                &config,
+                &screen,
+                &json!({
+                    "schema_version":CANVAS_CONTROL_VERSION,
+                    "request_id":format!("dock-materialize-{workspace_id}"),
+                    "command":{"command":"apply_document","document":document}
+                }),
+            )?
+        }
+    };
+    Ok(json!({"workspace_id":workspace_id,"stream":descriptor,"canvas":reply}))
+}
+
 fn sync_canvas_projects(source: &Value) -> Result<Value, String> {
     sync_canvas_projects_from_specs(portfolio_workspace_specs(source)?)
 }
@@ -786,6 +929,7 @@ pub fn execute(name: &str, args: &Value) -> Result<Value, String> {
             | "canvas_workspace_create"
             | "canvas_workspace_switch"
             | "canvas_workspace_reset"
+            | "canvas_stream_workspace_materialize"
     ) {
         Some(
             PRESENTATION
@@ -802,6 +946,10 @@ pub fn execute(name: &str, args: &Value) -> Result<Value, String> {
             }
             _ => return Err("Dock Control returned an unexpected display response".into()),
         },
+        "canvas_streams_list" => {
+            json!({"descriptors":stream_descriptors(arguments.target)?})
+        }
+        "canvas_stream_workspace_materialize" => materialize_stream_workspace(&arguments)?,
         "projects_list" => json!({"projects":project_summaries(&super::alfalfa::list()?)?}),
         "workspaces_list" => json!({"workspaces":workspace_summaries()?}),
         "canvas_workspaces_sync" => {

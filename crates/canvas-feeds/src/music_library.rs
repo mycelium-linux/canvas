@@ -26,6 +26,27 @@ pub struct SelectionReceipt {
     pub started: bool,
 }
 
+/// Owner-observed MPD playback; never contains filesystem paths.
+#[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
+pub struct PlayerStatus {
+    pub state: String,
+    pub song_id: Option<u32>,
+    pub artist: String,
+    pub title: String,
+    pub album: String,
+    pub elapsed: f64,
+    pub duration: Option<f64>,
+}
+
+/// Atomic stereo input selection derived from the studio graph.
+#[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
+pub struct ReferenceInput {
+    pub id: String,
+    pub sources: Vec<String>,
+    pub muted: bool,
+    pub soloed: bool,
+}
+
 /// Bounded blocking catalog client, intended for an acquisition worker, never rendering.
 pub struct Library {
     client: reqwest::blocking::Client,
@@ -34,6 +55,79 @@ pub struct Library {
 }
 
 impl Library {
+    pub fn player_status(&self) -> Result<PlayerStatus, String> {
+        let status: PlayerStatus =
+            self.get(self.base.join("player").map_err(|e| e.to_string())?)?;
+        Self::validate_player(status)
+    }
+    /// Closed owner transport commands. No automatic retry or queue clearing.
+    pub fn transport(&self, command: &str) -> Result<PlayerStatus, String> {
+        if !matches!(
+            command,
+            "play" | "pause" | "toggle" | "stop" | "next" | "previous"
+        ) {
+            return Err("Unsupported player command".into());
+        }
+        let mut url = self
+            .base
+            .join("queue/transport")
+            .map_err(|e| e.to_string())?;
+        url.query_pairs_mut().append_pair("command", command);
+        let mut request = self.client.post(url);
+        if let Some(token) = &self.bearer {
+            request = request.bearer_auth(token);
+        }
+        Self::validate_player(Self::response(request)?)
+    }
+    fn validate_player(status: PlayerStatus) -> Result<PlayerStatus, String> {
+        if !matches!(status.state.as_str(), "play" | "pause" | "stop")
+            || !status.elapsed.is_finite()
+            || status.elapsed < 0.0
+            || status.duration.is_some_and(|d| !d.is_finite() || d < 0.0)
+            || [&status.artist, &status.title, &status.album]
+                .iter()
+                .any(|s| s.len() > 8192)
+        {
+            return Err("Invalid owner playback state".into());
+        }
+        Ok(status)
+    }
+    /// Read configured stable stereo input groups; owner IDs never come from labels.
+    pub fn reference_inputs(&self) -> Result<Vec<ReferenceInput>, String> {
+        let snapshot: serde_json::Value =
+            self.get(self.base.join("v1/studio").map_err(|e| e.to_string())?)?;
+        reference_inputs(&snapshot)
+    }
+    /// Reference solo affects only the graph-derived reference input bank, not DAW transport.
+    pub fn reference_control(
+        &self,
+        id: &str,
+        command: &str,
+    ) -> Result<Vec<ReferenceInput>, String> {
+        let inputs = self.reference_inputs()?;
+        let selected = inputs
+            .iter()
+            .find(|i| i.id == id)
+            .ok_or("Reference input is no longer available")?;
+        let intent = match command {
+            "mute" => {
+                serde_json::json!({"action":"set_monitor_muted","sources":selected.sources,"muted":!selected.muted})
+            }
+            "solo" => {
+                serde_json::json!({"action":"set_monitor_solo","sources":if selected.soloed {vec![]}else{selected.sources.clone()},"scope":inputs.iter().flat_map(|i|i.sources.clone()).collect::<Vec<_>>()})
+            }
+            _ => return Err("Unsupported reference command".into()),
+        };
+        let mut request = self
+            .client
+            .post(self.base.join("v1/intents").map_err(|e| e.to_string())?)
+            .json(&intent);
+        if let Some(token) = &self.bearer {
+            request = request.bearer_auth(token);
+        }
+        let _: serde_json::Value = Self::response(request)?;
+        self.reference_inputs()
+    }
     /// Fetch authoritative local artwork. Missing art is distinct from a failed request.
     pub fn artwork(&self, album: &Album) -> Result<Option<Vec<u8>>, String> {
         use std::io::Read;
@@ -219,6 +313,44 @@ impl Library {
         }
         serde_json::from_slice(&bytes).map_err(|error| format!("invalid catalog JSON: {error}"))
     }
+}
+
+fn reference_inputs(snapshot: &serde_json::Value) -> Result<Vec<ReferenceInput>, String> {
+    let interfaces = snapshot["graph"]["interfaces"]
+        .as_object()
+        .ok_or("Missing studio interfaces")?;
+    let sources = snapshot["graph"]["audio_sources"]
+        .as_object()
+        .ok_or("Missing studio sources")?;
+    if interfaces.len() > 128 || sources.len() > 256 {
+        return Err("Studio input catalog exceeds bounds".into());
+    }
+    let contains = |key: &str, id: &str| {
+        snapshot["state"][key]
+            .as_array()
+            .is_some_and(|values| values.iter().any(|v| v.as_str() == Some(id)))
+    };
+    let mut inputs = vec![];
+    for (id, interface) in interfaces {
+        if interface["reference_playback"] != true || interface["input_channels"] != 2 {
+            continue;
+        }
+        let group: Vec<String> = sources
+            .iter()
+            .filter(|(_, source)| source["interface"].as_str() == Some(id))
+            .map(|(name, _)| name.clone())
+            .collect();
+        if group.len() != 2 {
+            continue;
+        }
+        inputs.push(ReferenceInput {
+            id: id.clone(),
+            muted: group.iter().all(|s| contains("muted_monitor_sources", s)),
+            soloed: group.iter().all(|s| contains("soloed_monitor_sources", s)),
+            sources: group,
+        });
+    }
+    Ok(inputs)
 }
 
 #[cfg(test)]

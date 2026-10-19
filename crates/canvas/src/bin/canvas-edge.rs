@@ -29,7 +29,7 @@ use canvas::stream_binding::{STREAM_SCHEMA_VERSION, StreamEnvelope};
 use canvas::workspace_mirror::{
     LocalWorkspaceSnapshot, MIRROR_KIND, MIRROR_SCHEMA_VERSION, WorkspaceState, same_representation,
 };
-use canvas_core::unibus::{Envelope, envelope, kinds, result_message};
+use canvas_core::unibus::{Envelope, envelope, kinds, result_message_with_data};
 use serde::Deserialize;
 
 const RECONNECT_MIN: Duration = Duration::from_secs(1);
@@ -252,6 +252,7 @@ fn ingest(
                 actor: None,
                 command: Command::SetPresence { presence: snapshot },
             })
+            .map(|_| ())
             .context("SetPresence")
         }
         "canvas_command" | "canvas.command" => {
@@ -278,12 +279,12 @@ fn ingest(
                 .map(str::to_owned);
             let outcome = match authorize(config, envelope, &raw) {
                 Ok(request) => match submit(request) {
-                    Ok(()) => (true, None),
-                    Err(e) => (false, Some(format!("{e:#}"))),
+                    Ok(data) => (true, None, data),
+                    Err(e) => (false, Some(format!("{e:#}")), None),
                 },
                 Err(reason) => {
                     eprintln!("canvas-edge: denied: {reason}");
-                    (false, Some(reason))
+                    (false, Some(reason), None)
                 }
             };
             if outcome.0 {
@@ -299,7 +300,7 @@ fn ingest(
                     }
                 }
             }
-            receipt(bus, envelope, &request_id, outcome.0, outcome.1)
+            receipt(bus, envelope, &request_id, outcome.0, outcome.1, outcome.2)
         }
         CAMERA_KIND => apply_camera_pose(camera_seen, envelope),
         "audio_level" | "audio.level" => publish_audio_level(envelope),
@@ -1671,13 +1672,15 @@ fn authorize(
     Ok(request)
 }
 
-fn submit(request: ControlRequest) -> Result<()> {
+fn submit(request: ControlRequest) -> Result<Option<serde_json::Value>> {
     request.validate().map_err(anyhow::Error::msg)?;
     let reply = canvas::control::send(&request).map_err(anyhow::Error::msg)?;
     // The hub ack proves delivery; the receipt must carry what Canvas
     // actually answered, including application-level failures.
     match reply.outcome {
-        canvas::control::Outcome::Ok { .. } => Ok(()),
+        canvas::control::Outcome::Ok { receipt } => Ok(Some(
+            serde_json::to_value(receipt).context("encode Canvas receipt")?,
+        )),
         canvas::control::Outcome::Error { code, message } => {
             bail!("canvas rejected the command ({code:?}): {message}")
         }
@@ -1690,8 +1693,9 @@ fn receipt(
     request_id: &str,
     ok: bool,
     error: Option<String>,
+    data: Option<serde_json::Value>,
 ) -> Result<()> {
-    let message = result_message(request_id, ok, error);
+    let message = result_message_with_data(request_id, ok, error, data);
     let envelope = bus
         .to_destination(&command_envelope.producer_id, message)
         .context("build receipt envelope")?;
@@ -1931,7 +1935,7 @@ mod tests {
 
     #[test]
     fn receipts_parse_back_to_correlated_results() {
-        let message = result_message("r4", false, Some("denied".into()));
+        let message = canvas_core::unibus::result_message("r4", false, Some("denied".into()));
         let parsed = parse_result(&message).expect("parses");
         assert_eq!(parsed.request_id, "r4");
         assert!(!parsed.ok);

@@ -44,6 +44,9 @@ impl Workspaces {
         }
         let document = crate::WorkspaceDocument::parse(input, &self.catalog)
             .map_err(|error| error.to_string())?;
+        if self.documents.values().any(|existing| existing.id == document.id && existing.project_id != document.project_id) {
+            return Err("Workspace identity belongs to another project".into());
+        }
         if let Some(current) = self.documents.get(&document.project_id) {
             if current.id != document.id {
                 return Err(
@@ -111,6 +114,10 @@ impl Workspaces {
         self.documents.get(project)
     }
 
+    pub fn document_by_id(&self, id: &str) -> Option<&crate::WorkspaceDocument> {
+        self.documents.values().find(|document| document.id == id)
+    }
+
     /// Replace only the selected workspace's named views, preserving all surfaces.
     pub fn set_pages(&mut self, pages: Vec<crate::Page>) -> Result<(), String> {
         let mut next = self.document().ok_or("No selected document")?.clone();
@@ -160,8 +167,8 @@ impl Workspaces {
     /// last complete document available to the platform renderer.
     pub fn apply_document_patch(&mut self, patch: &crate::WorkspacePatch) -> Result<(), String> {
         let current = self
-            .document()
-            .ok_or("Selected workspace has no document")?;
+            .document_by_id(&patch.workspace_id)
+            .ok_or("Patch workspace is not declared")?;
         let next = current
             .apply_patch(patch, &self.catalog)
             .map_err(|error| error.to_string())?;
@@ -359,5 +366,16 @@ mod tests {
             Some("video")
         );
         assert!(session.apply_document_patch(&patch).is_err());
+    }
+
+    #[test]
+    fn workspace_identity_cannot_alias_another_project() {
+        let mut session = Workspaces::from_catalog(CATALOG, "television").unwrap();
+        session.install_document(&document("television", 1)).unwrap();
+        let saved = session.retained_projection();
+        let mut alias: serde_json::Value = serde_json::from_str(&document("television", 1)).unwrap();
+        alias["project_id"] = serde_json::json!("studio");
+        assert!(session.install_document(&alias.to_string()).is_err());
+        assert_eq!(session.retained_projection(), saved);
     }
 }
