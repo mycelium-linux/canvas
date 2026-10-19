@@ -1,9 +1,3 @@
-struct App(canvas_workspace_ui::shell::Shell);
-impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.0.show(ctx);
-    }
-}
 fn main() -> eframe::Result {
     eframe::run_native(
         "Canvas workspace · demo data",
@@ -14,10 +8,10 @@ fn main() -> eframe::Result {
                 .with_min_inner_size([680.0, 540.0]),
             ..Default::default()
         },
-        Box::new(|_| {
-            Ok(Box::new(App(
-                canvas_workspace_ui::shell::Shell::demo().map_err(std::io::Error::other)?
-            )))
+        Box::new(|cc| {
+            Ok(Box::new(
+                canvas_workspace_ui::preview_host::App::new(cc).map_err(std::io::Error::other)?,
+            ))
         }),
     )
 }
