@@ -4,13 +4,17 @@
   "frames_per_second": 24,
   "endpoint": "udp://100.80.85.86:55212?pkt_size=1316",
   "ffmpeg_binary": "/opt/homebrew/bin/ffmpeg",
+  "live_snapshot": {
+    "url": "http://127.0.0.1:18581/operator/spatial/snapshot?domains=ais,hf_radar,noaa_coops,marine_weather,nws_weather,peeringdb,ripe_atlas&limit=20000",
+    "key_file": "/Users/ajmwagar/.config/canvas-panopticon/spatial-owner.key"
+  },
   "raster_path": "/Users/ajmwagar/src/fpl/panopticon/galileo/wasm/assets/earth.jpg",
   "theme": {"source": "coherence", "mode": "dark", "accent": "info"},
   "camera": {
-    "latitude": 32.0,
-    "longitude": -118.0,
-    "distance_m": 16000000.0,
+    "latitude": 45.0,
+    "longitude": -125.0,
+    "distance_m": 8000000.0,
     "pitch_degrees": 8.0,
-    "orbit_degrees_per_second": 1.5
+    "orbit_degrees_per_second": 0.0
   }
 }

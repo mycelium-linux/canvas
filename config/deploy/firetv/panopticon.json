@@ -15,7 +15,7 @@
     },
     {
       "id": "panopticon-source-status",
-      "title": "Basemap only · Spatial layers not connected",
+      "title": "Marine · weather · network sites | 5s refresh · expired overlays hidden",
       "inputs": [],
       "content": {"kind": "scene", "scene": {"nodes": []}}
     }

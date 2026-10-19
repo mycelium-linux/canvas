@@ -162,6 +162,10 @@ struct FeatureWire {
     entity_id: String,
     geometry: GeometryWire,
     style_role: String,
+    // The owner also supplies richer render semantics. Point consumers use
+    // geometry/style_role; semantic payloads belong to their typed adapters.
+    #[serde(default, rename = "semantic")]
+    _semantic: Option<Value>,
     #[serde(default)]
     measures: BTreeMap<String, f64>,
     #[serde(default)]

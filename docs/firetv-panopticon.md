@@ -6,12 +6,23 @@ TV media edge. Android owns native playback. This does not embed Bevy in Canvas
 or add another app to the TV. This is a display-only globe; the remote camera
 is not yet an interactive, synchronized Galileo session.
 
-The initial profile explicitly renders the basemap only. It uses Panopticon's
-existing Earth raster and resolves its palette from the canonical Coherence
-theme. No spatial snapshot is configured, and the TV footer says spatial layers
-are not connected. The existing snapshot-based stream configuration remains
-supported; neither a test fixture nor a stale track snapshot should be installed
-as live TV intelligence. Live source binding/freshness needs separate proof.
+The profile uses Panopticon's existing Earth raster and canonical Coherence
+theme. Spatial layers come from the local owner's authenticated
+`/operator/spatial/snapshot` endpoint, refreshed every five seconds on a separate
+thread. The selected domains are vessels, HF radar, NOAA CO-OPS, marine and NWS
+weather, PeeringDB and RIPE Atlas. The camera holds the Pacific Northwest in view.
+These are point layers; chart tiles, boundaries and interactive camera control
+remain separate work. Temporal series render when supplied by the owner.
+
+The credential lives in an owner-private file referenced by `live_snapshot.key_file`;
+never commit it or pass it in process arguments. The curl transport only accepts
+loopback URLs, follows no redirects, limits responses to 16 MiB and times out
+after four seconds. Failed requests clear overlays. Snapshots expire at the
+owner's maximum age (capped at 60 seconds); individual entities expire using the
+owner's `summary.expires_at_unix`. Thus a fresh snapshot cannot revive an expired
+vessel. Source errors are recorded in the producer log; the TV caption describes
+layer selection and expiry policy, rather than claiming that every feed is healthy.
+The legacy file-snapshot configuration remains supported for offline consumers.
 
 ## Stream route
 
@@ -66,6 +77,12 @@ continues to use its existing direct GPU path.
 3. Install/verify the receiver unit on Agora and start only
    `canvas-panopticon-firetv.service`. Start the producer through its supplied
    LaunchAgent. Enable the receiver for login only after the stream proof.
+   Before enabling live layers, provision `spatial-owner.key` with mode 0600
+   from the existing Panopticon owner's internal credential. On this Studio,
+   its source is the `EnvironmentVariables.PANOPTICON_INTERNAL_KEY` entry in
+   `~/Library/LaunchAgents/dev.fpl.panopticon-ais-local.plist`; use `plutil
+   -extract ... raw -o DESTINATION` under `umask 077` so its value never appears
+   on stdout. Do not generate a replacement owner key.
 4. Use Agora's `ffprobe` to check the HLS output: H.264, 1280 × 720, moving frames.
    Check at least two distinct decoded frame hashes and playlist advancement.
    A running service or a file's existence is not frame-delivery proof.

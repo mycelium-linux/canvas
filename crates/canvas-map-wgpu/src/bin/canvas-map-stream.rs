@@ -17,6 +17,8 @@ use std::{
 };
 
 const BYTES_PER_PIXEL: u32 = 4;
+#[path = "../live_snapshot.rs"]
+mod live_snapshot;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -32,6 +34,8 @@ struct Config {
     /// None is an explicit basemap-only presentation, with no synthetic tracks.
     #[serde(default)]
     snapshot_path: Option<String>,
+    #[serde(default)]
+    live_snapshot: Option<live_snapshot::Source>,
     #[serde(default)]
     raster_path: Option<String>,
     theme: StreamTheme,
@@ -161,6 +165,10 @@ fn main() -> Result<()> {
 
 fn validate(config: &Config) -> Result<()> {
     ensure!(
+        config.snapshot_path.is_none() || config.live_snapshot.is_none(),
+        "choose a file snapshot or live owner, not both"
+    );
+    ensure!(
         config.width >= 64 && config.width <= 7_680,
         "width must be 64..=7680"
     );
@@ -194,6 +202,8 @@ async fn run(
     config: Config,
     snapshot: Option<canvas::map::spatial::SpatialFeatureSet>,
 ) -> Result<()> {
+    let live = config.live_snapshot.as_ref().map(live_snapshot::start);
+    let mut active_snapshot = snapshot.clone();
     let local_frame_path = config
         .source_id
         .as_deref()
@@ -252,6 +262,8 @@ async fn run(
             snapshot.revision,
             snapshot.features.len()
         );
+    } else if live.is_some() {
+        eprintln!("canvas-map-stream: waiting for live spatial owner; basemap until connected");
     } else {
         eprintln!("canvas-map-stream: basemap only; spatial layers are not connected");
     }
@@ -299,6 +311,45 @@ async fn run(
     );
 
     loop {
+        if let Some(live) = &live {
+            if let Some(features) = active_snapshot.as_mut() {
+                let count = features.features.len();
+                live_snapshot::expire(features, live_snapshot::now_ms());
+                if features.features.len() != count {
+                    renderer.set_features(&device, features)?;
+                }
+            }
+            if let Ok(update) = live.try_recv() {
+                match update {
+                    Ok(mut features) => {
+                        live_snapshot::expire(&mut features, live_snapshot::now_ms());
+                        eprintln!(
+                            "spatial: revision={} features={}",
+                            features.revision,
+                            features.features.len()
+                        );
+                        renderer.set_features(&device, &features)?;
+                        active_snapshot = Some(features);
+                    }
+                    Err(error) => {
+                        eprintln!("spatial: disconnected: {error}");
+                        if let Some(mut previous) = active_snapshot.take() {
+                            previous.features.clear();
+                            renderer.set_features(&device, &previous)?;
+                        }
+                    }
+                }
+            }
+            if active_snapshot
+                .as_ref()
+                .is_some_and(|features| !live_snapshot::fresh(features, live_snapshot::now_ms()))
+            {
+                let mut expired = active_snapshot.take().unwrap();
+                expired.features.clear();
+                renderer.set_features(&device, &expired)?;
+                eprintln!("spatial: stale; overlays cleared");
+            }
+        }
         let longitude = wrap_longitude(
             config.camera.longitude
                 + started.elapsed().as_secs_f64() * config.camera.orbit_degrees_per_second,
@@ -398,13 +449,14 @@ mod tests {
     }
 
     #[test]
-    fn firetv_stream_uses_canonical_theme_and_explicit_basemap_mode() {
+    fn firetv_stream_uses_canonical_theme_and_live_owner() {
         let config: Config = serde_json::from_str(include_str!(
             "../../../../config/deploy/mac-studio/panopticon-firetv-stream.json"
         ))
         .unwrap();
         validate(&config).unwrap();
         assert!(config.snapshot_path.is_none());
+        assert!(config.live_snapshot.is_some());
         assert!(config.source_id.is_none());
         assert_eq!(
             config.theme.palette(),
