@@ -223,6 +223,18 @@ producer using the LAN; the separately installed supervised profile uses the
 smaller VPN packets described above. It is not a controlled before/after
 comparison with the earlier four-stop route.
 
+The installed supervised VPN profile also sustained a complete circuit at
+24.0004 fps (elapsed 2–208 s). Its p99 work was 48.681 ms, with 1.982% over
+budget, maximum work 120.633 ms and maximum inter-frame gap 232.063 ms:
+`/tmp/canvas-reference-supervised.csv`. It does **not** yet meet the p99/1%
+headroom target, so `dock-h5w.2` remains open. After initial playback startup,
+the actual TV logged 216 seconds of 24 fps playback with zero dropped frames,
+no buffer-low/ready events, and 41 ms average frame spacing across its five-second
+reporting windows. That includes a complete 208-second route. This is a bounded
+successful playback observation, not a guarantee against future stalls.
+Playback log: `/tmp/canvas-reference-supervised-tv.log`. The prior venture deck
+was restored after QA, and the temporary producer tracing environment was removed.
+
 Actual TV captures show the Lake Union/Fremont close-up, San Juan Islands,
 surface-following cable strokes, and the fitted native map key. Stale vessel
 observations were correctly omitted during this run; ship/aircraft shape and
