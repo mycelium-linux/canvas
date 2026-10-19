@@ -82,8 +82,31 @@ impl Filter {
         }
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    Archive,
+    Star,
+    Unread,
+    Read,
+    Snooze,
+}
+impl Action {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Archive => "Archived",
+            Self::Star => "Star updated",
+            Self::Unread => "Marked unread",
+            Self::Read => "Marked read",
+            Self::Snooze => "Snoozed until tomorrow",
+        }
+    }
+}
 #[derive(Clone, Debug)]
 pub enum Intent {
+    Bulk {
+        keys: Vec<KeyId>,
+        action: Action,
+    },
     ComposePreview {
         account: String,
         to: String,
@@ -96,6 +119,10 @@ pub enum Intent {
     Snooze(KeyId),
     Open(KeyId),
     SavePreview {
+        key: KeyId,
+        body: String,
+    },
+    EditPreview {
         key: KeyId,
         body: String,
     },
@@ -120,6 +147,68 @@ pub struct Mail {
     focus_reply: bool,
     focus_search: bool,
     scroll_selected: bool,
+    checked: HashSet<KeyId>,
+    selection_index: usize,
+}
+#[derive(Serialize, Deserialize)]
+struct DraftSession {
+    account: String,
+    to: String,
+    subject: String,
+    body: String,
+    open: bool,
+    replies: Vec<(KeyId, String)>,
+    selected: Option<KeyId>,
+    reader_open: bool,
+}
+impl Mail {
+    pub fn save_draft_session(&self) -> Result<String, String> {
+        serde_json::to_string(&DraftSession {
+            account: self.compose_account.clone(),
+            to: self.compose_to.clone(),
+            subject: self.compose_subject.clone(),
+            body: self.compose_body.clone(),
+            open: self.compose_open,
+            replies: self
+                .editors
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            selected: self.selected.clone(),
+            reader_open: self.reader_open,
+        })
+        .map_err(|e| e.to_string())
+    }
+    pub fn restore_draft_session(&mut self, json: &str, threads: &[Thread]) -> Result<(), String> {
+        if json.len() > 8 * 1024 * 1024 {
+            return Err("Draft session exceeds size limit".into());
+        }
+        let session: DraftSession =
+            serde_json::from_str(json).map_err(|e| format!("Invalid draft session: {e}"))?;
+        let mut seen = HashSet::new();
+        if session.to.len() > 320
+            || session.subject.len() > 512
+            || session.body.len() > 64 * 1024
+            || (!session.account.is_empty()
+                && !threads.iter().any(|t| t.id.account == session.account))
+            || session.replies.iter().any(|(k, v)| {
+                v.len() > 64 * 1024 || !seen.insert(k) || !threads.iter().any(|t| &t.id == k)
+            })
+        {
+            return Err("Invalid draft session bounds or identity".into());
+        }
+        self.compose_account = session.account;
+        self.compose_to = session.to;
+        self.compose_subject = session.subject;
+        self.compose_body = session.body;
+        self.compose_open = session.open;
+        self.editors = session.replies.into_iter().collect();
+        self.selected = session
+            .selected
+            .filter(|k| threads.iter().any(|t| &t.id == k));
+        self.reader_open = session.reader_open;
+        Ok(())
+    }
 }
 #[derive(Default)]
 pub struct Report {
@@ -170,6 +259,8 @@ impl Mail {
         keyboard_active: bool,
     ) -> Report {
         let mut report = Report::default();
+        self.editors
+            .retain(|key, _| threads.iter().any(|t| &t.id == key));
         let visible = self.visible(threads, drafts);
         report.matched = visible.len();
         if self
@@ -177,8 +268,12 @@ impl Mail {
             .as_ref()
             .is_none_or(|id| !visible.iter().any(|t| &t.id == id))
         {
-            self.selected = visible.first().map(|t| t.id.clone());
+            self.selected = visible
+                .get(self.selection_index.min(visible.len().saturating_sub(1)))
+                .map(|t| t.id.clone());
         }
+        self.checked
+            .retain(|key| visible.iter().any(|t| &t.id == key));
         let ctx = ui.ctx().clone();
         if keyboard_active && ctx.input(|i| i.focused) {
             if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::K)) {
@@ -188,6 +283,7 @@ impl Mail {
                 self.palette = false;
                 self.help = false;
                 self.reader_open = false;
+                self.compose_open = false;
             }
             if !ctx.wants_keyboard_input() && !self.palette && !self.help && !self.compose_open {
                 if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::C)) {
@@ -221,8 +317,16 @@ impl Mail {
                 }
                 if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)) {
                     self.reader_open = true;
+                    if let Some(key) = &self.selected {
+                        report.intents.push(Intent::Open(key.clone()));
+                    }
                 }
                 if let Some(key) = self.selected.clone() {
+                    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::X))
+                        && !self.checked.remove(&key)
+                    {
+                        self.checked.insert(key.clone());
+                    }
                     for (button, intent) in [
                         (Key::E, Intent::Archive(key.clone())),
                         (Key::S, Intent::Star(key.clone())),
@@ -230,7 +334,23 @@ impl Mail {
                         (Key::H, Intent::Snooze(key.clone())),
                     ] {
                         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, button)) {
-                            report.intents.push(intent);
+                            report.intents.push(if self.checked.is_empty() {
+                                intent
+                            } else {
+                                Intent::Bulk {
+                                    keys: visible
+                                        .iter()
+                                        .filter(|t| self.checked.contains(&t.id))
+                                        .map(|t| t.id.clone())
+                                        .collect(),
+                                    action: match button {
+                                        Key::E => Action::Archive,
+                                        Key::S => Action::Star,
+                                        Key::U => Action::Unread,
+                                        _ => Action::Snooze,
+                                    },
+                                }
+                            });
                         }
                     }
                     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::R)) {
@@ -279,6 +399,34 @@ impl Mail {
             });
         }
         ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            if ui.small_button("Select visible").clicked() {
+                self.checked = visible.iter().take(1000).map(|t| t.id.clone()).collect();
+            }
+            if !self.checked.is_empty() {
+                ui.label(format!("{} selected", self.checked.len()));
+                for (label, action) in [
+                    ("Archive", Action::Archive),
+                    ("Read", Action::Read),
+                    ("Unread", Action::Unread),
+                    ("Snooze", Action::Snooze),
+                ] {
+                    if ui.small_button(label).clicked() {
+                        report.intents.push(Intent::Bulk {
+                            keys: visible
+                                .iter()
+                                .filter(|t| self.checked.contains(&t.id))
+                                .map(|t| t.id.clone())
+                                .collect(),
+                            action,
+                        });
+                    }
+                }
+                if ui.small_button("Clear").clicked() {
+                    self.checked.clear();
+                }
+            }
+        });
         let wide = ui.available_width() >= 960.0;
         let selected = self
             .selected
@@ -360,6 +508,14 @@ impl Mail {
                         row.spacing_mut().item_spacing.y = 2.0;
                         row.spacing_mut().interact_size.y = tokens.metrics.small + 2.0;
                         row.horizontal(|ui| {
+                            let mut checked = self.checked.contains(&thread.id);
+                            if ui.checkbox(&mut checked, "").changed() {
+                                if checked {
+                                    self.checked.insert(thread.id.clone());
+                                } else {
+                                    self.checked.remove(&thread.id);
+                                }
+                            }
                             let width = (ui.available_width() - 165.0).max(20.0);
                             let sender = if thread.unread {
                                 RichText::new(&thread.sender)
@@ -402,14 +558,17 @@ impl Mail {
                                 .weak(),
                             );
                         });
-                        row.add(
-                            egui::Label::new(if thread.unread {
-                                RichText::new(&thread.subject).strong()
-                            } else {
-                                RichText::new(&thread.subject)
-                            })
-                            .truncate(),
-                        );
+                        row.horizontal(|ui| {
+                            ui.add_space(ui.spacing().icon_width + ui.spacing().item_spacing.x);
+                            ui.add(
+                                egui::Label::new(if thread.unread {
+                                    RichText::new(&thread.subject).strong()
+                                } else {
+                                    RichText::new(&thread.subject)
+                                })
+                                .truncate(),
+                            );
+                        });
                         if response.clicked() {
                             self.selected = Some(thread.id.clone());
                             self.reader_open = true;
@@ -498,6 +657,7 @@ impl Mail {
                         ("E / Z", "Archive / undo"),
                         ("S / U / H", "Star / unread / snooze"),
                         ("R", "Reply preview"),
+                        ("X", "Select conversation for bulk triage"),
                         ("/", "Search"),
                         ("⌘K", "Commands"),
                     ] {
@@ -588,6 +748,10 @@ impl Mail {
                 self.compose_to.clear();
             }
         }
+        self.selection_index = visible
+            .iter()
+            .position(|t| Some(&t.id) == self.selected.as_ref())
+            .unwrap_or(0);
         report
     }
     fn reader(
@@ -703,30 +867,22 @@ impl Mail {
                         .desired_width(f32::INFINITY)
                         .hint_text("Write a reply preview…"),
                 );
+                if editor.changed() {
+                    intents.push(Intent::EditPreview {
+                        key: t.id.clone(),
+                        body: body.clone(),
+                    });
+                }
                 if self.focus_reply {
                     editor.request_focus();
                     editor.scroll_to_me(Some(egui::Align::Center));
                     self.focus_reply = false;
                 }
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(
-                            !body.trim().is_empty(),
-                            egui::Button::new("Save draft preview"),
-                        )
-                        .clicked()
-                    {
-                        intents.push(Intent::SavePreview {
-                            key: t.id.clone(),
-                            body: body.clone(),
-                        });
-                    }
-                    ui.label(
-                        RichText::new("Local demo only · nothing is sent")
-                            .small()
-                            .weak(),
-                    );
-                });
+                ui.label(
+                    RichText::new("Draft preview autosaves locally · nothing is sent")
+                        .small()
+                        .weak(),
+                );
             });
     }
 }
@@ -892,5 +1048,69 @@ mod tests {
         for rows in r.rows.windows(2) {
             assert!(rows[0].1.bottom() <= rows[1].1.top() + 0.1);
         }
+    }
+    #[test]
+    fn archive_advances_in_place_and_bulk_selection_stays_in_scope() {
+        let ctx = egui::Context::default();
+        let mut owner = crate::demo::Owner::new();
+        let mut mail = Mail::default();
+        frame(&ctx, &mut mail, &owner.threads, 1500.0, vec![], true);
+        frame(
+            &ctx,
+            &mut mail,
+            &owner.threads,
+            1500.0,
+            vec![key(Key::J)],
+            true,
+        );
+        let next = owner.threads[2].id.clone();
+        let report = frame(
+            &ctx,
+            &mut mail,
+            &owner.threads,
+            1500.0,
+            vec![key(Key::E)],
+            true,
+        );
+        for intent in report.intents {
+            owner.apply(intent).unwrap();
+        }
+        frame(&ctx, &mut mail, &owner.threads, 1500.0, vec![], true);
+        assert_eq!(mail.selected, Some(next));
+        frame(
+            &ctx,
+            &mut mail,
+            &owner.threads,
+            1500.0,
+            vec![key(Key::X)],
+            true,
+        );
+        assert_eq!(mail.checked.len(), 1);
+        mail.account = Some(crate::demo::ACCOUNTS[1].into());
+        frame(&ctx, &mut mail, &owner.threads, 1500.0, vec![], true);
+        assert!(mail.checked.is_empty());
+    }
+    #[test]
+    fn unfinished_reply_and_compose_survive_session_roundtrip() {
+        let owner = crate::demo::Owner::new();
+        let key = owner.threads[0].id.clone();
+        let mut mail = Mail {
+            compose_account: crate::demo::ACCOUNTS[1].into(),
+            compose_to: "mira@example.com".into(),
+            compose_body: "Unfinished compose".into(),
+            compose_open: true,
+            ..Default::default()
+        };
+        mail.editors.insert(key.clone(), "Unfinished reply".into());
+        let json = mail.save_draft_session().unwrap();
+        let mut restored = Mail::default();
+        restored
+            .restore_draft_session(&json, &owner.threads)
+            .unwrap();
+        assert_eq!(restored.editors[&key], "Unfinished reply");
+        assert_eq!(restored.compose_account, crate::demo::ACCOUNTS[1]);
+        assert!(restored.compose_open);
+        assert_eq!(restored.compose_body, "Unfinished compose");
+        assert!(restored.restore_draft_session(&json, &[]).is_err());
     }
 }

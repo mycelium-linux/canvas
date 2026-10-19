@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 pub mod demo;
 pub mod mail;
+#[cfg(any(feature = "native", feature = "web"))]
+pub mod preview_host;
 pub mod shell;
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
 pub mod web;

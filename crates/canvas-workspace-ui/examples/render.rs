@@ -43,7 +43,7 @@ async fn render(
     let mut shell = Shell::demo()?;
     shell.mode = mode;
     shell.view = match view {
-        "mail" | "commands" | "compose" | "thread" => View::Mail,
+        "mail" | "bulk" | "commands" | "compose" | "thread" => View::Mail,
         "work" => View::Work,
         "calendar" => View::Calendar,
         _ => return Err("Unknown view".into()),
@@ -51,15 +51,26 @@ async fn render(
     shell.mail.palette = view == "commands";
     shell.mail.compose_open = view == "compose";
     shell.mail.reader_open = view == "thread";
-    let input = egui::RawInput {
+    let mut input = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
             egui::vec2(width as f32, height as f32),
         )),
         time: Some(0.0),
+        focused: true,
         ..Default::default()
     };
+    if view == "bulk" {
+        input.events.push(egui::Event::Key {
+            key: egui::Key::X,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
     let mut output = context.run(input.clone(), |ctx| shell.show(ctx));
+    input.events.clear();
     for frame in 1..=3 {
         let mut settled = input.clone();
         settled.time = Some(frame as f64);

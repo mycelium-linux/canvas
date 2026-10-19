@@ -171,7 +171,7 @@ impl Shell {
                     }
                 }
                 ui.add_space(25.0);
-                egui::CollapsingHeader::new("Workspace context")
+                egui::CollapsingHeader::new("Context")
                     .default_open(true)
                     .show(ui, |ui| {
                         ui.label(RichText::new("Coding").small().strong());
@@ -190,6 +190,15 @@ impl Shell {
                         self.owner = demo::Owner::new();
                         self.mail = mail::Mail::default();
                     }
+                    if ui
+                        .small_button("Advance one day")
+                        .on_hover_text("Advance the mock clock to exercise snooze return")
+                        .clicked()
+                    {
+                        let returned = self.owner.advance_to(self.owner.now.saturating_add(86400));
+                        self.mail.notice =
+                            Some(format!("{returned} snoozed conversation(s) returned"));
+                    }
                 });
             });
         egui::TopBottomPanel::bottom("workspace-footer").exact_height(28.0).show(ctx,|ui|{ui.horizontal(|ui|{
@@ -204,10 +213,14 @@ impl Shell {
                             .show(ui, &tokens, &self.owner.threads, &self.owner.drafts, true);
                     self.last_rows = report.drawn;
                     for intent in report.intents {
-                        self.mail.notice = Some(match self.owner.apply(intent) {
-                            Ok(message) => message,
-                            Err(error) => format!("Demo action failed: {error}"),
-                        });
+                        let automatic = matches!(intent, mail::Intent::EditPreview { .. });
+                        match self.owner.apply(intent) {
+                            Ok(message) if !automatic => self.mail.notice = Some(message),
+                            Ok(_) => {}
+                            Err(error) => {
+                                self.mail.notice = Some(format!("Demo action failed: {error}"))
+                            }
+                        }
                     }
                 }
                 View::Work => {
