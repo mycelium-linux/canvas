@@ -3499,6 +3499,21 @@ fn data_state_content<'a, Message: 'a>(
         text(data_state_label(state))
             .size(metrics.body)
             .color(color(visual.palette.text)),
+        text(match state {
+            WidgetDataState::Loading => "Waiting for the first update from this source.",
+            WidgetDataState::NoData =>
+                "No observations match this view. Check its filters and source coverage.",
+            WidgetDataState::Disconnected =>
+                "Waiting for the source to reconnect. Check its connection.",
+            WidgetDataState::Error =>
+                "The source could not provide data. Check the source application for details.",
+            _ => "",
+        })
+        .size(metrics.small)
+        .color(color(visual.palette.text_muted))
+        .width(Length::Fill)
+        .align_x(iced::alignment::Horizontal::Center)
+        .wrapping(text::Wrapping::WordOrGlyph),
     ]
     .spacing(metrics.space_2)
     .align_x(iced::alignment::Horizontal::Center);
@@ -3506,10 +3521,14 @@ fn data_state_content<'a, Message: 'a>(
         content = content.push(
             text(detail)
                 .size(metrics.small)
-                .color(color(visual.palette.text_muted)),
+                .color(color(visual.palette.text_muted))
+                .width(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Center)
+                .wrapping(text::Wrapping::WordOrGlyph),
         );
     }
     container(content)
+        .padding(metrics.space_3)
         .width(Length::Fill)
         .height(Length::Fill)
         .center(Length::Fill)

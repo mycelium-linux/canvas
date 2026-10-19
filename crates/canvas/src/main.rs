@@ -98,9 +98,7 @@ struct TransientNotification {
     notification: Notification,
     shown_at: Instant,
 }
-#[cfg(feature = "lua-scenes")]
 const STREAM_FIRST_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(feature = "lua-scenes")]
 const STREAM_STALE_AFTER: Duration = Duration::from_secs(60);
 const SURFACE_CONTROL_HIT_SIZE: f64 = 18.0;
 const SURFACE_CONTROL_INSET: f64 = 4.0;
@@ -154,15 +152,17 @@ impl JumpHistory {
     /// vim jump list does: a new jump invalidates the path you would have gone
     /// forward to.
     fn jump(&mut self, target: JumpEntry) {
+        if self.entries.get(self.cursor) == Some(&target) {
+            return;
+        }
         let next = self.cursor + 1;
         self.entries.truncate(next);
         self.entries.push(target);
         self.cursor = next;
-        if self.entries.len() > Self::MAX_DEPTH {
-            self.entries.drain(0..self.entries.len() - Self::MAX_DEPTH);
-            self.cursor = self
-                .cursor
-                .saturating_sub(self.entries.len() - Self::MAX_DEPTH);
+        let excess = self.entries.len().saturating_sub(Self::MAX_DEPTH);
+        if excess > 0 {
+            self.entries.drain(0..excess);
+            self.cursor = self.cursor.saturating_sub(excess);
         }
     }
 
@@ -468,6 +468,7 @@ enum Message {
     ShellBack,
     ShellForward,
     ShellProjects,
+    ShellPage(i32),
     ShellNewTask,
     EngineeringBrowser(BrowserAction),
     ProjectBrowserAction {
@@ -1791,7 +1792,10 @@ impl App {
         }
         let entry = self.jump_history.back().expect("checked above").clone();
         let view = entry.view_id.as_deref();
-        self.navigate_to(entry.project_id.as_str(), view);
+        if !self.navigate_to(entry.project_id.as_str(), view) {
+            self.jump_history.forward();
+            return;
+        }
         self.status = format!(
             "Jumped to '{}{}'.",
             entry.project_id,
@@ -1806,7 +1810,10 @@ impl App {
         }
         let entry = self.jump_history.forward().expect("checked above").clone();
         let view = entry.view_id.as_deref();
-        self.navigate_to(entry.project_id.as_str(), view);
+        if !self.navigate_to(entry.project_id.as_str(), view) {
+            self.jump_history.back();
+            return;
+        }
         self.status = format!(
             "Jumped forward to '{}{}'.",
             entry.project_id,
@@ -1815,23 +1822,61 @@ impl App {
     }
 
     /// Apply a jump target: switch project workspace and optionally open a view.
-    fn navigate_to(&mut self, project_id: &str, view_id: Option<&str>) {
-        self.start_transition();
-        if let Some(document) = self.workspaces.get(project_id).cloned() {
-            self.document = document;
-            self.active_project_workspace = Some(project_id.to_owned());
+    fn navigate_to(&mut self, project_id: &str, view_id: Option<&str>) -> bool {
+        let Some(mut document) = self.workspaces.get(project_id).cloned() else {
+            self.status = format!("Workspace '{project_id}' is no longer available.");
+            return false;
+        };
+        if let Some(view_id) = view_id {
+            match ::canvas::operational_views::materialize(view_id, &document, self.view_fit()) {
+                Ok(opened) => document = opened.document,
+                Err(error) => {
+                    self.status = format!("Could not reopen view '{view_id}': {error}");
+                    return false;
+                }
+            }
         }
-        if let Some(view_id) = view_id
-            && let Ok(opened) =
-                ::canvas::operational_views::materialize(view_id, &self.document, self.view_fit())
+        if let Err(error) = self.ensure_background_available(&document) {
+            self.status = format!("Could not reopen workspace '{project_id}': {error:?}");
+            return false;
+        }
+        let mut next = self.workspaces.clone();
+        if self.active_project_workspace.as_deref() == Some(self.document.project_id.as_str()) {
+            next.upsert(self.document.clone());
+        }
+        next.active_project_id = Some(project_id.to_owned());
+        if let Err(error) = workspace_store::save(&self.workspace_store_path, &next, &self.catalog)
         {
-            self.snapped_view = Some(view_id.to_owned());
-            self.document = opened.document;
-            self.ensure_scene_decoded();
+            self.status = format!("Could not restore workspace '{project_id}': {error}");
+            return false;
         }
-        self.reset_background_animation();
+        self.workspaces = next;
+        self.present_workspace_document(document, view_id);
         self.bump();
         self.emit_event(format!("jump_navigate {} {:?}", project_id, view_id));
+        true
+    }
+
+    /// The same runtime handoff for a project switch and history traversal.
+    fn present_workspace_document(&mut self, document: WorkspaceDocument, view_id: Option<&str>) {
+        self.start_transition();
+        self.document = document;
+        self.active_project_workspace = Some(self.document.project_id.clone());
+        self.workspaces.active_project_id = Some(self.document.project_id.clone());
+        self.snapped_view = view_id
+            .map(str::to_owned)
+            .or_else(|| inferred_snapped_view(&self.document));
+        self.free_layout = None;
+        self.layout_policy = self
+            .snapped_view
+            .as_deref()
+            .and_then(|id| ::canvas::operational_views::load(id).ok())
+            .map(|view| view.layout_policy)
+            .unwrap_or_default();
+        self.publish_web_themes();
+        self.reset_workspace_runtime();
+        self.ensure_scene_decoded();
+        self.reset_background_animation();
     }
 
     fn open_engineering_entry(
@@ -2009,6 +2054,7 @@ impl App {
                 Task::none()
             }
             Message::ShellProjects => self.toggle_project_picker(),
+            Message::ShellPage(direction) => self.cycle_page(direction),
             Message::EngineeringBrowser(action) => {
                 let Some(browser) = self.engineering_browser.as_mut() else {
                     return Task::none();
@@ -5337,22 +5383,8 @@ impl App {
                         return Task::none();
                     }
                     self.workspaces = next;
-                    self.start_transition();
-                    self.document = document;
-                    self.snapped_view = inferred_snapped_view(&self.document);
-                    self.free_layout = None;
-                    self.layout_policy = self
-                        .snapped_view
-                        .as_deref()
-                        .and_then(|view_id| ::canvas::operational_views::load(view_id).ok())
-                        .map(|view| view.layout_policy)
-                        .unwrap_or_default();
-                    self.active_project_workspace = Some(name.clone());
+                    self.present_workspace_document(document, None);
                     self.jump_history.jump(JumpEntry::current(&name, None));
-                    self.publish_web_themes();
-                    self.reset_workspace_runtime();
-                    self.ensure_scene_decoded();
-                    self.reset_background_animation();
                     self.bump();
                     self.status = format!("Switched to workspace '{name}'.");
                     self.answer(
@@ -6732,7 +6764,14 @@ impl App {
         };
         match target.region {
             HitRegion::Resize { handle } => resize_cursor(handle),
-            HitRegion::Body | HitRegion::TopBar => mouse::Interaction::None,
+            HitRegion::TopBar => {
+                if self.interaction.captured_pointer().is_some() {
+                    mouse::Interaction::Grabbing
+                } else {
+                    mouse::Interaction::Grab
+                }
+            }
+            HitRegion::Body => mouse::Interaction::None,
         }
     }
 
@@ -8727,7 +8766,12 @@ impl App {
         let bar = if show_title {
             row![
                 controls,
-                container(text(title).size(11).color(color(palette.text_muted)))
+                tooltip(
+                    container(text(title).size(11).color(color(if focused {
+                        palette.text
+                    } else {
+                        palette.text_muted
+                    })))
                     .padding(iced::Padding {
                         top: 0.0,
                         right: 8.0,
@@ -8739,7 +8783,10 @@ impl App {
                         iced::alignment::Horizontal::Center
                     } else {
                         iced::alignment::Horizontal::Left
-                    })
+                    }),
+                    text("Drag title to move · Drag edges to resize").size(11),
+                    tooltip::Position::Bottom,
+                )
             ]
             .align_y(iced::alignment::Vertical::Center)
         } else {
@@ -8790,55 +8837,67 @@ impl App {
             .iter()
             .filter(|surface| self.minimized_surfaces.contains(&surface.id))
             .map(|surface| {
-                let initial = surface
-                    .title
-                    .chars()
-                    .find(|character| character.is_alphanumeric())
-                    .unwrap_or('•')
-                    .to_uppercase()
-                    .to_string();
+                let mut label: String = surface.title.chars().take(28).collect();
+                if surface.title.chars().count() > 28 {
+                    label.push('…');
+                }
                 tooltip(
-                    button(text(initial).size(14))
-                        .width(Length::Fixed(36.0))
-                        .height(Length::Fixed(36.0))
-                        .padding(0)
+                    button(text(label).size(12).wrapping(text::Wrapping::WordOrGlyph))
+                        .width(Length::Fixed(180.0))
+                        .height(Length::Fixed(44.0))
+                        .padding([4, 10])
                         .on_press(Message::RestoreSurface(surface.id.clone()))
                         .style(button::secondary),
-                    text(surface.title.clone()).size(12),
+                    text(format!("Restore {}", surface.title)).size(12),
                     tooltip::Position::Top,
                 )
                 .into()
             })
             .collect::<Vec<Element<'_, Message>>>();
-        let dock = container(row(items).spacing(8))
-            .padding(8)
-            .style(move |_| container::Style {
-                background: Some(
-                    Color::from_rgba8(
-                        palette.surface[0],
-                        palette.surface[1],
-                        palette.surface[2],
-                        0.82,
-                    )
-                    .into(),
+        let dock = container(
+            column![
+                text(format!("Minimized · {}", self.minimized_surfaces.len()))
+                    .size(12)
+                    .color(color(palette.text_muted)),
+                scrollable(row(items).spacing(8))
+                    .direction(scrollable::Direction::Horizontal(
+                        scrollable::Scrollbar::new()
+                    ))
+                    .width(Length::Fill)
+                    .height(Length::Fixed(56.0)),
+            ]
+            .spacing(6),
+        )
+        .width(Length::Fill)
+        .max_width(640)
+        .padding(8)
+        .style(move |_| container::Style {
+            background: Some(
+                Color::from_rgba8(
+                    palette.surface[0],
+                    palette.surface[1],
+                    palette.surface[2],
+                    0.82,
+                )
+                .into(),
+            ),
+            border: iced::Border {
+                color: Color::from_rgba8(
+                    palette.border[0],
+                    palette.border[1],
+                    palette.border[2],
+                    0.72,
                 ),
-                border: iced::Border {
-                    color: Color::from_rgba8(
-                        palette.border[0],
-                        palette.border[1],
-                        palette.border[2],
-                        0.72,
-                    ),
-                    width: 1.0,
-                    radius: 14.0.into(),
-                },
-                shadow: iced::Shadow {
-                    color: Color::from_rgba8(0, 0, 0, 0.32),
-                    offset: iced::Vector::new(0.0, 8.0),
-                    blur_radius: 24.0,
-                },
-                ..Default::default()
-            });
+                width: 1.0,
+                radius: 14.0.into(),
+            },
+            shadow: iced::Shadow {
+                color: Color::from_rgba8(0, 0, 0, 0.32),
+                offset: iced::Vector::new(0.0, 8.0),
+                blur_radius: 24.0,
+            },
+            ..Default::default()
+        });
         Some(
             container(dock)
                 .width(Length::Fill)
@@ -9742,6 +9801,41 @@ impl App {
                 .style(move |_, status| {
                     canvas_widgets::live::app_chrome::cube_button_style(visual_theme, true, status)
                 });
+            let pages = self.document.page_count();
+            let page_button = |label: String, direction: i32| {
+                button(text(label).size(11))
+                    .padding([5, 8])
+                    .on_press_maybe((pages > 1).then_some(Message::ShellPage(direction)))
+                    .style(move |_, status| {
+                        canvas_widgets::live::app_chrome::cube_button_style(
+                            visual_theme,
+                            false,
+                            status,
+                        )
+                    })
+            };
+            let page_navigation = row![
+                tooltip(
+                    page_button("‹".into(), -1),
+                    text("Previous page · Ctrl+Left").size(12),
+                    tooltip::Position::Bottom
+                ),
+                text(format!(
+                    "{} · {}/{}",
+                    self.document.active_page_name(),
+                    self.document.active_page_index() + 1,
+                    pages
+                ))
+                .size(11)
+                .color(muted),
+                tooltip(
+                    page_button("›".into(), 1),
+                    text("Next page · Ctrl+Right").size(12),
+                    tooltip::Position::Bottom
+                ),
+            ]
+            .spacing(4)
+            .align_y(iced::Alignment::Center);
             let has_creator = self.decoded.values().any(|surface| {
                 matches!(
                     &surface.source,
@@ -9756,25 +9850,47 @@ impl App {
                 });
             let identity = row![
                 text("FPL").size(12).color(Color { a: 0.90, ..primary }),
-                back,
-                forward,
-                project,
+                tooltip(
+                    back,
+                    text("Back · Ctrl+O").size(12),
+                    tooltip::Position::Bottom
+                ),
+                tooltip(
+                    forward,
+                    text("Forward · Ctrl+I").size(12),
+                    tooltip::Position::Bottom
+                ),
+                tooltip(
+                    project,
+                    text("Switch project · Ctrl+P").size(12),
+                    tooltip::Position::Bottom
+                ),
                 text("/").size(11).color(Color { a: 0.40, ..muted }),
-                text(self.document.active_page_name().to_uppercase())
-                    .size(10)
-                    .color(Color { a: 0.72, ..muted }),
-                create,
+                page_navigation,
+                tooltip(
+                    create,
+                    text(if has_creator {
+                        "Create a task"
+                    } else {
+                        "This workspace has no task creator"
+                    })
+                    .size(12),
+                    tooltip::Position::Bottom
+                ),
             ]
             .spacing(7)
             .align_y(iced::Alignment::Center);
             let health = row![
-                text(format!("{live_sources} LIVE"))
-                    .size(10)
-                    .color(Color { a: 0.72, ..primary }),
-                text("●").size(8).color(Color {
-                    a: 0.88,
-                    ..color(palette.success)
-                }),
+                text(format!(
+                    "{live_sources} video {}",
+                    if live_sources == 1 {
+                        "source"
+                    } else {
+                        "sources"
+                    }
+                ))
+                .size(10)
+                .color(Color { a: 0.72, ..primary }),
                 text(clock).size(12).color(Color {
                     a: 0.94,
                     ..text_color
@@ -15761,6 +15877,85 @@ mod tests {
         assert!(!hist.can_go_back());
         assert!(hist.can_go_forward());
         assert_eq!(hist.forward().unwrap().project_id, "b");
+    }
+
+    #[test]
+    fn jump_history_stays_navigable_after_its_capacity_is_reached() {
+        let mut history = JumpHistory::new(JumpEntry::current("start", None));
+        for index in 0..150 {
+            history.jump(JumpEntry::current(&format!("project-{index}"), None));
+        }
+        assert_eq!(history.entries.len(), JumpHistory::MAX_DEPTH);
+        assert_eq!(history.cursor, JumpHistory::MAX_DEPTH - 1);
+        assert!(!history.can_go_forward());
+        assert_eq!(history.back().unwrap().project_id, "project-148");
+        assert_eq!(history.forward().unwrap().project_id, "project-149");
+    }
+
+    #[test]
+    fn jump_history_reselecting_current_keeps_the_forward_path() {
+        let mut history = JumpHistory::new(JumpEntry::current("a", None));
+        history.jump(JumpEntry::current("b", None));
+        history.back();
+        history.jump(JumpEntry::current("a", None));
+        assert_eq!(history.entries.len(), 2);
+        assert_eq!(history.forward().unwrap().project_id, "b");
+    }
+
+    #[test]
+    fn history_navigation_redecodes_shared_surface_ids_in_the_incoming_workspace() {
+        let mut app = test_app();
+        app.document.surfaces = vec![Surface {
+            id: "shared".into(),
+            title: "Outgoing".into(),
+            inputs: vec![],
+            content: SurfaceContent::Scene {
+                scene: Scene { nodes: vec![] },
+            },
+        }];
+        app.document.layout = Layout::Canvas {
+            placements: vec![Placement {
+                surface_id: "shared".into(),
+                bounds: NormalizedRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1.0,
+                    height: 1.0,
+                },
+                layer: 0,
+            }],
+        };
+        app.active_project_workspace = Some(app.document.project_id.clone());
+        app.ensure_scene_decoded();
+        let mut incoming = app.document.clone();
+        incoming.project_id = if app.document.project_id == "studio" {
+            "dock"
+        } else {
+            "studio"
+        }
+        .into();
+        incoming.id = format!("history-{}", incoming.project_id);
+        incoming.surfaces[0].title = "Incoming".into();
+        let destination = incoming.project_id.clone();
+        app.workspaces.upsert(incoming);
+        assert!(app.navigate_to(&destination, None), "{}", app.status);
+        assert_eq!(app.decoded["shared"].snapshot.title, "Incoming");
+        assert_eq!(
+            app.workspaces.active_project_id.as_deref(),
+            Some(destination.as_str())
+        );
+    }
+
+    #[test]
+    fn history_navigation_failure_keeps_the_workspace_and_cursor() {
+        let mut app = test_app();
+        let project = app.document.project_id.clone();
+        app.jump_history = JumpHistory::new(JumpEntry::current("missing-workspace", None));
+        app.jump_history.jump(JumpEntry::current(&project, None));
+        app.jump_back();
+        assert_eq!(app.document.project_id, project);
+        assert_eq!(app.jump_history.cursor, 1);
+        assert!(app.status.contains("no longer available"));
     }
 
     #[test]
