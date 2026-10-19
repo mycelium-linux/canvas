@@ -7,12 +7,15 @@ final class DecoderAudio {
     static final int UNKNOWN=0, PRESENT=1, ABSENT=2;
     static int fromKinds(int[] kinds) {
         if(kinds==null || kinds.length==0) return UNKNOWN;
-        boolean video=false;
+        boolean video=false, unknown=false;
         for(int kind:kinds) {
             if(kind==MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_AUDIO) return PRESENT;
             if(kind==MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_VIDEO) video=true;
+            else if(kind!=MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_TIMEDTEXT
+                && kind!=MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_SUBTITLE
+                && kind!=MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_METADATA) unknown=true;
         }
-        return video ? ABSENT : UNKNOWN;
+        return video && !unknown ? ABSENT : UNKNOWN;
     }
     static int inspect(MediaPlayer player) {
         if(player==null) return UNKNOWN;

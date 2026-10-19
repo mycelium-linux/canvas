@@ -20,6 +20,10 @@ public final class AudioChromeTest {
             throw new AssertionError("audio metadata is present, not necessarily audible");
         if(DecoderAudio.fromKinds(new int[]{0,4})!=DecoderAudio.UNKNOWN)
             throw new AssertionError("unrecognized and subtitle-only metadata are unknown");
+        if(DecoderAudio.fromKinds(new int[]{1,0})!=DecoderAudio.UNKNOWN)
+            throw new AssertionError("an unknown track could contain audio");
+        if(DecoderAudio.fromKinds(new int[]{1,3,4,5})!=DecoderAudio.ABSENT)
+            throw new AssertionError("video and known text/metadata tracks contain no audio");
         if(!ShellChrome.audioDescription("Deck",false,DecoderAudio.ABSENT).equals("No audio track in Deck.")
             || !ShellChrome.audioDescription("Deck",true,DecoderAudio.ABSENT).equals("No audio track in Deck."))
             throw new AssertionError("no-audio is independent from mute preference");
