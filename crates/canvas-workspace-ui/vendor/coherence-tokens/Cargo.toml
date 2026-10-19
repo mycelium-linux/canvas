@@ -1,0 +1,16 @@
+[package]
+name = "coherence-tokens"
+version = "0.2.3"
+edition = "2021"
+description = "Shared FPL Coherence product tokens for native UI adapters"
+license = "MIT"
+repository = "https://github.com/FuturePresentLabs/coherence"
+# Publishable only to the FPL registry. An explicit allowlist rather than a
+# bare `publish = false`: this crate is meant to be consumed by version, and
+# naming the one registry makes an accidental crates.io push impossible.
+publish = ["fpl"]
+readme = "README.md"
+keywords = ["design-tokens", "theme"]
+
+[lib]
+path = "src/lib.rs"
