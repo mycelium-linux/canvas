@@ -24,7 +24,7 @@ import org.json.JSONObject;
 
 /** Platform decoding/lifecycle only. GFX owns matte contract and shaders. */
 final class MattedVideoView extends TextureView implements TextureView.SurfaceTextureListener {
-    interface Listener { void prepared(); void failed(String message); }
+    interface Listener { void prepared(); void audioTracks(int availability); void failed(String message); }
     private static native String nativeShaders();
     private static EGLDisplay sharedDisplay = EGL14.EGL_NO_DISPLAY;
     private static int displayUsers;
@@ -150,8 +150,13 @@ final class MattedVideoView extends TextureView implements TextureView.SurfaceTe
             player.setOnPreparedListener(p -> {
                 if (stopped || disposed) return;
                 if (!checkSize(p.getVideoWidth(), p.getVideoHeight())) return;
+                publishAudioTracks();
                 p.setVolume(muted ? 0 : 1, muted ? 0 : 1); p.start();
                 post(() -> { if (!disposed) listener.prepared(); });
+            });
+            player.setOnInfoListener((p,what,extra) -> {
+                if(!stopped && !disposed && (what==MediaPlayer.MEDIA_INFO_METADATA_UPDATE || what==MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START)) publishAudioTracks();
+                return false;
             });
             player.setOnErrorListener((p, what, extra) -> { stopWithError("Decoder error " + what + "/" + extra); return true; });
             player.setOnCompletionListener(p -> stopWithError("Stream ended"));
@@ -168,6 +173,10 @@ final class MattedVideoView extends TextureView implements TextureView.SurfaceTe
                 sourceWidth = matte.optBoolean("packed_alpha", false) ? w / 2 : w;
                 sourceHeight = h; return true;
             } catch (Exception error) { failure(error); release(); return false; }
+        }
+        private void publishAudioTracks() {
+            int availability=DecoderAudio.inspect(player);
+            post(() -> { if(!disposed) listener.audioTracks(availability); });
         }
         private void stopWithError(String message) {
             post(() -> { if (!disposed) listener.failed(message); }); release();

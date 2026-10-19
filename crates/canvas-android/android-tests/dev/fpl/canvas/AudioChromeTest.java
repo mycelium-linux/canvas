@@ -12,6 +12,19 @@ public final class AudioChromeTest {
         if (ShellChrome.audioAction(true).length()>6) throw new AssertionError("compact label");
         if (ShellChrome.AUDIO_HEIGHT_DP!=24 || ShellChrome.AUDIO_WIDTH_DP!=ShellChrome.AUDIO_HEIGHT_DP)
             throw new AssertionError("compact square D-pad target");
+        if(DecoderAudio.fromKinds(null)!=DecoderAudio.UNKNOWN || DecoderAudio.fromKinds(new int[0])!=DecoderAudio.UNKNOWN)
+            throw new AssertionError("missing track metadata is unknown");
+        if(DecoderAudio.fromKinds(new int[]{1})!=DecoderAudio.ABSENT)
+            throw new AssertionError("video-only metadata has no audio");
+        if(DecoderAudio.fromKinds(new int[]{1,2})!=DecoderAudio.PRESENT || DecoderAudio.fromKinds(new int[]{2})!=DecoderAudio.PRESENT)
+            throw new AssertionError("audio metadata is present, not necessarily audible");
+        if(DecoderAudio.fromKinds(new int[]{0,4})!=DecoderAudio.UNKNOWN)
+            throw new AssertionError("unrecognized and subtitle-only metadata are unknown");
+        if(!ShellChrome.audioDescription("Deck",false,DecoderAudio.ABSENT).equals("No audio track in Deck.")
+            || !ShellChrome.audioDescription("Deck",true,DecoderAudio.ABSENT).equals("No audio track in Deck."))
+            throw new AssertionError("no-audio is independent from mute preference");
+        if(!ShellChrome.audioDescription("Deck",false,DecoderAudio.UNKNOWN).contains("unknown"))
+            throw new AssertionError("unknown audio must not imply presence");
         System.out.println("Audio chrome contracts passed");
     }
 }

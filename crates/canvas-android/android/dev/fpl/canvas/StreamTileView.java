@@ -23,6 +23,7 @@ final class StreamTileView extends FrameLayout {
     private final String url;
     private boolean muted = true;
     private boolean active = true;
+    private int audioAvailability=DecoderAudio.UNKNOWN;
 
     StreamTileView(Context context, String title, String source, JSONObject palette, JSONObject matte) throws Exception {
         super(context);
@@ -36,12 +37,12 @@ final class StreamTileView extends FrameLayout {
         addView(status, new LayoutParams(-1, -1));
         mute = new Button(context);
         ShellChrome.control(mute,palette,false);
-        ShellChrome.audioState(mute,title,muted);
+        ShellChrome.audioState(mute,title,muted,audioAvailability);
         mute.setOnClickListener(v -> {
             muted = !muted;
             if (matted != null) matted.setMuted(muted);
             if (player != null) player.setVolume(muted ? 0 : 1, muted ? 0 : 1);
-            ShellChrome.audioState(mute,title,muted);
+            ShellChrome.audioState(mute,title,muted,audioAvailability);
         });
         int densityHeight=Math.round(ShellChrome.AUDIO_HEIGHT_DP*context.getResources().getDisplayMetrics().density);
         int densityWidth=Math.round(ShellChrome.AUDIO_WIDTH_DP*context.getResources().getDisplayMetrics().density);
@@ -51,7 +52,14 @@ final class StreamTileView extends FrameLayout {
         if (matte != null) {
             matted = new MattedVideoView(context, source, matte, new MattedVideoView.Listener() {
                 public void prepared() { status.setVisibility(View.GONE); }
-                public void failed(String message) { status.setText(message); status.setVisibility(View.VISIBLE); }
+                public void audioTracks(int availability) {
+                    audioAvailability=availability;
+                    ShellChrome.audioState(mute,title,muted,audioAvailability);
+                }
+                public void failed(String message) {
+                    audioTracks(DecoderAudio.UNKNOWN);
+                    status.setText(message); status.setVisibility(View.VISIBLE);
+                }
             });
             addView(matted, 0, new LayoutParams(-1, -1, Gravity.CENTER));
             return;
@@ -61,16 +69,31 @@ final class StreamTileView extends FrameLayout {
         addView(video, 0, new LayoutParams(-1, -1, Gravity.CENTER));
         video.setOnPreparedListener(p -> {
             player = p;
+            audioAvailability=DecoderAudio.inspect(p);
+            ShellChrome.audioState(mute,title,muted,audioAvailability);
             p.setVolume(muted ? 0 : 1, muted ? 0 : 1);
             status.setVisibility(View.GONE);
             if (active) video.start();
         });
         video.setOnErrorListener((p, what, extra) -> {
+            player=null; audioAvailability=DecoderAudio.UNKNOWN;
+            ShellChrome.audioState(mute,title,muted,audioAvailability);
             status.setText("Playback failed (" + what + ", " + extra + ")");
             status.setVisibility(View.VISIBLE);
             return true;
         });
-        video.setOnCompletionListener(p -> { status.setText("Stream ended"); status.setVisibility(View.VISIBLE); });
+        video.setOnCompletionListener(p -> {
+            player=null; audioAvailability=DecoderAudio.UNKNOWN;
+            ShellChrome.audioState(mute,title,muted,audioAvailability);
+            status.setText("Stream ended"); status.setVisibility(View.VISIBLE);
+        });
+        video.setOnInfoListener((p,what,extra) -> {
+            if(p==player && (what==MediaPlayer.MEDIA_INFO_METADATA_UPDATE || what==MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START)) {
+                audioAvailability=DecoderAudio.inspect(p);
+                ShellChrome.audioState(mute,title,muted,audioAvailability);
+            }
+            return false;
+        });
         video.setVideoURI(Uri.parse(url));
     }
 

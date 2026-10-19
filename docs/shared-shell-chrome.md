@@ -86,3 +86,39 @@ through navigation; its initial 85-frame and later 2,827-frame snapshots both
 reported zero dropped frames. This is a navigation smoke test, not a sustained
 playback benchmark. Rust's full Android library suite passed 31 tests; Java
 compilation and the JVM audio contract test passed.
+
+## Immersive streams and audio availability
+
+The Android Rust viewport adapter now overlays shell chrome only for an active
+single ordinary stream with hidden titles, zero canvas padding, zero surface
+gap and no status header. Other layouts keep the shell inset. Java applies
+absolute Rust bounds and preserves video aspect fit; it does not stretch or
+crop video. A 16:9 stream on a 1920×1080 display fills the display rather than
+fitting inside a 1920×1050 rectangle and exposing wallpaper on the right.
+
+Audio controls use decoder track metadata, separate from source gain:
+
+- Present: the speaker icon indicates the source mute preference.
+- Absent: a dimmed crossed speaker is disabled and says “No audio track.”
+- Unknown: a question icon retains the mute preference action and explicitly
+  reports unknown availability. Missing metadata is not proof of no audio.
+
+The main stream, independent tiles and matted decoder share the same contract.
+Metadata is read on preparation and metadata/rendering events, not each refresh.
+New sources, errors, completion and player teardown clear stale availability.
+Matted video reads its player on the decoder thread and reports state to the UI.
+The remote audio-control readiness flag requires a known audio track. Track
+presence does not prove audible samples or sound at the physical speakers.
+
+### Omni verification — immersive/audio update
+
+APK version 58 (`0.1.57-tv-immersive-audio`) was installed in place with the
+same development certificate. A temporary switch to the existing venture deck
+confirmed VideoView bounds `[0,0][1920,1080]` and a full-width screenshot.
+Panopticon, which was selected at verification time, was restored afterward;
+its multi-surface dashboard retained the 30px shell inset. All 31 projects and
+deck document revision 3 remained intact. The feed probe reported 1280×720 video
+with no audio stream, but this device's HLS decoder exposed no usable track
+metadata: the on-screen control correctly remained unknown, not “audio present.”
+All 32 Rust library tests, ARM check/release build, Java compilation and the
+expanded JVM audio-state contract checks passed.

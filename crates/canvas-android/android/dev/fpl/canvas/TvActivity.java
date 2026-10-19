@@ -68,9 +68,10 @@ public final class TvActivity extends Activity {
     private static native String nativeObserverState();
     private ObserverView observerView;
     private ControlNoticeView controlNoticeView;
+    private int audioAvailability=DecoderAudio.UNKNOWN;
     private static native int[] nativeVideoFrame(int width, int height, boolean windowed);
     private static native String nativeStartControl(String directory);
-    private static native String nativeProjection(int width, int height);
+    private static native String nativeProjection(int width, int height, int shellHeight);
     private static native String nativeSelectWorkspace(String project);
     private static native String nativeSelectPage(int index);
     private static native String nativePdfAsset(String asset);
@@ -159,7 +160,7 @@ public final class TvActivity extends Activity {
     private void showLibrary() {
         if (libraryScreen != null || libraryEndpoint.isEmpty()) return;
         try {
-            JSONObject palette = new JSONObject(nativeProjection(frame.getWidth(),frame.getHeight())).getJSONObject("palette");
+            JSONObject palette = new JSONObject(nativeProjection(frame.getWidth(),frame.getHeight(),barHeight())).getJSONObject("palette");
             libraryReturnFocus = getCurrentFocus();
             libraryReturnFocusability = selector.getDescendantFocusability();
             if(cachedLibraryScreen==null)cachedLibraryScreen = new LibraryView(this,libraryEndpoint,palette,() -> closeLibrary());
@@ -900,15 +901,29 @@ public final class TvActivity extends Activity {
         });
         video.setOnPreparedListener(player -> {
             preparedPlayer = player;
+            audioAvailability=DecoderAudio.inspect(player);
             setSurfaceMuted(nativeIsMuted());
             status.setVisibility(View.GONE);
             if (resumed) video.start();
         });
         video.setOnErrorListener((player, what, extra) -> {
+            preparedPlayer=null; audioAvailability=DecoderAudio.UNKNOWN;
+            ShellChrome.audioState(muteButton,surfaceTitle,nativeIsMuted(),audioAvailability);
             showStatus("Playback failed (" + what + ", " + extra + ")");
             return true;
         });
-        video.setOnCompletionListener(player -> showStatus("Stream ended"));
+        video.setOnCompletionListener(player -> {
+            preparedPlayer=null; audioAvailability=DecoderAudio.UNKNOWN;
+            ShellChrome.audioState(muteButton,surfaceTitle,nativeIsMuted(),audioAvailability);
+            showStatus("Stream ended");
+        });
+        video.setOnInfoListener((player,what,extra) -> {
+            if(player==preparedPlayer && (what==MediaPlayer.MEDIA_INFO_METADATA_UPDATE || what==MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START)) {
+                audioAvailability=DecoderAudio.inspect(player);
+                ShellChrome.audioState(muteButton,surfaceTitle,nativeIsMuted(),audioAvailability);
+            }
+            return false;
+        });
         applyIntent(getIntent());
     }
 
@@ -949,7 +964,7 @@ public final class TvActivity extends Activity {
     // This replaces the video tile in-place; it is not an Android dialog/window.
     private void renderChannels(JSONArray channels, String surface) throws Exception {
         closeChannels();
-        JSONObject palette=new JSONObject(nativeProjection(frame.getWidth(),frame.getHeight())).getJSONObject("palette");
+        JSONObject palette=new JSONObject(nativeProjection(frame.getWidth(),frame.getHeight(),barHeight())).getJSONObject("palette");
         int foreground=Color.parseColor(palette.getString("text")), muted=Color.parseColor(palette.getString("text_muted"));
         channelScreen=new LinearLayout(this); channelScreen.setOrientation(LinearLayout.VERTICAL);
         channelScreen.setBackgroundColor(Color.parseColor(palette.getString("background")));
@@ -1024,7 +1039,7 @@ public final class TvActivity extends Activity {
         }
         if (workspaceMode) return;
         applySurfaceGeometry();
-        preparedPlayer = null;
+        preparedPlayer = null; audioAvailability=DecoderAudio.UNKNOWN;
         video.stopPlayback();
         if (intent.hasExtra("muted")) setSurfaceMuted(intent.getBooleanExtra("muted", false));
         String url = intent.getStringExtra("stream_url");
@@ -1042,14 +1057,14 @@ public final class TvActivity extends Activity {
     private void setSurfaceMuted(boolean muted) {
         float gain = nativeSetMuted(muted);
         if (preparedPlayer != null) preparedPlayer.setVolume(gain, gain);
-        ShellChrome.audioState(muteButton, surfaceTitle, muted);
+        ShellChrome.audioState(muteButton, surfaceTitle, muted, audioAvailability);
     }
 
     private void refreshAudioControl() {
         try {
             String id = videoSurfaceId == null || videoSurfaceId.isEmpty() ? "standalone-video" : videoSurfaceId;
             JSONObject snapshot = new JSONObject(nativeAudioUpdate(id, surfaceTitle, currentUrl,
-                preparedPlayer != null && resumed && video.getVisibility() == View.VISIBLE, nativeIsMuted()));
+                preparedPlayer != null && audioAvailability==DecoderAudio.PRESENT && resumed && video.getVisibility() == View.VISIBLE, nativeIsMuted()));
             if (snapshot.has("error")) throw new IllegalStateException(snapshot.getString("error"));
             if (controlNoticeView != null) controlNoticeView.update(snapshot);
             if (snapshot.isNull("pending")) return;
@@ -1503,7 +1518,8 @@ public final class TvActivity extends Activity {
         refreshAudioControl(); // Revoke pending work before releasing the player.
         background.setActive(false);
         updates.removeCallbacks(refresh);
-        preparedPlayer = null;
+        preparedPlayer = null; audioAvailability=DecoderAudio.UNKNOWN;
+        ShellChrome.audioState(muteButton,surfaceTitle,nativeIsMuted(),audioAvailability);
         video.stopPlayback(); // Release tuner when the app is no longer visible.
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         super.onPause();
@@ -1795,9 +1811,9 @@ public final class TvActivity extends Activity {
     }
 
     private void refreshWorkspace() {
-        int width = frame.getWidth(), height = frame.getHeight() - barHeight();
+        int width = frame.getWidth(), height = frame.getHeight();
         if (width <= 0 || height <= 0) return;
-        String raw = nativeProjection(width, height);
+        String raw = nativeProjection(width, height, barHeight());
         if (raw == null) return;
         try {
             JSONObject projection = new JSONObject(raw);
@@ -1897,7 +1913,7 @@ public final class TvActivity extends Activity {
                 JSONObject tile = tiles.getJSONObject(i), surface = tile.getJSONObject("surface");
                 JSONObject content = surface.getJSONObject("content");
                 JSONArray bounds = tile.getJSONArray("bounds");
-                int x = bounds.getInt(0), y = bounds.getInt(1) + barHeight();
+                int x = bounds.getInt(0), y = bounds.getInt(1);
                 int w = bounds.getInt(2), h = bounds.getInt(3);
                 FrameLayout.LayoutParams geometry = new FrameLayout.LayoutParams(w, h, Gravity.TOP | Gravity.LEFT);
                 geometry.leftMargin = x; geometry.topMargin = y;
@@ -1931,7 +1947,8 @@ public final class TvActivity extends Activity {
                     videoSurfaceId = surface.getString("id");
                     setSurfaceMuted(nativeIsMuted());
                     if (!url.equals(currentUrl)) {
-                        preparedPlayer = null;
+                        preparedPlayer = null; audioAvailability=DecoderAudio.UNKNOWN;
+                        ShellChrome.audioState(muteButton,surfaceTitle,nativeIsMuted(),audioAvailability);
                         video.stopPlayback();
                         currentUrl = url;
                         showStatus("Connecting…");
@@ -2023,7 +2040,7 @@ public final class TvActivity extends Activity {
             if (!hasVideo) {
                 closeChannels();
                 videoSurfaceId=""; channelButton.setVisibility(View.GONE);
-                video.stopPlayback(); preparedPlayer = null; currentUrl = "";
+                video.stopPlayback(); preparedPlayer = null; audioAvailability=DecoderAudio.UNKNOWN; currentUrl = "";
                 video.setVisibility(View.INVISIBLE); muteButton.setVisibility(View.GONE);
                 status.setVisibility(View.GONE);
             } else {
@@ -2032,7 +2049,7 @@ public final class TvActivity extends Activity {
                 muteButton.setVisibility(View.VISIBLE);
                 FrameLayout.LayoutParams chrome = new FrameLayout.LayoutParams(dp(ShellChrome.AUDIO_WIDTH_DP), dp(ShellChrome.AUDIO_HEIGHT_DP), Gravity.TOP | Gravity.RIGHT);
                 FrameLayout.LayoutParams videoBounds = (FrameLayout.LayoutParams)video.getLayoutParams();
-                chrome.topMargin = videoBounds.topMargin + dp(ShellChrome.AUDIO_INSET_DP);
+                chrome.topMargin = Math.max(barHeight(),videoBounds.topMargin) + dp(ShellChrome.AUDIO_INSET_DP);
                 chrome.rightMargin = Math.max(0, width - videoBounds.leftMargin - videoBounds.width) + dp(ShellChrome.AUDIO_INSET_DP);
                 chrome.width = Math.min(chrome.width,Math.max(1,videoBounds.width-2*dp(ShellChrome.AUDIO_INSET_DP)));
                 muteButton.setMaxWidth(videoBounds.width);
@@ -2041,6 +2058,8 @@ public final class TvActivity extends Activity {
                 if (preparedPlayer != null) status.setVisibility(View.GONE);
             }
             selector.getParent().requestLayout();
+            workspaceSelector.bringToFront();
+            workspaceHeader.bringToFront();
             if (!focusedTask.isEmpty()) for (View widget: widgets) {
                 if (widget instanceof SignalView && ((SignalView)widget).surfaceId.equals(focusedTask)) {
                     widget.requestFocus(); break;

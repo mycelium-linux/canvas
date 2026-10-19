@@ -115,12 +115,15 @@ final class ShellChrome {
         view.setBackground(new Face(view,palette,true,false));
     }
     /** Source-local action, not device-wide volume or proof of audible signal. */
-    static void audioState(Button button, String title, boolean muted) {
-        String description=audioDescription(title,muted);
+    static void audioState(Button button, String title, boolean muted, int availability) {
+        String description=audioDescription(title,muted,availability);
         if(description.contentEquals(button.getContentDescription()==null ? "" : button.getContentDescription())) return;
+        button.setEnabled(availability!=DecoderAudio.ABSENT);
+        button.setAlpha(availability==DecoderAudio.PRESENT ? 1f : availability==DecoderAudio.ABSENT ? 0.4f : 0.7f);
         button.setText("");
         float density=button.getResources().getDisplayMetrics().density;
-        Drawable icon=button.getResources().getDrawable(muted ? android.R.drawable.ic_lock_silent_mode : android.R.drawable.ic_lock_silent_mode_off,button.getContext().getTheme()).mutate();
+        int resource=availability==DecoderAudio.UNKNOWN ? android.R.drawable.ic_menu_help : muted || availability==DecoderAudio.ABSENT ? android.R.drawable.ic_lock_silent_mode : android.R.drawable.ic_lock_silent_mode_off;
+        Drawable icon=button.getResources().getDrawable(resource,button.getContext().getTheme()).mutate();
         int size=Math.round(14*density);
         icon.setBounds(0,0,size,size);
         icon.setTintList(button.getTextColors());
@@ -128,6 +131,7 @@ final class ShellChrome {
         button.setCompoundDrawablePadding(0);
         audioInsets(button);
         button.setContentDescription(description);
+        if(android.os.Build.VERSION.SDK_INT>=26) button.setTooltipText(description);
     }
     private static void audioInsets(Button button) {
         int inset=Math.round(5*button.getResources().getDisplayMetrics().density);
@@ -139,6 +143,11 @@ final class ShellChrome {
     static String audioDescription(String title, boolean muted) {
         return audioAction(muted) + " " + title + " audio. This stream is " +
             (muted ? "muted." : "unmuted.");
+    }
+    static String audioDescription(String title, boolean muted, int availability) {
+        if(availability==DecoderAudio.ABSENT) return "No audio track in " + title + ".";
+        if(availability==DecoderAudio.UNKNOWN) return "Audio track availability is unknown. " + audioDescription(title,muted);
+        return audioDescription(title,muted);
     }
     private ShellChrome() {}
 }

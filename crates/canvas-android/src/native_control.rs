@@ -698,6 +698,7 @@ pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeProjection(
     _class: jni::objects::JClass,
     width: jni::sys::jint,
     height: jni::sys::jint,
+    shell_height: jni::sys::jint,
 ) -> jni::sys::jstring {
     let result = (|| -> Result<serde_json::Value, String> {
         let endpoint = endpoint()
@@ -709,16 +710,16 @@ pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeProjection(
         }
         let document: canvas_workspace::WorkspaceDocument =
             serde_json::from_value(snapshot["document"].clone()).map_err(|e| e.to_string())?;
-        let frames = canvas_core::layout_tree::solve(
-            document.active_layout(),
-            canvas_core::layout::Rect {
-                x: 0,
-                y: 0,
-                width: u32::try_from(width).map_err(|_| "Invalid width")?,
-                height: u32::try_from(height).map_err(|_| "Invalid height")?,
-            },
-        )
-        .map_err(|e| e.to_string())?;
+        let viewport = crate::geometry::workspace_viewport(
+            &document,
+            u32::try_from(width).map_err(|_| "Invalid width")?,
+            u32::try_from(height).map_err(|_| "Invalid height")?,
+            u32::try_from(shell_height).map_err(|_| "Invalid shell height")?,
+            !snapshot["header"].is_null(),
+        )?;
+        snapshot["content_top"] = serde_json::json!(viewport.y);
+        let frames = canvas_core::layout_tree::solve(document.active_layout(), viewport)
+            .map_err(|e| e.to_string())?;
         snapshot["tiles"] = serde_json::to_value(frames.iter().map(|placement| {
             let surface = document.surfaces.iter().find(|s| s.id == placement.surface_id);
             serde_json::json!({"surface":surface,
