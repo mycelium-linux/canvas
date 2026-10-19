@@ -71,6 +71,38 @@ pub fn ambient_frame(elapsed_ms: u64) -> [f32; 3] {
     [previous, next, t * t * (3.0 - 2.0 * t)]
 }
 
+/// Adapt the render buffer, not the display. Stable scenes own quality changes;
+/// never resize mid-crossfade. A heavy shader gets a bounded 16:9 raster.
+pub fn ambient_raster_width(current: u32, mean_work_ms: f32, transitioning: bool) -> u32 {
+    if transitioning
+        || !(320..=640).contains(&current)
+        || !mean_work_ms.is_finite()
+        || mean_work_ms < 0.0
+    {
+        return current;
+    }
+    if mean_work_ms > 60.0 {
+        let desired = (current as f32 * (40.0 / mean_work_ms).sqrt() / 16.0).floor() as u32 * 16;
+        return desired.clamp(320, 640).min(current);
+    }
+    if mean_work_ms < 15.0 {
+        return 640;
+    }
+    current
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeAmbientRasterWidth(
+    _env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    width: jni::sys::jint,
+    work: jni::sys::jfloat,
+    transitioning: jni::sys::jboolean,
+) -> jni::sys::jint {
+    ambient_raster_width(width.max(0) as u32, work, transitioning != 0) as i32
+}
+
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeAmbientFrame(
@@ -207,5 +239,15 @@ mod tests {
                 .contains("ambient_sample")
         );
         assert!(program["max_fps"].as_u64().unwrap() <= 30);
+    }
+
+    #[test]
+    fn ambient_quality_responds_to_work_without_resizing_a_crossfade() {
+        assert_eq!(ambient_raster_width(640, 165.0, false), 320);
+        assert_eq!(ambient_raster_width(320, 41.0, false), 320);
+        assert_eq!(ambient_raster_width(320, 1.0, false), 640);
+        assert_eq!(ambient_raster_width(640, 165.0, true), 640);
+        assert_eq!(ambient_raster_width(320, f32::NAN, false), 320);
+        assert_eq!(ambient_raster_width(640, -1.0, false), 640);
     }
 }

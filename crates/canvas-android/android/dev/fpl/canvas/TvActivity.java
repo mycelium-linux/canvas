@@ -69,6 +69,7 @@ public final class TvActivity extends Activity {
     private static native String nativeAmbientState();
     private static native boolean nativeAmbientWake();
     private static native float[] nativeAmbientFrame(long elapsedMillis);
+    private static native int nativeAmbientRasterWidth(int width,float meanWorkMillis,boolean transitioning);
     private FrameLayout ambientScreen;
     private boolean ambientShown;
     private int ambientWakeKey=-1;
@@ -289,6 +290,7 @@ public final class TvActivity extends Activity {
         private int maxWidth=1280,maxHeight=720,frameMillis=33;
         private long animationEpoch=System.nanoTime();
         private int lastAmbientIndex=-1;
+        private long rasterFrames,rasterWorkNanos,lastRasterChange;
         private final float[] theme = new float[4];
         private final ByteBuffer uniforms = ByteBuffer.allocateDirect(48).order(ByteOrder.nativeOrder());
         private final long epoch = System.nanoTime();
@@ -323,6 +325,7 @@ public final class TvActivity extends Activity {
             maxWidth=source.optInt("max_width",1280); maxHeight=source.optInt("max_height",720);
             frameMillis=1000/Math.max(1,Math.min(30,source.optInt("max_fps",30)));
             animationEpoch=System.nanoTime(); lastAmbientIndex=-1;
+            rasterFrames=0; rasterWorkNanos=0; lastRasterChange=0;
             key = next; setVisibility(View.VISIBLE); active = resumed;
             gpu.post(() -> {
                 vertex = vs; fragment = fs; speed = rate;
@@ -397,7 +400,22 @@ public final class TvActivity extends Activity {
                     if (!EGL14.eglSwapBuffers(display, output)) throw new IllegalStateException("EGL swap failed");
                     // One submitted frame at a time; wait for completion before pacing.
                     GLES30.glFinish();
-                    workNanos += System.nanoTime() - started;
+                    long work=System.nanoTime()-started;
+                    workNanos += work;
+                    if(ambientMode) {
+                        rasterWorkNanos+=work;
+                        if(++rasterFrames>=60) {
+                            float mean=(float)(rasterWorkNanos/1e6/rasterFrames);
+                            int target=nativeAmbientRasterWidth(width,mean,phase[0]!=phase[1]);
+                            if(target!=width && System.nanoTime()-lastRasterChange>TimeUnit.SECONDS.toNanos(5)) {
+                                lastRasterChange=System.nanoTime();
+                                final int rasterWidth=target,rasterHeight=target*9/16;
+                                android.util.Log.i("CanvasBackground","ambient raster="+rasterWidth+"x"+rasterHeight+" measured-work-ms="+mean);
+                                post(() -> {if(ambientMode && active)getHolder().setFixedSize(rasterWidth,rasterHeight);});
+                            }
+                            rasterFrames=0; rasterWorkNanos=0;
+                        }
+                    }
                     if (++completedFrames == 300) {
                         long now = System.nanoTime();
                         android.util.Log.i("CanvasBackground", "fps=" + (completedFrames * 1e9 / (now - sampleStart))

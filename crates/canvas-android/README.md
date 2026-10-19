@@ -75,7 +75,9 @@ shader indexes and the blend weight from one monotonic elapsed time. One
 retained GLES program handles the whole rotation; only the crossfade evaluates
 two scenes. There is no network shader loading, per-transition compilation,
 CPU pixel readback or second EGL surface. The TV adapter caps this path at
-640×360 internal pixels and 20 FPS, upscaled to the full display. Other
+640×360 internal pixels and 20 FPS, upscaled to the full display. Measured
+GPU work can reduce a heavy stable scene to a minimum 320×180 raster. Light
+scenes recover the larger raster; quality never changes mid-crossfade. Other
 workspace background profiles are unchanged.
 
 It releases local video decoders and PDF panels and hides the workspace chrome. It does
