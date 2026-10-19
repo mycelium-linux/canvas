@@ -24,6 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("       echo 'workspace create wikiracing' | canvasctl");
         eprintln!("       echo 'surface add-live-video surf-browser surf-tv 1280 720' | canvasctl");
         eprintln!("       echo 'surface center surf-browser 0.70' | canvasctl");
+        eprintln!("       echo 'file-actions \"/path/to/image.png\"' | canvasctl");
         eprintln!("       echo 'focus\\nbg dock' | canvasctl");
         eprintln!("       echo 'move 0 25 1920 1150' | canvasctl");
         eprintln!("       echo 'indicator status speaking \"Socket live\"' | canvasctl");

@@ -64,6 +64,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use unibus_media::CameraDetections;
 
+mod file_radial;
 mod indicator;
 mod keyboard_input;
 mod notification;
@@ -460,6 +461,10 @@ type TimelineAction = canvas_model_viewer::view::TimelineAction;
 #[derive(Debug, Clone)]
 enum Message {
     Tick,
+    FileActionsCompleted {
+        project_id: String,
+        results: Vec<Result<LoadedContent, Failure>>,
+    },
     ShellBack,
     ShellForward,
     ShellProjects,
@@ -766,6 +771,8 @@ struct App {
     /// identity and storage.
     engineering_projects: BTreeMap<String, EngineeringProject>,
     engineering_browser: Option<EngineeringBrowser>,
+    file_radial: file_radial::Menu,
+    file_actions_busy: bool,
     engineering_thumbnails: BTreeMap<String, iced::widget::image::Handle>,
     project_switcher: Option<::canvas::project_switcher::ProjectSwitcher>,
     jarvis_visible: bool,
@@ -927,6 +934,127 @@ impl App {
         self.rebuild_stack();
         self.status = format!("Opened {}.", loaded.snapshot.title);
         self.emit_event(format!("surface_opened {}", loaded.snapshot.id));
+    }
+
+    fn show_file_radial(&mut self, window: iced::window::Id) {
+        let viewport = self.windows.get(&window).copied().unwrap_or(self.frame);
+        let cursor = platform::file_drag_state()
+            .map(|(point, _)| Point::new(point.x - viewport.x as f32, point.y - viewport.y as f32))
+            .or_else(|| {
+                self.cursor
+                    .filter(|_| self.cursor_window == Some(window))
+                    .map(|cursor| {
+                        Point::new(
+                            (cursor.x - f64::from(viewport.x - self.frame.x)) as f32,
+                            (cursor.y - f64::from(viewport.y - self.frame.y)) as f32,
+                        )
+                    })
+            });
+        self.file_radial.show(
+            window,
+            cursor,
+            Size::new(viewport.width as f32, viewport.height as f32),
+        );
+        self.primary_pointer_down = false;
+        let intents = self.interaction.force_release();
+        self.apply_interaction_intents(intents);
+    }
+
+    fn file_drag_shift(&mut self, shift: bool) {
+        let rising = shift && !self.file_radial.shift;
+        self.file_radial.shift = shift;
+        if rising {
+            if self.file_radial.visible {
+                self.file_radial.toggle_page();
+            } else if !self.file_radial.files.is_empty()
+                && let Some(window) = self.file_radial.window
+            {
+                self.show_file_radial(window);
+            }
+        }
+    }
+
+    fn refresh_file_drag(&mut self) {
+        if self.file_radial.files.is_empty() || self.file_radial.dropped {
+            return;
+        }
+        let Some((point, shift)) = platform::file_drag_state() else {
+            return;
+        };
+        let Some(window) = self.file_radial.window else {
+            return;
+        };
+        let viewport = self.windows.get(&window).copied().unwrap_or(self.frame);
+        let local = Point::new(point.x - viewport.x as f32, point.y - viewport.y as f32);
+        self.cursor = Some(LogicalPoint {
+            x: f64::from(point.x) - f64::from(self.frame.x),
+            y: f64::from(point.y) - f64::from(self.frame.y),
+        });
+        self.cursor_window = Some(window);
+        self.file_drag_shift(shift);
+        if self.file_radial.visible {
+            self.file_radial.point(local);
+        }
+    }
+
+    fn run_file_actions(
+        &mut self,
+        action: file_radial::FileAction,
+        files: Vec<PathBuf>,
+    ) -> Task<Message> {
+        if self.file_actions_busy {
+            self.status = "A file action is still running. Try again when it finishes.".into();
+            return Task::none();
+        }
+        self.bump();
+        let viewport = self.media_viewport();
+        let scale = self.scale_factor;
+        let (sender, receiver) = iced::futures::channel::oneshot::channel();
+        let revision = self.runtime_revision;
+        let project_id = self.document.project_id.clone();
+        self.status = format!("{}: processing {} file(s)…", action.label(), files.len());
+        let worker = std::thread::Builder::new()
+            .name("canvas-file-actions".into())
+            .spawn(move || {
+                let results = files
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, path)| {
+                        let output = file_radial::transform(&path, action).map_err(|error| {
+                            Failure::invalid(format!("{}: {error}", path.display()))
+                        })?;
+                        load_content(
+                            format!("file-action-{revision}-{index}"),
+                            output.clone(),
+                            None,
+                            viewport,
+                            scale,
+                        )
+                        .map_err(|error| {
+                            Failure::invalid(format!("{}: {}", output.display(), error.message))
+                        })
+                    })
+                    .collect();
+                let _ = sender.send(results);
+            });
+        if let Err(error) = worker {
+            self.status = format!("Could not start file action: {error}");
+            return Task::none();
+        }
+        self.file_actions_busy = true;
+        Task::perform(
+            async move {
+                receiver.await.unwrap_or_else(|_| {
+                    vec![Err(Failure::platform(
+                        "File action worker stopped before returning a result",
+                    ))]
+                })
+            },
+            move |results| Message::FileActionsCompleted {
+                project_id: project_id.clone(),
+                results,
+            },
+        )
     }
 
     fn new(
@@ -1224,6 +1352,8 @@ impl App {
             project_picker: None,
             engineering_projects,
             engineering_browser: None,
+            file_radial: file_radial::Menu::default(),
+            file_actions_busy: false,
             engineering_thumbnails: BTreeMap::new(),
             project_switcher: None,
             jarvis_visible: true,
@@ -1947,6 +2077,38 @@ impl App {
                 self.bump();
                 Task::none()
             }
+            Message::FileActionsCompleted {
+                project_id,
+                results,
+            } => {
+                self.file_actions_busy = false;
+                let mut opened = 0;
+                let mut errors = Vec::new();
+                let project_changed = project_id != self.document.project_id;
+                for result in results {
+                    match result {
+                        Ok(loaded) => {
+                            if !project_changed {
+                                self.install_loaded_content(loaded);
+                            }
+                            opened += 1;
+                        }
+                        Err(error) => errors.push(error.message),
+                    }
+                }
+                self.status = if project_changed {
+                    format!(
+                        "Finished {opened} file(s) for {project_id}; workspace changed so results were not opened. Exports remain beside their sources. {}",
+                        errors.join("; ")
+                    )
+                } else if errors.is_empty() {
+                    format!("Opened {opened} file(s). Exports are saved beside their originals.")
+                } else {
+                    format!("Opened {opened} file(s); {}", errors.join("; "))
+                };
+                self.bump();
+                Task::none()
+            }
             Message::EngineeringArtifactLoaded(result) => {
                 match *result {
                     Ok(loaded) => self.install_loaded_content(loaded),
@@ -2037,6 +2199,10 @@ impl App {
                 self.navigate_pdf(surface_id, target, None)
             }
             Message::Tick => {
+                self.refresh_file_drag();
+                if let Some((action, files)) = self.file_radial.ready(Instant::now()) {
+                    return self.run_file_actions(action, files);
+                }
                 let previous_notification_count = self.notifications.len();
                 self.notifications
                     .retain(|item| item.shown_at.elapsed() < NOTIFICATION_LIFETIME);
@@ -2213,6 +2379,38 @@ impl App {
                     )
             }
             Message::WindowEvent(window, event) => {
+                match &event {
+                    iced::window::Event::FileHovered(path) => {
+                        if self.file_radial.dropped || self.file_radial.window != Some(window) {
+                            self.file_radial.cancel();
+                        }
+                        self.file_radial.window = Some(window);
+                        if let Err(error) = self.file_radial.add(path.clone()) {
+                            self.file_radial.cancel();
+                            self.status = error;
+                        } else {
+                            self.refresh_file_drag();
+                            if self.file_radial.shift {
+                                self.show_file_radial(window);
+                            }
+                        }
+                    }
+                    iced::window::Event::FileDropped(path) => {
+                        self.refresh_file_drag();
+                        self.show_file_radial(window);
+                        if let Err(error) = self.file_radial.drop_file(path.clone(), Instant::now())
+                        {
+                            self.file_radial.cancel();
+                            self.status = error;
+                        }
+                        return iced::window::gain_focus(window);
+                    }
+                    iced::window::Event::FilesHoveredLeft => self.file_radial.leave(),
+                    iced::window::Event::Unfocused if !self.file_radial.dropped => {
+                        self.file_radial.cancel()
+                    }
+                    _ => {}
+                }
                 let mut metrics_changed = false;
                 match event {
                     iced::window::Event::Moved(point) => {
@@ -2247,6 +2445,19 @@ impl App {
                 Task::none()
             }
             Message::MouseEvent(window, event) => {
+                if self.file_radial.visible && self.file_radial.window == Some(window) {
+                    match event {
+                        mouse::Event::CursorMoved { position } => self.file_radial.point(position),
+                        mouse::Event::ButtonReleased(mouse::Button::Left) => {
+                            self.file_radial.choose()
+                        }
+                        mouse::Event::ButtonPressed(mouse::Button::Right) => {
+                            self.file_radial.cancel()
+                        }
+                        _ => {}
+                    }
+                    return Task::none();
+                }
                 self.handle_mouse(window, event);
                 Task::none()
             }
@@ -2370,6 +2581,36 @@ impl App {
                 Task::none()
             }
             Message::TerminalInput(kbd_event) => {
+                use iced::keyboard::{
+                    Event as KeyboardEvent, Key as KeyboardKey, key::Named as KeyboardNamed,
+                };
+                if let KeyboardEvent::ModifiersChanged(modifiers) = &kbd_event {
+                    self.file_drag_shift(modifiers.shift());
+                }
+                if self.file_radial.visible {
+                    if let KeyboardEvent::KeyPressed {
+                        key, repeat: false, ..
+                    } = &kbd_event
+                    {
+                        match key {
+                            KeyboardKey::Named(KeyboardNamed::Escape) => self.file_radial.cancel(),
+                            KeyboardKey::Named(KeyboardNamed::Tab) => {
+                                self.file_radial.toggle_page()
+                            }
+                            KeyboardKey::Named(KeyboardNamed::Enter) => self.file_radial.choose(),
+                            KeyboardKey::Character(value) => {
+                                if let Ok(index) = value.parse::<usize>()
+                                    && (1..=self.file_radial.actions().len()).contains(&index)
+                                {
+                                    self.file_radial.selected = Some(index - 1);
+                                    self.file_radial.choose();
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    return Task::none();
+                }
                 if self.engineering_browser.is_some()
                     && matches!(
                         &kbd_event,
@@ -4573,6 +4814,45 @@ impl App {
                         result: Box::new(result),
                     },
                 )
+            }
+            Command::FileActions { paths } => {
+                let files = paths
+                    .iter()
+                    .map(|path| canonical_regular_file(Path::new(path)))
+                    .collect::<Result<Vec<_>, _>>();
+                let files = match files {
+                    Ok(files) => files,
+                    Err(error) => {
+                        self.fail(pending, error);
+                        return Task::none();
+                    }
+                };
+                let Some(window) = self
+                    .cursor_window
+                    .or_else(|| self.windows.keys().next().copied())
+                else {
+                    self.fail(pending, Failure::platform("No Canvas window is available"));
+                    return Task::none();
+                };
+                self.file_radial.cancel();
+                self.file_radial.dropped = true;
+                for path in files {
+                    if let Err(error) = self.file_radial.drop_file(path, Instant::now()) {
+                        self.file_radial.cancel();
+                        self.fail(pending, Failure::invalid(error));
+                        return Task::none();
+                    }
+                }
+                self.show_file_radial(window);
+                self.bump();
+                let file_count = self.file_radial.files.len();
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::FileActionsShown { file_count },
+                    },
+                );
+                self.set_canvas_visible(true)
             }
             Command::CloseSurface { surface_id } => {
                 if !self
@@ -9797,6 +10077,10 @@ impl App {
             }
         }
 
+        if self.file_radial.visible && self.file_radial.window == Some(window) {
+            layers.push(file_radial::view(&self.file_radial, palette));
+        }
+
         mouse_area(
             container(stack(layers))
                 .width(Length::Fill)
@@ -12236,6 +12520,36 @@ mod platform {
     use canvas_core::desktop::WallpaperRequest;
     use canvas_core::layout::Rect;
 
+    /// winit's AppKit drag destination reports paths but not draggingUpdated
+    /// cursor/modifier events. Read value-only NSEvent state while a file drag
+    /// is already inside Canvas; this requires no AX or input-monitoring grant.
+    #[cfg(all(target_os = "macos", not(test)))]
+    pub fn file_drag_state() -> Option<(iced::Point, bool)> {
+        use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSScreen};
+        let marker = objc2_foundation::MainThreadMarker::new()?;
+        // SAFETY: called on iced's UI thread, checked above. These AppKit
+        // class methods return value types; no borrowed native objects escape.
+        let (point, flags, top) = unsafe {
+            let screens = NSScreen::screens(marker);
+            let primary = screens.firstObject()?;
+            let frame = primary.frame();
+            (
+                NSEvent::mouseLocation(),
+                NSEvent::modifierFlags_class(),
+                frame.origin.y + frame.size.height,
+            )
+        };
+        Some((
+            iced::Point::new(point.x as f32, (top - point.y) as f32),
+            flags.contains(NSEventModifierFlags::NSEventModifierFlagShift),
+        ))
+    }
+
+    #[cfg(any(not(target_os = "macos"), test))]
+    pub fn file_drag_state() -> Option<(iced::Point, bool)> {
+        None
+    }
+
     #[cfg(target_os = "macos")]
     pub(super) fn canvas_frame(display: &canvas_control::Display) -> Rect {
         Rect {
@@ -12716,6 +13030,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             cadence
         };
+        let cadence = if app.file_radial.visible || !app.file_radial.files.is_empty() {
+            cadence.min(Duration::from_millis(40))
+        } else {
+            cadence
+        };
         Subscription::batch([
             iced::time::every(cadence).map(|_| Message::Tick),
             iced::event::listen_with(|event, _, window| match event {
@@ -12834,6 +13153,84 @@ fn assemble_presence(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_radial_native_events_select_a_drop_without_moving_the_workspace() {
+        let mut app = test_app();
+        let window = iced::window::Id::unique();
+        app.windows.insert(window, INITIAL_FRAME);
+        let document = app.document.clone();
+        let path = PathBuf::from("/tmp/radial-test.png");
+        let _ = app.update(Message::WindowEvent(
+            window,
+            iced::window::Event::FileHovered(path.clone()),
+        ));
+        assert!(!app.file_radial.visible);
+        let _ = app.update(Message::TerminalInput(
+            iced::keyboard::Event::ModifiersChanged(iced::keyboard::Modifiers::SHIFT),
+        ));
+        assert!(app.file_radial.visible);
+        let center = app.file_radial.center;
+        let _ = app.update(Message::MouseEvent(
+            window,
+            mouse::Event::CursorMoved {
+                position: Point::new(center.x + 100.0, center.y),
+            },
+        ));
+        let _ = app.update(Message::WindowEvent(
+            window,
+            iced::window::Event::FileDropped(path.clone()),
+        ));
+        assert_eq!(
+            app.file_radial
+                .ready(Instant::now() + Duration::from_secs(1)),
+            Some((file_radial::FileAction::Png, vec![path]))
+        );
+        assert_eq!(app.document, document);
+    }
+
+    #[test]
+    fn file_actions_control_opens_the_same_menu_and_rejects_missing_files() {
+        let mut app = test_app();
+        let window = iced::window::Id::unique();
+        app.windows.insert(window, INITIAL_FRAME);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.png");
+        image::RgbaImage::new(2, 2).save(&path).unwrap();
+        let reply = execute(
+            &mut app,
+            "file-actions-test",
+            Command::FileActions {
+                paths: vec![path.to_string_lossy().into_owned()],
+            },
+        );
+        assert!(matches!(
+            reply.outcome,
+            Outcome::Ok {
+                receipt: Receipt::FileActionsShown { file_count: 1 }
+            }
+        ));
+        assert!(app.file_radial.visible);
+        assert!(app.file_radial.dropped);
+        assert!(
+            app.file_radial
+                .ready(Instant::now() + Duration::from_secs(1))
+                .is_none()
+        );
+        let reply = execute(
+            &mut app,
+            "file-actions-bad",
+            Command::FileActions {
+                paths: vec![
+                    dir.path()
+                        .join("missing.png")
+                        .to_string_lossy()
+                        .into_owned(),
+                ],
+            },
+        );
+        assert!(matches!(reply.outcome, Outcome::Error { .. }));
+    }
 
     #[test]
     fn browser_keys_preserve_named_keys_text_and_modifiers() {

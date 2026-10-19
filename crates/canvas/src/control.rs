@@ -29,6 +29,7 @@ pub const CONTROL_VERSION: u32 = 1;
 pub const UNCORRELATED_REQUEST_ID: &str = "invalid";
 pub const MAX_CONTROL_MESSAGE: u64 = 256 * 1024;
 pub const MAX_ACTIVE_INDICATORS: usize = 16;
+pub const MAX_FILE_ACTION_FILES: usize = 32;
 pub const MAX_MESH_NODES: usize = 8;
 pub const MAX_PRESENCE_OCCUPANTS: usize = 8;
 pub const MAX_PRESENCE_FACES: usize = 8;
@@ -95,6 +96,9 @@ pub enum Command {
         path: String,
         #[serde(default)]
         title: Option<String>,
+    },
+    FileActions {
+        paths: Vec<String>,
     },
     CloseSurface {
         surface_id: String,
@@ -647,6 +651,9 @@ pub enum ErrorCode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Receipt {
+    FileActionsShown {
+        file_count: usize,
+    },
     DocumentSnapshot {
         document: Box<WorkspaceDocument>,
         snapshot: RuntimeSnapshot,
@@ -976,6 +983,19 @@ impl ControlRequest {
             return Err("request_id must be 1–64 lowercase identifier characters".into());
         }
         match &self.command {
+            Command::FileActions { paths } => {
+                if paths.is_empty() || paths.len() > MAX_FILE_ACTION_FILES {
+                    return Err(format!(
+                        "file actions require 1–{MAX_FILE_ACTION_FILES} paths"
+                    ));
+                }
+                if paths
+                    .iter()
+                    .any(|path| path.is_empty() || path.len() > 4096 || path.contains('\0'))
+                {
+                    return Err("file paths must contain 1–4096 non-NUL bytes".into());
+                }
+            }
             Command::OpenFile {
                 surface_id,
                 path,
@@ -1607,6 +1627,12 @@ pub mod text {
                     title,
                 })
             }
+            "file-actions" => {
+                req(tokens, 2, "file-actions <path> [path ...]")?;
+                Ok(Command::FileActions {
+                    paths: tokens[1..].to_vec(),
+                })
+            }
             "wallpaper" | "wp" => {
                 req(tokens, 6, "wp <project> <display_id> <r> <g> <b>")?;
                 if !workspace_name(&tokens[1]) {
@@ -1746,6 +1772,9 @@ pub mod text {
                     Receipt::DocumentApplied { workspace_id } => {
                         format!("document={}", workspace_id)
                     }
+                    Receipt::FileActionsShown { file_count } => {
+                        format!("file_actions_shown={file_count}")
+                    }
                     Receipt::SurfaceOpened { surface } => {
                         format!("opened={}", surface.id)
                     }
@@ -1869,6 +1898,26 @@ pub mod text {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_actions_preserve_quoted_paths_and_validate_batch_bounds() {
+        let request = text::parse_line("file-actions \"/tmp/a b.png\" /tmp/c.webp").unwrap();
+        assert!(
+            matches!(&request.command, Command::FileActions { paths } if paths == &["/tmp/a b.png", "/tmp/c.webp"])
+        );
+        request.validate().unwrap();
+        for paths in [
+            vec![],
+            vec!["/tmp/a.png".into(); MAX_FILE_ACTION_FILES + 1],
+            vec!["bad\0path".into()],
+        ] {
+            let invalid = ControlRequest {
+                command: Command::FileActions { paths },
+                ..request.clone()
+            };
+            assert!(invalid.validate().is_err());
+        }
+    }
 
     #[test]
     fn framing_is_bounded_and_requires_newline() {

@@ -188,6 +188,9 @@ renderer — `canvas_inspect`, `canvas_apply_patch`, `canvas_open_widget`,
 source positions it rendered, so an agent cannot silently reason about pixels
 different from the ones shown to the person.
 
+[Native file actions](docs/file-actions.md) provide a Shift-drag radial menu
+for image conversion and tools, with a `file-actions` control entry point.
+
 ## Lua modules
 
 A module is a manifest plus Luau source that turns typed host data into a small
