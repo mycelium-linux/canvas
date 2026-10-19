@@ -10,6 +10,8 @@
     <string>--zone</string><string>main_room</string>
     <string>--serial</string><string>192.168.2.97:5555</string>
     <string>--tvctl</string><string>/Users/ajmwagar/.local/bin/canvas-tvctl</string>
+    <string>--tvctl-host</string><string>ajmwagar@100.120.101.5</string>
+    <string>--ssh-key</string><string>/Users/ajmwagar/.ssh/canvas-main-room-presence</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict><key>PATH</key><string>/opt/homebrew/bin:/Users/ajmwagar/.local/bin:/usr/bin:/bin</string></dict>

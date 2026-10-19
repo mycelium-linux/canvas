@@ -64,6 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if arguments.len()==3 && arguments[2]=="ambient-stream" {
         let (port,token,_guard)=connect(&arguments[1])?;
         let mut input=std::io::stdin().lock();
+        let mut freshness_warning=false;
         loop {
             let mut line=String::new();
             let n=std::io::Read::by_ref(&mut input).take(1025).read_line(&mut line)?;
@@ -71,7 +72,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if n>1024 || !line.ends_with('\n') {return Err("Invalid ambient stream frame".into());}
             let request=Request {schema_version:1,request_id:"ambient-presence".into(),expected_revision:None,command:ambient_presence(&line)?};
             let receipt=exchange(port,&token,&request)?;
-            if receipt["ok"]!=true {return Err(format!("TV rejected ambient observation: {}",receipt["error"]).into());}
+            if receipt["ok"]!=true {
+                // Delayed source frames are expected after transport setup or
+                // jitter. Never replay them or restart into another backlog.
+                if matches!(receipt["error"].as_str(),Some("Ambient observation is in the future" | "Ambient observation is stale or has invalid expiry")) {
+                    if !freshness_warning {eprintln!("Ambient observation rejected by receiver freshness check; waiting for fresh evidence.");}
+                    freshness_warning=true;
+                    continue;
+                }
+                return Err(format!("TV rejected ambient observation: {}",receipt["error"]).into());
+            }
+            if freshness_warning {eprintln!("Ambient evidence freshness recovered."); freshness_warning=false;}
             // The producer needs no copies of the display catalog or credentials.
         }
         return Ok(());

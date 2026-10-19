@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 pub const EMPTY_DELAY: Duration = Duration::from_secs(60);
 const HUMAN_GRACE: Duration = Duration::from_secs(120);
 pub const MAX_AGE_MS: u64 = 5000;
+/// Bound host clock skew without granting a longer receiver-owned lease.
+const MAX_FUTURE_SKEW_MS: u64 = 2000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -105,9 +107,14 @@ impl Ambient {
         if self.room.as_deref() != Some(frame.room.as_str()) {
             return Err("Ambient room is not bound to this display".into());
         }
-        let age = unix_ms
-            .checked_sub(frame.observed_at_unix_ms)
-            .ok_or("Ambient observation is in the future")?;
+        let age = if frame.observed_at_unix_ms > unix_ms {
+            if frame.observed_at_unix_ms - unix_ms > MAX_FUTURE_SKEW_MS {
+                return Err("Ambient observation is in the future".into());
+            }
+            0 // Never add clock skew to the five-second receiver lease.
+        } else {
+            unix_ms - frame.observed_at_unix_ms
+        };
         if frame.valid_for_ms == 0 || frame.valid_for_ms > MAX_AGE_MS || age >= frame.valid_for_ms {
             return Err("Ambient observation is stale or has invalid expiry".into());
         }
@@ -231,7 +238,7 @@ mod tests {
         let mut f = frame(Occupancy::Empty, 1000);
         f.room = "other".into();
         assert!(a.observe(f, 1000, now).is_err());
-        assert!(a.observe(frame(Occupancy::Empty, 2000), 1000, now).is_err());
+        assert!(a.observe(frame(Occupancy::Empty, 4000), 1000, now).is_err());
         assert!(a.observe(frame(Occupancy::Empty, 1000), 6000, now).is_err());
         a.observe(frame(Occupancy::Empty, 1000), 1000, now).unwrap();
         a.observe(
@@ -275,5 +282,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(a.snapshot()["occupancy"], "occupied");
+    }
+    #[test]
+    fn small_host_clock_skew_never_extends_receiver_lease() {
+        let now = Instant::now();
+        let mut a = bound();
+        a.observe(frame(Occupancy::Empty, 2500), 1000, now).unwrap();
+        a.tick(now + Duration::from_millis(MAX_AGE_MS));
+        assert!(a.sample.is_none());
+        assert!(!a.active());
     }
 }

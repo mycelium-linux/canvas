@@ -58,7 +58,9 @@ ambient presence main_room empty 1792425600000 5000
 
 The timestamp is the actual sensor observation time in Unix milliseconds,
 not a delivery heartbeat. The example timestamp is illustrative. Frames expire
-after at most five seconds on the receiver's monotonic clock. Future, expired,
+after at most five seconds on the receiver's monotonic clock. Future timestamps
+allow at most two seconds of host clock skew without extending that lease.
+Larger future offsets, expired,
 conflicting, regressed and wrong-room observations are rejected. Replaying a
 known observation cannot extend its deadline. Empty requires 60 seconds of
 continuous fresh evidence. Unknown evidence or a delivery gap resets that timer.
@@ -86,6 +88,15 @@ No identities or camera images enter this display-only path.
 `config/deploy/firetv/ambient-main-room.plist` supervises the adapter on Studio
 using the existing Frigate publication. Install the tested adapter and matching
 CLI, upgrade the TV APK in place, bind the room, then bootstrap that LaunchAgent.
+Studio cannot directly reach the Omni's LAN address. This deployment invokes
+Neo's installed CLI through an authenticated SSH stdin stream. Its dedicated
+Ed25519 key is restricted in Neo's `authorized_keys` to the exact
+`canvas-tvctl 192.168.2.97:5555 ambient-stream` command, with no PTY or forwarding.
+The forced command supplies the existing ADB executable search path. Verify the
+Neo host-key fingerprint before pinning it; the adapter requires strict host-key
+checking and uses only its dedicated key. Install updated executables through
+a new inode and atomic rename so macOS does not retain a stale code-signing
+cache for an overwritten executable.
 If delivery fails, inspect the service error log and the source owner's health;
 do not restart or seize another active TV app. For rollback, boot out only that
 LaunchAgent and send `ambient unbind`; keep the prior signed APK.
