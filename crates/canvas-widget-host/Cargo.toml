@@ -12,6 +12,7 @@ description = "Independent bounded Lua composition and Canvas presentation deliv
 [features]
 default = ["luau"]
 luau = []
+owner-http = ["dep:reqwest"]
 
 [dependencies]
 mlua = { version = "=0.12.2", features = ["serialize", "luau", "vendored"] }
@@ -20,3 +21,9 @@ serde = { version = "1", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 sha2 = "0.10"
 unibus = { path = "../../../unibus/crates/unibus" }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"], optional = true }
+
+[[bin]]
+name = "canvas-first-party"
+path = "src/bin/canvas-first-party.rs"
+required-features = ["owner-http"]

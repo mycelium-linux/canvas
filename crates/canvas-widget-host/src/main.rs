@@ -321,6 +321,27 @@ mod tests {
         assert!(result["data"].get("observed_at_unix_ms").is_none());
     }
     #[test]
+    fn first_party_binder_runs_in_the_real_luau_host_with_empty_array_and_utf8() {
+        let script = include_bytes!("../../../config/binders/first-party-v1.lua");
+        let mut input = serde_json::json!({"schema":"canvas.first-party/1","owner":"ohmos","source":"phone","scope":"personal","state":"empty","read_at_unix_ms":1000,"total":0,"omitted":0,"rows":[]});
+        input["provenance"] = serde_json::json!("sample");
+        input["read_at_unix_ms"] = serde_json::json!(chrono::Utc::now().timestamp_millis());
+        let result = compose_script(script, &serde_json::to_vec(&input).unwrap()).unwrap();
+        assert_eq!(result["data"]["state"], "no_data");
+        assert!(result["widget"]["nodes"].is_array());
+        input["state"] = serde_json::json!("ready");
+        input["total"] = serde_json::json!(1);
+        input["rows"] = serde_json::json!([{"id":"1","title":"é".repeat(100),"status":"2 unread","detail":"Signal"}]);
+        let result = compose_script(script, &serde_json::to_vec(&input).unwrap()).unwrap();
+        assert!(
+            result["widget"]["nodes"][0]["label"]
+                .as_str()
+                .unwrap()
+                .len()
+                <= 128
+        );
+    }
+    #[test]
     fn nonterminating_binder_is_bounded() {
         let start = std::time::Instant::now();
         let result = compose_script(b"return {render=function() while true do end end}", b"{}");
