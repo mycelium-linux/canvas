@@ -135,6 +135,28 @@ CLI parser test, 14 JARVIS adapter tests, ARM check/release build, Java compilat
 and APK signature verification passed. Source commit `812f162` adds further
 timer diagnostics; those extra fields are not included in deployed APK 61.
 
+#### Animated rotation verification — 2026-10-19
+
+APK 62 displayed full-screen Star Nest on the Omni's Mali-G52, with no shell
+or audio chrome. At elapsed 300,005 ms its renderer began the next scene. A
+mid-transition screenshot contained both Star Nest and Aurora; the next showed
+Aurora alone. This was a real five-minute wait, not an accelerated timer test.
+
+The initial 640×360 Star Nest measured 6.00 FPS and 165 ms mean GPU work.
+APK 63 (`0.1.62-tv-shader-adaptive`) added the tested work-based raster policy.
+The device reduced that heavy scene to 320×180, then sustained 19.46–19.61 FPS
+with 42.68–43.56 ms mean work in two 300-frame windows. It keeps a full-screen
+1920×1080 output. The rotation and crossfade policy is unchanged from APK 62;
+a second five-minute cycle was not repeated on APK 63. Light-scene recovery to
+the larger raster and the no-resize-during-fade rule have focused policy tests.
+Remote wake after adaptation restored the selected deck; all 31 projects and
+deck revision 3 remained intact. The screensaver was then shown again.
+
+Validation passed: 94 shared-workspace tests, 35 Android library tests, Java
+compilation, JVM audio contracts, ARM check/release build and APK signature.
+The MIT notice is packaged in the APK. Previous signed APKs remain available
+for rollback; this does not change Neo's shell or the room's presence producer.
+
 ### Transient assistant observations
 
 `observer_frame` accepts a bounded renderer-neutral activity frame through the
