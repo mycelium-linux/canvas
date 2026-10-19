@@ -24,7 +24,9 @@ selects XYZ detail. A bounded worker fetches at most 64 tiles per region using
 four concurrent requests, validates 256×256 images, caches compressed provider
 bytes, and uploads a north-up mosaic. `fpl-gfx` samples that mosaic in Web
 Mercator over its retained global basemap, preserving global coverage while new
-regions load. Provider failures remain visible in the producer log and keep the
+regions load. The worker replaces pending camera views with the newest request,
+skips unchanged regions and retains four decoded mosaics (up to 64 MiB of cached
+pixels). Provider failures remain visible in the producer log and keep the
 last valid imagery. The TV caption credits the configured Esri World Imagery
 provider: Esri, Vantor, Earthstar Geographics and the GIS User Community.
 
@@ -43,7 +45,7 @@ The legacy file-snapshot configuration remains supported for offline consumers.
 - Producer: `config/deploy/mac-studio/panopticon-firetv-stream.json`.
 - Supervisor: `config/deploy/mac-studio/dev.fpl.panopticon-firetv.plist`.
 - Receiver: `config/deploy/agora-one/canvas-panopticon-firetv.service`.
-- Receiver ingress: Agora's Tailscale address, UDP port 55212.
+- Receiver ingress: Agora's direct LAN address `192.168.2.67`, UDP port 55212.
 - TV URL: `http://192.168.2.67:18089/panopticon.m3u8`.
 - Workspace: `config/deploy/firetv/panopticon.json`.
 
@@ -84,13 +86,17 @@ continues to use its existing direct GPU path.
    `/opt/homebrew/bin` in `PATH`. The SSH tunnels are setup/control paths only;
    they are not part of the TV's persistent video route.
 
-2. Build `cargo build -p canvas-map-wgpu --bin canvas-map-stream`. Install that
+2. Build an optimized host with `cargo rustc -p canvas-map-wgpu --bin
+   canvas-map-stream -- -C opt-level=3 -C debuginfo=1`. Install that
    binary as `~/.local/lib/canvas-panopticon/canvas-map-stream` and the producer
    configuration as `~/.config/canvas-panopticon/firetv-stream.json`. Both names
    are distinct from the existing local-map producer and Panopticon source.
 3. Install/verify the receiver unit on Agora and start only
    `canvas-panopticon-firetv.service`. Start the producer through its supplied
    LaunchAgent. Enable the receiver for login only after the stream proof.
+   Preserve `ProcessType=Interactive` in the producer LaunchAgent: this is a
+   continuous video workload. Under Studio's background scheduling policy the
+   same optimized binary delivered too slowly to sustain playback.
    Before enabling live layers, provision `spatial-owner.key` with mode 0600
    from the existing Panopticon owner's internal credential. On this Studio,
    its source is the `EnvironmentVariables.PANOPTICON_INTERNAL_KEY` entry in
@@ -129,6 +135,49 @@ remains separate. Actual TV screenshots show the globe rotating and the
 basemap-only caption. Agora decoded three consecutive, distinct video frame
 hashes at H.264 1280 × 720, 24 fps. The producer LaunchAgent is running and the
 dedicated receiver is active and enabled. No APK update or app reset was needed.
+
+## Transition performance investigation, 2026-10-19
+
+Fire TV's native player logged repeated buffer starvation lasting 11–15 seconds.
+With the same optimized producer binary, warm imagery cache, 720p24 configuration
+and initial Puget hold, changing the LaunchAgent's scheduling policy to
+`Interactive` produced the following measurements. The common window excludes
+startup and covers elapsed seconds 2–25:
+
+| LaunchAgent policy | Frames | p99 frame work | Frames over 41.67 ms |
+| --- | ---: | ---: | ---: |
+| Default | 153 | 533.10 ms | 35.3% |
+| Interactive | 547 | 40.26 ms | 0.7% |
+
+Agora subsequently published ten one-second segments in ten wall-clock seconds;
+the earlier measurement advanced only three. The producer and receiver now use
+the direct LAN route, avoiding the VPN's 1280-byte MTU. Live playlists omit the
+end marker so a receiver shutdown cannot permanently end playback on the TV.
+After a receiver restart, wait for a newly advancing live playlist before opening
+it; an old playlist may still contain an end marker from the previous version.
+
+The separate optimized-host cache experiment did **not** establish a frame-time
+win: p99 was 24.33 ms before and 22.66 ms after, with 0.58% versus 0.66% over
+budget. The cache change removes repeated decoding/uploads and replaces obsolete
+pending views, but scheduling was the substantial measured delivery problem.
+This distinction matters when diagnosing future regressions.
+
+Measurements used M1 Max / 32 GiB, macOS 15.0.1, Rust 1.98.1, the existing cached
+development dependency artifacts and an `opt-level=3, debuginfo=1` stream host.
+They do not represent a fully optimized dependency build. Studio was under heavy
+concurrent load; these are bounded observations, not confidence intervals.
+The source baseline was `e655dfd` plus optional tracing. Configuration SHA-256:
+`b9399b4f50397defa556f7c2c6e48dbf6026ef436b3f96fe3df0245eabd5f167`.
+
+For diagnosis, set `CANVAS_MAP_STREAM_TRACE` to a CSV path before starting the
+producer. It records updates, render/readback, encoder handoff and total frame
+work. Leave it unset for normal operation. Retained local evidence includes
+`/tmp/canvas-smoothness-{baseline,after}.csv`,
+`/tmp/canvas-launchagent-{before,interactive-proof}.csv` and the matching logs.
+Instruments was unavailable with Command Line Tools; native `sample` captures
+are a separately collected profiling alternative, not wall-time benchmarks.
+The stream's 15 focused tests pass. Full workspace checks have unrelated existing
+failures recorded separately in Beads.
 
 ## Rollback
 

@@ -7,6 +7,7 @@
     <string>/Users/ajmwagar/.config/canvas-panopticon/firetv-stream.json</string>
   </array>
   <key>RunAtLoad</key><true/>
+  <key>ProcessType</key><string>Interactive</string>
   <key>EnvironmentVariables</key><dict>
     <key>PANOPTICON_TILE_CACHE</key><string>/Volumes/DOC MOVIES/Panopticon/tiles</string>
     <key>PANOPTICON_TILE_CACHE_MAX_GB</key><string>1</string>

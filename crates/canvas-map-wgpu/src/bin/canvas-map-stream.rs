@@ -310,6 +310,17 @@ async fn run(
     let interval = Duration::from_secs_f64(1.0 / f64::from(config.frames_per_second));
     let started = Instant::now();
     let mut deadline = started;
+    let mut timing = std::env::var_os("CANVAS_MAP_STREAM_TRACE")
+        .map(std::fs::File::create)
+        .transpose()
+        .context("create frame timing trace")?
+        .map(std::io::BufWriter::new);
+    if let Some(trace) = timing.as_mut() {
+        writeln!(
+            trace,
+            "elapsed_ms,updates_ms,render_readback_ms,encode_ms,total_ms"
+        )?;
+    }
     eprintln!(
         "canvas-map-stream: adapter='{}' {}x{}@{} -> {}",
         adapter_info.name,
@@ -324,6 +335,7 @@ async fn run(
     );
 
     loop {
+        let frame_started = Instant::now();
         if let Some(live) = &live {
             if let Some(features) = active_snapshot.as_mut() {
                 let count = features.features.len();
@@ -411,7 +423,7 @@ async fn run(
                 }
             }
             if Instant::now() >= next_tile_request && camera.distance_m < 4_000_000.0 {
-                let _ = tiles.requests.try_send(galileo::tile_lod::TileView {
+                tiles.requests.submit(galileo::tile_lod::TileView {
                     latitude: camera.latitude,
                     longitude: camera.longitude,
                     meters_per_pixel: camera.meters_per_pixel(config.height),
@@ -421,6 +433,7 @@ async fn run(
                 next_tile_request = Instant::now() + Duration::from_secs(2);
             }
         }
+        let updates_done = Instant::now();
         let plan = camera.frame_plan(
             SurfaceMetrics {
                 logical_width: f64::from(config.width),
@@ -477,12 +490,26 @@ async fn run(
         }
         drop(mapped);
         readback.unmap();
+        let render_done = Instant::now();
         if let Some(encoder) = &mut encoder_process {
             encoder.write_frame(&rgba)?;
         } else if let Some(path) = &local_frame_path {
             publish_frame(path, &rgba)?;
         }
 
+        let frame_done = Instant::now();
+        if let Some(trace) = timing.as_mut() {
+            writeln!(
+                trace,
+                "{:.3},{:.3},{:.3},{:.3},{:.3}",
+                frame_started.duration_since(started).as_secs_f64() * 1000.0,
+                updates_done.duration_since(frame_started).as_secs_f64() * 1000.0,
+                render_done.duration_since(updates_done).as_secs_f64() * 1000.0,
+                frame_done.duration_since(render_done).as_secs_f64() * 1000.0,
+                frame_done.duration_since(frame_started).as_secs_f64() * 1000.0
+            )?;
+            trace.flush()?;
+        }
         deadline += interval;
         if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
             std::thread::sleep(remaining);

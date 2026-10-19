@@ -8,7 +8,7 @@ use image::RgbaImage;
 use std::{
     collections::VecDeque,
     process::Command,
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Condvar, Mutex, mpsc},
 };
 
 pub struct Raster {
@@ -19,17 +19,76 @@ pub struct Raster {
 }
 
 pub struct Stream {
-    pub requests: mpsc::SyncSender<TileView>,
-    pub results: mpsc::Receiver<Result<Raster>>,
+    pub requests: LatestView,
+    pub results: mpsc::Receiver<Result<Arc<Raster>>>,
+}
+
+/// Camera motion replaces pending work instead of queuing obsolete views.
+#[derive(Default, Clone)]
+pub struct LatestView(Arc<(Mutex<Option<TileView>>, Condvar)>);
+
+impl LatestView {
+    pub fn submit(&self, view: TileView) {
+        let (pending, ready) = &*self.0;
+        *pending.lock().unwrap() = Some(view);
+        ready.notify_one();
+    }
+
+    fn receive(&self) -> TileView {
+        let (pending, ready) = &*self.0;
+        let mut pending = pending.lock().unwrap();
+        loop {
+            if let Some(view) = pending.take() {
+                return view;
+            }
+            pending = ready.wait(pending).unwrap();
+        }
+    }
 }
 
 pub fn start(template: String) -> Stream {
-    let (sender, requests) = mpsc::sync_channel(1);
+    let sender = LatestView::default();
+    let requests = sender.clone();
     let (results, receiver) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
         let cache = TileCache::from_environment(&template);
-        while let Ok(view) = requests.recv() {
-            let raster = load(view, &template, cache.as_ref());
+        // Four maximum-sized mosaics retain at most 64 MiB of decoded pixels.
+        // Repeated views must not decode and upload the same imagery every two seconds.
+        let mut prepared = VecDeque::new();
+        let mut displayed = None;
+        loop {
+            let view = requests.receive();
+            let key = match rectangle(view) {
+                Ok(key) => key,
+                Err(error) => {
+                    if results.send(Err(error)).is_err() {
+                        break;
+                    }
+                    continue;
+                }
+            };
+            if displayed == Some(key) {
+                continue;
+            }
+            let raster = if let Some(index) = prepared.iter().position(|(cached, _)| *cached == key)
+            {
+                let entry: (_, Arc<Raster>) = prepared.remove(index).unwrap();
+                let raster = Arc::clone(&entry.1);
+                prepared.push_back(entry);
+                Ok(raster)
+            } else {
+                load(view, &template, cache.as_ref()).map(|raster| {
+                    let raster = Arc::new(raster);
+                    if prepared.len() == 4 {
+                        prepared.pop_front();
+                    }
+                    prepared.push_back((key, Arc::clone(&raster)));
+                    raster
+                })
+            };
+            if raster.is_ok() {
+                displayed = Some(key);
+            }
             if results.send(raster).is_err() {
                 break;
             }
@@ -195,6 +254,21 @@ fn decode_tile(bytes: &[u8]) -> Result<RgbaImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn camera_motion_replaces_pending_view() {
+        let pending = LatestView::default();
+        let view = |longitude| TileView {
+            latitude: 47.6,
+            longitude,
+            meters_per_pixel: 150.0,
+            viewport_width_px: 1280.0,
+            viewport_height_px: 720.0,
+        };
+        pending.submit(view(-122.3));
+        pending.submit(view(-66.1));
+        assert_eq!(pending.receive().longitude, -66.1);
+        assert!(pending.0.0.lock().unwrap().is_none());
+    }
     #[test]
     fn puget_and_puerto_rico_select_bounded_detail() {
         for (latitude, longitude) in [(47.6, -122.3), (18.4, -66.1)] {

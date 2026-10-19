@@ -2,7 +2,7 @@
   "width": 1280,
   "height": 720,
   "frames_per_second": 24,
-  "endpoint": "udp://100.80.85.86:55212?pkt_size=1316",
+  "endpoint": "udp://192.168.2.67:55212?pkt_size=1316",
   "ffmpeg_binary": "/opt/homebrew/bin/ffmpeg",
   "live_snapshot": {
     "url": "http://127.0.0.1:18581/operator/spatial/snapshot?domains=ais,hf_radar,noaa_coops,marine_weather,nws_weather,peeringdb,ripe_atlas&limit=20000",
