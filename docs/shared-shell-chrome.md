@@ -107,8 +107,10 @@ The main stream, independent tiles and matted decoder share the same contract.
 Metadata is read on preparation and metadata/rendering events, not each refresh.
 New sources, errors, completion and player teardown clear stale availability.
 Matted video reads its player on the decoder thread and reports state to the UI.
-The remote audio-control readiness flag requires a known audio track. Track
-presence does not prove audible samples or sound at the physical speakers.
+Known absence disables remote audio readiness. Unknown metadata preserves the
+existing source-local gain preference controls, with unknown status shown; it
+does not revoke an otherwise valid source grant. Track presence does not prove
+audible samples or sound at the physical speakers.
 
 ### Omni verification — immersive/audio update
 

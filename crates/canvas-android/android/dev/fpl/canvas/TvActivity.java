@@ -392,7 +392,7 @@ public final class TvActivity extends Activity {
                 Math.round((float)rgba.getDouble(2)*255));
         }
         float metric(String name) throws Exception { return (float)chrome.getDouble(name); }
-        ObserverView(){super(TvActivity.this);setVisibility(View.GONE);setFocusable(false);setClickable(false);}
+        ObserverView(){super(TvActivity.this);setVisibility(View.GONE);setFocusable(false);setClickable(false);setTranslationZ(dp(32));}
         void refresh(){
             String raw=nativeObserverState();
             try{
@@ -1064,7 +1064,7 @@ public final class TvActivity extends Activity {
         try {
             String id = videoSurfaceId == null || videoSurfaceId.isEmpty() ? "standalone-video" : videoSurfaceId;
             JSONObject snapshot = new JSONObject(nativeAudioUpdate(id, surfaceTitle, currentUrl,
-                preparedPlayer != null && audioAvailability==DecoderAudio.PRESENT && resumed && video.getVisibility() == View.VISIBLE, nativeIsMuted()));
+                preparedPlayer != null && audioAvailability!=DecoderAudio.ABSENT && resumed && video.getVisibility() == View.VISIBLE, nativeIsMuted()));
             if (snapshot.has("error")) throw new IllegalStateException(snapshot.getString("error"));
             if (controlNoticeView != null) controlNoticeView.update(snapshot);
             if (snapshot.isNull("pending")) return;
