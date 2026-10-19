@@ -32,6 +32,14 @@ pub mod workspaces;
 #[cfg(all(test, feature = "android-native-video"))]
 mod chrome_tests {
     #[test]
+    fn tv_metrics_are_compact_without_changing_desktop() {
+        let desktop = fpl_gfx::chrome::metrics();
+        let tv = super::tv_chrome_metrics();
+        assert_eq!(desktop[0], 44);
+        assert_eq!(tv, [15, 15, 10, 6]);
+        assert_eq!(tv[0], desktop[0].div_ceil(3));
+    }
+    #[test]
     fn preserves_shared_state_and_rejects_bad_frames() {
         let selected = super::chrome_records(100.0, 32.0, 1, false).unwrap();
         let focus = super::chrome_records(100.0, 32.0, 2, false).unwrap();
@@ -52,6 +60,14 @@ mod chrome_tests {
     }
 }
 
+/// TV density profile derived from the shared shell, not a desktop metric change.
+#[cfg(feature = "android-native-video")]
+pub fn tv_chrome_metrics() -> [u32; 4] {
+    let [height, _, text, padding] = fpl_gfx::chrome::metrics();
+    let height = height.div_ceil(3);
+    [height, height, text.saturating_sub(4), padding.saturating_sub(2)]
+}
+
 /// Bounded raster adapter for the shared GFX shell scene.
 #[cfg(all(target_os = "android", feature = "android-native-video"))]
 #[unsafe(no_mangle)]
@@ -59,7 +75,7 @@ pub extern "system" fn Java_dev_fpl_canvas_ShellChrome_nativeMetrics(
     env: jni::JNIEnv,
     _class: jni::objects::JClass,
 ) -> jni::sys::jintArray {
-    let values = fpl_gfx::chrome::metrics().map(|value| value as i32);
+    let values = tv_chrome_metrics().map(|value| value as i32);
     let Ok(array) = env.new_int_array(values.len() as i32) else { return std::ptr::null_mut(); };
     if env.set_int_array_region(&array, 0, &values).is_err() { return std::ptr::null_mut(); }
     array.into_raw()

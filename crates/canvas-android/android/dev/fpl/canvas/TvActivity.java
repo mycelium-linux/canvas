@@ -822,6 +822,14 @@ public final class TvActivity extends Activity {
         frame.addView(background, new FrameLayout.LayoutParams(-1, -1));
         video = new VideoView(this);
         video.setZOrderMediaOverlay(true); // Above shader surface, below native UI.
+        video.setOnKeyListener((view,key,event) -> {
+            if(!workspaceMode || (key!=KeyEvent.KEYCODE_DPAD_UP && key!=KeyEvent.KEYCODE_DPAD_DOWN)) return false;
+            if(event.getAction()==KeyEvent.ACTION_DOWN) {
+                if(key==KeyEvent.KEYCODE_DPAD_UP) focusWorkspaceSelector();
+                else if(muteButton.isShown()) muteButton.requestFocus();
+            }
+            return true;
+        });
         FrameLayout.LayoutParams geometry = new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER);
         frame.addView(video, geometry);
         status = new TextView(this);
@@ -857,6 +865,7 @@ public final class TvActivity extends Activity {
         HorizontalScrollView scroller = new HorizontalScrollView(this);
         workspaceSelector = scroller;
         scroller.setHorizontalScrollBarEnabled(false);
+        scroller.setFocusable(false); // Focus the real controls, never the scroll container.
         scroller.setFillViewport(true);
         scroller.setClipToPadding(false);
         scroller.setPadding(dp(ShellChrome.barPadding()), 0, dp(ShellChrome.barPadding()), 0);
@@ -868,7 +877,7 @@ public final class TvActivity extends Activity {
         workspaceHeader = new TextView(this);
         workspaceHeader.setSingleLine(true);
         workspaceHeader.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        workspaceHeader.setTextSize(13);
+        workspaceHeader.setTextSize(ShellChrome.textSize());
         workspaceHeader.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
         workspaceHeader.setPadding(dp(12), 0, dp(16), 0);
         workspaceHeader.setVisibility(View.GONE);
@@ -986,6 +995,7 @@ public final class TvActivity extends Activity {
     @Override public void onBackPressed() {
         if(libraryScreen!=null) { if(!libraryScreen.goBack())closeLibrary(); return; }
         if(channelScreen!=null) { closeChannels(); return; }
+        if(menuExpanded) { closeWorkspaceMenu(); return; }
         super.onBackPressed();
     }
 
@@ -1533,6 +1543,78 @@ public final class TvActivity extends Activity {
     private JSONObject shellMenu;
     private String menuSection = "", menuProject = "";
     private boolean menuExpanded = false;
+    private JSONObject menuProjection;
+    private String menuFirstChildTag="";
+    private final java.util.HashSet<String> menuChildTags=new java.util.HashSet<>();
+
+    private void closeWorkspaceMenu() {
+        menuExpanded=false;
+        try { if(menuProjection!=null) renderWorkspaceMenu(menuProjection); }
+        catch(Exception error) { showStatus("Menu failed: "+error.getMessage()); }
+        focusWorkspaceSelector();
+    }
+    private void focusWorkspaceSelector() {
+        for(int i=0;i<selector.getChildCount();i++) {
+            View child=selector.getChildAt(i);
+            if("workspace-menu".equals(child.getTag())) { child.requestFocus(); return; }
+        }
+    }
+    private void focusWorkspaceContent() {
+        closeWorkspaceMenu();
+        for(View widget:widgets) {
+            if(widget.getVisibility()!=View.VISIBLE) continue;
+            for(View target:widget.getFocusables(View.FOCUS_FORWARD)) {
+                if(target.isShown() && target.isEnabled() && target.requestFocus()) return;
+            }
+        }
+        if(muteButton.isShown()) muteButton.requestFocus();
+    }
+    private void wireWorkspaceFocus() {
+        java.util.ArrayList<View> choices=new java.util.ArrayList<>();
+        for(int i=0;i<selector.getChildCount();i++) {
+            View child=selector.getChildAt(i);
+            if(child.isFocusable() && child.getVisibility()==View.VISIBLE && child.isEnabled()) {
+                if(child.getId()==View.NO_ID) child.setId(View.generateViewId());
+                choices.add(child);
+            }
+        }
+        for(int i=0;i<choices.size();i++) {
+            final int index=i;
+            View child=choices.get(i);
+            child.setNextFocusLeftId(choices.get(Math.max(0,i-1)).getId());
+            child.setNextFocusRightId(choices.get(Math.min(choices.size()-1,i+1)).getId());
+            child.setNextFocusUpId(child.getId());
+            child.setOnKeyListener((view,key,event) -> {
+                if(key!=KeyEvent.KEYCODE_DPAD_DOWN && key!=KeyEvent.KEYCODE_DPAD_UP && key!=KeyEvent.KEYCODE_DPAD_LEFT && key!=KeyEvent.KEYCODE_DPAD_RIGHT) return false;
+                if(event.getAction()!=KeyEvent.ACTION_DOWN) return true;
+                if(key==KeyEvent.KEYCODE_DPAD_DOWN) {
+                    if(!menuExpanded) view.performClick();
+                    else if(view.getTag()!=null && view.getTag().toString().startsWith("section:")) {
+                        String section=view.getTag().toString().substring("section:".length());
+                        if(!menuSection.equals(section)) view.performClick();
+                        View first=menuFirstChildTag.isEmpty() ? null : selector.findViewWithTag(menuFirstChildTag);
+                        if(first!=null) first.requestFocus();
+                    } else focusWorkspaceContent();
+                } else if(key==KeyEvent.KEYCODE_DPAD_UP && index>0) {
+                    View parent=selector.findViewWithTag("section:"+menuSection);
+                    if(parent!=null && menuChildTags.contains(String.valueOf(view.getTag()))) parent.requestFocus();
+                    else focusWorkspaceSelector();
+                } else if(key==KeyEvent.KEYCODE_DPAD_LEFT || key==KeyEvent.KEYCODE_DPAD_RIGHT) {
+                    int next=Math.max(0,Math.min(choices.size()-1,index+(key==KeyEvent.KEYCODE_DPAD_RIGHT ? 1 : -1)));
+                    choices.get(next).requestFocus();
+                }
+                return true;
+            });
+        }
+        wireSourceAudio(muteButton);
+    }
+    private void wireSourceAudio(Button button) {
+        button.setOnKeyListener((view,key,event) -> {
+            if(key!=KeyEvent.KEYCODE_DPAD_UP) return false;
+            if(event.getAction()==KeyEvent.ACTION_DOWN) focusWorkspaceSelector();
+            return true;
+        });
+    }
     private JSONObject menuDescriptor() throws Exception {
         if (shellMenu != null) return shellMenu;
         try (java.io.InputStream input = getAssets().open("canvas-menu.json")) {
@@ -1586,6 +1668,9 @@ public final class TvActivity extends Activity {
         if(tag.equals(focusedTag)) button.requestFocus();
     }
     private void renderWorkspaceMenu(JSONObject projection) throws Exception {
+        menuProjection=projection;
+        menuFirstChildTag="";
+        menuChildTags.clear();
         JSONObject catalog=projection.getJSONObject("catalog"), palette=projection.getJSONObject("palette");
         JSONObject menu=menuDescriptor(); JSONArray configured=menu.getJSONArray("items"), items=new JSONArray();
         java.util.HashSet<String> listed=new java.util.HashSet<>();
@@ -1628,7 +1713,8 @@ public final class TvActivity extends Activity {
         String focusedTag=focused != null && focused.getTag()!=null ? focused.getTag().toString() : "";
         selector.removeAllViews();
         TextView identity=new TextView(this); identity.setText("fungOS");
-        identity.setTextSize(ShellChrome.textSize()); identity.setTextColor(Color.parseColor(palette.getString("primary")));
+        identity.setTextSize(ShellChrome.textSize()); identity.setTextColor(Color.parseColor(palette.getString("success")));
+        identity.setIncludeFontPadding(false);
         identity.setGravity(Gravity.CENTER_VERTICAL); identity.setPadding(0,0,dp(ShellChrome.barPadding()),0);
         selector.addView(identity,new LinearLayout.LayoutParams(-2,barHeight()));
         String selectedName=selected;
@@ -1639,10 +1725,20 @@ public final class TvActivity extends Activity {
         workspace.setText(selectedName + (menuExpanded ? " ▴" : " ▾")); workspace.setTextSize(ShellChrome.textSize());
         ShellChrome.control(workspace,palette,true,true); workspace.setContentDescription((menuExpanded ? "Close" : "Open") + " workspaces. Current workspace " + selectedName);
         workspace.setOnClickListener(v -> {menuExpanded=!menuExpanded;
-            try {renderWorkspaceMenu(projection);} catch(Exception error) {showStatus("Menu failed: "+error.getMessage());}});
+            try {
+                renderWorkspaceMenu(projection);
+                if(menuExpanded) {
+                    for(int i=0;i<selector.getChildCount();i++) {
+                        View choice=selector.getChildAt(i);
+                        if(choice.isFocusable() && choice!=selector.findViewWithTag("workspace-menu")) {choice.requestFocus();break;}
+                    }
+                } else focusWorkspaceSelector();
+            } catch(Exception error) {showStatus("Menu failed: "+error.getMessage());}});
         selector.addView(workspace,new LinearLayout.LayoutParams(-2,dp(ShellChrome.controlHeight())));
         if("workspace-menu".equals(focusedTag) || (!menuExpanded && !focusedTag.isEmpty())) workspace.requestFocus();
         if(!menuExpanded) {
+            TextView hint=new TextView(this);hint.setText("↓ Browse");hint.setIncludeFontPadding(false);hint.setTextSize(ShellChrome.textSize());hint.setTextColor(Color.parseColor(palette.getString("text_muted")));hint.setGravity(Gravity.CENTER_VERTICAL);hint.setPadding(dp(10),0,0,0);
+            selector.addView(hint,new LinearLayout.LayoutParams(-2,barHeight()));
             String pageName=projection.getJSONObject("document").optInt("active_page",0)==0 ? "Overview" : "";
             JSONArray pageChoices=projection.getJSONObject("document").optJSONArray("pages");
             int selectedPage=projection.getJSONObject("document").optInt("active_page",0);
@@ -1654,6 +1750,7 @@ public final class TvActivity extends Activity {
             View flexible=new View(this);selector.addView(flexible,new LinearLayout.LayoutParams(0,barHeight(),1));
             android.widget.TextClock clock=new android.widget.TextClock(this);clock.setFormat12Hour("HH:mm");clock.setFormat24Hour("HH:mm");clock.setTextSize(ShellChrome.textSize());clock.setGravity(Gravity.CENTER_VERTICAL);clock.setTextColor(Color.parseColor(palette.getString("text")));
             selector.addView(clock,new LinearLayout.LayoutParams(-2,barHeight()));
+            wireWorkspaceFocus();
             return;
         }
         JSONArray expanded=null;
@@ -1662,15 +1759,19 @@ public final class TvActivity extends Activity {
             if(item.optString("id").equals(menuSection)) expanded=item.optJSONArray("children");
         }
         if(expanded != null) {
+            if(expanded.length()>0) menuFirstChildTag=expanded.getJSONObject(0).getString("project_id");
             View divider=new View(this); divider.setBackgroundColor(Color.parseColor(palette.getString("border")));
-            LinearLayout.LayoutParams line=new LinearLayout.LayoutParams(dp(1),barHeight()-dp(14));
-            line.setMargins(dp(12),dp(7),dp(8),dp(7));selector.addView(divider,line);
-            for(int i=0;i<expanded.length();i++) addMenuChoice(expanded.getJSONObject(i),projection,focusedTag);
+            LinearLayout.LayoutParams line=new LinearLayout.LayoutParams(dp(1),barHeight()-dp(6));
+            line.setMargins(dp(8),dp(3),dp(6),dp(3));selector.addView(divider,line);
+            for(int i=0;i<expanded.length();i++) {
+                menuChildTags.add(expanded.getJSONObject(i).getString("project_id"));
+                addMenuChoice(expanded.getJSONObject(i),projection,focusedTag);
+            }
         }
         if(!libraryEndpoint.isEmpty() && (menu.optString("library_project").isEmpty() || menu.optString("library_project").equals(selected))) {
             Button library=new Button(this);library.setText("Library");library.setTextSize(ShellChrome.textSize());
             styleControl(library,palette,libraryScreen!=null);library.setOnClickListener(v -> showLibrary());
-            selector.addView(library,new LinearLayout.LayoutParams(-2,barHeight()-dp(4)));
+            selector.addView(library,new LinearLayout.LayoutParams(-2,barHeight()));
         }
         JSONArray pages=projection.getJSONObject("document").optJSONArray("pages");
         if(pages != null && pages.length()>0) for(int i=0;i<=pages.length();i++) {
@@ -1684,8 +1785,9 @@ public final class TvActivity extends Activity {
                 else {lastProjection="";refreshWorkspace();}
             });
             button.setMinHeight(0);button.setMinimumHeight(0);
-            selector.addView(button,new LinearLayout.LayoutParams(-2,barHeight()-dp(4)));
+            selector.addView(button,new LinearLayout.LayoutParams(-2,barHeight()));
         }
+        wireWorkspaceFocus();
     }
 
     private void styleControl(Button button, JSONObject palette, boolean selected) throws Exception {
@@ -1845,6 +1947,7 @@ public final class TvActivity extends Activity {
                     if (extra != null && !extra.matches(url, content.optJSONObject("matte"))) { extra.dispose(); frame.removeView(extra); extraStreams.remove(id); extra = null; }
                     if (extra == null) {
                         extra = new StreamTileView(this, surface.getString("title"), url, palette, content.optJSONObject("matte"));
+                        wireSourceAudio(extra.muteControl());
                         extraStreams.put(id, extra); frame.addView(extra, geometry);
                     } else extra.setLayoutParams(geometry);
                     styleControl(extra.muteControl(), palette, false);

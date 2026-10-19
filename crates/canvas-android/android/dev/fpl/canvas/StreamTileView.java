@@ -35,10 +35,7 @@ final class StreamTileView extends FrameLayout {
         status.setGravity(Gravity.CENTER);
         addView(status, new LayoutParams(-1, -1));
         mute = new Button(context);
-        mute.setAllCaps(false);
-        mute.setTextSize(14);
-        mute.setTextColor(Color.parseColor(palette.getString("text")));
-        mute.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.parseColor(palette.getString("surface"))));
+        ShellChrome.control(mute,palette,false);
         ShellChrome.audioState(mute,title,muted);
         mute.setOnClickListener(v -> {
             muted = !muted;

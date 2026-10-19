@@ -34,7 +34,10 @@ renderers.
 
 ## TV audio control
 
-Video surfaces keep a compact 88×44 logical-pixel `Mute` / `Unmute` action.
+Video surfaces keep a compact 24×24dp speaker action using Android's native
+muted/unmuted icons, not a font glyph. These are remote/D-pad controls, not
+touch targets. The focus outline remains visible; the accessible action is
+still `Mute` / `Unmute`.
 One press changes only that decoder's gain; it never touches system volume or
 other tiles. Repeated stream titles are removed from the visible label, but
 the accessibility description retains the exact source and current mute state.
@@ -44,14 +47,42 @@ the same label contract. JVM-only `AudioChromeTest` covers that contract.
 
 ## Compact shell hierarchy
 
-GFX owns the shared 44-logical-pixel shell row height. Desktop re-exports that
-constant; Android reads the same compact row metrics through JNI. Android's
-default row is `fungOS / selected workspace / current page / clock`, with a
+GFX owns the shared 44-logical-pixel desktop shell row height. The Android Rust
+adapter derives its TV profile (`ceil(height / 3)`, currently 15dp), with 10sp
+labels and 6dp outer padding, and exports it through JNI. Desktop stays 44px.
+Android's default row is `fungOS / selected workspace / ↓ Browse / current page / clock`, with a
 single workspace action revealing the retained grouped navigation and page
 choices. Expanded choices stay in the same horizontal row; they never become
 a second stacked toolbar or replace workspace content. Selection collapses the
 menu, while MENU focuses the first actual control rather than the brand label.
-The TV row shrinks from 56 to 44dp; at density 4 on a 2160px panel, its height
-falls from 224px (10.37%) to 176px (8.15%). Desktop's existing 44px row is
-unchanged. D-pad control targets remain 44 logical pixels tall. Page controls
-and the Library launcher remain available in the expanded navigation.
+At density 2 on the Omni's 1920×1080 logical display, the bar falls from 88px
+to 30px. This does not change Android's display size or any other application.
+The brand uses the theme's green success ink. Page controls and the Library
+launcher remain available in the expanded navigation.
+
+Down or Select on the workspace selector opens and focuses the first choice.
+Left/Right traverses the visible enabled controls and clamps at either end.
+Down on a category enters its first workspace; Up returns to the category.
+Down from a workspace choice closes the menu and enters interactive content
+(or the source audio control for video-only workspaces). Up from source audio
+returns to the selector. MENU restores selector focus; Back collapses the menu
+before leaving the Activity, without superseding Library or Channels handling.
+Content retains its own PDF panning and signal-widget arrow handling. Remote
+navigation does not implicitly grant keyboard control of a Surf stream.
+
+From a focused main video, Up returns directly to the selector and Down enters
+its audio control. The horizontal scroller itself is not a focus stop.
+
+### Omni verification — 2026-10-19
+
+Installed development APK version 57 (`0.1.56-tv-compact-navigation`) in place,
+using the existing signing certificate and without clearing app data. The
+selected FPL venture deck (document revision 3) and all 31 workspaces survived.
+ADB screenshots and accessibility bounds confirmed the 30px bar and 48×48px
+speaker target on the 1920×1080 logical display. Verified selector Down,
+Left clamping, category Right/Down, child Up, Back collapse, source-audio Down
+and Up-to-selector on the device. Decoder connection 1607 remained unchanged
+through navigation; its initial 85-frame and later 2,827-frame snapshots both
+reported zero dropped frames. This is a navigation smoke test, not a sustained
+playback benchmark. Rust's full Android library suite passed 31 tests; Java
+compilation and the JVM audio contract test passed.

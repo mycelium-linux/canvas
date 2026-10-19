@@ -10,8 +10,8 @@ public final class AudioChromeTest {
         if (!ShellChrome.audioDescription("Tour",false).equals("Mute Tour audio. This stream is unmuted."))
             throw new AssertionError("source-specific unmuted state");
         if (ShellChrome.audioAction(true).length()>6) throw new AssertionError("compact label");
-        if (ShellChrome.AUDIO_HEIGHT_DP<44 || ShellChrome.AUDIO_WIDTH_DP<ShellChrome.AUDIO_HEIGHT_DP)
-            throw new AssertionError("minimum remote target");
+        if (ShellChrome.AUDIO_HEIGHT_DP!=24 || ShellChrome.AUDIO_WIDTH_DP!=ShellChrome.AUDIO_HEIGHT_DP)
+            throw new AssertionError("compact square D-pad target");
         System.out.println("Audio chrome contracts passed");
     }
 }

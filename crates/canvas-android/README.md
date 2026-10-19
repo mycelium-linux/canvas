@@ -203,7 +203,8 @@ On the Mac, use a fresh packaging directory. Set `tv_package` to its path,
 library from Agora into `$tv_package/lib/armeabi-v7a/`. From this crate directory:
 
 ```sh
-mkdir -p "$tv_package/classes" "$tv_package/dex"
+mkdir -p "$tv_package/classes" "$tv_package/dex" "$tv_package/assets"
+cp ../../config/deploy/firetv/menu.json "$tv_package/assets/canvas-menu.json"
 "$JAVA_HOME/bin/javac" -source 8 -target 8 \
   -classpath "$tv_sdk/platforms/android-33/android.jar" \
   -d "$tv_package/classes" android/dev/fpl/canvas/*.java
@@ -219,7 +220,7 @@ mkdir -p "$tv_package/classes" "$tv_package/dex"
   "$tv_package/resources.zip"
 cp -f "$tv_package/dex/classes.dex" "$tv_package/classes.dex"
 cd "$tv_package"
-zip -q unsigned.apk classes.dex lib/armeabi-v7a/libcanvas_android.so
+zip -q unsigned.apk classes.dex lib/armeabi-v7a/libcanvas_android.so assets/canvas-menu.json
 "$tv_sdk/build-tools/33.0.2/zipalign" -f 4 unsigned.apk aligned.apk
 "$tv_sdk/build-tools/33.0.2/apksigner" sign \
   --ks "$tv_keystore" --ks-key-alias canvas-tv-debug \
@@ -232,6 +233,12 @@ adb -s 192.168.2.97:5555 install -r canvas-tv.apk
 for upgrades; let apksigner prompt for its password rather than recording
 production secrets in a command or runbook. The currently installed build is
 development-signed, not a release-distribution artifact.
+
+For upgrades, read the installed version with `adb shell dumpsys package
+dev.fpl.canvas.tv` and select an equal or higher version code instead of the
+initial-install example above. Package `canvas-menu.json` with every APK:
+omitting it silently falls back to a flat project list and loses the configured
+navigation groups, though the saved workspaces remain intact.
 
 Do not give javac the Android JAR as `-bootclasspath`: its API stubs lack Java's
 lambda compiler runtime. D8 desugars the compiled listeners for the minimum API.

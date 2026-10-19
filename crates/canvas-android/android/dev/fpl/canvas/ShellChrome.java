@@ -12,13 +12,14 @@ final class ShellChrome {
     private static native int[] nativeMetrics();
     private static final class Metrics {
         static final int[] VALUES=nativeMetrics();
-        static { if(VALUES==null || VALUES.length!=4 || VALUES[0]<32 || VALUES[0]>64 || VALUES[1]<32 || VALUES[1]>64 || VALUES[2]<10 || VALUES[2]>24 || VALUES[3]<0 || VALUES[3]>16) throw new IllegalStateException("Invalid shared shell metrics"); }
+        static { if(VALUES==null || VALUES.length!=4 || VALUES[0]<12 || VALUES[0]>32 || VALUES[1]<12 || VALUES[1]>32 || VALUES[2]<10 || VALUES[2]>16 || VALUES[3]<0 || VALUES[3]>16) throw new IllegalStateException("Invalid TV shell metrics"); }
     }
     static int barHeight() { return Metrics.VALUES[0]; }
     static int controlHeight() { return Metrics.VALUES[1]; }
     static int textSize() { return Metrics.VALUES[2]; }
     static int barPadding() { return Metrics.VALUES[3]; }
-    static final int AUDIO_WIDTH_DP=88, AUDIO_HEIGHT_DP=44, AUDIO_INSET_DP=6;
+    // D-pad targets, not touch targets: focus supplies the affordance on a TV.
+    static final int AUDIO_WIDTH_DP=24, AUDIO_HEIGHT_DP=24, AUDIO_INSET_DP=6;
     private static native float[] nativeFrame(float width, float height, int state, boolean bar, boolean quiet);
     private static int color(JSONObject palette, String role) throws Exception {
         return Color.parseColor(palette.getString(role));
@@ -108,15 +109,31 @@ final class ShellChrome {
         button.setPadding(padding,0,padding,0);
         button.setOnFocusChangeListener((view,focused) -> TvMotion.focus(view,focused));
         button.setSelected(selected);
+        if(button.getCompoundDrawables()[0]!=null) audioInsets(button);
     }
     static void bar(View view, JSONObject palette) throws Exception {
         view.setBackground(new Face(view,palette,true,false));
     }
     /** Source-local action, not device-wide volume or proof of audible signal. */
     static void audioState(Button button, String title, boolean muted) {
-        button.setText(audioAction(muted));
-        button.setTextSize(14);
-        button.setContentDescription(audioDescription(title,muted));
+        String description=audioDescription(title,muted);
+        if(description.contentEquals(button.getContentDescription()==null ? "" : button.getContentDescription())) return;
+        button.setText("");
+        float density=button.getResources().getDisplayMetrics().density;
+        Drawable icon=button.getResources().getDrawable(muted ? android.R.drawable.ic_lock_silent_mode : android.R.drawable.ic_lock_silent_mode_off,button.getContext().getTheme()).mutate();
+        int size=Math.round(14*density);
+        icon.setBounds(0,0,size,size);
+        icon.setTintList(button.getTextColors());
+        button.setCompoundDrawables(icon,null,null,null);
+        button.setCompoundDrawablePadding(0);
+        audioInsets(button);
+        button.setContentDescription(description);
+    }
+    private static void audioInsets(Button button) {
+        int inset=Math.round(5*button.getResources().getDisplayMetrics().density);
+        button.setPadding(inset,0,inset,0);
+        Drawable icon=button.getCompoundDrawables()[0];
+        if(icon!=null) icon.setTintList(button.getTextColors());
     }
     static String audioAction(boolean muted) { return muted ? "Unmute" : "Mute"; }
     static String audioDescription(String title, boolean muted) {
