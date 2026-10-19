@@ -114,7 +114,7 @@ audible samples or sound at the physical speakers.
 
 ### Omni verification — immersive/audio update
 
-APK version 58 (`0.1.57-tv-immersive-audio`) was installed in place with the
+APK version 59 (`0.1.58-tv-immersive-audio`) was installed in place with the
 same development certificate. A temporary switch to the existing venture deck
 confirmed VideoView bounds `[0,0][1920,1080]` and a full-width screenshot.
 Panopticon, which was selected at verification time, was restored afterward;
@@ -124,3 +124,47 @@ with no audio stream, but this device's HLS decoder exposed no usable track
 metadata: the on-screen control correctly remained unknown, not “audio present.”
 All 32 Rust library tests, ARM check/release build, Java compilation and the
 expanded JVM audio-state contract checks passed.
+
+## Desktop navigation scopes
+
+The top workspace selector lists Canvas workspaces only. The bottom dock shows
+Canvas windows in the current document, excluding frameless instruments. Its
+launcher opens the Canvas-window view; native applications are an explicit
+secondary view, available by its labelled button or F2. The workspace selector
+does not offer that native-app toggle. Native dock pins stay saved but no longer
+precede Canvas windows in the default dock.
+
+These are UI filters, not authorization boundaries. The full owner CLI catalog,
+target binding, catalog revisions and activation checks stay unchanged. Search
+filters within the selected view before the six-row presentation limit. A view
+change invalidates older pointer selections; it cannot cancel an initial
+catalog load and strand the picker without data. Remote window IDs are never
+filtered against the local document's IDs.
+
+On Neo, installed module files under `~/Library/Application Support/Dock/canvas/modules`
+override repository defaults. Deploy the `.lua` and `.json` pairs for
+`desktop-bar-v1`, `desktop-dock-v1` and `desktop-launcher-v1` together with the
+compatible native host. The bar manifest must grant the shared `padding` and
+`labelsize` inputs; the launcher manifest must grant optional `scope`.
+
+The installed app is `~/Applications/Canvas.app`, executable `Contents/MacOS/canvas`,
+with signing identifier `dev.fpl.canvas.shell`. Its existing LaunchAgent is
+`dev.fpl.canvas`. Preserve that identifier, module overrides, workspace store,
+active project and native pins when updating. Back up the binary and overrides,
+stop only that LaunchAgent, replace/sign the binary and matching module pairs,
+then reload the same LaunchAgent. Verify owner inspection and a screenshot,
+and confirm both selectors. Do not change the system Dock or replace the
+independent permission-bearing Dock Control helper.
+
+### Neo verification — 2026-10-19
+
+Deployed source commit `2b1bb53` with all three matching module pairs. The
+existing signing identifier and LaunchAgent were retained. Signing verification,
+module comparisons, owner inspection and a live screenshot passed. The bottom
+dock no longer displays the Calculator or Terminal pins. All 32 workspaces,
+the active Tardy workspace and its five surfaces survived. The saved native-pin
+file hash is unchanged. Eight production launcher integration tests and the
+focused native App routing test passed, along with native check and build.
+Interactive picker behavior is covered by those tests; this deployment did not
+inject pointer events into the desktop. A rollback copy of the old binary,
+module pairs and state is retained under the local Canvas shell backup folder.
