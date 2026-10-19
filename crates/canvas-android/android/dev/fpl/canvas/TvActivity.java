@@ -68,6 +68,7 @@ public final class TvActivity extends Activity {
     private static native String nativeObserverState();
     private static native String nativeAmbientState();
     private static native boolean nativeAmbientWake();
+    private static native float[] nativeAmbientFrame(long elapsedMillis);
     private FrameLayout ambientScreen;
     private boolean ambientShown;
     private int ambientWakeKey=-1;
@@ -104,11 +105,21 @@ public final class TvActivity extends Activity {
                 ambientScreen.setBackgroundColor(Color.BLACK);
                 ambientScreen.setContentDescription("Screensaver. Press a remote button to return.");
                 ambientScreen.setFocusable(true); ambientScreen.setFocusableInTouchMode(true);
-                // Black pixels avoid fixed bright marks and do not imply activity.
                 frame.addView(ambientScreen,new FrameLayout.LayoutParams(-1,-1));
+                frame.removeView(background);
+                ambientScreen.addView(background,new FrameLayout.LayoutParams(-1,-1));
+                JSONObject palette=new JSONObject(nativeProjection(frame.getWidth(),frame.getHeight(),barHeight())).getJSONObject("palette");
+                JSONObject ambientDocument=new JSONObject().put("background",new JSONObject()
+                    .put("kind","shader").put("shader_id","ambient-rotation").put("speed",1.0));
+                background.configure(ambientDocument,palette);
                 ambientScreen.bringToFront(); ambientScreen.requestFocus();
             } else {
-                if(ambientScreen!=null)frame.removeView(ambientScreen);
+                if(ambientScreen!=null) {
+                    background.setActive(false);
+                    ambientScreen.removeView(background);
+                    frame.addView(background,0,new FrameLayout.LayoutParams(-1,-1));
+                    frame.removeView(ambientScreen);
+                }
                 ambientScreen=null;
                 for(java.util.Map.Entry<View,Integer> entry:ambientVisibility.entrySet())
                     if(entry.getKey().getParent()==frame)entry.getKey().setVisibility(entry.getValue());
@@ -274,6 +285,10 @@ public final class TvActivity extends Activity {
         private volatile boolean active;
         private String key = "", vertex = "", fragment = "";
         private float speed;
+        private boolean ambientMode;
+        private int maxWidth=1280,maxHeight=720,frameMillis=33;
+        private long animationEpoch=System.nanoTime();
+        private int lastAmbientIndex=-1;
         private final float[] theme = new float[4];
         private final ByteBuffer uniforms = ByteBuffer.allocateDirect(48).order(ByteOrder.nativeOrder());
         private final long epoch = System.nanoTime();
@@ -304,6 +319,10 @@ public final class TvActivity extends Activity {
             if (!Float.isFinite(rate) || rate < 0 || rate > 4) throw new IllegalArgumentException("Invalid shader speed");
             int color = Color.parseColor(palette.getString("background"));
             final String vs = source.getString("vertex"), fs = source.getString("fragment");
+            ambientMode=source.optBoolean("ambient",false);
+            maxWidth=source.optInt("max_width",1280); maxHeight=source.optInt("max_height",720);
+            frameMillis=1000/Math.max(1,Math.min(30,source.optInt("max_fps",30)));
+            animationEpoch=System.nanoTime(); lastAmbientIndex=-1;
             key = next; setVisibility(View.VISIBLE); active = resumed;
             gpu.post(() -> {
                 vertex = vs; fragment = fs; speed = rate;
@@ -357,8 +376,16 @@ public final class TvActivity extends Activity {
                 try {
                     long started = System.nanoTime();
                     uniforms.clear(); uniforms.putFloat(width).putFloat(height);
-                    uniforms.putFloat(speed == 0 ? 0 : (System.nanoTime() - epoch) / 1e9f * speed).putFloat(0);
-                    for (int i = 0; i < 4; i++) uniforms.putFloat(0);
+                    long elapsed=TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-animationEpoch);
+                    float[] phase=ambientMode ? nativeAmbientFrame(elapsed) : null;
+                    if(ambientMode && (phase==null || phase.length!=3))throw new IllegalStateException("Invalid ambient phase");
+                    uniforms.putFloat(speed == 0 ? 0 : (System.nanoTime() - (ambientMode?animationEpoch:epoch)) / 1e9f * speed).putFloat(ambientMode?phase[2]:0);
+                    uniforms.putFloat(0).putFloat(0); // local framebuffer origin
+                    uniforms.putFloat(ambientMode?phase[0]:0).putFloat(ambientMode?phase[1]:0);
+                    if(ambientMode && lastAmbientIndex!=(int)phase[1]) {
+                        lastAmbientIndex=(int)phase[1];
+                        android.util.Log.i("CanvasBackground","ambient shader="+lastAmbientIndex+" elapsed-ms="+elapsed);
+                    }
                     for (float value : theme) uniforms.putFloat(value);
                     uniforms.flip();
                     GLES30.glViewport(0, 0, width, height); GLES30.glUseProgram(program);
@@ -378,13 +405,13 @@ public final class TvActivity extends Activity {
                         completedFrames = 0; workNanos = 0; sampleStart = now;
                     }
                     if (active && speed > 0) gpu.postDelayed(this,
-                        Math.max(1, 33 - TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)));
+                        Math.max(1, frameMillis - TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)));
                 } catch (Exception error) { failure(error); }
             }
         };
         @Override public void surfaceCreated(SurfaceHolder holder) {
             int w = Math.max(1, getWidth()), h = Math.max(1, getHeight());
-            float scale = Math.min(1, Math.min(1280f / w, 720f / h));
+            float scale = Math.min(1, Math.min((float)maxWidth / w, (float)maxHeight / h));
             width = Math.max(1, Math.round(w * scale)); height = Math.max(1, Math.round(h * scale));
             holder.setFixedSize(width, height);
             gpu.post(() -> {
@@ -1563,7 +1590,7 @@ public final class TvActivity extends Activity {
         super.onResume();
         resumed = true;
         for (View widget : widgets) if(widget instanceof ConwaysView) ((ConwaysView)widget).setActive(true);
-        background.setActive(!ambientShown);
+        background.setActive(true);
         lastProjection = "";
         lastStructure = "";
         if (workspaceMode) currentUrl = "";

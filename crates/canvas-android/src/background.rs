@@ -2,10 +2,98 @@
 use canvas_workspace::{BackgroundShader, background_shaders};
 
 pub fn program(id: &str) -> Result<serde_json::Value, String> {
+    if id == "ambient-rotation" {
+        let mut body = String::new();
+        const ENTRY: &str =
+            "@fragment\nfn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32>";
+        for (index, shader) in AMBIENT_SHADERS.iter().enumerate() {
+            if !background_shaders::ambient_redistributable(*shader) {
+                return Err("Ambient shader license is not cleared".into());
+            }
+            let source =
+                background_shaders::source(*shader).ok_or("Ambient shader is unavailable")?;
+            if !source.contains(ENTRY) {
+                return Err("Ambient shader entry contract changed".into());
+            }
+            body.push_str(&source.replacen(
+                ENTRY,
+                &format!("fn ambient_{index}(pos: vec4<f32>) -> vec4<f32>"),
+                1,
+            ));
+        }
+        body.push_str(
+            "\nfn ambient_sample(index: i32, pos: vec4<f32>) -> vec3<f32> {\nswitch index {\n",
+        );
+        for index in 0..AMBIENT_SHADERS.len() {
+            body.push_str(&format!("case {index}: {{ return clamp(ambient_{index}(pos).xyz,vec3<f32>(0.0),vec3<f32>(1.0)); }}\n"));
+        }
+        body.push_str("default: { return vec3<f32>(0.0); }\n}\n}\n@fragment\nfn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {\nlet outgoing=ambient_sample(i32(u._pad2.x),pos);\nif u._pad<=0.0 { return vec4<f32>(outgoing,1.0); }\nlet incoming=ambient_sample(i32(u._pad2.y),pos);\nreturn vec4<f32>(mix(outgoing,incoming,u._pad),1.0);\n}\n");
+        let mut program = compile(&body)?;
+        program["ambient"] = serde_json::json!(true);
+        program["shaders"] = serde_json::json!(AMBIENT_SHADERS);
+        program["rotation_ms"] = serde_json::json!(ROTATION_MS);
+        program["crossfade_ms"] = serde_json::json!(CROSSFADE_MS);
+        program["max_fps"] = serde_json::json!(20);
+        program["max_width"] = serde_json::json!(640);
+        program["max_height"] = serde_json::json!(360);
+        return Ok(program);
+    }
     let shader: BackgroundShader = serde_json::from_value(serde_json::json!(id))
         .map_err(|_| format!("Unknown background shader: {id}"))?;
+    if !background_shaders::ambient_redistributable(shader) {
+        return Err(format!("Fire TV shader license is not cleared: {id}"));
+    }
     let body = background_shaders::source(shader)
         .ok_or_else(|| format!("Fire TV does not yet support shader: {id}"))?;
+    compile(body)
+}
+
+pub const ROTATION_MS: u64 = 300_000;
+pub const CROSSFADE_MS: u64 = 4_000;
+pub const AMBIENT_SHADERS: [BackgroundShader; 5] = [
+    BackgroundShader::StarNest,
+    BackgroundShader::AuroraDrift,
+    BackgroundShader::SlowRipple,
+    BackgroundShader::Tidepool,
+    BackgroundShader::DuskEmber,
+];
+
+/// Monotonic absolute phase: no timer drift or catch-up loops after a stall.
+pub fn ambient_frame(elapsed_ms: u64) -> [f32; 3] {
+    let cycle = elapsed_ms / ROTATION_MS;
+    let phase = elapsed_ms % ROTATION_MS;
+    let next = (cycle % AMBIENT_SHADERS.len() as u64) as f32;
+    if cycle == 0 || phase >= CROSSFADE_MS {
+        return [next, next, 0.0];
+    }
+    let previous = ((cycle - 1) % AMBIENT_SHADERS.len() as u64) as f32;
+    let t = phase as f32 / CROSSFADE_MS as f32;
+    [previous, next, t * t * (3.0 - 2.0 * t)]
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_fpl_canvas_TvActivity_nativeAmbientFrame(
+    env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    elapsed: jni::sys::jlong,
+) -> jni::sys::jfloatArray {
+    let Ok(elapsed) = u64::try_from(elapsed) else {
+        return std::ptr::null_mut();
+    };
+    let Ok(array) = env.new_float_array(3) else {
+        return std::ptr::null_mut();
+    };
+    if env
+        .set_float_array_region(&array, 0, &ambient_frame(elapsed))
+        .is_err()
+    {
+        return std::ptr::null_mut();
+    }
+    array.into_raw()
+}
+
+fn compile(body: &str) -> Result<serde_json::Value, String> {
     // Platform color adaptation uses the shared semantic background token.
     // GLES fragment coordinates start at the bottom; Canvas/WGSL starts at top.
     let uniforms = background_shaders::UNIFORM_WGSL
@@ -91,6 +179,33 @@ mod tests {
             );
         }
         assert!(program("downloaded-code").is_err());
-        assert!(program("star-nest").is_err());
+        assert!(program("spirales").is_err());
+        assert!(program("star-nest").is_ok());
+    }
+
+    #[test]
+    fn ambient_rotation_blends_at_exact_five_minute_boundaries() {
+        assert_eq!(ambient_frame(0), [0.0, 0.0, 0.0]);
+        assert_eq!(ambient_frame(299_999), [0.0, 0.0, 0.0]);
+        assert_eq!(ambient_frame(300_000), [0.0, 1.0, 0.0]);
+        assert_eq!(ambient_frame(302_000), [0.0, 1.0, 0.5]);
+        assert_eq!(ambient_frame(304_000), [1.0, 1.0, 0.0]);
+        assert_eq!(ambient_frame(1_500_000), [4.0, 0.0, 0.0]);
+        assert_eq!(ambient_frame(u64::MAX)[2], 0.0);
+    }
+
+    #[test]
+    fn ambient_program_is_local_and_valid_gles() {
+        let program = program("ambient-rotation").unwrap();
+        assert_eq!(program["rotation_ms"], 300000);
+        assert_eq!(program["crossfade_ms"], 4000);
+        assert_eq!(program["shaders"].as_array().unwrap().len(), 5);
+        assert!(
+            program["fragment"]
+                .as_str()
+                .unwrap()
+                .contains("ambient_sample")
+        );
+        assert!(program["max_fps"].as_u64().unwrap() <= 30);
     }
 }
