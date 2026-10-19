@@ -1,8 +1,13 @@
-//! Canonical calm background sources, shared by platform rendering adapters.
+//! Canonical background sources, shared by platform rendering adapters.
 use crate::BackgroundShader;
 #[path = "cat_toy_shaders.rs"]
 mod cat_toy;
 pub use cat_toy::{BALL as CAT_TOY_BALL, DVD as DVD_BOUNCE};
+#[path = "art_shaders.rs"]
+mod art;
+pub use art::{
+    SPIRAL, SPIRAL_CREDIT, SPIRAL_LICENSE, STAR_NEST, STAR_NEST_CREDIT, STAR_NEST_LICENSE,
+};
 
 pub fn source(shader: BackgroundShader) -> Option<&'static str> {
     match shader {
@@ -12,8 +17,25 @@ pub fn source(shader: BackgroundShader) -> Option<&'static str> {
         BackgroundShader::AuroraDrift => Some(AURORA_DRIFT),
         BackgroundShader::DuskEmber => Some(DUSK_EMBER),
         BackgroundShader::SlowRipple => Some(SLOW_RIPPLE),
+        BackgroundShader::Spirales => Some(SPIRAL),
+        BackgroundShader::StarNest => Some(STAR_NEST),
         _ => None,
     }
+}
+
+/// Sources cleared for a newly shipped ambient rotation. Existing desktop
+/// selections are not an upstream redistribution grant.
+pub fn ambient_redistributable(shader: BackgroundShader) -> bool {
+    matches!(
+        shader,
+        BackgroundShader::CatToyBall
+            | BackgroundShader::DvdBounce
+            | BackgroundShader::Tidepool
+            | BackgroundShader::AuroraDrift
+            | BackgroundShader::DuskEmber
+            | BackgroundShader::SlowRipple
+            | BackgroundShader::StarNest
+    )
 }
 
 pub const UNIFORM_WGSL: &str = r#"
@@ -121,3 +143,37 @@ fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     return vec4<f32>(c, 1.0);
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ambient_sources_have_one_canonical_body() {
+        for shader in BackgroundShader::ALL {
+            if ambient_redistributable(shader) {
+                let source = source(shader).expect("allowed ambient shader needs a source");
+                assert!(source.contains("@fragment"));
+                assert!(source.contains("u.time"));
+            }
+        }
+        assert_eq!(source(BackgroundShader::StarNest), Some(STAR_NEST));
+        assert_eq!(source(BackgroundShader::Spirales), Some(SPIRAL));
+    }
+
+    #[test]
+    fn unverified_sources_are_not_ambient_redistributable() {
+        for shader in [
+            BackgroundShader::Spirales,
+            BackgroundShader::FloatingRectangles,
+            BackgroundShader::SmokeRings,
+            BackgroundShader::Flame,
+            BackgroundShader::Meme,
+        ] {
+            assert!(!ambient_redistributable(shader));
+        }
+        assert_eq!(STAR_NEST_LICENSE, "MIT");
+        assert!(STAR_NEST_CREDIT.contains("Pablo Roman Andrioli"));
+        assert!(SPIRAL_LICENSE.contains("unverified"));
+    }
+}
