@@ -22,6 +22,7 @@ pub struct Shell {
     calendar_data: canvas_calendar::Snapshot,
     applied: Option<Mode>,
     pub last_rows: usize,
+    pub input_hint: Option<String>,
 }
 impl Shell {
     pub fn demo() -> Result<Self, String> {
@@ -36,6 +37,7 @@ impl Shell {
             calendar_data: demo::calendar()?,
             applied: None,
             last_rows: 0,
+            input_hint: None,
         })
     }
     pub fn show(&mut self, ctx: &egui::Context) {
@@ -202,7 +204,7 @@ impl Shell {
                 });
             });
         egui::TopBottomPanel::bottom("workspace-footer").exact_height(28.0).show(ctx,|ui|{ui.horizontal(|ui|{
-            ui.label(RichText::new("J / K  Navigate     E  Archive     Z  Undo     R  Reply     /  Search     ⌘K  Commands").small().weak());
+            ui.label(RichText::new(self.input_hint.as_deref().unwrap_or("J / K  Navigate     E  Archive     Z  Undo     R  Reply     /  Search     ⌘K  Commands")).small().weak());
         });});
         egui::CentralPanel::default()
             .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(16.0))
@@ -239,5 +241,42 @@ impl Shell {
                     self.calendar.show(ui, &self.calendar_data, &colors);
                 }
             });
+    }
+}
+
+use serde::{Deserialize, Serialize};
+#[derive(Serialize, Deserialize)]
+struct Saved {
+    version: u32,
+    owner: String,
+    drafts: String,
+}
+impl Shell {
+    pub fn save_preview(&self) -> Result<String, String> {
+        let json = serde_json::to_string(&Saved {
+            version: 1,
+            owner: self.owner.save()?,
+            drafts: self.mail.save_draft_session()?,
+        })
+        .map_err(|e| e.to_string())?;
+        // Never replace a valid checkpoint with state this version cannot restore.
+        Self::restore_preview(&json)?;
+        Ok(json)
+    }
+    pub fn restore_preview(json: &str) -> Result<Self, String> {
+        if json.len() > 20 * 1024 * 1024 {
+            return Err("Preview state exceeds size limit".into());
+        }
+        let saved: Saved =
+            serde_json::from_str(json).map_err(|e| format!("Cannot restore preview: {e}"))?;
+        if saved.version != 1 {
+            return Err("Unsupported preview version".into());
+        }
+        let mut shell = Self::demo()?;
+        shell.owner = crate::demo::Owner::restore(&saved.owner)?;
+        shell
+            .mail
+            .restore_draft_session(&saved.drafts, &shell.owner.threads)?;
+        Ok(shell)
     }
 }

@@ -3,6 +3,9 @@
 use crate::{InvalidMetrics, Mode, Tokens};
 use ::egui::{vec2, Color32, CornerRadius, FontFamily, FontId, Margin, Stroke, Style, TextStyle};
 
+/// Reusable dense controls; domain data and actions stay with the host.
+pub mod widgets;
+
 fn color([r, g, b]: [u8; 3]) -> Color32 {
     Color32::from_rgb(r, g, b)
 }

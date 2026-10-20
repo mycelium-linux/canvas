@@ -284,6 +284,9 @@ impl Mail {
                 self.help = false;
                 self.reader_open = false;
                 self.compose_open = false;
+                if let Some(id) = ctx.memory(|m| m.focused()) {
+                    ctx.memory_mut(|m| m.surrender_focus(id));
+                }
             }
             if !ctx.wants_keyboard_input() && !self.palette && !self.help && !self.compose_open {
                 if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::C)) {
@@ -315,7 +318,9 @@ impl Mail {
                 if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Slash)) {
                     self.focus_search = true;
                 }
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)) {
+                if ctx.memory(|m| m.focused().is_none())
+                    && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter))
+                {
                     self.reader_open = true;
                     if let Some(key) = &self.selected {
                         report.intents.push(Intent::Open(key.clone()));

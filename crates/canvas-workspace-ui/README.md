@@ -19,7 +19,7 @@ component. Calendar reuses `canvas-calendar`; all share Coherence appearance.
 
 ```sh
 cargo run --manifest-path crates/canvas-workspace-ui/Cargo.toml --features native --bin canvas-workspace-demo
-cargo run --manifest-path crates/canvas-workspace-ui/Cargo.toml --features preview --example render -- /tmp/mail.png 1600 1000 dark mail
+cargo run --manifest-path crates/canvas-workspace-review/Cargo.toml -- /tmp/mail.png 1600 1000 dark mail
 cargo test --manifest-path crates/canvas-workspace-ui/Cargo.toml
 ```
 

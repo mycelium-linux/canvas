@@ -1,5 +1,8 @@
 //! Android platform shell. Rust owns command admission; Java owns the surface.
 use std::net::IpAddr;
+#[cfg(all(target_os = "android", feature = "workspace-demo"))]
+#[allow(clippy::missing_const_for_thread_local, reason = "The initializer is explicitly const; Rust 1.99 flags the thread_local macro expansion.")]
+mod workspace_demo;
 pub const CONTROL_PORT: u16 = 27841;
 
 #[cfg(feature = "shared-workspaces")]

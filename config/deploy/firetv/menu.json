@@ -1,9 +1,15 @@
 {
   "schema_version": 1,
-  "page_rotation_ms": {"taig-simulator": 15000},
+  "page_rotation_ms": {
+    "taig-simulator": 15000
+  },
   "library_project": "studio",
   "include_unlisted": true,
-  "hidden_projects": ["clock", "ipfs-reading", "ipfs-hmm"],
+  "hidden_projects": [
+    "clock",
+    "ipfs-reading",
+    "ipfs-hmm"
+  ],
   "items": [
     {
       "label": "Home",
@@ -12,6 +18,10 @@
     {
       "label": "Studio",
       "project_id": "studio"
+    },
+    {
+      "label": "Workspace demo",
+      "project_id": "mail-workspace-demo"
     },
     {
       "label": "Tardy",

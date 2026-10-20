@@ -1606,6 +1606,7 @@ public final class TvActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        for (View widget : widgets) if (widget instanceof WorkspaceDemoView) ((WorkspaceDemoView)widget).onResume();
         resumed = true;
         for (View widget : widgets) if(widget instanceof ConwaysView) ((ConwaysView)widget).setActive(true);
         background.setActive(true);
@@ -1619,6 +1620,7 @@ public final class TvActivity extends Activity {
     }
 
     @Override protected void onPause() {
+        for (View widget : widgets) if (widget instanceof WorkspaceDemoView) ((WorkspaceDemoView)widget).onPause();
         resumed = false;
         ambientWakeKey=-1;
         clearPanelCache();
@@ -2091,6 +2093,9 @@ public final class TvActivity extends Activity {
                         extraStreams.put(id, extra); frame.addView(extra, geometry);
                     } else extra.setLayoutParams(geometry);
                     styleControl(extra.muteControl(), palette, false);
+                } else if (content.getString("kind").equals("external_surface") && content.optString("source_id").equals("canvas-workspace-demo")) {
+                    WorkspaceDemoView workspace = new WorkspaceDemoView(this);
+                    frame.addView(workspace, geometry); widgets.add(workspace); workspace.requestFocus();
                 } else if (content.getString("kind").equals("conways")) {
                     ConwaysView life = new ConwaysView(this, palette);
                     frame.addView(life, geometry); widgets.add(life);

@@ -1,42 +1,6 @@
 //! Preview-only persistence through eframe's host storage. Components own no filesystem paths.
 use crate::shell::Shell;
-use serde::{Deserialize, Serialize};
 const STORAGE_KEY: &str = "canvas.mock-workspace.v1";
-#[derive(Serialize, Deserialize)]
-struct Saved {
-    version: u32,
-    owner: String,
-    drafts: String,
-}
-impl Shell {
-    pub fn save_preview(&self) -> Result<String, String> {
-        let json = serde_json::to_string(&Saved {
-            version: 1,
-            owner: self.owner.save()?,
-            drafts: self.mail.save_draft_session()?,
-        })
-        .map_err(|e| e.to_string())?;
-        // Never replace a valid checkpoint with state this version cannot restore.
-        Self::restore_preview(&json)?;
-        Ok(json)
-    }
-    pub fn restore_preview(json: &str) -> Result<Self, String> {
-        if json.len() > 20 * 1024 * 1024 {
-            return Err("Preview state exceeds size limit".into());
-        }
-        let saved: Saved =
-            serde_json::from_str(json).map_err(|e| format!("Cannot restore preview: {e}"))?;
-        if saved.version != 1 {
-            return Err("Unsupported preview version".into());
-        }
-        let mut shell = Self::demo()?;
-        shell.owner = crate::demo::Owner::restore(&saved.owner)?;
-        shell
-            .mail
-            .restore_draft_session(&saved.drafts, &shell.owner.threads)?;
-        Ok(shell)
-    }
-}
 pub struct App {
     pub shell: Shell,
     storage_error: Option<String>,

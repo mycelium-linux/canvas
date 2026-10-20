@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "id": "tv-mail-workspace-demo",
+  "project_id": "mail-workspace-demo",
+  "revision": 1,
+  "theme": { "source": "project" },
+  "chrome": { "canvas_padding": 0, "surface_gap": 0, "title": "hidden" },
+  "surfaces": [{ "id": "mail-workspace-demo", "title": "Canvas workspace · mock data", "content": { "kind": "external_surface", "source_id": "canvas-workspace-demo" } }],
+  "layout": { "kind": "surface", "surface_id": "mail-workspace-demo" },
+  "focused_surface_id": "mail-workspace-demo"
+}
