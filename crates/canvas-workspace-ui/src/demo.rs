@@ -379,6 +379,8 @@ struct SavedOwner {
     threads: Vec<Thread>,
     drafts: Vec<(KeyId, String)>,
     snoozes: Vec<(KeyId, u64)>,
+    // The host supplies current time. Ticking alone must not rewrite flash storage.
+    #[serde(default, skip_serializing)]
     now: u64,
 }
 impl Owner {
@@ -594,6 +596,21 @@ mod tests {
 #[cfg(test)]
 mod triage_tests {
     use super::*;
+    #[test]
+    fn clock_ticks_do_not_rewrite_an_unchanged_checkpoint() {
+        let mut owner = Owner::new();
+        owner.advance_to(1000);
+        let before = owner.save().unwrap();
+        owner.advance_to(1001);
+        assert_eq!(owner.save().unwrap(), before);
+        owner
+            .apply(Intent::Snooze(owner.threads[0].id.clone()))
+            .unwrap();
+        let snoozed = owner.save().unwrap();
+        assert_ne!(snoozed, before);
+        owner.advance_to(1002);
+        assert_eq!(owner.save().unwrap(), snoozed);
+    }
     #[test]
     fn bulk_read_counts_and_reply_autosave_keep_triage_undo() {
         let mut owner = Owner::new();

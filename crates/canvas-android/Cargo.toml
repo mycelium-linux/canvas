@@ -15,6 +15,7 @@ default = []
 android-native-video = ["dep:jni", "shared-workspaces", "dep:getrandom", "dep:subtle", "dep:fpl-gfx", "dep:naga", "dep:canvas-feeds"]
 android-tuner-control = ["dep:jni", "dep:serde_json"]
 shared-workspaces = ["dep:canvas-core", "dep:canvas-workspace", "dep:serde", "dep:serde_json", "dep:sha2"]
+workspace-demo = ["android-native-video", "dep:canvas-workspace-ui", "dep:egui_glow", "dep:egui"]
 
 [dependencies]
 canvas-feeds = { path = "../canvas-feeds", optional = true }
@@ -31,6 +32,9 @@ fpl-gfx = { path = "../../../gfx", default-features = false, optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.21", optional = true }
+canvas-workspace-ui = { path = "../canvas-workspace-ui", optional = true }
+egui_glow = { version = "=0.33.3", optional = true }
+egui = { version = "=0.33.3", optional = true }
 
 [[bin]]
 name = "canvas-tvctl"
