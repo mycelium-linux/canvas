@@ -37,6 +37,10 @@ policy and theme export), `canvas-mac`, `canvas-linux`.
 
 ## Build and run
 
+The agent fleet itself is observable without a terminal: `scripts/cp-server.lua`
+exposes one tmux session as JSON with per-pane send, capture, and kill, and
+Canvas draws a widget per pane over it. See
+[the control plane](docs/CONTROL-PLANE.md).
 ```sh
 cargo build --workspace
 cargo test --workspace

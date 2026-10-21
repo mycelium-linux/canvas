@@ -112,6 +112,14 @@ const JUMP_BACK_KEYS: &str = "Ctrl-O";
 const JUMP_FORWARD_KEYS: &str = "Ctrl-Shift-O";
 const SHORTCUT_HELP_KEYS: &str = "Ctrl-Option-?";
 const FOCUSED_HELP_KEYS: &str = "?";
+/// Opt-in appliance mode. A dedicated Canvas exhibit sets `CANVAS_KIOSK=1` to
+/// keep the borderless fullscreen desktop; every other launch gets a normal
+/// decorated window that the compositor maximizes.
+const KIOSK_ENV: &str = "CANVAS_KIOSK";
+/// Two presses of the desktop background inside this window count as a zoom
+/// gesture on the host window (native title-bar double-click semantics).
+const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
+const DOUBLE_CLICK_SLOP: f64 = 6.0;
 
 /// A position in the jump list: a project workspace and optionally an
 /// operational view within it.
@@ -874,6 +882,8 @@ struct App {
     hovered_surface_id: Option<String>,
     focus_emphasis_started: Option<Instant>,
     primary_pointer_down: bool,
+    desktop_press: Option<(Instant, LogicalPoint)>,
+    kiosk: bool,
     minimized_surfaces: BTreeSet<String>,
     maximized_surfaces: BTreeSet<String>,
     transition: Option<transition::Transition>,
@@ -917,6 +927,7 @@ impl App {
         socket: SocketGuard,
         frame: Rect,
         workspace_store_path: PathBuf,
+        kiosk: bool,
     ) -> Result<Self, String> {
         let base_catalog = Catalog::bundled().expect("bundled project catalog must remain valid");
         // An unusable store must not boot the wall blank in silence
@@ -1307,6 +1318,8 @@ impl App {
             hovered_surface_id: None,
             focus_emphasis_started: None,
             primary_pointer_down: false,
+            desktop_press: None,
+            kiosk,
             minimized_surfaces: BTreeSet::new(),
             maximized_surfaces: BTreeSet::new(),
             transition: None,
@@ -1735,7 +1748,7 @@ impl App {
                 }
                 if host.window.is_none() {
                     if let Some(snapshot) = &host.snapshot {
-                        let mut settings = canvas_window_settings(snapshot.switcher.frame);
+                        let mut settings = switcher_window_settings(snapshot.switcher.frame);
                         settings.transparent = true;
                         #[cfg(target_os = "linux")]
                         {
@@ -2144,25 +2157,39 @@ impl App {
                 Task::batch(tasks)
             }
             Message::WindowReady(window) => {
-                if let Err(error) = platform::make_windows_shareable() {
+                if let Err(error) = platform::make_windows_shareable(self.kiosk) {
                     self.status = format!("Canvas capture setup failed: {error}");
                     eprintln!("{}", self.status);
                 }
                 let frame = self.windows.get(&window).copied().unwrap_or(self.frame);
-                // Canvas windows are borderless and already sized to the
-                // selected display. Native macOS fullscreen creates a Space
-                // transition that can stall this utility-style window's event
-                // loop, so fill the display directly and keep control/stream
-                // sockets responsive.
+                let scale = iced::window::scale_factor(window)
+                    .map(move |scale| Message::ScaleFactorChanged(window, scale));
+                if self.kiosk {
+                    // A kiosk exhibit owns the whole output: borderless and
+                    // fullscreen, sized directly to the selected display.
+                    // Native macOS fullscreen creates a Space transition that
+                    // can stall this utility-style window's event loop, so fill
+                    // the display directly and keep control/stream sockets
+                    // responsive.
+                    return iced::window::set_mode(window, iced::window::Mode::Fullscreen)
+                        .chain(iced::window::move_to(
+                            window,
+                            Point::new(frame.x as f32, frame.y as f32),
+                        ))
+                        .chain(iced::window::resize(
+                            window,
+                            Size::new(frame.width as f32, frame.height as f32),
+                        ))
+                        .chain(scale);
+                }
+                // A decorated window keeps the compositor's zoom semantics: the
+                // title-bar double-click maximizes and restores, while
+                // fullscreen stays reserved for kiosk launches. Place the window
+                // on its display first, then request the maximize state; a
+                // resize here would fight the compositor's zoomed frame.
                 iced::window::move_to(window, Point::new(frame.x as f32, frame.y as f32))
-                    .chain(iced::window::resize(
-                        window,
-                        Size::new(frame.width as f32, frame.height as f32),
-                    ))
-                    .chain(
-                        iced::window::scale_factor(window)
-                            .map(move |scale| Message::ScaleFactorChanged(window, scale)),
-                    )
+                    .chain(iced::window::maximize(window, true))
+                    .chain(scale)
             }
             Message::WindowEvent(window, event) => {
                 #[cfg(all(unix, feature = "lua-scenes"))]
@@ -2228,8 +2255,7 @@ impl App {
                 if self.project_switcher.is_some() {
                     return Task::none();
                 }
-                self.handle_mouse(window, event);
-                Task::none()
+                self.handle_mouse(window, event)
             }
             Message::RestoreSurface(surface_id) => {
                 if self.minimized_surfaces.remove(&surface_id) {
@@ -3281,7 +3307,7 @@ impl App {
             .collect::<Vec<Task<Message>>>();
         self.windows.clear();
         for frame in frames {
-            let (window, open) = iced::window::open(canvas_window_settings(frame));
+            let (window, open) = iced::window::open(canvas_window_settings(frame, self.kiosk));
             self.windows.insert(window, frame);
             tasks.push(open.map(Message::WindowReady));
         }
@@ -5313,7 +5339,7 @@ impl App {
                 task
             }
             Command::Focus => {
-                if let Err(error) = platform::make_windows_shareable() {
+                if let Err(error) = platform::make_windows_shareable(self.kiosk) {
                     self.fail(pending, Failure::platform(error));
                     return Task::none();
                 }
@@ -6896,7 +6922,11 @@ impl App {
         }
     }
 
-    fn handle_mouse(&mut self, window: iced::window::Id, event: iced::mouse::Event) {
+    fn handle_mouse(
+        &mut self,
+        window: iced::window::Id,
+        event: iced::mouse::Event,
+    ) -> Task<Message> {
         use iced::mouse::{Button, Event};
 
         let hid_event = event;
@@ -6909,11 +6939,11 @@ impl App {
         match event {
             Event::ButtonPressed(Button::Back) if self.focused_hid_target().is_none() => {
                 self.jump_back();
-                return;
+                return Task::none();
             }
             Event::ButtonPressed(Button::Forward) if self.focused_hid_target().is_none() => {
                 self.jump_forward();
-                return;
+                return Task::none();
             }
             _ => {}
         }
@@ -6921,6 +6951,7 @@ impl App {
         if let Event::ButtonPressed(Button::Left) = &event
             && let Some((surface_id, action)) = self.hit_test_surface_control()
         {
+            self.desktop_press = None;
             self.desktop_focused = false;
             match action {
                 WindowAction::Close => {
@@ -6960,7 +6991,7 @@ impl App {
                     self.bump();
                 }
             }
-            return;
+            return Task::none();
         }
 
         let phase = match event {
@@ -7010,7 +7041,7 @@ impl App {
                         self.snap_preview = preview;
                         self.bump();
                     }
-                    return;
+                    return Task::none();
                 } else {
                     self.cursor = None;
                     self.cursor_window = None;
@@ -7023,7 +7054,7 @@ impl App {
         if let Some(position) = self.cursor
             && self.handle_hid_pointer(&hid_event, position, &surfaces)
         {
-            return;
+            return Task::none();
         }
         let (Some(phase), Some(position)) = (phase, self.cursor) else {
             if let Event::WheelScrolled { delta } = event
@@ -7056,10 +7087,10 @@ impl App {
                     self.status = format!("Canvas external scroll failed: {error}");
                 }
             }
-            return;
+            return Task::none();
         };
         if self.handle_external_surface_pointer(phase, position, &surfaces) {
-            return;
+            return Task::none();
         }
         if phase == PointerPhase::Press
             && let Ok(Some(target)) = hit_test(
@@ -7091,7 +7122,7 @@ impl App {
                     surface_id: target.surface_id,
                 },
             ]);
-            return;
+            return Task::none();
         }
         match self.interaction.handle(
             PointerEvent {
@@ -7104,8 +7135,29 @@ impl App {
             Ok(intents) => {
                 if phase == PointerPhase::Press {
                     self.desktop_focused = intents.is_empty();
+                    // Double-clicking bare desktop zooms the decorated host
+                    // window exactly like a title-bar double-click: maximize or
+                    // restore, never fullscreen. Kiosk owns the whole output, so
+                    // it has no windowed zoom state to toggle.
+                    let zoom = if self.desktop_focused && !self.kiosk {
+                        self.desktop_zoom_gesture(position)
+                    } else {
+                        self.desktop_press = None;
+                        false
+                    };
+                    self.apply_interaction_intents(intents);
+                    if zoom {
+                        self.status = "Zoomed the Canvas window.".into();
+                        let preview = self.interaction.snap_preview();
+                        if preview != self.snap_preview {
+                            self.snap_preview = preview;
+                            self.bump();
+                        }
+                        return iced::window::toggle_maximize(window);
+                    }
+                } else {
+                    self.apply_interaction_intents(intents);
                 }
-                self.apply_interaction_intents(intents);
                 let preview = self.interaction.snap_preview();
                 if preview != self.snap_preview {
                     self.snap_preview = preview;
@@ -7114,6 +7166,16 @@ impl App {
             }
             Err(error) => self.status = format!("Canvas pointer rejected: {error}"),
         }
+        Task::none()
+    }
+
+    /// Fold an empty-desktop press into the host window's double-click zoom
+    /// gesture. Returns true when the press completes a double-click.
+    fn desktop_zoom_gesture(&mut self, position: LogicalPoint) -> bool {
+        let now = Instant::now();
+        let zoom = double_click(self.desktop_press.take(), now, position);
+        self.desktop_press = (!zoom).then_some((now, position));
+        zoom
     }
 
     fn focused_hid_target(&self) -> Option<String> {
@@ -13001,9 +13063,14 @@ mod platform {
     }
 
     #[cfg(target_os = "macos")]
-    pub(super) fn canvas_presentation_options() -> objc2_app_kit::NSApplicationPresentationOptions {
+    pub(super) fn canvas_presentation_options(
+        kiosk: bool,
+    ) -> objc2_app_kit::NSApplicationPresentationOptions {
         use objc2_app_kit::NSApplicationPresentationOptions;
 
+        if !kiosk {
+            return NSApplicationPresentationOptions::empty();
+        }
         NSApplicationPresentationOptions::NSApplicationPresentationAutoHideDock
             | NSApplicationPresentationOptions::NSApplicationPresentationAutoHideMenuBar
     }
@@ -13044,13 +13111,13 @@ mod platform {
     }
 
     #[cfg(target_os = "macos")]
-    pub fn make_windows_shareable() -> Result<(), String> {
+    pub fn make_windows_shareable(kiosk: bool) -> Result<(), String> {
         use objc2_app_kit::{NSApplication, NSWindowSharingType};
         use objc2_foundation::MainThreadMarker;
 
         let marker = MainThreadMarker::new().ok_or("AppKit window setup left the main thread")?;
         let application = NSApplication::sharedApplication(marker);
-        application.setPresentationOptions(canvas_presentation_options());
+        application.setPresentationOptions(canvas_presentation_options(kiosk));
         for window in application.windows().iter() {
             window.setSharingType(NSWindowSharingType::NSWindowSharingReadOnly);
             unsafe { window.setCollectionBehavior(canvas_collection_behavior()) };
@@ -13059,7 +13126,7 @@ mod platform {
     }
 
     #[cfg(not(target_os = "macos"))]
-    pub fn make_windows_shareable() -> Result<(), String> {
+    pub fn make_windows_shareable(_kiosk: bool) -> Result<(), String> {
         Ok(())
     }
 
@@ -13341,14 +13408,53 @@ fn daemon_theme(app: &App, _window: iced::window::Id) -> Theme {
     app.theme()
 }
 
-fn canvas_window_settings(frame: Rect) -> iced::window::Settings {
+/// Host window geometry for one display.
+///
+/// The default Canvas desktop is a normal decorated window that the compositor
+/// maximizes, so window management stays native: drag, resize, and title-bar
+/// double-click zoom all behave like any other app. Only an explicit kiosk
+/// launch (`CANVAS_KIOSK=1`) drops the chrome and takes the whole output.
+fn canvas_window_settings(frame: Rect, kiosk: bool) -> iced::window::Settings {
     iced::window::Settings {
         size: Size::new(frame.width as f32, frame.height as f32),
         position: iced::window::Position::Specific(Point::new(frame.x as f32, frame.y as f32)),
-        decorations: false,
+        maximized: !kiosk,
+        fullscreen: kiosk,
+        decorations: !kiosk,
         exit_on_close_request: false,
         ..iced::window::Settings::default()
     }
+}
+
+/// The native project switcher is a transparent presentation overlay, not a
+/// desktop window: it is always borderless and never maximized.
+fn switcher_window_settings(frame: Rect) -> iced::window::Settings {
+    iced::window::Settings {
+        decorations: false,
+        maximized: false,
+        ..canvas_window_settings(frame, false)
+    }
+}
+
+fn canvas_kiosk_requested() -> bool {
+    kiosk_from_env(std::env::var(KIOSK_ENV).ok().as_deref())
+}
+
+fn kiosk_from_env(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value.trim() == "1")
+}
+
+/// Report whether a press completes a double-click at the same spot.
+fn double_click(
+    previous: Option<(Instant, LogicalPoint)>,
+    now: Instant,
+    position: LogicalPoint,
+) -> bool {
+    previous.is_some_and(|(at, at_position)| {
+        now.saturating_duration_since(at) <= DOUBLE_CLICK_INTERVAL
+            && (at_position.x - position.x).abs() <= DOUBLE_CLICK_SLOP
+            && (at_position.y - position.y).abs() <= DOUBLE_CLICK_SLOP
+    })
 }
 
 fn render_cadence(
@@ -13409,6 +13515,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(error) => eprintln!("Canvas appearance config ignored: {error}"),
     }
     let (receiver, socket) = start_server()?;
+    let kiosk = canvas_kiosk_requested();
     let initial_frame = std::env::var("CANVAS_CAPTURE_FRAME")
         .ok()
         .and_then(|value| {
@@ -13441,9 +13548,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 socket,
                 initial_frame,
                 workspace_store_path.clone(),
+                kiosk,
             )
             .expect("Canvas project workspace store must remain valid");
-            let (window, open) = iced::window::open(canvas_window_settings(initial_frame));
+            let (window, open) = iced::window::open(canvas_window_settings(initial_frame, kiosk));
             app.windows.insert(window, initial_frame);
             (app, open.map(Message::WindowReady))
         },
@@ -13867,6 +13975,7 @@ mod tests {
                     std::process::id(),
                 ))
                 .join("workspaces.json"),
+            false,
         )
         .unwrap();
         app.frame = INITIAL_FRAME;
@@ -13934,6 +14043,7 @@ mod tests {
             },
             INITIAL_FRAME,
             store_path,
+            false,
         )
         .unwrap();
         assert_eq!(app.document.id, "restored-wall");
@@ -16399,7 +16509,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn canvas_uses_complete_display_instead_of_reserving_system_chrome() {
+    fn canvas_frame_uses_the_complete_display() {
         let display = canvas_control::Display {
             id: "right".into(),
             name: "Right".into(),
@@ -16426,16 +16536,24 @@ mod tests {
                 height: 1200,
             }
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn canvas_hides_system_chrome_only_in_kiosk_mode() {
         use objc2_app_kit::NSApplicationPresentationOptions;
-        let options = platform::canvas_presentation_options();
+
+        let windowed = platform::canvas_presentation_options(false);
+        assert!(windowed.is_empty());
+
+        let kiosk = platform::canvas_presentation_options(true);
         assert!(
-            options.contains(
+            kiosk.contains(
                 NSApplicationPresentationOptions::NSApplicationPresentationAutoHideMenuBar
             )
         );
         assert!(
-            options
-                .contains(NSApplicationPresentationOptions::NSApplicationPresentationAutoHideDock)
+            kiosk.contains(NSApplicationPresentationOptions::NSApplicationPresentationAutoHideDock)
         );
     }
 
@@ -16528,13 +16646,13 @@ mod tests {
                 },
             ],
         };
-        app.handle_mouse(
+        let _ = app.handle_mouse(
             window,
             iced::mouse::Event::CursorMoved {
                 position: Point::new(180.0, 180.0),
             },
         );
-        app.handle_mouse(
+        let _ = app.handle_mouse(
             window,
             iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
         );
@@ -16581,13 +16699,13 @@ mod tests {
                 layer: 0,
             }],
         };
-        app.handle_mouse(
+        let _ = app.handle_mouse(
             right,
             iced::mouse::Event::CursorMoved {
                 position: Point::new(200.0, 240.0),
             },
         );
-        app.handle_mouse(
+        let _ = app.handle_mouse(
             right,
             iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
         );
@@ -16696,7 +16814,7 @@ mod tests {
             x: left + 44.0,
             y: top + 10.0,
         });
-        app.handle_mouse(
+        let _ = app.handle_mouse(
             window,
             iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
         );
@@ -16706,7 +16824,7 @@ mod tests {
             app.hit_test_surface_control(),
             Some(("sample".into(), WindowAction::Maximize))
         );
-        app.handle_mouse(
+        let _ = app.handle_mouse(
             window,
             iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
         );
@@ -17433,6 +17551,7 @@ mod tests {
             },
             INITIAL_FRAME,
             path,
+            false,
         )
         .unwrap();
 
@@ -17446,22 +17565,129 @@ mod tests {
     }
 
     #[test]
-    fn canvas_window_opens_as_a_persistent_borderless_desktop() {
+    fn canvas_window_opens_maximized_with_native_chrome() {
         let frame = Rect {
             x: 3840,
             y: 0,
             width: 1920,
             height: 1200,
         };
-        let settings = canvas_window_settings(frame);
+        let settings = canvas_window_settings(frame, false);
         assert_eq!(settings.size, Size::new(1920.0, 1200.0));
         assert!(matches!(
             settings.position,
             iced::window::Position::Specific(Point { x: 3840.0, y: 0.0 })
         ));
-        assert!(!settings.decorations);
+        assert!(settings.decorations);
+        assert!(settings.maximized);
+        assert!(!settings.fullscreen);
         assert!(!settings.exit_on_close_request);
         assert!(settings.visible);
+    }
+
+    #[test]
+    fn canvas_kiosk_window_stays_borderless_and_fullscreen() {
+        let frame = Rect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1200,
+        };
+        let settings = canvas_window_settings(frame, true);
+        assert!(!settings.decorations);
+        assert!(settings.fullscreen);
+        assert!(!settings.maximized);
+        assert!(!settings.exit_on_close_request);
+    }
+
+    #[test]
+    fn switcher_overlay_stays_borderless_and_windowed() {
+        let frame = Rect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1200,
+        };
+        let settings = switcher_window_settings(frame);
+        assert!(!settings.decorations);
+        assert!(!settings.fullscreen);
+        assert!(!settings.maximized);
+    }
+
+    #[test]
+    fn kiosk_mode_requires_an_explicit_opt_in() {
+        assert!(!kiosk_from_env(None));
+        assert!(!kiosk_from_env(Some("")));
+        assert!(!kiosk_from_env(Some("0")));
+        assert!(!kiosk_from_env(Some("true")));
+        assert!(kiosk_from_env(Some("1")));
+        assert!(kiosk_from_env(Some(" 1 ")));
+    }
+
+    #[test]
+    fn desktop_double_click_only_zooms_repeated_presses_at_one_spot() {
+        let at = Instant::now();
+        let here = LogicalPoint { x: 400.0, y: 300.0 };
+        let near = LogicalPoint { x: 403.0, y: 301.0 };
+        let far = LogicalPoint { x: 460.0, y: 300.0 };
+
+        assert!(!double_click(None, at, here));
+        assert!(double_click(Some((at, here)), at, near));
+        assert!(!double_click(Some((at, here)), at, far));
+        assert!(!double_click(
+            Some((at, here)),
+            at + DOUBLE_CLICK_INTERVAL + Duration::from_millis(1),
+            here
+        ));
+    }
+
+    #[test]
+    fn double_clicking_the_desktop_zooms_the_host_window() {
+        let mut app = test_app();
+        let window = iced::window::Id::unique();
+        app.windows.insert(window, INITIAL_FRAME);
+        let _ = app.handle_mouse(
+            window,
+            iced::mouse::Event::CursorMoved {
+                position: Point::new(200.0, 200.0),
+            },
+        );
+
+        let _ = app.handle_mouse(
+            window,
+            iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+        );
+        assert!(app.desktop_press.is_some());
+        assert_ne!(app.status, "Zoomed the Canvas window.");
+
+        let _ = app.handle_mouse(
+            window,
+            iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+        );
+        assert_eq!(app.status, "Zoomed the Canvas window.");
+        assert!(app.desktop_press.is_none());
+    }
+
+    #[test]
+    fn kiosk_desktop_ignores_the_windowed_zoom_gesture() {
+        let mut app = test_app();
+        app.kiosk = true;
+        let window = iced::window::Id::unique();
+        app.windows.insert(window, INITIAL_FRAME);
+        let _ = app.handle_mouse(
+            window,
+            iced::mouse::Event::CursorMoved {
+                position: Point::new(200.0, 200.0),
+            },
+        );
+        for _ in 0..2 {
+            let _ = app.handle_mouse(
+                window,
+                iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            );
+        }
+        assert_ne!(app.status, "Zoomed the Canvas window.");
+        assert!(app.desktop_press.is_none());
     }
 
     #[test]
