@@ -86,14 +86,19 @@ single argument reaches `tmux`.
 
 ## Routes
 
-| Method & path | Body | Result |
-| --- | --- | --- |
-| `GET /api/panes` | — | fleet document above; `?workers=1` filters |
-| `POST /api/pane/{name}/send` | `{"message": "...", "submit": true}` | `{"ok":true,"name","target","chars","submitted"}` |
-| `GET /api/pane/{name}/capture?lines=N` | — | `{"ok":true,"name","target","lines","text"}` |
-| `POST /api/pane/{name}/kill` | — | `{"ok":true,"name","target","killed"}` |
+| Method & path | Body | Result | Failure modes |
+| --- | --- | --- | --- |
+| `GET /api/panes` | — | fleet document above; `?workers=1` filters | `405` wrong method; `502` `tmux list-panes` failed |
+| `POST /api/pane/{name}/send` | `{"message": "...", "submit": true}` | `{"ok":true,"name","target","chars","submitted"}` | `400` bad name, non-JSON body, or non-boolean `submit`; `404` unknown/stale pane; `405` wrong method; `413` body or message over 1 MiB; `502` `pi-tmux send` failed |
+| `GET /api/pane/{name}/capture?lines=N` | — | `{"ok":true,"name","target","lines","text"}` | `400` bad name, non-integer `lines`, or `lines` outside 1..2000; `404` unknown/stale pane; `405` wrong method; `502` `pi-tmux capture` failed |
+| `POST /api/pane/{name}/kill` | — | `{"ok":true,"name","target","killed"}` | `400` bad name; `404` unknown/stale pane; `405` wrong method; `409` refusing the fleet window; `502` `pi-tmux kill` failed |
+| any other path | — | — | `404` `{"ok":false,"error":"not found"}` |
 
 `send` pastes through `pi-tmux send`, so multi-line prompts keep their newlines.
+Any path not in this table is `404` with `{"ok":false,"error":"not found"}`;
+a path in the table called with the wrong method is `405` with
+`{"ok":false,"error":"no such route for METHOD"}`. The router keeps those two
+cases distinct, so an unknown path never claims to be a known route.
 `submit` defaults to `true` and appends the single Enter that submits a Pi
 editor; `submit: false` stages text without running it. `capture` returns the
 visible pane text oldest-first via `pi-tmux capture --lines N` (`N` defaults to
@@ -107,12 +112,12 @@ Every failure is JSON and explicit — no silent fallbacks:
 | Status | When |
 | --- | --- |
 | `400` | bad name, bad `lines`, invalid JSON, empty or non-string message |
-| `404` | unknown pane, or a name whose pane is gone since the snapshot |
+| `404` | unknown route, unknown pane, or a name whose pane is gone since the snapshot |
 | `405` | known path with the wrong method (e.g. `POST .../capture`) |
 | `409` | refusing to kill the fleet window |
 | `413` | body over 1 MiB |
 | `502` | `tmux` or `pi-tmux` returned an error; its message is passed through |
-| `504` | the `tmux`/`pi-tmux` call exceeded its timeout |
+| `504` | reserved for a future `tmux`/`pi-tmux` timeout; the current adapter has no separate timeout |
 
 A pane that vanished between listing and acting returns `404` rather than an
 `ok: true` with a stale target, because the caller's next move (retry, respawn,
@@ -291,8 +296,46 @@ Phase 1 was smoke-tested end to end against a disposable tmux session
 - `404` (unknown pane `ghost`), `400` (`lines=zero`), `400` (non-JSON body),
   `405` (`POST .../capture`), `404` (unknown route), and `409` (killing the
   fleet window via a state-file `fleet` entry) all returned the documented JSON;
+- `scripts/cp-server-selftest.sh` boots a scratch `cp-404-selftest-*` session on
+  an ephemeral port, blocks on the server's own "listening" line for readiness
+  (no stabiliser sleeps), and asserts the status matrix — `GET /api/nope` →
+  `404`, `POST .../capture` → `405`, `GET /api/panes` → `200` — printing a
+  `PASS`/`FAIL` line per case and exiting non-zero on drift, so a future router
+  edit cannot silently restore the old 405-for-404 behavior;
 - binding `127.0.0.1:8791` on the Mac failed loudly and named Alfalfa as the
   owner, rather than silently taking another port.
+
+### Unknown-route regression (404)
+
+Run the self-contained check from the repository root:
+
+```sh
+luac -p scripts/cp-server.lua
+scripts/cp-server-selftest.sh
+```
+
+Observed output:
+
+```text
+PASS  GET /api/nope (unknown path)           404
+PASS  POST /api/pane/x/capture (wrong method) 405
+PASS  GET /api/panes (valid route)           200
+cp-server-selftest: 3 passed, 0 failed (port 49337, session cp-404-selftest-19092)
+```
+
+Against a scratch server on port 8899, the bodies are the documented ones:
+
+```sh
+curl -s -w ' [%{http_code}]\n' localhost:8899/api/nope
+curl -s -w ' [%{http_code}]\n' -X POST localhost:8899/api/pane/x/capture
+curl -s -o /dev/null -w '[%{http_code}]\n' localhost:8899/api/panes
+```
+
+```text
+{"error":"not found","ok":false} [404]
+{"error":"no such route for POST","ok":false} [405]
+[200]
+```
 
 ## Non-goals
 

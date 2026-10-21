@@ -836,6 +836,23 @@ local function serve_request(fleet, client, request_line, headers)
   end
   local params = parse_query(query)
 
+  -- A path that exists in the route table but was called with another
+  -- method is 405; anything else is 404. Keep the two cases distinct so an
+  -- unknown path never claims to be a known route.
+  local known_actions = { capture = true, send = true, kill = true }
+  local function known_route(route_parts)
+    if route_parts[1] ~= "api" then
+      return false
+    end
+    if #route_parts == 2 and route_parts[2] == "panes" then
+      return true
+    end
+    if #route_parts == 4 and route_parts[2] == "pane" and known_actions[route_parts[4]] then
+      return true
+    end
+    return false
+  end
+
   local results = table.pack(pcall(function()
     if method == "GET" and #parts == 2 and parts[1] == "api" and parts[2] == "panes" then
       local snapshot = fleet:snapshot()
@@ -877,7 +894,7 @@ local function serve_request(fleet, client, request_line, headers)
       end
     end
 
-    if #parts >= 2 and parts[1] == "api" then
+    if known_route(parts) then
       error({ status = 405, message = "no such route for " .. method })
     end
     error({ status = 404, message = "not found" })
@@ -1005,8 +1022,13 @@ if not server then
 end
 server:settimeout(nil)
 
+-- Port 0 asks the OS for a free port; report the one we actually got so a
+-- scratch server (and its selftest) can connect without guessing.
+local _, bound_port = server:getsockname()
+bound_port = tonumber(bound_port) or options.port
+
 io.stderr:write(string.format("cp-server: session=%s panes=%d listening on http://%s:%d\n",
-  options.session, snapshot.count, options.host, options.port))
+  options.session, snapshot.count, options.host, bound_port))
 
 while true do
   local client = server:accept()
