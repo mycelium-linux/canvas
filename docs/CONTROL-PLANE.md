@@ -94,6 +94,10 @@ single argument reaches `tmux`.
 | `POST /api/pane/{name}/kill` | — | `{"ok":true,"name","target","killed"}` |
 
 `send` pastes through `pi-tmux send`, so multi-line prompts keep their newlines.
+Any path not in this table is `404` with `{"ok":false,"error":"not found"}`;
+a path in the table called with the wrong method is `405` with
+`{"ok":false,"error":"no such route for METHOD"}`. The router keeps those two
+cases distinct, so an unknown path never claims to be a known route.
 `submit` defaults to `true` and appends the single Enter that submits a Pi
 editor; `submit: false` stages text without running it. `capture` returns the
 visible pane text oldest-first via `pi-tmux capture --lines N` (`N` defaults to
@@ -107,7 +111,7 @@ Every failure is JSON and explicit — no silent fallbacks:
 | Status | When |
 | --- | --- |
 | `400` | bad name, bad `lines`, invalid JSON, empty or non-string message |
-| `404` | unknown pane, or a name whose pane is gone since the snapshot |
+| `404` | unknown route, unknown pane, or a name whose pane is gone since the snapshot |
 | `405` | known path with the wrong method (e.g. `POST .../capture`) |
 | `409` | refusing to kill the fleet window |
 | `413` | body over 1 MiB |
@@ -291,6 +295,11 @@ Phase 1 was smoke-tested end to end against a disposable tmux session
 - `404` (unknown pane `ghost`), `400` (`lines=zero`), `400` (non-JSON body),
   `405` (`POST .../capture`), `404` (unknown route), and `409` (killing the
   fleet window via a state-file `fleet` entry) all returned the documented JSON;
+- `scripts/cp-server-selftest.sh` boots a scratch `cp-404-selftest-*` session on
+  an ephemeral port and asserts the status matrix — `GET /api/nope` → `404`,
+  `POST .../capture` → `405`, `GET /api/panes` → `200` — exiting non-zero on
+  drift, so a future router edit cannot silently restore the old 405-for-404
+  behavior;
 - binding `127.0.0.1:8791` on the Mac failed loudly and named Alfalfa as the
   owner, rather than silently taking another port.
 
