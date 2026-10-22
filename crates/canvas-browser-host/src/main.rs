@@ -158,20 +158,22 @@ async fn forward(
         Ok(b) => b,
         Err(e) => return error(StatusCode::BAD_GATEWAY, e.to_string()),
     };
-    if method == Method::POST && path == "session" && status.is_success() {
-        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-            let webdriver_id = value
-                .pointer("/value/sessionId")
-                .or_else(|| value.get("sessionId"))
-                .and_then(serde_json::Value::as_str);
-            if let Some(webdriver_id) = webdriver_id {
-                if let Err(e) = app.pool.start_stream(&id, webdriver_id) {
-                    return error(
-                        StatusCode::BAD_GATEWAY,
-                        format!("browser started but media failed: {e:#}"),
-                    );
-                }
-            }
+    if method == Method::POST
+        && path == "session"
+        && status.is_success()
+        && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
+    {
+        let webdriver_id = value
+            .pointer("/value/sessionId")
+            .or_else(|| value.get("sessionId"))
+            .and_then(serde_json::Value::as_str);
+        if let Some(webdriver_id) = webdriver_id
+            && let Err(e) = app.pool.start_stream(&id, webdriver_id)
+        {
+            return error(
+                StatusCode::BAD_GATEWAY,
+                format!("browser started but media failed: {e:#}"),
+            );
         }
     }
     let mut builder = Response::builder().status(status);

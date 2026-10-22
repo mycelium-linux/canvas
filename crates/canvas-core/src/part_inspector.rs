@@ -357,7 +357,7 @@ fn classify_artifact(entry: &ManifestEntry, manifest_revision: &str) -> PartArti
             || lower_path.contains("drawing"))
     {
         ArtifactRole::Drawing
-    } else if components.iter().any(|part| *part == "metadata")
+    } else if components.contains(&"metadata")
         || lower_path.ends_with("metadata.json")
         || lower_path.ends_with("metadata.toml")
         || lower_path.ends_with("metadata.yaml")
