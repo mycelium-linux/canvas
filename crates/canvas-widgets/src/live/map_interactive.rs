@@ -1,18 +1,18 @@
 //! Stateful map interaction with independently ordered raster/vector GPU layers.
-use super::{gfx_signals, map_raster, CacheState};
-use advanced::{graphics::geometry::Renderer as _, image::Renderer as _, Renderer as _};
+use super::{CacheState, gfx_signals, map_raster};
+use advanced::{Renderer as _, graphics::geometry::Renderer as _, image::Renderer as _};
 use fpl_gfx::{
+    Rect,
     geo_map::{camera::Camera, raster::cropped_extent},
     signals::SignalFrame,
-    Rect,
 };
 use iced::{
+    Element, Event, Length, Point, Rectangle, Renderer, Size, Theme, Vector,
     advanced::{
-        self, image, layout, renderer,
-        widget::{tree, Tree},
-        Widget,
+        self, Widget, image, layout, renderer,
+        widget::{Tree, tree},
     },
-    mouse, Element, Event, Length, Point, Rectangle, Renderer, Size, Theme, Vector,
+    mouse,
 };
 
 pub(super) fn view<'a, Message: 'a>(

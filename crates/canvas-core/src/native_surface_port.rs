@@ -250,9 +250,10 @@ mod tests {
         let sender = NativeSurfacePortSender::connect(&path).unwrap();
         // A send right to the receiver itself suffices to test the kernel's
         // rights-transfer ABI without relying on a GUI or fake IOSurface ID.
-        assert_eq!(unsafe {
-            mach_port_mod_refs(mach_task_self(), receiver.port, MACH_PORT_RIGHT_SEND, 1)
-        }, 0);
+        assert_eq!(
+            unsafe { mach_port_mod_refs(mach_task_self(), receiver.port, MACH_PORT_RIGHT_SEND, 1) },
+            0
+        );
         let right = NativeSurfacePort(receiver.port);
         sender.send("native/a", 1, 42, &right).unwrap();
         sender.send("native/b", 2, 43, &right).unwrap();

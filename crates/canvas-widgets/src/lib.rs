@@ -254,7 +254,10 @@ pub fn is_known_widget_kind(tag: &str) -> bool {
 pub enum WidgetKind {
     /// Bounded renderer-neutral signal snapshot; gfx owns its typed validation
     /// and geometry. WidgetData owns source identity, units and freshness.
-    SignalView { title: String, frame: serde_json::Value },
+    SignalView {
+        title: String,
+        frame: serde_json::Value,
+    },
     /// Domain-owned quantitative visualizations sharing the common widget shell.
     Quant { widget: quant::QuantWidget },
     /// Prometheus-style single value with optional trend and retained history.
@@ -3190,7 +3193,10 @@ impl WidgetSpec {
                 "clock format must be 1-64 characters",
             )?,
             WidgetKind::SignalView { title, frame } => {
-                check(!title.is_empty() && title.len() <= 128, "signal title must be 1-128 bytes")?;
+                check(
+                    !title.is_empty() && title.len() <= 128,
+                    "signal title must be 1-128 bytes",
+                )?;
                 let frame: fpl_gfx::signals::SignalFrame = serde_json::from_value(frame.clone())
                     .map_err(|error| Error(format!("invalid signal frame: {error}")))?;
                 frame.validate().map_err(|error| Error(error.to_string()))?;

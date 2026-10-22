@@ -1,11 +1,11 @@
 //! Latest-view-only client of Galileo's independently compiled tile worker.
 use fpl_gfx::{
+    Rect,
     geo::Extent,
     geo_map::{
-        tiles::{Request, Response},
         Map,
+        tiles::{Request, Response},
     },
-    Rect,
 };
 use iced::widget::image::Handle;
 use std::{
@@ -13,8 +13,8 @@ use std::{
     path::PathBuf,
     process::{Command, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };

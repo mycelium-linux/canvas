@@ -1,7 +1,8 @@
 //! Cheap, deterministic full-screen toys. Pixels stay on the local GPU.
 macro_rules! toy {
     ($body:literal) => {
-        concat!(r#"
+        concat!(
+            r#"
 fn reflect_unit(t: f32) -> f32 {
     return 1.0 - abs(1.0 - 2.0 * fract(t));
 }
@@ -10,11 +11,14 @@ fn moving_center(extent: vec2<f32>, half_size: vec2<f32>, velocity: vec2<f32>) -
     let phase = (u.time * velocity / span + vec2<f32>(0.37, 0.61)) * 0.5;
     return half_size + span * vec2<f32>(reflect_unit(phase.x), reflect_unit(phase.y));
 }
-"#, $body)
+"#,
+            $body
+        )
     };
 }
 
-pub const BALL: &str = toy!(r#"
+pub const BALL: &str = toy!(
+    r#"
 @fragment
 fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let size = min(u.res.x, u.res.y);
@@ -24,9 +28,11 @@ fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let ink = 1.0 - smoothstep(-0.8, 0.8, edge);
     return vec4<f32>(vec3<f32>(ink), 1.0);
 }
-"#);
+"#
+);
 
-pub const DVD: &str = toy!(r#"
+pub const DVD: &str = toy!(
+    r#"
 // Original DVD mark vector outline, flattened from Wikimedia Commons DVD_logo.svg.
 // Source: https://commons.wikimedia.org/wiki/File:DVD_logo.svg
 // DVD is a trademark of its respective owner. No screensaver implementation copied.
@@ -281,4 +287,5 @@ fn main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let color=0.55+0.45*cos(vec3<f32>(0.0,2.094,4.188)+hits*1.618);
     return vec4<f32>(max(color*ink,vec3<f32>(border*0.7)),1.0);
 }
-"#);
+"#
+);

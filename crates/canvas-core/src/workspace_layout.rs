@@ -168,8 +168,10 @@ mod compatibility_tests {
                 .is_err()
         );
         assert!(
-            serde_json::from_value::<Layout>(serde_json::json!({"kind":"surface","surface_id":"video","unexpected":true}))
-                .is_err()
+            serde_json::from_value::<Layout>(
+                serde_json::json!({"kind":"surface","surface_id":"video","unexpected":true})
+            )
+            .is_err()
         );
     }
 }

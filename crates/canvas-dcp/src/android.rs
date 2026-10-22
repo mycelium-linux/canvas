@@ -94,7 +94,12 @@ mod tests {
     #[test]
     fn workspace_command_rejects_multiple_tokens_before_owner_dispatch() {
         let (app, _) = super::super::tests::sample();
-        for id in ["", "clock\nworkspace switch studio", "clock studio", "clock\tstudio"] {
+        for id in [
+            "",
+            "clock\nworkspace switch studio",
+            "clock studio",
+            "clock\tstudio",
+        ] {
             let error = switch_workspace(&app, id).unwrap_err();
             assert!(error.to_string().contains("one exact token"));
         }

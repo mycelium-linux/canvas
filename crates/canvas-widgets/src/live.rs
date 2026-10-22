@@ -30,16 +30,16 @@ use iced::{Color, ContentFit, Element, Length, Point, Rectangle, Renderer, Size,
 pub mod app_chrome;
 mod clock;
 mod gfx_clock;
+mod gfx_signals;
 pub mod gfx_theme;
-pub mod retained_gradient;
+mod map_fetch;
+mod map_interactive;
+mod map_raster;
 mod primitives;
 mod quality;
 mod quant;
+pub mod retained_gradient;
 mod signal_scene;
-mod gfx_signals;
-mod map_raster;
-mod map_interactive;
-mod map_fetch;
 mod spectral_waterfall;
 mod wasm_cdg;
 mod wasm_hyperspace;
@@ -2015,7 +2015,9 @@ pub fn element_at_with_artwork<'a, Message: 'a>(
             .into(),
             visual,
         ),
-        WidgetKind::SignalView { frame, .. } => panel(spec, gfx_signals::view(frame, visual), visual),
+        WidgetKind::SignalView { frame, .. } => {
+            panel(spec, gfx_signals::view(frame, visual), visual)
+        }
         WidgetKind::Chart { .. } => {
             // Live charts reuse the canvas ChartProgram; the widgets crate
             // delegates so there is one chart implementation (tenet 1).

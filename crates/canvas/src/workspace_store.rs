@@ -26,7 +26,7 @@ const MAX_STORE_BYTES: u64 = 4 * 1024 * 1024;
 /// Bounded because the trail would otherwise grow with every switch for the life
 /// of the install, inside a store already capped at [`MAX_STORE_BYTES`]. Sixteen
 /// is well past the point where someone still remembers which one they meant.
-use canvas_core::workspace_navigation::{MAX_RECENT_PROJECTS, record_switch, previous};
+use canvas_core::workspace_navigation::{MAX_RECENT_PROJECTS, previous, record_switch};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -151,7 +151,11 @@ impl WorkspaceStore {
             return;
         }
         let departed = self.active_project_id.replace(project_id.to_string());
-        record_switch(&mut self.recent_project_ids, departed.as_deref(), project_id);
+        record_switch(
+            &mut self.recent_project_ids,
+            departed.as_deref(),
+            project_id,
+        );
     }
 
     /// Where "go back" goes, or `None` when there is nowhere to go.
@@ -160,7 +164,9 @@ impl WorkspaceStore {
     /// failing: a project deleted months ago must not make "go back" an error,
     /// and it must not silently become a switch to something that cannot load.
     pub fn previous_project_id(&self) -> Option<&str> {
-        previous(&self.recent_project_ids, |id| self.projects.contains_key(id))
+        previous(&self.recent_project_ids, |id| {
+            self.projects.contains_key(id)
+        })
     }
 
     /// Bring an older store forward in place.

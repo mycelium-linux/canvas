@@ -438,7 +438,10 @@ fn follow(serial: &str, project: &str) -> Result<(), String> {
         match call(
             "canvas-tvctl",
             &[serial],
-            &request(json!({"command":"workspace_presentation","name":project}), None),
+            &request(
+                json!({"command":"workspace_presentation","name":project}),
+                None,
+            ),
         ) {
             Ok(reply) => {
                 let presentation = &reply["data"];

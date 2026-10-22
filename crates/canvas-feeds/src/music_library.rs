@@ -203,7 +203,9 @@ impl Library {
         url.query_pairs_mut()
             .append_pair("limit", "24")
             .append_pair("offset", &offset.to_string());
-        if !artist.is_empty() { url.query_pairs_mut().append_pair("artist", artist); }
+        if !artist.is_empty() {
+            url.query_pairs_mut().append_pair("artist", artist);
+        }
         let albums: Vec<Album> = self.get(url)?;
         if albums.len() > 24 {
             return Err("catalog exceeded requested album page size".into());
@@ -214,28 +216,49 @@ impl Library {
     /// Bounded artist page from the catalog owner.
     pub fn artists(&self, offset: usize) -> Result<Vec<String>, String> {
         let mut url = self.base.join("artists").map_err(|e| e.to_string())?;
-        url.query_pairs_mut().append_pair("limit", "24").append_pair("offset", &offset.to_string());
+        url.query_pairs_mut()
+            .append_pair("limit", "24")
+            .append_pair("offset", &offset.to_string());
         let values: Vec<String> = self.get(url)?;
-        if values.len() > 24 || values.iter().any(|value| value.len() > 8192) { return Err("Invalid artist page".into()); }
+        if values.len() > 24 || values.iter().any(|value| value.len() > 8192) {
+            return Err("Invalid artist page".into());
+        }
         Ok(values)
     }
 
     /// Imported playlist metadata; local playability must not be inferred from membership.
     pub fn playlists(&self, offset: usize) -> Result<serde_json::Value, String> {
-        let mut url=self.base.join("playlists").map_err(|e| e.to_string())?;
-        url.query_pairs_mut().append_pair("summary","1").append_pair("limit","24").append_pair("offset",&offset.to_string());
+        let mut url = self.base.join("playlists").map_err(|e| e.to_string())?;
+        url.query_pairs_mut()
+            .append_pair("summary", "1")
+            .append_pair("limit", "24")
+            .append_pair("offset", &offset.to_string());
         let values: serde_json::Value = self.get(url)?;
         let values = values.as_array().ok_or("Invalid playlist catalog")?;
-        if values.len()>24 || values.iter().any(|value|value["playlist"].get("tracks").is_some()) {return Err("Expected bounded playlist summaries".into());}
+        if values.len() > 24
+            || values
+                .iter()
+                .any(|value| value["playlist"].get("tracks").is_some())
+        {
+            return Err("Expected bounded playlist summaries".into());
+        }
         Ok(serde_json::Value::Array(values.clone()))
     }
 
     /// A bounded metadata preview, without resolving provider tracks or changing playback.
-    pub fn playlist_tracks(&self, owner:&str,name:&str)->Result<serde_json::Value,String> {
-        let mut url=self.base.join("playlists/tracks").map_err(|e|e.to_string())?;
-        url.query_pairs_mut().append_pair("owner",owner).append_pair("name",name).append_pair("limit","100");
-        let value:serde_json::Value=self.get(url)?;
-        if value.as_array().is_none_or(|tracks|tracks.len()>100) {return Err("Invalid playlist preview".into());}
+    pub fn playlist_tracks(&self, owner: &str, name: &str) -> Result<serde_json::Value, String> {
+        let mut url = self
+            .base
+            .join("playlists/tracks")
+            .map_err(|e| e.to_string())?;
+        url.query_pairs_mut()
+            .append_pair("owner", owner)
+            .append_pair("name", name)
+            .append_pair("limit", "100");
+        let value: serde_json::Value = self.get(url)?;
+        if value.as_array().is_none_or(|tracks| tracks.len() > 100) {
+            return Err("Invalid playlist preview".into());
+        }
         Ok(value)
     }
 
@@ -399,17 +422,33 @@ mod tests {
         let (origin, handle) = mock(r#"["A & B"]"#);
         let library = Library::new(&origin, None).unwrap();
         assert_eq!(library.artists(24).unwrap(), vec!["A & B"]);
-        assert_eq!(handle.join().unwrap(), "GET /artists?limit=24&offset=24 HTTP/1.1\r\n");
+        assert_eq!(
+            handle.join().unwrap(),
+            "GET /artists?limit=24&offset=24 HTTP/1.1\r\n"
+        );
         let (origin, handle) = mock("[]");
-        Library::new(&origin, None).unwrap().albums_by_artist(0, "A & B").unwrap();
-        assert_eq!(handle.join().unwrap(), "GET /albums?limit=24&offset=0&artist=A+%26+B HTTP/1.1\r\n");
+        Library::new(&origin, None)
+            .unwrap()
+            .albums_by_artist(0, "A & B")
+            .unwrap();
+        assert_eq!(
+            handle.join().unwrap(),
+            "GET /albums?limit=24&offset=0&artist=A+%26+B HTTP/1.1\r\n"
+        );
     }
 
     #[test]
     fn playlists_are_paged_without_claiming_local_playability() {
-        let (origin, handle) = mock(r#"[{"owner":"me","playlist":{"name":"One","track_count":10}}]"#);
-        assert_eq!(Library::new(&origin, None).unwrap().playlists(0).unwrap()[0]["playlist"]["name"], "One");
-        assert_eq!(handle.join().unwrap(), "GET /playlists?summary=1&limit=24&offset=0 HTTP/1.1\r\n");
+        let (origin, handle) =
+            mock(r#"[{"owner":"me","playlist":{"name":"One","track_count":10}}]"#);
+        assert_eq!(
+            Library::new(&origin, None).unwrap().playlists(0).unwrap()[0]["playlist"]["name"],
+            "One"
+        );
+        assert_eq!(
+            handle.join().unwrap(),
+            "GET /playlists?summary=1&limit=24&offset=0 HTTP/1.1\r\n"
+        );
     }
 
     #[test]

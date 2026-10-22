@@ -1,5 +1,5 @@
 //! Immutable digest assets become a retained GPU image; no network fetches.
-use fpl_gfx::{geo_map::Map, Rect};
+use fpl_gfx::{Rect, geo_map::Map};
 use iced::widget::image::Handle;
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, io::Read, path::Path};
