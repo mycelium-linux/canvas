@@ -80,7 +80,11 @@ pub struct ActorContext {
 pub enum Command {
     ShellCatalog,
     ShellDockPins,
-    ShellDockPin { catalog_revision: String, entry_id: String, pinned: bool },
+    ShellDockPin {
+        catalog_revision: String,
+        entry_id: String,
+        pinned: bool,
+    },
     ShellActivate {
         catalog_revision: String,
         entry_id: String,
@@ -685,7 +689,9 @@ pub enum Receipt {
     ShellActivated {
         entry_id: String,
     },
-    ShellDockPins { pins: Vec<String> },
+    ShellDockPins {
+        pins: Vec<String>,
+    },
     Performance {
         metrics: serde_json::Value,
     },
@@ -1037,7 +1043,12 @@ impl ControlRequest {
             Command::ShellActivate {
                 catalog_revision,
                 entry_id,
-            } | Command::ShellDockPin { catalog_revision, entry_id, .. } => {
+            }
+            | Command::ShellDockPin {
+                catalog_revision,
+                entry_id,
+                ..
+            } => {
                 if catalog_revision.len() != 64
                     || !catalog_revision.bytes().all(|b| b.is_ascii_hexdigit())
                     || entry_id.is_empty()
@@ -1539,10 +1550,17 @@ pub mod text {
                     name: tokens[1].clone(),
                 })
             }
-            "dock-pins" => { req(tokens, 1, "dock-pins")?; Ok(Command::ShellDockPins) }
+            "dock-pins" => {
+                req(tokens, 1, "dock-pins")?;
+                Ok(Command::ShellDockPins)
+            }
             "dock-pin" | "dock-unpin" => {
                 req(tokens, 3, "dock-pin <catalog-revision> <entry-id>")?;
-                Ok(Command::ShellDockPin { catalog_revision: tokens[1].clone(), entry_id: tokens[2].clone(), pinned: tokens[0] == "dock-pin" })
+                Ok(Command::ShellDockPin {
+                    catalog_revision: tokens[1].clone(),
+                    entry_id: tokens[2].clone(),
+                    pinned: tokens[0] == "dock-pin",
+                })
             }
             "screensaver_shader" | "shader" => {
                 req(tokens, 2, "screensaver_shader <index>")?;
@@ -1868,7 +1886,9 @@ pub mod text {
                         serde_json::to_string(catalog).unwrap_or_else(|e| e.to_string())
                     }
                     Receipt::ShellActivated { entry_id } => format!("opened={entry_id}"),
-                    Receipt::ShellDockPins { pins } => serde_json::to_string(pins).unwrap_or_else(|e| e.to_string()),
+                    Receipt::ShellDockPins { pins } => {
+                        serde_json::to_string(pins).unwrap_or_else(|e| e.to_string())
+                    }
                     Receipt::Snapshot { snapshot } => format!(
                         "project={} frame={},{},{},{} surfaces={} indicators={} events={} displays={} visible={}",
                         snapshot.project_id,
@@ -2033,11 +2053,31 @@ mod tests {
     #[test]
     fn shell_dock_pin_commands_are_revision_bound_and_round_trip() {
         use super::*;
-        let command = Command::ShellDockPin { catalog_revision: "a".repeat(64), entry_id: "app:/Applications/Calculator.app".into(), pinned: true };
-        let request = ControlRequest { schema_version: CONTROL_VERSION, request_id: "pin-test".into(), expected_revision: None, actor: None, command: command.clone() };
+        let command = Command::ShellDockPin {
+            catalog_revision: "a".repeat(64),
+            entry_id: "app:/Applications/Calculator.app".into(),
+            pinned: true,
+        };
+        let request = ControlRequest {
+            schema_version: CONTROL_VERSION,
+            request_id: "pin-test".into(),
+            expected_revision: None,
+            actor: None,
+            command: command.clone(),
+        };
         request.validate().unwrap();
-        assert_eq!(serde_json::from_slice::<Command>(&serde_json::to_vec(&command).unwrap()).unwrap(), command);
-        let bad = ControlRequest { command: Command::ShellDockPin { catalog_revision: "stale".into(), entry_id: "app:/a".into(), pinned: true }, ..request };
+        assert_eq!(
+            serde_json::from_slice::<Command>(&serde_json::to_vec(&command).unwrap()).unwrap(),
+            command
+        );
+        let bad = ControlRequest {
+            command: Command::ShellDockPin {
+                catalog_revision: "stale".into(),
+                entry_id: "app:/a".into(),
+                pinned: true,
+            },
+            ..request
+        };
         assert!(bad.validate().is_err());
         assert!(serde_json::from_str::<Command>(r#"{"command":"shell_dock_pin","catalog_revision":"x","entry_id":"app:/a","pinned":true,"path":"/bin/sh"}"#).is_err());
     }

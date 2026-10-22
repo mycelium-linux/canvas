@@ -264,9 +264,7 @@ impl<Message> shader::Program<Message> for Program<Message> {
                 }
                 _ => REDRAW_INTERVAL,
             };
-            return Some(iced::widget::Action::request_redraw_at(
-                *now + interval,
-            ));
+            return Some(iced::widget::Action::request_redraw_at(*now + interval));
         }
         let Some(hook) = self.on_orbit.as_ref() else {
             return None;
@@ -423,8 +421,10 @@ impl shader::Primitive for Primitive {
                     };
                     let imported = match &descriptor.transport {
                         SurfaceTransport::SharedMemory { .. } => None,
-                        SurfaceTransport::IoSurface { .. } | SurfaceTransport::IoSurfaceMachPort { .. } => {
-                            match crate::external_surface::import_retained_iosurface(device, frame) {
+                        SurfaceTransport::IoSurface { .. }
+                        | SurfaceTransport::IoSurfaceMachPort { .. } => {
+                            match crate::external_surface::import_retained_iosurface(device, frame)
+                            {
                                 Ok(texture) => Some(texture),
                                 Err(error) => {
                                     eprintln!(
@@ -455,9 +455,14 @@ impl shader::Primitive for Primitive {
                 imported,
             );
             if let FrameSource::External(frame) = &self.source {
-                state.native_hold = frame.native_surface.clone().map(|surface| DeferredNativeHold {
-                    surface: Some(surface), queue: queue.clone(),
-                });
+                state.native_hold =
+                    frame
+                        .native_surface
+                        .clone()
+                        .map(|surface| DeferredNativeHold {
+                            surface: Some(surface),
+                            queue: queue.clone(),
+                        });
             }
             pipeline.textures.insert(self.ticket, state);
         }
@@ -557,8 +562,18 @@ impl shader::Primitive for Primitive {
             source: [source_width as f32, source_height as f32],
             staleness,
             has_alpha: if has_alpha { 1.0 } else { 0.0 },
-            premultiplied: if matches!(&self.source, FrameSource::External(frame) if frame.descriptor.alpha_mode == canvas_core::external_surface::AlphaMode::Premultiplied) { 1.0 } else { 0.0 },
-            native_alpha: if matches!(&self.source, FrameSource::External(frame) if frame.descriptor.alpha_mode != canvas_core::external_surface::AlphaMode::Opaque) { 1.0 } else { 0.0 },
+            premultiplied: if matches!(&self.source, FrameSource::External(frame) if frame.descriptor.alpha_mode == canvas_core::external_surface::AlphaMode::Premultiplied)
+            {
+                1.0
+            } else {
+                0.0
+            },
+            native_alpha: if matches!(&self.source, FrameSource::External(frame) if frame.descriptor.alpha_mode != canvas_core::external_surface::AlphaMode::Opaque)
+            {
+                1.0
+            } else {
+                0.0
+            },
         };
         queue.write_buffer(&state.uniform, 0, &uniforms.to_bytes());
 

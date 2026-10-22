@@ -12,30 +12,30 @@ pub mod appearance;
 pub mod boot_budget;
 pub mod chunk;
 pub mod desktop;
-#[cfg(unix)]
-pub mod native_control;
 pub mod desktop_theme;
 pub mod display_watch;
 pub mod external_surface;
-#[cfg(target_os = "macos")]
-pub mod native_surface_port;
 #[cfg(unix)]
 pub mod external_surface_ipc;
 pub mod global_hotkey;
 pub mod layout;
 pub mod layout_tree;
-pub mod workspace_layout;
-pub mod workspace_navigation;
 pub mod manifest_query;
+#[cfg(unix)]
+pub mod native_control;
+#[cfg(target_os = "macos")]
+pub mod native_surface_port;
 pub mod notification;
-pub mod stream_lease;
 pub mod part_inspector;
 pub mod project_browser;
-pub mod workbench;
+pub mod stream_lease;
 pub mod task;
 pub mod theme_file;
 pub mod unibus;
+pub mod workbench;
 pub mod working_set;
+pub mod workspace_layout;
+pub mod workspace_navigation;
 
 /// The set of stream contracts Canvas recognises for ingress.
 ///

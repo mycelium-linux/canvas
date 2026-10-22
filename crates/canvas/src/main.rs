@@ -1975,10 +1975,16 @@ impl App {
                 self.navigate_pdf(surface_id, target, None)
             }
             Message::Tick => {
-                if self.expire_voice_indicator(Instant::now()) { self.bump(); }
-                if self.indicator_dismissing.as_ref().is_some_and(|(_, since)| {
-                    since.elapsed().as_secs_f32() >= fpl_gfx::voice_popup::DISMISS_SECONDS
-                }) {
+                if self.expire_voice_indicator(Instant::now()) {
+                    self.bump();
+                }
+                if self
+                    .indicator_dismissing
+                    .as_ref()
+                    .is_some_and(|(_, since)| {
+                        since.elapsed().as_secs_f32() >= fpl_gfx::voice_popup::DISMISS_SECONDS
+                    })
+                {
                     self.indicator_dismissing = None;
                 }
                 #[cfg(feature = "lua-scenes")]
@@ -5417,7 +5423,9 @@ impl App {
                 self.indicator_dismissing = None;
                 if changed {
                     // A partial caption/state update must not restart the reveal.
-                    if !was_visible { self.indicator_started = Instant::now(); }
+                    if !was_visible {
+                        self.indicator_started = Instant::now();
+                    }
                     self.bump();
                     self.status = format!("Updated indicator {indicator_id}.");
                 }
@@ -6760,14 +6768,20 @@ impl App {
                 self.indicator_dismissing = removed.map(|value| (value, now));
             }
         }
-        if id == canvas_workspace::observer::VOICE_INDICATOR_ID { self.voice_indicator_seen = None; }
+        if id == canvas_workspace::observer::VOICE_INDICATOR_ID {
+            self.voice_indicator_seen = None;
+        }
         did_remove
     }
 
     fn expire_voice_indicator(&mut self, now: Instant) -> bool {
         let expiry = Duration::from_millis(u64::from(canvas_workspace::observer::MAX_TTL_MS));
-        if self.voice_indicator_seen.is_some_and(|seen| now.saturating_duration_since(seen) >= expiry) {
-            return self.dismiss_status_indicator(canvas_workspace::observer::VOICE_INDICATOR_ID, now);
+        if self
+            .voice_indicator_seen
+            .is_some_and(|seen| now.saturating_duration_since(seen) >= expiry)
+        {
+            return self
+                .dismiss_status_indicator(canvas_workspace::observer::VOICE_INDICATOR_ID, now);
         }
         false
     }
@@ -11414,7 +11428,9 @@ impl App {
             layers.push(indicator::view(
                 active,
                 self.indicator_started.elapsed(),
-                (self.indicator_started.elapsed().as_secs_f32() / fpl_gfx::voice_popup::REVEAL_SECONDS).min(1.0),
+                (self.indicator_started.elapsed().as_secs_f32()
+                    / fpl_gfx::voice_popup::REVEAL_SECONDS)
+                    .min(1.0),
                 indicator::IndicatorPalette {
                     panel: Color {
                         a: 0.94,
@@ -11429,8 +11445,14 @@ impl App {
             layers.push(indicator::view(
                 active,
                 self.indicator_started.elapsed(),
-                (1.0 - since.elapsed().as_secs_f32() / fpl_gfx::voice_popup::DISMISS_SECONDS).max(0.0),
-                indicator::IndicatorPalette { panel: surface_color, border: border_color, text: text_color, muted },
+                (1.0 - since.elapsed().as_secs_f32() / fpl_gfx::voice_popup::DISMISS_SECONDS)
+                    .max(0.0),
+                indicator::IndicatorPalette {
+                    panel: surface_color,
+                    border: border_color,
+                    text: text_color,
+                    muted,
+                },
             ));
         }
 
@@ -14636,12 +14658,30 @@ mod tests {
         use ::canvas::control::IndicatorState;
         let mut app = test_app();
         let document = app.document.clone();
-        execute(&mut app, "generic", Command::UpsertIndicator { indicator: indicator("other", IndicatorState::Thinking) });
+        execute(
+            &mut app,
+            "generic",
+            Command::UpsertIndicator {
+                indicator: indicator("other", IndicatorState::Thinking),
+            },
+        );
         let voice = canvas_workspace::observer::VOICE_INDICATOR_ID;
-        execute(&mut app, "voice", Command::UpsertIndicator { indicator: indicator(voice, IndicatorState::Listening) });
+        execute(
+            &mut app,
+            "voice",
+            Command::UpsertIndicator {
+                indicator: indicator(voice, IndicatorState::Listening),
+            },
+        );
         let reveal = app.indicator_started;
         let revision = app.runtime_revision;
-        execute(&mut app, "heartbeat", Command::UpsertIndicator { indicator: indicator(voice, IndicatorState::Listening) });
+        execute(
+            &mut app,
+            "heartbeat",
+            Command::UpsertIndicator {
+                indicator: indicator(voice, IndicatorState::Listening),
+            },
+        );
         assert_eq!(app.indicator_started, reveal);
         assert_eq!(app.runtime_revision, revision);
         let seen = app.voice_indicator_seen.unwrap();

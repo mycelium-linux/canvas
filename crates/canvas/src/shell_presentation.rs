@@ -213,8 +213,14 @@ mod tests {
             s.values = std::collections::BTreeMap::from([
                 ("width".into(), V::Number(width)),
                 ("height".into(), V::Number(44.0)),
-                ("padding".into(), V::Number(f64::from(fpl_gfx::chrome::BAR_PADDING))),
-                ("labelsize".into(), V::Number(f64::from(fpl_gfx::chrome::BAR_TEXT_SIZE))),
+                (
+                    "padding".into(),
+                    V::Number(f64::from(fpl_gfx::chrome::BAR_PADDING)),
+                ),
+                (
+                    "labelsize".into(),
+                    V::Number(f64::from(fpl_gfx::chrome::BAR_TEXT_SIZE)),
+                ),
                 ("workspace".into(), V::Text("HOME".into())),
                 ("page".into(), V::Text("DESKTOP".into())),
                 ("clock".into(), V::Text("12:34:56".into())),
@@ -244,7 +250,10 @@ mod tests {
                 assert!(b.x >= -4.0 && b.x + b.width <= 4.001, "{width}: {b:?}");
                 assert!(b.y <= 4.0 && b.y - b.height >= -4.001);
                 assert_eq!(b.y, 4.0);
-                assert_eq!(b.height, 8.0, "shell controls retain the full logical hit row");
+                assert_eq!(
+                    b.height, 8.0,
+                    "shell controls retain the full logical hit row"
+                );
                 if b.id == "back" || b.id == "create" {
                     assert!(!b.enabled);
                 }
@@ -431,15 +440,34 @@ mod tests {
         use crate::lua_module::ModuleInputValue as V;
         let mut s = snapshot();
         s.values = std::collections::BTreeMap::from([
-            ("width".into(), V::Number(1408.0)), ("height".into(), V::Number(72.0)),
-            ("count".into(), V::Number(1.0)), ("item0-id".into(), V::Text("app:/Applications/App.app".into())),
-            ("item0-title".into(), V::Text("App".into())), ("item0-open".into(), V::Boolean(false)),
+            ("width".into(), V::Number(1408.0)),
+            ("height".into(), V::Number(72.0)),
+            ("count".into(), V::Number(1.0)),
+            (
+                "item0-id".into(),
+                V::Text("app:/Applications/App.app".into()),
+            ),
+            ("item0-title".into(), V::Text("App".into())),
+            ("item0-open".into(), V::Boolean(false)),
             ("item0-available".into(), V::Boolean(false)),
         ]);
         let mut p = Presentation::default();
-        p.refresh(include_str!("../../../config/modules/desktop-dock-v1.json"), include_str!("../../../config/modules/desktop-dock-v1.lua"), s, theme()).unwrap();
+        p.refresh(
+            include_str!("../../../config/modules/desktop-dock-v1.json"),
+            include_str!("../../../config/modules/desktop-dock-v1.lua"),
+            s,
+            theme(),
+        )
+        .unwrap();
         let output = p.retained().unwrap();
-        assert!(!output.buttons.iter().find(|b| b.id == "item0").unwrap().enabled);
+        assert!(
+            !output
+                .buttons
+                .iter()
+                .find(|b| b.id == "item0")
+                .unwrap()
+                .enabled
+        );
         assert!(!output.scene.nodes.iter().any(|n| n.id == "item0-state"));
     }
 }

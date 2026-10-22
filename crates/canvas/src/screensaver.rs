@@ -16,7 +16,9 @@ const CALM_WORKSPACE_SHADERS: [BackgroundShader; 4] = [
     BackgroundShader::SlowRipple,
 ];
 
-use canvas_workspace::background_shaders::{UNIFORM_WGSL, TIDEPOOL, AURORA_DRIFT, DUSK_EMBER, SLOW_RIPPLE};
+use canvas_workspace::background_shaders::{
+    AURORA_DRIFT, DUSK_EMBER, SLOW_RIPPLE, TIDEPOOL, UNIFORM_WGSL,
+};
 
 // "Spirales" by Danilo Guanabara (https://www.shadertoy.com/view/4dS3Wd)
 // License: MIT

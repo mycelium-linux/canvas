@@ -44,7 +44,9 @@ impl Workspaces {
         }
         let document = crate::WorkspaceDocument::parse(input, &self.catalog)
             .map_err(|error| error.to_string())?;
-        if self.documents.values().any(|existing| existing.id == document.id && existing.project_id != document.project_id) {
+        if self.documents.values().any(|existing| {
+            existing.id == document.id && existing.project_id != document.project_id
+        }) {
             return Err("Workspace identity belongs to another project".into());
         }
         if let Some(current) = self.documents.get(&document.project_id) {
@@ -69,7 +71,11 @@ impl Workspaces {
 
     /// Import one complete generation without replacing the owner's catalog.
     /// Validation and generation conflicts leave selection and all documents intact.
-    pub fn import_document(&mut self, document: &crate::WorkspaceDocument, activate: bool) -> Result<(), String> {
+    pub fn import_document(
+        &mut self,
+        document: &crate::WorkspaceDocument,
+        activate: bool,
+    ) -> Result<(), String> {
         let mut next = self.clone();
         if next.catalog.project(&document.project_id).is_err() {
             next.catalog.projects.push(canvas_core::Project {
@@ -287,14 +293,24 @@ mod tests {
     #[test]
     fn single_import_retains_other_projects_and_selection_transactionally() {
         let mut session = Workspaces::from_catalog(CATALOG, "television").unwrap();
-        session.install_document(&document("television", 1)).unwrap();
+        session
+            .install_document(&document("television", 1))
+            .unwrap();
         let original = session.document().unwrap().clone();
-        let incoming: crate::WorkspaceDocument = serde_json::from_str(&document("live-work", 2)).unwrap();
+        let incoming: crate::WorkspaceDocument =
+            serde_json::from_str(&document("live-work", 2)).unwrap();
         session.import_document(&incoming, false).unwrap();
         assert_eq!(session.selected(), "television");
         assert_eq!(session.document(), Some(&original));
         assert_eq!(session.document_for("live-work"), Some(&incoming));
-        assert!(session.catalog.project("live-work").unwrap().resources.is_empty());
+        assert!(
+            session
+                .catalog
+                .project("live-work")
+                .unwrap()
+                .resources
+                .is_empty()
+        );
         session.import_document(&incoming, false).unwrap();
         let before = session.retained_projection();
         let mut conflict = incoming.clone();
@@ -371,9 +387,12 @@ mod tests {
     #[test]
     fn workspace_identity_cannot_alias_another_project() {
         let mut session = Workspaces::from_catalog(CATALOG, "television").unwrap();
-        session.install_document(&document("television", 1)).unwrap();
+        session
+            .install_document(&document("television", 1))
+            .unwrap();
         let saved = session.retained_projection();
-        let mut alias: serde_json::Value = serde_json::from_str(&document("television", 1)).unwrap();
+        let mut alias: serde_json::Value =
+            serde_json::from_str(&document("television", 1)).unwrap();
         alias["project_id"] = serde_json::json!("studio");
         assert!(session.install_document(&alias.to_string()).is_err());
         assert_eq!(session.retained_projection(), saved);

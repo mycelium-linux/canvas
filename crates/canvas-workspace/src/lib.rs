@@ -10,12 +10,12 @@ use std::{
     fmt,
 };
 
-pub mod chart;
 pub mod audio;
-pub mod observer;
 pub mod background_shaders;
-pub mod session;
+pub mod chart;
 pub mod endpoint;
+pub mod observer;
+pub mod session;
 pub mod view;
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -1285,7 +1285,9 @@ impl WorkspaceDocument {
                 SurfaceContent::Scene { scene } => scene.validate()?,
                 SurfaceContent::Stream { url, matte } => {
                     check(!url.is_empty(), "Stream URL must not be empty")?;
-                    if let Some(matte) = matte { matte.validate().map_err(|e| Error(e.into()))?; }
+                    if let Some(matte) = matte {
+                        matte.validate().map_err(|e| Error(e.into()))?;
+                    }
                 }
                 SurfaceContent::LiveImage { source_id } => {
                     check(
@@ -2490,9 +2492,15 @@ mod video_matte_tests {
             "source_size":[1280,960],"regions":[{"bounds":[0,0,0.625,1],"color":[0,0,0],"cutoff":0.01,"feather":0.02}]
         }});
         let content: SurfaceContent = serde_json::from_value(value.clone()).unwrap();
-        let reparsed: SurfaceContent = serde_json::from_value(serde_json::to_value(&content).unwrap()).unwrap();
+        let reparsed: SurfaceContent =
+            serde_json::from_value(serde_json::to_value(&content).unwrap()).unwrap();
         assert_eq!(content, reparsed);
-        let SurfaceContent::Stream { matte: Some(matte), .. } = content else { panic!("matte dropped") };
+        let SurfaceContent::Stream {
+            matte: Some(matte), ..
+        } = content
+        else {
+            panic!("matte dropped")
+        };
         matte.validate().unwrap();
         let mut invalid = matte;
         invalid.regions[0].bounds[2] = 2.0;

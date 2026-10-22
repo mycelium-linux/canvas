@@ -9,9 +9,11 @@ mod macos {
     use anyhow::{Context, Result, ensure};
     use canvas::bus::{Bus, BusConfig};
     use canvas_core::unibus::Message;
-    use canvas_media_edge::native_window::{WindowSelector, capture_dimensions, list_windows, select_window};
     #[cfg(test)]
     use canvas_media_edge::native_window::{Candidate, require_unique};
+    use canvas_media_edge::native_window::{
+        WindowSelector, capture_dimensions, list_windows, select_window,
+    };
     use screencapturekit::{
         cm::{CMSampleBufferExt, CMTime},
         cv::CVPixelBufferLockFlags,
@@ -60,7 +62,6 @@ mod macos {
         #[serde(default = "default_ttl_ms")]
         ttl_ms: u64,
     }
-
 
     const fn default_max_height() -> u32 {
         960
@@ -354,7 +355,6 @@ mod macos {
             }
         }
     }
-
 
     fn announce(bus: &Bus, config: &Config, width: u32, height: u32) -> Result<()> {
         let now = canvas_media_edge::now_unix_ms();

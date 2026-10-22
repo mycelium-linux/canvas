@@ -1,9 +1,9 @@
 //! Iced/wGPU paint adapter for renderer-neutral gfx signal geometry.
-use super::{gfx_theme, CacheState, Key};
+use super::{CacheState, Key, gfx_theme};
 use canvas_core::VisualTheme;
-use fpl_gfx::{signals::SignalFrame, PrimitiveKind, Rect, Scene};
-use iced::widget::{canvas, Canvas};
-use iced::{mouse, Element, Length, Point, Rectangle, Renderer, Theme};
+use fpl_gfx::{PrimitiveKind, Rect, Scene, signals::SignalFrame};
+use iced::widget::{Canvas, canvas};
+use iced::{Element, Length, Point, Rectangle, Renderer, Theme, mouse};
 
 pub(super) fn view<'a, Message: 'a>(
     raw: &serde_json::Value,
