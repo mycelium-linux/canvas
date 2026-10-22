@@ -54,25 +54,39 @@ tmux new-session -d -s "$session" "sh -c 'echo ready; exec sleep 120'" \
 # Server stderr goes to a FIFO; fd 3 stays open read-write so the writer never
 # blocks and the reader never sees EOF. The first "listening" line is the
 # readiness signal, so there is no polling sleep.
+# The server resolves `pi-tmux` at startup and dies if it is missing, which is
+# true on a bare CI runner. The status-matrix checks below only exercise routing
+# and the tmux fleet snapshot, not pi-tmux actions, so an executable stub is
+# enough. Override PI_TMUX_BIN to test against a real helper.
+export PI_TMUX_BIN="${PI_TMUX_BIN:-$(type -P true)}"
+
 mkfifo "$fifo"
 exec 3<>"$fifo"
 "$server" --port 0 --session "$session" --state-file "$tmpdir/state" \
   >"$log" 2>"$fifo" &
 pid=$!
 
+# Keep every stderr line so a startup failure reports the server's own message
+# instead of an empty stdout log.
+stderr_log="$tmpdir/server.err"
+: >"$stderr_log"
+
 port=""
 deadline=$((SECONDS + 15))
 while ((SECONDS < deadline)); do
   if ! read -r -t 1 -u 3 line; then
-    kill -0 "$pid" 2>/dev/null || fail "server exited during startup: $(cat "$log")"
+    if ! kill -0 "$pid" 2>/dev/null; then
+      fail "server exited during startup (stderr: $(cat "$stderr_log"); stdout: $(cat "$log"))"
+    fi
     continue
   fi
+  printf '%s\n' "$line" >>"$stderr_log"
   if [[ $line =~ listening\ on\ http://[^:]+:([0-9]+) ]]; then
     port="${BASH_REMATCH[1]}"
     break
   fi
 done
-[ -n "$port" ] || fail "server did not report a listening port within 15s"
+[ -n "$port" ] || fail "server did not report a listening port within 15s (stderr: $(cat "$stderr_log"))"
 
 base="http://127.0.0.1:$port"
 status() {
