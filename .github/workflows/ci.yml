@@ -1,0 +1,44 @@
+name: canvas-ci
+
+# Hosted gate (owner-approved E-376 option 3).
+#
+# This workflow deliberately runs ONLY checks that have no private-dependency
+# surface. The Rust workspace depends on `../gfx` (no hosted remote on this
+# branch) and on the private `FuturePresentLabs/unibus` ssh dependency, so a
+# hosted cargo build cannot resolve them without credentials or a self-hosted
+# runner. The Rust fmt/check/clippy/test gate therefore runs locally via
+# `scripts/ci-local.sh` and its transcript is attached to the PR.
+#
+# There is no pure TS/JS check on this branch: the repository has 0 `.ts`
+# files and no root `package.json`. Keep this gate to the cp-server selftest.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  canvas-ci:
+    name: cp-server selftest
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out canvas
+        uses: actions/checkout@v4
+
+      # scripts/cp-server.lua is compiled with luac inside the selftest.
+      # lua5.4 on Ubuntu ships /usr/bin/luac5.4, not /usr/bin/luac.
+      - name: Install Lua compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua5.4
+          if ! command -v luac >/dev/null 2>&1; then
+            sudo ln -sf /usr/bin/luac5.4 /usr/local/bin/luac
+          fi
+          luac -v
+
+      - name: Run cp-server selftest
+        run: bash scripts/cp-server-selftest.sh
