@@ -57,8 +57,39 @@ tmux new-session -d -s "$session" "sh -c 'echo ready; exec sleep 120'" \
 # The server resolves `pi-tmux` at startup and dies if it is missing, which is
 # true on a bare CI runner. The status-matrix checks below only exercise routing
 # and the tmux fleet snapshot, not pi-tmux actions, so an executable stub is
-# enough. Override PI_TMUX_BIN to test against a real helper.
-export PI_TMUX_BIN="${PI_TMUX_BIN:-$(type -P true)}"
+# enough. A real helper is only used when PI_TMUX_BIN is explicitly set.
+stub_tmux="$tmpdir/pi-tmux-stub"
+cat >"$stub_tmux" <<'STUB'
+#!/bin/sh
+# Selftest stub: never touch the operator's real fleet.
+printf '[]\n'
+STUB
+chmod +x "$stub_tmux"
+export PI_TMUX_BIN="${PI_TMUX_BIN:-$stub_tmux}"
+[ -x "$PI_TMUX_BIN" ] || fail "PI_TMUX_BIN is not executable: $PI_TMUX_BIN"
+case "$PI_TMUX_BIN" in
+  "$stub_tmux") ;;
+  *)
+    # Fail loudly rather than silently testing against a real helper.
+    [ "${CP_SELFTEST_ALLOW_REAL_PI_TMUX:-}" = "1" ] || \
+      fail "refusing to use a non-stub PI_TMUX_BIN ($PI_TMUX_BIN); set CP_SELFTEST_ALLOW_REAL_PI_TMUX=1 to override"
+    ;;
+esac
+echo "cp-server-selftest: PI_TMUX_BIN=$PI_TMUX_BIN (stub unless explicitly overridden)"
+
+# Poison `pi-tmux` on PATH. If the server ever falls back to discovery instead
+# of the stub, the poison marker is written and the selftest fails: no real
+# tmux fleet may be touched by this test.
+poison_dir="$tmpdir/poison-bin"
+poison_marker="$tmpdir/real-pi-tmux-called"
+mkdir -p "$poison_dir"
+cat >"$poison_dir/pi-tmux" <<POISON
+#!/bin/sh
+echo called >>"$poison_marker"
+exit 99
+POISON
+chmod +x "$poison_dir/pi-tmux"
+export PATH="$poison_dir:$PATH"
 
 mkfifo "$fifo"
 exec 3<>"$fifo"
@@ -113,5 +144,15 @@ check "GET /api/nope (unknown path)" 404 "$base/api/nope"
 check "POST /api/pane/x/capture (wrong method)" 405 -X POST "$base/api/pane/x/capture"
 check "GET /api/panes (valid route)" 200 "$base/api/panes"
 
+# The stub is the only helper the server was given; if discovery ran anyway the
+# poison wrapper would have recorded it.
+if [ -e "$poison_marker" ]; then
+  fail "real pi-tmux was invoked during the selftest (poison marker present)"
+fi
+
+# The scratch session is the only tmux object this script is allowed to touch.
+tmux has-session -t "$session" 2>/dev/null || fail "scratch tmux session disappeared"
+
+echo "cp-server-selftest: real pi-tmux not invoked; only scratch session $session touched"
 echo "cp-server-selftest: $passed passed, $failed failed (port $port, session $session)"
 [ "$failed" -eq 0 ] || exit 1
