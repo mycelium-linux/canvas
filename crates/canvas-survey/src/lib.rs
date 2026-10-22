@@ -28,8 +28,8 @@
 //!   how a dashboard quietly lacks the metric that mattered.
 use canvas_metrics::{Mapping, SourceSpec};
 use canvas_widgets::{
-    Provenance, WIDGET_SCHEMA_VERSION, WidgetData, WidgetDataState, WidgetKind as WidgetBody,
-    WidgetSpec,
+    HeatmapStyle, Provenance, WIDGET_SCHEMA_VERSION, WidgetData, WidgetDataState,
+    WidgetKind as WidgetBody, WidgetSpec,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -274,6 +274,7 @@ impl WidgetKind {
                 rows: Vec::new(),
                 columns: Vec::new(),
                 values: Vec::new(),
+                style: HeatmapStyle::Matrix,
                 unit,
             },
             Self::Histogram => WidgetBody::Histogram {
