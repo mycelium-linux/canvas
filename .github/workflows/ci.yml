@@ -29,16 +29,22 @@ jobs:
       - name: Check out canvas
         uses: actions/checkout@v4
 
-      # scripts/cp-server.lua is compiled with luac inside the selftest.
-      # lua5.4 on Ubuntu ships /usr/bin/luac5.4, not /usr/bin/luac.
-      - name: Install Lua compiler
+      # scripts/cp-server.lua needs Lua 5.4, luasocket and tmux. The selftest
+      # invokes the server via `#!/usr/bin/env lua`, while Debian/Ubuntu only
+      # install /usr/bin/lua5.4 and /usr/bin/luac5.4, so link both names.
+      - name: Install Lua compiler and runtime
         run: |
           sudo apt-get update
-          sudo apt-get install -y lua5.4
+          sudo apt-get install -y lua5.4 lua-socket tmux
+          if ! command -v lua >/dev/null 2>&1; then
+            sudo ln -sf /usr/bin/lua5.4 /usr/local/bin/lua
+          fi
           if ! command -v luac >/dev/null 2>&1; then
             sudo ln -sf /usr/bin/luac5.4 /usr/local/bin/luac
           fi
+          lua -v
           luac -v
+          lua -e 'require("socket"); print("luasocket ok")'
 
       - name: Run cp-server selftest
         run: bash scripts/cp-server-selftest.sh
