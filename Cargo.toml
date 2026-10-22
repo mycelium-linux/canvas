@@ -1,8 +1,15 @@
 [workspace]
-members = ["crates/dock-canvas", "crates/dock-core", "crates/dock-linux", "crates/dock-mac", "crates/dock-control", "crates/dock-widgets"]
-default-members = ["crates/dock-core", "crates/dock-linux", "crates/dock-mac"]
-exclude = ["vendor/coherence-tokens"]
+members = ["crates/canvas-workspace", "crates/canvas-browser-host", "crates/canvas-feeds", "crates/canvas-alfalfa", "crates/canvas-bifrost", "crates/canvas-dcp", "crates/canvas-eval", "crates/canvas-fab", "crates/canvas-shroud", "crates/canvas-frigate", "crates/canvas-media-edge", "crates/canvas-model-host", "crates/canvas-model-viewer", "crates/canvas-metrics", "crates/canvas-sse", "crates/canvas", "crates/canvas-core", "crates/canvas-linux", "crates/canvas-mac", "crates/canvas-control", "crates/canvas-web", "crates/canvas-widgets", "crates/canvas-survey", "crates/canvas-agents", "crates/canvas-agent-bridge", ]
+default-members = ["crates/canvas-core", "crates/canvas-linux", "crates/canvas-mac"]
+exclude = ["vendor/coherence-tokens", "vendor/coherence-native", "vendor/iced_wgpu"]
 resolver = "2"
+
+[patch.crates-io]
+iced_wgpu = { path = "vendor/iced_wgpu" }
+
+# Local ecosystem development: one gfx identity for widgets and Coherence.
+[patch."https://github.com/ajmwagar/gfx.git"]
+fpl-gfx = { path = "../gfx" }
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +19,28 @@ license = "LicenseRef-Proprietary"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-dock-core = { path = "crates/dock-core" }
-dock-canvas = { path = "crates/dock-canvas" }
+schemars = "1"
+canvas-core = { path = "crates/canvas-core" }
+canvas = { path = "crates/canvas" }
+fpl-gfx = { git = "https://github.com/ajmwagar/gfx.git", rev = "ba980e8251ec65d3fc25bcd9cfa3b882ca0e1034" }
+coherence-native = { path = "vendor/coherence-native", default-features = false, features = ["gfx"] }
+anyhow = "1"
+axum = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+dcp = { git = "https://github.com/FuturePresentLabs/dcp.git", rev = "d3a1335" }
+tempfile = "3"
 coherence-tokens = { path = "vendor/coherence-tokens" }
+# The household bus contract, shared with JARVIS (dock marbles dock-pubd).
+# Pinned by rev; bump deliberately alongside unibus releases.
+unibus = { git = "ssh://git@github.com/FuturePresentLabs/unibus.git", rev = "b47a6cc15a6246296ac34136d513533d21dd11c1" }
+stream-descriptors = { path = "../unibus/crates/stream-descriptors" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+
+# Canvas runs directly from dev artifacts during local UI iteration. Keep the
+# JPEG hot path representative of deployed performance without optimizing the
+# entire workspace and slowing every edit/build cycle.
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.zune-jpeg]
+opt-level = 3

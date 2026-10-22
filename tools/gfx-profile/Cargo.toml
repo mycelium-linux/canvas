@@ -1,0 +1,13 @@
+[package]
+name = "canvas-gfx-profile"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+fpl-gfx = { git = "https://github.com/ajmwagar/gfx.git", rev = "6e4b5a8e4cfe9a229086c906fa741f147a34e4c6" }
+wgpu = "27"
+pollster = "0.4"
+serde_json = "1"

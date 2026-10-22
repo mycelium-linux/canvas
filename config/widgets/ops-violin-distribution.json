@@ -1,0 +1,5 @@
+{"schema_version":2,"id":"ops-violin-distribution","kind":"distribution","title":"Frame time density","style":"violin","unit":"ms","groups":[
+{"label":"macOS","samples":[7,8,8,9,9,9,10,10,10,11,12,13,16,19]},
+{"label":"Pi 4","samples":[28,31,34,36,38,40,41,42,44,48,53,61,72,85]},
+{"label":"Linux GPU","samples":[5,6,6,6,7,7,8,8,8,9,9,10,12,14]}
+],"data":{"state":"ready","source":"demo/distribution","provenance":"demo"},"chrome":"drag_only"}

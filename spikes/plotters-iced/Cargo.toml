@@ -1,0 +1,23 @@
+# Standalone spike crate. The empty [workspace] table detaches it from the
+# enclosing Canvas workspace so it never perturbs the real build graph.
+[package]
+name = "spike-plotters-iced"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+# Same iced version + renderer as crates/canvas.
+iced = { version = "0.14", default-features = false, features = ["wgpu", "tokio", "canvas"] }
+# NOTE: `plotters-iced2`, not `plotters-iced`. See report.
+plotters-iced2 = "0.14"
+plotters = { version = "0.3", default-features = false, features = [
+    "line_series",
+    "point_series",
+    "area_series",
+] }
+plotters-backend = "0.3"
+# Same mlua configuration as crates/canvas.
+mlua = { version = "0.12.1", features = ["luau", "serialize"] }

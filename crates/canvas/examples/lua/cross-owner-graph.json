@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "cross-owner-graph",
+  "title": "Cross-owner activity",
+  "inputs": [
+    {
+      "id": "bifrost",
+      "kind": "graph",
+      "required": true
+    },
+    {
+      "id": "elmers",
+      "kind": "graph",
+      "required": true
+    }
+  ],
+  "capabilities": {
+    "write_scene": true,
+    "read_inputs": ["bifrost", "elmers"],
+    "read_theme": true
+  }
+}

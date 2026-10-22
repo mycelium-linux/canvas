@@ -1,0 +1,576 @@
+{
+ "installation_id": "home",
+ "listen": "127.0.0.1:18790",
+ "state_dir": "/home/ajm/.local/state/unibus-router",
+ "routes": [
+  {
+   "kind": "audio_level",
+   "target": {
+    "mode": "any_holder",
+    "name": "canvas.audio_level"
+   }
+  },
+  {
+   "kind": "camera.stream.v1",
+   "target": {
+    "mode": "any_holder",
+    "name": "canvas.media"
+   }
+  },
+  {
+   "kind": "media.video_stream.v1",
+   "target": {
+    "mode": "any_holder",
+    "name": "canvas.media"
+   }
+  },
+  {
+   "kind": "media.video_alpha_mask.v1",
+   "target": {
+    "mode": "any_holder",
+    "name": "canvas.media"
+   }
+  },
+  {
+   "kind": "camera.detections.v1",
+   "target": {
+    "mode": "any_holder",
+    "name": "canvas.media"
+   }
+  },
+  {
+   "kind": "input.gamepad_state",
+   "target": {
+    "mode": "any_holder",
+    "name": "game.input"
+   }
+  },
+  {
+   "kind": "input.desktop_state.v1",
+   "target": {
+    "mode": "capability",
+    "name": "qemu.input"
+   }
+  },
+  {
+   "kind": "rlcd.decision.v1",
+   "target": {
+    "mode": "any_holder",
+    "name": "canvas.rlcd"
+   }
+  },
+  {
+   "kind": "canvas.model.camera.v1",
+   "target": {
+    "mode": "any_holder",
+    "name": "canvas.model"
+   }
+  },
+  {
+   "kind": "canvas.workspace_state.v1",
+   "target": {
+    "mode": "capability",
+    "name": "canvas.workspace_mirror"
+   }
+  },
+  {
+   "kind": "canvas_command",
+   "target": {
+    "mode": "capability",
+    "name": "display"
+   }
+  },
+  {
+   "kind": "market.order_book.v1",
+   "target": {
+    "mode": "capability",
+    "name": "canvas.display"
+   }
+  },
+  {
+   "kind": "market.trade.v1",
+   "target": {
+    "mode": "capability",
+    "name": "canvas.display"
+   }
+  },
+  {
+   "kind": "market.ohlcv.raw.v1",
+   "target": {
+    "mode": "capability",
+    "name": "canvas.display"
+   }
+  },
+  {
+   "kind": "canvas.result",
+   "target": {
+    "mode": "producer"
+   }
+  },
+  {
+   "kind": "canvas_command_result",
+   "target": {
+    "mode": "producer"
+   }
+  },
+  {
+   "kind": "canvas.prompt.v1",
+   "target": {
+    "mode": "any_holder",
+    "name": "canvas.agent"
+   }
+  }
+ ],
+ "nodes": [
+  {
+   "producer_id": "home-pi-audio",
+   "token_file": "/home/ajm/.config/unibus/tokens/home-pi-audio.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "audio_output",
+    "audio_input"
+   ]
+  },
+  {
+   "producer_id": "home-pi-display",
+   "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "display",
+    "canvas.audio_level",
+    "canvas.rlcd",
+    "canvas.workspace_mirror"
+   ],
+   "screen_anchors": [
+    "screen-tv"
+   ],
+   "publishes": [
+    "canvas.workspace_state.v1",
+    "canvas.result",
+    "canvas_command_result"
+   ],
+   "publish_zones": [
+    "living-room"
+   ]
+  },
+  {
+   "producer_id": "home-pi-media",
+   "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "canvas.media"
+   ],
+   "screen_anchors": [
+    "screen-tv"
+   ]
+  },
+  {
+   "producer_id": "macbook-neo-media",
+   "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "canvas.media"
+   ],
+   "screen_anchors": [
+    "screen-neo"
+   ]
+  },
+  {
+   "producer_id": "macbook-neo-simulator",
+   "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "canvas.media"
+   ],
+   "screen_anchors": [
+    "screen-neo"
+   ]
+  },
+  {
+   "producer_id": "macbook-neo-ghidra",
+   "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "canvas.media"
+   ],
+   "screen_anchors": [
+    "screen-neo"
+   ]
+  },
+  {
+   "producer_id": "mac-studio-media",
+   "token_file": "/home/ajm/.config/unibus/tokens/mac-studio-media.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "canvas.media"
+   ],
+   "screen_anchors": [
+    "screen-studio"
+   ]
+  },
+  {
+   "producer_id": "surf-worker-agora",
+   "token_file": "/home/ajm/.config/unibus/tokens/surf-worker-agora.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "media.video_stream.source"
+   ],
+   "publishes": [
+    "media.video_stream.v1"
+   ],
+   "publish_zones": [
+    "living-room"
+   ]
+  },
+  {
+   "producer_id": "agora-one-qemu",
+   "token_file": "/home/ajm/.config/unibus/tokens/agora-one-qemu.token",
+   "zones": [
+    "compute",
+    "living-room"
+   ],
+   "capabilities": [
+    "media.video_stream.source",
+    "qemu.input"
+   ],
+   "publishes": [
+    "media.video_stream.v1"
+   ],
+   "publish_zones": [
+    "living-room"
+   ]
+  },
+  {
+   "producer_id": "mac-studio-android",
+   "token_file": "/home/ajm/.config/unibus/tokens/mac-studio-media.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "canvas.media"
+   ],
+   "screen_anchors": [
+    "screen-tv"
+   ]
+  },
+  {
+   "producer_id": "macbook-neo-hid",
+   "token_file": "/home/ajm/.config/unibus/tokens/macbook-neo-hid.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "input.desktop.source"
+   ],
+   "publishes": [
+    "input.desktop_state.v1"
+   ],
+   "publish_zones": [
+    "compute"
+   ]
+  },
+  {
+   "producer_id": "macbook-neo-display",
+   "token_file": "/home/ajm/.config/unibus/tokens/macbook-neo-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "display",
+    "canvas.display",
+    "canvas.rlcd",
+    "canvas.workspace_mirror"
+   ],
+   "screen_anchors": [
+    "screen-neo"
+   ],
+   "publishes": [
+    "canvas.workspace_state.v1",
+    "canvas.model.camera.v1",
+    "canvas.prompt.v1"
+   ],
+   "publish_zones": [
+    "living-room"
+   ]
+  },
+  {
+   "producer_id": "canvas-studio-display",
+   "token_file": "/home/ajm/.config/unibus/tokens/canvas-studio-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "display",
+    "canvas.display",
+    "canvas.rlcd",
+    "canvas.workspace_mirror",
+    "canvas.model"
+   ],
+   "screen_anchors": [
+    "screen-studio"
+   ],
+   "publishes": [
+    "canvas.workspace_state.v1"
+   ],
+   "publish_zones": [
+    "living-room"
+   ]
+  },
+  {
+   "producer_id": "home-pi-media-announce",
+   "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "camera.stream.source"
+   ]
+  },
+  {
+   "producer_id": "home-pi-frigate-observer",
+   "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "camera.detections.source"
+   ]
+  },
+  {
+   "producer_id": "mac-studio-game-umk3",
+   "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "game.input"
+   ]
+  },
+  {
+   "producer_id": "mac-studio-game-smk",
+   "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "game.input"
+   ]
+  },
+  {
+   "producer_id": "mac-studio-game-smb",
+   "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "game.input"
+   ]
+  },
+  {
+   "producer_id": "mac-studio-game-tetris",
+   "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "game.input"
+   ]
+  },
+  {
+   "producer_id": "mac-studio-speedy-umk3",
+   "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "rlcd.telemetry"
+   ],
+   "publishes": [
+    "rlcd.decision.v1"
+   ]
+  },
+  {
+   "producer_id": "mac-studio-speedy-smk",
+   "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "rlcd.telemetry"
+   ],
+   "publishes": [
+    "rlcd.decision.v1"
+   ]
+  },
+  {
+   "producer_id": "mac-studio-speedy-smb",
+   "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "rlcd.telemetry"
+   ],
+   "publishes": [
+    "rlcd.decision.v1"
+   ]
+  },
+  {
+   "producer_id": "mac-studio-speedy-tetris",
+   "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "rlcd.telemetry"
+   ],
+   "publishes": [
+    "rlcd.decision.v1"
+   ]
+  },
+  {
+   "producer_id": "mac-studio-controller-umk3",
+   "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "input.gamepad.source"
+   ]
+  },
+  {
+   "producer_id": "mac-studio-controller-smk",
+   "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "input.gamepad.source"
+   ]
+  },
+  {
+   "producer_id": "mac-studio-controller-smb",
+   "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "input.gamepad.source"
+   ]
+  },
+  {
+   "producer_id": "mac-studio-controller-tetris",
+   "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "input.gamepad.source"
+   ]
+  },
+  {
+   "producer_id": "canvas-central-studio",
+   "token_file": "/home/ajm/.config/unibus/tokens/canvas-central-studio.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "canvas.command"
+   ],
+   "publishes": [
+    "canvas_command"
+   ],
+   "publish_screen_anchors": [
+    "screen-tv"
+   ],
+   "publish_producers": [
+    "home-pi-display"
+   ]
+  },
+  {
+   "producer_id": "macbook-neo-agent-bridge",
+   "token_file": "/home/ajm/.config/unibus/tokens/macbook-neo-agent-bridge.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "canvas.agent"
+   ]
+  },
+  {
+   "producer_id": "mac-studio-agent-bridge",
+   "token_file": "/home/ajmwagar/.config/unibus/tokens/mac-studio-agent-bridge.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "canvas.agent"
+   ]
+  },
+  {
+   "producer_id": "home-pi-midi",
+   "token_file": "/home/ajm/.config/unibus/tokens/home-pi-midi.token",
+   "zones": [
+    "living-room"
+   ],
+      "capabilities": [
+        "midi.output",
+        "synesthesia.control",
+        "unibus.stream.source"
+   ],
+   "publishes": [
+    "unibus.stream.event.v1",
+    "unibus.stream.interest.v1"
+   ]
+  },
+  {
+   "producer_id": "macbook-neo-synesthesia-ui",
+   "token_file": "/home/ajm/.config/unibus/tokens/macbook-neo-display.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "synesthesia.ui"
+   ],
+   "publishes": [
+    "unibus.stream.event.v1",
+    "unibus.stream.interest.v1",
+    "unibus.stream.interest.release.v1"
+   ]
+  },
+  {
+   "producer_id": "trader-alpaca",
+   "token_file": "/home/ajm/.config/unibus/tokens/trader-alpaca.token",
+   "zones": [
+    "living-room"
+   ],
+   "capabilities": [
+    "market.stream"
+   ],
+   "publishes": [
+    "market.order_book.v1",
+    "market.trade.v1",
+    "market.ohlcv.raw.v1"
+   ],
+   "publish_zones": [
+    "living-room"
+   ]
+  }
+ ]
+}

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>dev.fpl.canvas-verk-carousel</string>
+<key>ProgramArguments</key><array>
+<string>/Users/ajmwagar/.local/bin/canvas-model-carousel</string>
+<string>/Users/ajmwagar/.config/dock/canvas/verk-carousel.json</string>
+</array>
+<key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+<key>ProcessType</key><string>Interactive</string><key>ThrottleInterval</key><integer>10</integer>
+<key>StandardOutPath</key><string>/Users/ajmwagar/.local/share/canvas-android/verk-carousel.log</string>
+<key>StandardErrorPath</key><string>/Users/ajmwagar/.local/share/canvas-android/verk-carousel.log</string>
+</dict></plist>

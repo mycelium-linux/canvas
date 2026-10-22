@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "id": "home-workspace",
+  "project_id": "home",
+  "revision": 1,
+  "theme": { "source": "project" },
+  "background": { "kind": "shader", "shader_id": "smoke-rings", "speed": 0.6 },
+  "chrome": { "title": "hidden", "canvas_padding": 18, "surface_gap": 12 },
+  "surfaces": [
+    {
+      "id": "clock",
+      "title": "Clock",
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "clock",
+          "kind": "clock",
+          "format": "%H:%M:%S",
+          "mode": "analog",
+          "theme": null,
+          "refresh_ms": 16,
+          "chrome": "frameless",
+          "data": { "state": "ready", "source": null, "observed_at": null, "window": null, "detail": null, "provenance": "live" }
+        }
+      },
+      "inputs": []
+    },
+    {
+      "id": "hyperspace",
+      "title": "Hyperspace",
+      "content": { "kind": "live_video", "source_id": "hyperspace", "width": 480, "height": 270 },
+      "inputs": []
+    },
+    {
+      "id": "network-topology",
+      "title": "Network topology",
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "network-topology",
+          "kind": "network_topology",
+          "title": "Mycelium network",
+          "segments": [],
+          "nodes": [],
+          "links": [],
+          "conflicts": 0,
+          "theme": null,
+          "refresh_ms": null,
+          "chrome": "frameless",
+          "data": {"state":"loading","source":"mycelium/topology","observed_at":null,"window":"live","detail":"Awaiting Mycelium topology","provenance":"live"}
+        }
+      },
+      "inputs": [{"id":"topology","contract":"canvas.widget.snapshot.v1"}]
+    },
+    {
+      "id": "cat",
+      "title": "CAT",
+      "content": { "kind": "live_video", "source_id": "cat", "width": 704, "height": 480 },
+      "inputs": []
+    },
+    {
+      "id": "door",
+      "title": "DOOR",
+      "content": { "kind": "live_video", "source_id": "door", "width": 704, "height": 480 },
+      "inputs": []
+    },
+    {
+      "id": "now-playing-art",
+      "title": "Now playing artwork source",
+      "content": { "kind": "live_image", "source_id": "now-playing-art" },
+      "inputs": []
+    },
+    {
+      "id": "now-playing",
+      "title": "Now playing",
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "now-playing",
+          "kind": "media_card",
+          "title": "Waiting for playback",
+          "artist": "No active source",
+          "album": null,
+          "source": "Media",
+          "artwork_source": "now-playing-art",
+          "elapsed_seconds": 0.0,
+          "duration_seconds": 0.0,
+          "observed_at_ms": 0,
+          "playing": false,
+          "theme": null,
+          "refresh_ms": 1000,
+          "chrome": "frameless",
+          "data": { "state": "loading", "source": "media", "observed_at": null, "window": "live", "detail": null, "provenance": "live" }
+        }
+      },
+      "inputs": [{ "id": "media", "contract": "canvas.widget.snapshot.v1" }]
+    },
+    {
+      "id": "notifications",
+      "title": "Notifications",
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "notifications",
+          "kind": "event_log",
+          "title": "Notifications",
+          "query": null,
+          "paused": false,
+          "follow": true,
+          "entries": [],
+          "theme": null,
+          "refresh_ms": null,
+          "chrome": "frameless",
+          "data": { "state": "loading", "source": "jarvis:notifications", "observed_at": null, "window": "recent", "detail": "Awaiting JARVIS", "provenance": "live" }
+        }
+      },
+      "inputs": [{ "id": "events", "contract": "canvas.widget.snapshot.v1" }]
+    }
+  ],
+  "layout": {
+    "kind": "canvas",
+    "placements": [
+      { "surface_id": "clock", "bounds": { "x": 0.00, "y": 0.00, "width": 0.28, "height": 0.46 }, "layer": 0 },
+      { "surface_id": "now-playing", "bounds": { "x": 0.00, "y": 0.46, "width": 0.28, "height": 0.54 }, "layer": 0 },
+      { "surface_id": "hyperspace", "bounds": { "x": 0.28, "y": 0.00, "width": 0.36, "height": 0.46 }, "layer": 0 },
+      { "surface_id": "network-topology", "bounds": { "x": 0.28, "y": 0.46, "width": 0.36, "height": 0.54 }, "layer": 0 },
+      { "surface_id": "cat", "bounds": { "x": 0.64, "y": 0.00, "width": 0.36, "height": 0.50 }, "layer": 0 },
+      { "surface_id": "door", "bounds": { "x": 0.64, "y": 0.50, "width": 0.36, "height": 0.50 }, "layer": 0 }
+    ]
+  },
+  "bindings": [
+    {
+      "id": "mycelium-topology-live",
+      "source": {"owner":"mycelium","stream":"topology","contract":"canvas.widget.snapshot.v1"},
+      "target": {"surface_id":"network-topology","input_id":"topology"},
+      "adapter": "mycelium-topology-v1",
+      "delivery": {"mode":"latest"}
+    },
+    {
+      "id": "now-playing-media",
+      "source": { "owner": "home-pi-media", "stream": "now-playing", "contract": "canvas.music.nowplaying.v1" },
+      "target": { "surface_id": "now-playing", "input_id": "media" },
+      "adapter": "music-nowplaying-v1",
+      "delivery": { "mode": "latest" }
+    },
+    {
+      "id": "jarvis-notifications-live",
+      "source": { "owner": "jarvis", "stream": "notifications", "contract": "canvas.widget.snapshot.v1" },
+      "target": { "surface_id": "notifications", "input_id": "events" },
+      "adapter": "jarvis-notifications-v1",
+      "delivery": { "mode": "latest" }
+    }
+  ],
+  "pages": [
+    {
+      "name": "Notifications",
+      "layout": { "kind": "surface", "surface_id": "notifications" }
+    }
+  ],
+  "active_page": 0,
+  "focused_surface_id": null
+}

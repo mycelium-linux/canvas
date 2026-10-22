@@ -1,0 +1,15 @@
+{
+  "schema_version": 2,
+  "id": "ops-gantt",
+  "kind": "span_timeline",
+  "title": "Agent execution",
+  "style": "gantt",
+  "unit": "minutes",
+  "spans": [
+    {"id":"research","label":"Research","lane":"Researcher","start":0,"end":18,"state":"good"},
+    {"id":"build","label":"Build","lane":"Builder","start":12,"end":42,"parent":"research","state":"good"},
+    {"id":"review","label":"Review","lane":"Reviewer","start":38,"end":51,"parent":"build","state":"warning"},
+    {"id":"deploy","label":"Deploy","lane":"Operator","start":49,"end":60,"parent":"review","state":"neutral"}
+  ],
+  "data": {"state":"ready","source":"demo:agents","provenance":"demo","window":"60m"}
+}

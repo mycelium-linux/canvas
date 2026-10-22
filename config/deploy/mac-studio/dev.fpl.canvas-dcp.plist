@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.fpl.canvas-dcp</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/ajmwagar/.local/bin/canvas-dcp</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CANVAS_DCP_LISTEN</key>
+    <string>127.0.0.1:7895</string>
+    <key>HOME</key>
+    <string>/Users/ajmwagar</string>
+    <key>PATH</key>
+    <string>/Users/ajmwagar/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardErrorPath</key>
+  <string>/Users/ajmwagar/Library/Logs/canvas-dcp.err.log</string>
+  <key>StandardOutPath</key>
+  <string>/Users/ajmwagar/Library/Logs/canvas-dcp.log</string>
+  <key>ThrottleInterval</key>
+  <integer>3</integer>
+</dict>
+</plist>

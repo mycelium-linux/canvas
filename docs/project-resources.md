@@ -1,10 +1,10 @@
 # Notes and dashboards within reach
 
-The default Dock window groups Alfalfa projects into company folders. A business
+The default Canvas window groups Alfalfa projects into company folders. A business
 can use the same project model: its notes, dashboards and other tools remain
-owned by their existing applications. Dock is the shortcut to them.
+owned by their existing applications. Canvas is the shortcut to them.
 
-Run `dock-mac`, summon it with Ctrl+Option+Space, and choose a company folder, then a project (type to filter each level). Enter switches into that project's resource context. Notes and dashboards
+Run `canvas-mac`, summon it with Ctrl+Option+Space, and choose a company folder, then a project (type to filter each level). Enter switches into that project's resource context. Notes and dashboards
 can then be chosen directly or filtered by title. Included notes preview as
 formatted Markdown. Enter opens web resources, project homes and supported local
 documents. Escape returns to projects, then companies, then hides the launcher. Command-R
@@ -27,22 +27,22 @@ observed workspaces are owner work tracked in `dock-96j.29`, not implemented sta
 controls in this launcher.
 
 Resources are read from the existing local Alfalfa service. Add or edit their
-titles, links and included note content in Alfalfa's project editor; Dock does not
+titles, links and included note content in Alfalfa's project editor; Canvas does not
 create a second resource catalog. Each project also has a result for its Alfalfa
 home. Notes are rendered only from the owner's explicitly included context
 sources. Other file paths and custom schemes open the project home when no safe
 document/web target is available. This first pass does not control individual
 browser tabs or guarantee that reopening a URL reuses an existing tab.
 
-The registered catalog includes Alfalfa and Dock. Other currently observed workspaces
+The registered catalog includes Alfalfa and Canvas. Other currently observed workspaces
 come from the changing My Agents feed. Declared business dashboard URLs become
 available inside their project as soon as they are added in Alfalfa.
 
 ```sh
-dock-mac resources
-dock-mac resources dock notes
-dock-mac --conversation
-dock-mac --connect-project studio
+canvas-mac resources
+canvas-mac resources dock notes
+canvas-mac --conversation
+canvas-mac --connect-project studio
 ```
 
 The last two commands retain the earlier conversation/desktop workflow. Project
@@ -57,7 +57,7 @@ used by screenshot mode.
 Company folders use Alfalfa's `company_id` and the authenticated FPL company
 membership list. Personal companies use their existing canonical `personal-*`
 IDs. Projects without a company and unregistered observations stay in Unassigned;
-Dock never derives ownership from a login name, GitHub account, or billing account.
+Canvas never derives ownership from a login name, GitHub account, or billing account.
 Equal company names remain separate folders, distinguished by their canonical IDs.
 Folders omit inactive projects unless Command-Shift-A is enabled. A removed
 membership closes the corresponding folder; it never reclassifies its projects as
@@ -67,7 +67,7 @@ Authenticated reads use the installed FPL Desktop Bridge credential owner:
 `fpl-desktop-bridge project-read companies --port 8791` (also `list`, `activity`,
 and `context PROJECT`). Set `DOCK_DESKTOP_BRIDGE_BIN` if the owner executable is
 not on PATH. The owner reads its OS credential store and sends the bearer directly
-to the local Alfalfa service. Dock receives bounded JSON only. Requests use fixed
+to the local Alfalfa service. Canvas receives bounded JSON only. Requests use fixed
 read routes on loopback, bypass proxy settings, and never follow redirects.
 
 If the owner executable or enrollment is absent, legacy local projects remain
@@ -75,4 +75,4 @@ available in Unassigned and company membership shows an explicit unavailable
 state. Authorization denial never falls back to unauthenticated reads and clears
 the launcher cache. Once authenticated reads have succeeded in the process,
 credential loss also fails closed. Retry with Command-R after repairing enrollment.
-No browser cookies, fabricated identity headers, or tokens are copied into Dock.
+No browser cookies, fabricated identity headers, or tokens are copied into Canvas.

@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "request_id": "firetv-install",
+  "expected_revision": 1,
+  "command": {
+    "command": "install",
+    "selected": "television",
+    "catalog": {
+      "schema_version": 1,
+      "projects": [
+        {"id":"television","name":"Television","theme":{"source":"coherence","mode":"dark","accent":"info"},"resources":[]},
+        {"id":"clock","name":"Clock","theme":{"source":"coherence","mode":"dark","accent":"info"},"resources":[]},
+        {"id":"ipfs-reading","name":"Attention","theme":{"source":"coherence","mode":"dark","accent":"info"},"resources":[]},
+        {"id":"ipfs-hmm","name":"HMM","theme":{"source":"coherence","mode":"dark","accent":"info"},"resources":[]}
+      ]
+    },
+    "documents": [
+      {
+        "schema_version":1,"id":"tv-television","project_id":"television","revision":1,
+        "theme":{"source":"project"},"chrome":{"title":"focused","canvas_padding":24,"surface_gap":12},
+        "surfaces":[
+          {"id":"komo4","title":"KOMO 4","content":{"kind":"stream","url":"http://192.168.2.67:18089/komo4.m3u8"}},
+          {"id":"clock","title":"Local time","content":{"kind":"widget","spec":{"schema_version":2,"id":"tv-clock","kind":"clock","mode":"digital"}}},
+          {"id":"help","title":"fungOS","content":{"kind":"scene","scene":{"nodes":[
+            {"id":"instructions","content":{"kind":"text","text":"MENU opens workspace controls. Select a workspace with the remote."}}
+          ]}}}
+        ],
+        "layout":{"kind":"canvas","placements":[
+          {"surface_id":"komo4","bounds":{"x":0.025,"y":0.10,"width":0.64,"height":0.68},"layer":0},
+          {"surface_id":"clock","bounds":{"x":0.69,"y":0.10,"width":0.285,"height":0.28},"layer":1},
+          {"surface_id":"help","bounds":{"x":0.69,"y":0.42,"width":0.285,"height":0.36},"layer":1}
+        ]}
+      },
+      {
+        "schema_version":1,"id":"tv-clock","project_id":"clock","revision":1,"theme":{"source":"project"},
+        "surfaces":[
+          {"id":"clock","title":"Local time","content":{"kind":"widget","spec":{"schema_version":2,"id":"clock","kind":"clock","mode":"digital"}}}
+        ],
+        "layout":{"kind":"surface","surface_id":"clock"}
+      },
+      {
+        "schema_version":1,"id":"tv-ipfs-reading","project_id":"ipfs-reading","revision":1,"theme":{"source":"project"},
+        "surfaces":[
+          {"id":"attention","title":"Attention Is All You Need","content":{"kind":"asset","asset":{"sha256":"bdfaa68d8984f0dc02beaca527b76f207d99b666d31d1da728ee0728182df697","media_type":"application/pdf","byte_length":2215244}}}
+        ],
+        "layout":{"kind":"canvas","placements":[
+          {"surface_id":"attention","bounds":{"x":0.02,"y":0.005,"width":0.96,"height":0.985},"layer":0}
+        ]}
+      },
+      {
+        "schema_version":1,"id":"tv-ipfs-hmm","project_id":"ipfs-hmm","revision":1,"theme":{"source":"project"},
+        "surfaces":[
+          {"id":"hmm","title":"Stanford · Hidden Markov Models","content":{"kind":"asset","asset":{"sha256":"73cfc92bd12dfd269a29e51cba99ceec48270dccbdaf49b9e6add4693af79253","media_type":"application/pdf","byte_length":574091}}}
+        ],
+        "layout":{"kind":"canvas","placements":[
+          {"surface_id":"hmm","bounds":{"x":0.02,"y":0.005,"width":0.96,"height":0.985},"layer":0}
+        ]}
+      }
+    ]
+  }
+}

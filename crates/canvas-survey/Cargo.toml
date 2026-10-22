@@ -1,0 +1,15 @@
+[package]
+name = "canvas-survey"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Classifies Prometheus metadata into candidate Canvas widget definitions"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+# The two crates that own the shapes a candidate is emitted in. Depending on
+# them is what makes an accepted candidate a file copy rather than a
+# translation: a candidate that would not load is a compile error here.
+canvas-metrics = { path = "../canvas-metrics" }
+canvas-widgets = { path = "../canvas-widgets", default-features = false }

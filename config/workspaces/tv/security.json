@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "security-workspace",
+  "project_id": "security",
+  "revision": 2,
+  "theme": { "source": "project" },
+  "background": { "kind": "shader", "shader_id": "smoke-rings", "speed": 0.6 },
+  "chrome": { "title": "hidden", "canvas_padding": 24, "surface_gap": 16 },
+  "surfaces": [
+    {
+      "id": "cat",
+      "title": "CAT",
+      "content": { "kind": "live_video", "source_id": "cat", "width": 704, "height": 480 },
+      "inputs": []
+    },
+    {
+      "id": "door",
+      "title": "DOOR",
+      "content": { "kind": "live_video", "source_id": "door", "width": 704, "height": 480 },
+      "inputs": []
+    }
+  ],
+  "layout": {
+    "kind": "canvas",
+    "placements": [
+      { "surface_id": "cat", "bounds": { "x": 0.03, "y": 0.20, "width": 0.46, "height": 0.60 }, "layer": 0 },
+      { "surface_id": "door", "bounds": { "x": 0.51, "y": 0.20, "width": 0.46, "height": 0.60 }, "layer": 0 }
+    ]
+  },
+  "bindings": [],
+  "focused_surface_id": null
+}

@@ -1,0 +1,24 @@
+{
+  "bus": {
+    "installation_id": "home",
+    "producer_id": "mac-studio-android",
+    "hub_endpoint": "127.0.0.1:18791",
+    "token_file": "/Users/ajmwagar/.config/unibus/tokens/mac-studio-media.token",
+    "zones": ["living-room"],
+    "capabilities": ["canvas.media"],
+    "screen_anchors": ["screen-tv"],
+    "schema_version": 1
+  },
+  "destination": "living-room",
+  "adb": "/Users/ajmwagar/Library/Android/sdk/platform-tools/adb",
+  "ffmpeg": "/opt/homebrew/bin/ffmpeg",
+  "serial": "S228001025000780",
+  "stream_id": "ohm-phone",
+  "display_name": "OHM Phone",
+  "stream_endpoint": "udp://192.168.2.74:55209?pkt_size=1316",
+  "advertised_endpoint": "udp://0.0.0.0:55209",
+  "width": 480,
+  "height": 640,
+  "fps": 30,
+  "ttl_ms": 30000
+}

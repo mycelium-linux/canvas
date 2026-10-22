@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "id": "elmers-now",
+  "revision": 1,
+  "sources": {
+    "metrics": {"source":{"owner":"elmers","id":"production-metrics","contract":"canvas.prometheus.v1","kind":"stream"},"position":{"kind":"live","observed_sequence":0}},
+    "events": {"source":{"owner":"elmers","id":"activity-events","contract":"canvas.sse.v1","kind":"stream"},"position":{"kind":"live","observed_sequence":0}}
+  },
+  "widgets": {
+    "loop-health": {"rect":{"x":0.0,"y":0.0,"width":0.2,"height":0.2},"spec":{"id":"loop-health","kind":"stat","label":"Loop health","value":0,"state":"neutral","data":{"state":"loading","source":"prometheus:elmers/loop","window":"now"}}},
+    "in-flight": {"rect":{"x":0.21,"y":0.0,"width":0.19,"height":0.2},"spec":{"id":"in-flight","kind":"stat","label":"In-flight runs","value":0,"data":{"state":"loading","source":"prometheus:elmers/runs","window":"now"}}},
+    "budget": {"rect":{"x":0.41,"y":0.0,"width":0.19,"height":0.2},"spec":{"id":"budget","kind":"gauge","value":0,"label":"Budget remaining","data":{"state":"loading","source":"prometheus:elmers/budget","window":"month"}}},
+    "model-usage": {"rect":{"x":0.61,"y":0.0,"width":0.39,"height":0.35},"spec":{"id":"model-usage","kind":"ranked_bar","title":"Model token use","bars":[{"label":"waiting","value":0}],"unit":"tokens","data":{"state":"loading","source":"prometheus:elmers/models","window":"24h"}}},
+    "workflow-rate": {"rect":{"x":0.0,"y":0.21,"width":0.6,"height":0.39},"spec":{"id":"workflow-rate","kind":"time_series","title":"Workflow outcomes","series":[{"label":"complete","points":[{"x":0,"y":0}]},{"label":"failed","points":[{"x":0,"y":0}]}],"unit":"runs","data":{"state":"loading","source":"prometheus:elmers/workflows","window":"24h"}}},
+    "attention": {"rect":{"x":0.61,"y":0.36,"width":0.39,"height":0.29},"spec":{"id":"attention","kind":"table","title":"Needs attention","columns":["Item","State","Age"],"rows":[],"data":{"state":"loading","source":"sse:elmers/attention","window":"live"}}},
+    "recent": {"rect":{"x":0.0,"y":0.61,"width":0.6,"height":0.39},"spec":{"id":"recent","kind":"event_log","title":"Recent outcomes","entries":[],"data":{"state":"loading","source":"sse:elmers/activity","window":"live"}}},
+    "state": {"rect":{"x":0.61,"y":0.66,"width":0.39,"height":0.34},"spec":{"id":"state","kind":"state_timeline","title":"Capability state","lanes":[{"label":"orchestrator","segments":[{"start":0,"end":1,"state":"neutral","label":"waiting"}]}],"data":{"state":"loading","source":"sse:elmers/state","window":"1h"}}}
+  }
+}

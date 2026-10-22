@@ -42,11 +42,11 @@ if ! test -f "$dock_vnc_config/config"; then
     } > "$dock_vnc_config/config"
 fi
 chmod 600 "$dock_vnc_config/password" "$dock_vnc_config/config" "$dock_vnc_config/tls-key.pem"
-cargo build --release -p dock-linux
+cargo build --release -p canvas-linux
 # Cargo owns where artifacts land: CARGO_TARGET_DIR, or build.target-dir in a cargo
 # config, can point it away from ./target. Ask cargo rather than assume.
 target=$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)
-install -m 755 "$target/release/dock-linux" "$HOME/.local/bin/dock-linux.next"
-mv -f "$HOME/.local/bin/dock-linux.next" "$HOME/.local/bin/dock-linux"
-"$HOME/.local/bin/dock-linux" desktop-start
+install -m 755 "$target/release/canvas-linux" "$HOME/.local/bin/canvas-linux.next"
+mv -f "$HOME/.local/bin/canvas-linux.next" "$HOME/.local/bin/canvas-linux"
+"$HOME/.local/bin/canvas-linux" desktop-start
 printf 'Desktop ready. Forward local 15901 to Agora localhost:5901 over SSH. VNC account dock; credential stays in ~/.config/dock/wayvnc/password.\n'

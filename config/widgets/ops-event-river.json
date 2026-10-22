@@ -1,0 +1,17 @@
+{
+  "schema_version": 2,
+  "id": "ops-event-river",
+  "kind": "span_timeline",
+  "title": "Operations river",
+  "style": "event_river",
+  "unit": "minutes",
+  "spans": [
+    {"id":"d1","label":"deploy","lane":"deploys","start":8,"end":8,"state":"good"},
+    {"id":"d2","label":"deploy","lane":"deploys","start":42,"end":42,"state":"good"},
+    {"id":"a1","label":"latency","lane":"alerts","start":18,"end":18,"state":"warning"},
+    {"id":"a2","label":"failure","lane":"alerts","start":36,"end":36,"state":"critical"},
+    {"id":"r1","label":"review","lane":"agents","start":14,"end":23,"state":"neutral"},
+    {"id":"r2","label":"build","lane":"agents","start":28,"end":48,"state":"good"}
+  ],
+  "data": {"state":"ready","source":"demo:events","provenance":"demo","window":"60m"}
+}

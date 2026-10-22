@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.fpl.canvas-alfalfa</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/ajmwagar/.local/bin/canvas-alfalfa</string>
+    <string>--url</string>
+    <string>http://127.0.0.1:8791</string>
+    <string>--bridge-bin</string>
+    <string>/Users/ajmwagar/.local/bin/fpl-desktop-bridge</string>
+    <string>--alfalfa-port</string>
+    <string>8791</string>
+    <string>--every</string>
+    <string>5</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/ajmwagar/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/ajmwagar/Library/Logs/Canvas/alfalfa.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/ajmwagar/Library/Logs/Canvas/alfalfa.log</string>
+</dict>
+</plist>

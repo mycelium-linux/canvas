@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "id": "tv-security",
+  "project_id": "security",
+  "revision": 3,
+  "theme": {"source": "project"},
+  "chrome": {"title": "hidden", "canvas_padding": 12, "surface_gap": 12},
+  "surfaces": [
+    {"id": "security-status", "title": "Fleet security", "content": {"kind": "widget", "spec": {
+      "schema_version": 2, "id": "security-status", "kind": "status_list", "title": "Mycelium · security", "nodes": [], "refresh_ms": 10000,
+      "data": {"state": "loading", "source": "mycelium security", "detail": "Waiting for owner telemetry"}
+    }}},
+    {"id": "cat", "title": "CAT", "content": {"kind": "stream", "url": "http://192.168.2.74:18090/cat.m3u8"}},
+    {"id": "door", "title": "DOOR", "content": {"kind": "stream", "url": "http://192.168.2.74:18090/door.m3u8"}}
+  ],
+  "layout": {"kind": "canvas", "placements": [
+    {"surface_id": "cat", "bounds": {"x": 0.02, "y": 0.03, "width": 0.63, "height": 0.94}, "layer": 0},
+    {"surface_id": "door", "bounds": {"x": 0.67, "y": 0.03, "width": 0.31, "height": 0.94}, "layer": 0}
+  ]},
+  "pages": [
+    {"name": "Cameras", "layout": {"kind": "canvas", "placements": [
+      {"surface_id": "cat", "bounds": {"x": 0.02, "y": 0.03, "width": 0.63, "height": 0.94}, "layer": 0},
+      {"surface_id": "door", "bounds": {"x": 0.67, "y": 0.03, "width": 0.31, "height": 0.94}, "layer": 0}
+    ]}},
+    {"name": "Fleet", "layout": {"kind": "surface", "surface_id": "security-status"}}
+  ], "active_page": 0, "bindings": [], "focused_surface_id": null
+}

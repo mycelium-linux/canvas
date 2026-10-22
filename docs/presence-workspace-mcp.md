@@ -1,6 +1,6 @@
 # Presence-aware workspace MCP
 
-Dock exposes one orchestration catalog through stdio and through an authenticated
+Canvas exposes one orchestration catalog through stdio and through an authenticated
 loopback Streamable HTTP listener. FPL Desktop Bridge owns device identity,
 remote routing, and capability advertisement. Its connector capability ID is
 `dock.workspace-mcp`, which the hosted FPL MCP bridge publishes as
@@ -13,7 +13,7 @@ The MCP tools are deliberately narrower than general desktop control:
 | `projects_list` | Lists safe Alfalfa-owned project identities. |
 | `project_resources` | Lists safe resource metadata for an exact project. |
 | `workspaces_list` | Lists exact projects and saved local window counts, without titles. |
-| `displays_list` | Lists displays attached to this Dock host. |
+| `displays_list` | Lists displays attached to this Canvas host. |
 | `presence_route` | Reports whether current identified presence maps to one display. |
 | `workspace_activate` | Arranges an exact saved Mac workspace on `primary` or `presence`. |
 | `project_recall` | Presents Agora and saved Mac surfaces for an exact project. |
@@ -26,7 +26,7 @@ migrate compute, or silently open a project resource.
 
 ## JARVIS Presence contract
 
-JARVIS owns sensing and identity fusion. Dock reads its public version 1 atomic
+JARVIS owns sensing and identity fusion. Canvas reads its public version 1 atomic
 publication files and owns only the route from `(producer_id, zone)` to a stable
 Dock Control display ID. The private Dock policy lives at:
 
@@ -55,13 +55,13 @@ Example:
 }
 ```
 
-Dock accepts only regular owner-controlled files of at most 1 MiB. It requires
+Canvas accepts only regular owner-controlled files of at most 1 MiB. It requires
 occupied presence, the configured person, policy confidence, and combined
 sensor/publication age below the configured maximum. An unknown person, stale
 sample, future timestamp, missing route, disconnected display, or simultaneous
 presence on different routed displays fails rather than choosing a fallback.
 Multiple physical screens in one JARVIS zone need distinct producer/zone
-observations before Dock can distinguish them; room presence alone does not
+observations before Canvas can distinguish them; room presence alone does not
 infer gaze or screen attention.
 
 Presence selects placement only. JARVIS must still recognize and authorize the
@@ -75,12 +75,12 @@ connector:
 
 ```sh
 CARGO_TARGET_DIR=/Volumes/DockBuild/target \
-  CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo build -p dock-mac
+  CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo build -p canvas-mac
 python3 scripts/setup-mac-workspace-mcp.py \
-  --source-binary /Volumes/DockBuild/target/debug/dock-mac
+  --source-binary /Volumes/DockBuild/target/debug/canvas-mac
 ```
 
-The setup writes a random 64-hex bearer to the owner-only Dock support
+The setup writes a random 64-hex bearer to the owner-only Canvas support
 directory, installs `dev.fpl.dock-mcp`, updates only the managed connector in
 FPL Desktop Bridge's configuration, and restarts the existing bridge. The
 connector gives the bridge the token file path; no token is placed in arguments,
@@ -89,17 +89,17 @@ logs, or project configuration.
 Manual checks:
 
 ```sh
-dock-mac orchestrate displays
-dock-mac orchestrate canvas-sync
-dock-mac orchestrate canvas-switch dock
-dock-mac orchestrate workspaces
-dock-mac orchestrate presence
+canvas-mac orchestrate displays
+canvas-mac orchestrate canvas-sync
+canvas-mac orchestrate canvas-switch dock
+canvas-mac orchestrate workspaces
+canvas-mac orchestrate presence
 fpl-desktop-bridge verify --connector dock-workspaces --local
 fpl-desktop-bridge verify --connector desktop.dock.workspace-mcp
-dock-mac orchestrate activate alfalfa presence
+canvas-mac orchestrate activate alfalfa presence
 ```
 
 To recover manually, stop `dev.fpl.dock-mcp`, remove only the connector whose
 ID is `dock-workspaces`, and restart `dev.fpl.desktop-bridge`. Preserve the token
-unless intentionally revoking the connector; deleting it causes Dock MCP to
+unless intentionally revoking the connector; deleting it causes Canvas MCP to
 fail loudly on its next start.

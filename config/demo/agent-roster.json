@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "id": "agents-roster-demo",
+  "revision": 1,
+  "surfaces": [
+    {
+      "id": "agent-roster",
+      "title": "Agent roster",
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 1,
+          "id": "agents/roster",
+          "kind": "status_list",
+          "title": "Agents",
+          "nodes": [],
+          "data": {
+            "state": "loading",
+            "source": "agent attention",
+            "detail": "Waiting for the first report from canvas-agents",
+            "provenance": "demo"
+          }
+        }
+      }
+    }
+  ],
+  "bindings": [
+    {
+      "id": "agent-roster-feed",
+      "source": {
+        "owner": "agents",
+        "stream": "roster",
+        "contract": "canvas.widget.snapshot.v1"
+      },
+      "target": {
+        "surface_id": "agent-roster",
+        "input_id": "widget"
+      },
+      "adapter": "widget-snapshot-v1",
+      "delivery": { "mode": "latest" }
+    }
+  ]
+}

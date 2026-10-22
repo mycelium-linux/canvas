@@ -1,0 +1,14 @@
+{
+  "bus": {
+    "installation_id": "home",
+    "producer_id": "mac-studio-hyperspace",
+    "hub_endpoint": "127.0.0.1:18790",
+    "token_file": "/Users/ajmwagar/.config/unibus/tokens/mac-studio-hyperspace.token",
+    "zones": ["living-room"],
+    "capabilities": ["hyperspace.audio"],
+    "screen_anchors": [],
+    "schema_version": 1
+  },
+  "socket_path": "/Users/ajmwagar/Library/Caches/FPL/hyperspace-audio.sock",
+  "stream_id": "home-playback"
+}

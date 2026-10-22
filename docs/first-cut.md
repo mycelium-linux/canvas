@@ -1,13 +1,13 @@
-# Dock: shared project workspaces
+# Canvas: shared project workspaces
 
 This consolidates the user's corrections to the original build note. The product
 is a workspace that a person and an agent can both operate, spanning Agora One's
 Ubuntu GPU desktop, local Mac windows, and existing Edgerunner/OpenCode sessions.
 
 Alfalfa owns project context, shared coordination and bulletin-board resources.
-Dock consumes that context and presents the workspace. Edgerunner/OpenCode owns
+Canvas consumes that context and presents the workspace. Edgerunner/OpenCode owns
 agent conversations and model selection; fpl-auth and the existing desktop bridge
-own identity, enrollment and credential handling. Dock is not an agent harness.
+own identity, enrollment and credential handling. Canvas is not an agent harness.
 The [startup integration](project-startup.md) distinguishes working adapters from
 the remaining authenticated session and tool integration.
 
@@ -24,16 +24,16 @@ not individual remote windows exposed through a compositing API.
 
 ## Boundaries
 
-`dock-core` holds local project/resource bindings, Coherence token selection, and local
-workspace control policy. `dock-mac` owns the iced presentation and public Mac
-window orchestration. The independently installed `dock-control` helper owns
+`canvas-core` holds local project/resource bindings, Coherence token selection, and local
+workspace control policy. `canvas-mac` owns the iced presentation and public Mac
+window orchestration. The independently installed `canvas-control` helper owns
 native Accessibility operations; ordinary GUI rebuilds leave its permission
-identity untouched. `dock-linux` owns explicitly launched systemd user
+identity untouched. `canvas-linux` owns explicitly launched systemd user
 processes, the independent Sway desktop, and adapters to OpenCode's supported
 session API. The earlier nested Hyprland setup remains exploratory. Streaming
 remains owned by the existing transport implementations. Alfalfa, Edgerunner,
 Bifrost, identity and compute orchestration remain external owners. Their
-interfaces are integrated without duplicating their lifecycles in Dock.
+interfaces are integrated without duplicating their lifecycles in Canvas.
 
 Native tokens are an exact vendored snapshot of Coherence's existing native
 crate. Project themes select upstream light/dark mode and a semantic accent;
@@ -56,9 +56,9 @@ Project selection changes workspace visibility and preserves background context.
 It does not stop agents, freeze the desktop or suspend a machine.
 
 The Linux adapter's explicit pause/resume freezes/thaws the cgroup of a process
-launched by Dock. This covers that process's descendants, not external sessions.
+launched by Canvas. This covers that process's descendants, not external sessions.
 The state model records a pause only after a successful adapter acknowledgement.
-Separately, OpenCode owns persistent coding conversations. Dock prompts,
+Separately, OpenCode owns persistent coding conversations. Canvas prompts,
 observes, interrupts and continues the recorded session through its API while a
 tmux-backed terminal attaches to that same session. These controls do not imply
 equivalent integration with Codex, Claude or Edge Runner.
@@ -66,7 +66,7 @@ equivalent integration with Codex, Claude or Edge Runner.
 The human can reserve local workspace control. Agent-facing Mac operations must
 respect that reservation. This is cooperative control among local clients,
 not authentication or a security sandbox: the CLI actor flag is not proof of
-identity, and direct SSH/OS access can act outside Dock. Linux takeover persists
+identity, and direct SSH/OS access can act outside Canvas. Linux takeover persists
 the human latch under the same lock as agent input and prompt submission, then
 requests OpenCode cancellation. It reports an abort failure explicitly. This
 does not interrupt coding agents managed outside that registered OpenCode session.

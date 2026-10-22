@@ -1,0 +1,166 @@
+{
+ "schema_version": 1,
+ "id": "alfalfa",
+ "project_id": "alfalfa",
+ "revision": 1,
+ "theme": {
+  "source": "project"
+ },
+ "surfaces": [
+  {
+   "id": "fleet",
+   "title": "Alfalfa fleet",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "fleet",
+     "title": "Alfalfa fleet",
+     "nodes": [],
+     "kind": "status_list"
+    }
+   },
+   "inputs": [
+    {
+     "id": "widget",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "load",
+   "title": "Fleet load",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "load",
+     "title": "Fleet load",
+     "rows": [
+      "\u2014"
+     ],
+     "columns": [
+      "act"
+     ],
+     "values": [
+      [
+       0
+      ]
+     ],
+     "kind": "heatmap"
+    }
+   },
+   "inputs": [
+    {
+     "id": "widget",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "self-pulse",
+   "title": "alfalfa marbles",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "self-pulse",
+     "title": "alfalfa \u2014 recent marbles",
+     "entries": [],
+     "kind": "event_log"
+    }
+   },
+   "inputs": [
+    {
+     "id": "widget",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  }
+ ],
+ "bindings": [
+  {
+   "id": "fleet-bind",
+   "source": {
+    "owner": "alfalfa",
+    "stream": "overview",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "fleet",
+    "input_id": "widget"
+   },
+   "adapter": "alfalfa-overview-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "load-bind",
+   "source": {
+    "owner": "alfalfa",
+    "stream": "overview",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "load",
+    "input_id": "widget"
+   },
+   "adapter": "alfalfa-fleet-heatmap-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "self-bind",
+   "source": {
+    "owner": "alfalfa",
+    "stream": "alfalfa-pulse",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "self-pulse",
+    "input_id": "widget"
+   },
+   "adapter": "alfalfa-pulse-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  }
+ ],
+ "layout": {
+  "kind": "canvas",
+  "placements": [
+   {
+    "surface_id": "fleet",
+    "bounds": {
+     "x": 0.0,
+     "y": 0.0,
+     "width": 0.618,
+     "height": 0.618
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "load",
+    "bounds": {
+     "x": 0.0,
+     "y": 0.618,
+     "width": 0.618,
+     "height": 0.382
+    },
+    "layer": 1
+   },
+   {
+    "surface_id": "self-pulse",
+    "bounds": {
+     "x": 0.618,
+     "y": 0.0,
+     "width": 0.382,
+     "height": 1.0
+    },
+    "layer": 2
+   }
+  ]
+ }
+}

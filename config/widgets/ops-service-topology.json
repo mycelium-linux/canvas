@@ -1,0 +1,20 @@
+{
+  "schema_version": 2,
+  "id": "ops-service-topology",
+  "kind": "neural_graph",
+  "title": "Service topology",
+  "nodes": [
+    {"id":"edge","label":"Edge","group":"ingress","heat":0.72,"state":"good"},
+    {"id":"auth","label":"Auth","group":"control","heat":0.34,"state":"good"},
+    {"id":"api","label":"API","group":"control","heat":1.0,"state":"good"},
+    {"id":"models","label":"Models","group":"compute","heat":0.88,"state":"warning"},
+    {"id":"cache","label":"Cache","group":"data","heat":0.46,"state":"good"}
+  ],
+  "edges": [
+    {"from":"edge","to":"auth","heat":0.76},
+    {"from":"auth","to":"api","heat":0.69},
+    {"from":"api","to":"models","heat":1.0},
+    {"from":"api","to":"cache","heat":0.48}
+  ],
+  "data": {"state":"ready","source":"demo:topology","provenance":"demo","window":"live"}
+}

@@ -21,11 +21,14 @@ pub mod light {
     pub const COLOR_DANGER: [u8; 3] = [177, 43, 64];
     pub const COLOR_INFO: [u8; 3] = [40, 105, 121];
     pub const COLOR_FOCUS: [u8; 3] = [36, 73, 216];
+    pub const FONT_SANS: &str = "\"Geist\", \"Segoe UI\", -apple-system, BlinkMacSystemFont, system-ui, sans-serif";
+    pub const FONT_SERIF: &str = "var(--co-font-sans)";
     pub const FONT_SIZE_BASE: f32 = 16.0;
     pub const FONT_SIZE_SM: f32 = 12.0;
     pub const FONT_SIZE_LG: f32 = 18.0;
     pub const FONT_SIZE_XL: f32 = 22.0;
     pub const FONT_SIZE_2XL: f32 = 28.0;
+    pub const LINE_HEIGHT_BASE: f32 = 1.5;
     pub const RADIUS_XS: f32 = 2.0;
     pub const RADIUS_SM: f32 = 4.0;
     pub const RADIUS_MD: f32 = 6.0;
@@ -42,6 +45,11 @@ pub mod light {
     pub const ROW_HEIGHT: f32 = 64.0;
     pub const SIDEBAR_WIDTH: f32 = 208.0;
     pub const SHELL_RADIUS: f32 = 0.0;
+    pub const LABEL_LETTER_SPACING: f32 = 0.0;
+    pub const READING_FONT_SIZE: f32 = 17.0;
+    pub const READING_LINE_HEIGHT: f32 = 1.6;
+    pub const READING_LETTER_SPACING: f32 = 0.0;
+    pub const READING_WORD_SPACING: f32 = 0.0;
 }
 
 pub mod dark {
@@ -65,11 +73,14 @@ pub mod dark {
     pub const COLOR_DANGER: [u8; 3] = [255, 157, 170];
     pub const COLOR_INFO: [u8; 3] = [131, 203, 220];
     pub const COLOR_FOCUS: [u8; 3] = [154, 175, 255];
+    pub const FONT_SANS: &str = "\"Geist\", \"Segoe UI\", -apple-system, BlinkMacSystemFont, system-ui, sans-serif";
+    pub const FONT_SERIF: &str = "var(--co-font-sans)";
     pub const FONT_SIZE_BASE: f32 = 16.0;
     pub const FONT_SIZE_SM: f32 = 12.0;
     pub const FONT_SIZE_LG: f32 = 18.0;
     pub const FONT_SIZE_XL: f32 = 22.0;
     pub const FONT_SIZE_2XL: f32 = 28.0;
+    pub const LINE_HEIGHT_BASE: f32 = 1.5;
     pub const RADIUS_XS: f32 = 2.0;
     pub const RADIUS_SM: f32 = 4.0;
     pub const RADIUS_MD: f32 = 6.0;
@@ -86,6 +97,63 @@ pub mod dark {
     pub const ROW_HEIGHT: f32 = 64.0;
     pub const SIDEBAR_WIDTH: f32 = 208.0;
     pub const SHELL_RADIUS: f32 = 0.0;
+    pub const LABEL_LETTER_SPACING: f32 = 0.0;
+    pub const READING_FONT_SIZE: f32 = 17.0;
+    pub const READING_LINE_HEIGHT: f32 = 1.6;
+    pub const READING_LETTER_SPACING: f32 = 0.0;
+    pub const READING_WORD_SPACING: f32 = 0.0;
+}
+
+pub mod sepia {
+    pub const COLOR_BACKGROUND: [u8; 3] = [242, 233, 216];
+    pub const COLOR_BACKGROUND_STRONG: [u8; 3] = [232, 220, 196];
+    pub const COLOR_SURFACE: [u8; 3] = [250, 243, 230];
+    pub const COLOR_SURFACE_MUTED: [u8; 3] = [236, 226, 206];
+    pub const COLOR_SURFACE_RAISED: [u8; 3] = [253, 248, 238];
+    pub const COLOR_SURFACE_ACCENT: [u8; 3] = [240, 236, 221];
+    pub const COLOR_SURFACE_ACCENT_STRONG: [u8; 3] = [228, 221, 199];
+    pub const COLOR_TEXT: [u8; 3] = [74, 63, 53];
+    pub const COLOR_TEXT_MUTED: [u8; 3] = [107, 93, 79];
+    pub const COLOR_BORDER: [u8; 3] = [216, 204, 180];
+    pub const COLOR_BORDER_STRONG: [u8; 3] = [156, 141, 118];
+    pub const COLOR_BRAND: [u8; 3] = [36, 73, 216];
+    pub const COLOR_BRAND_STRONG: [u8; 3] = [25, 56, 175];
+    pub const COLOR_BRAND_MUTED: [u8; 3] = [228, 226, 242];
+    pub const COLOR_CTA_LABEL: [u8; 3] = [250, 243, 230];
+    pub const COLOR_SUCCESS: [u8; 3] = [31, 111, 71];
+    pub const COLOR_WARNING: [u8; 3] = [136, 87, 12];
+    pub const COLOR_DANGER: [u8; 3] = [177, 43, 64];
+    pub const COLOR_INFO: [u8; 3] = [40, 105, 121];
+    pub const COLOR_FOCUS: [u8; 3] = [36, 73, 216];
+    pub const FONT_SANS: &str = "\"Geist\", \"Segoe UI\", -apple-system, BlinkMacSystemFont, system-ui, sans-serif";
+    pub const FONT_SERIF: &str = "var(--co-font-sans)";
+    pub const FONT_SIZE_BASE: f32 = 16.0;
+    pub const FONT_SIZE_SM: f32 = 12.0;
+    pub const FONT_SIZE_LG: f32 = 18.0;
+    pub const FONT_SIZE_XL: f32 = 22.0;
+    pub const FONT_SIZE_2XL: f32 = 28.0;
+    pub const LINE_HEIGHT_BASE: f32 = 1.5;
+    pub const RADIUS_XS: f32 = 2.0;
+    pub const RADIUS_SM: f32 = 4.0;
+    pub const RADIUS_MD: f32 = 6.0;
+    pub const RADIUS_LG: f32 = 8.0;
+    pub const SPACE_1: f32 = 4.0;
+    pub const SPACE_2: f32 = 8.0;
+    pub const SPACE_3: f32 = 12.0;
+    pub const SPACE_4: f32 = 16.0;
+    pub const SPACE_5: f32 = 24.0;
+    pub const SPACE_6: f32 = 32.0;
+    pub const SPACE_7: f32 = 48.0;
+    pub const SPACE_8: f32 = 64.0;
+    pub const CONTROL_HEIGHT: f32 = 36.0;
+    pub const ROW_HEIGHT: f32 = 64.0;
+    pub const SIDEBAR_WIDTH: f32 = 208.0;
+    pub const SHELL_RADIUS: f32 = 0.0;
+    pub const LABEL_LETTER_SPACING: f32 = 0.0;
+    pub const READING_FONT_SIZE: f32 = 17.0;
+    pub const READING_LINE_HEIGHT: f32 = 1.6;
+    pub const READING_LETTER_SPACING: f32 = 0.0;
+    pub const READING_WORD_SPACING: f32 = 0.0;
 }
 
 pub mod compact {

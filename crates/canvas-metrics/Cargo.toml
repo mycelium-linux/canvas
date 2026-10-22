@@ -1,0 +1,10 @@
+[package]
+name = "canvas-metrics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Prometheus connector that emits Canvas widget snapshots"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

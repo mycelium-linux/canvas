@@ -1,0 +1,26 @@
+[package]
+name = "canvas-agent-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+canvas = { workspace = true }
+canvas-core = { workspace = true }
+canvas-widgets = { path = "../canvas-widgets" }
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "json",
+    "rustls-tls",
+] }
+
+[lib]
+name = "canvas_agent_bridge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "canvas-agent-bridge"
+path = "src/main.rs"

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "id": "fpl-gpu-power",
+  "version": "1.0.0",
+  "source": "prometheus:yggdrasil_accelerator_power_watts",
+  "binder": "widget-snapshot-v1",
+  "widget_kind": "stat",
+  "provenance": "live",
+  "refresh_ms": 30000
+}

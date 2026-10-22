@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "id": "calendar-workspace",
+  "project_id": "home",
+  "revision": 1,
+  "theme": { "source": "project" },
+  "background": { "kind": "theme" },
+  "chrome": {
+    "title": "hidden",
+    "canvas_padding": 0,
+    "surface_gap": 0
+  },
+  "surfaces": [
+    {
+      "id": "calendar",
+      "title": "Calendar",
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "calendar",
+          "kind": "module",
+          "module": "calendar-v1",
+          "inputs": {
+            "view": { "type": "text", "value": "month" }
+          },
+          "theme": null,
+          "refresh_ms": null,
+          "chrome": "frameless",
+          "data": {
+            "state": "ready",
+            "source": "host clock",
+            "observed_at": null,
+            "window": null,
+            "detail": null,
+            "provenance": "live"
+          }
+        }
+      },
+      "inputs": []
+    }
+  ],
+  "layout": {
+    "kind": "canvas",
+    "placements": [
+      {
+        "surface_id": "calendar",
+        "bounds": { "x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0 },
+        "layer": 0
+      }
+    ]
+  },
+  "bindings": [],
+  "focused_surface_id": "calendar"
+}

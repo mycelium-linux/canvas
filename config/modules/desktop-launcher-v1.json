@@ -1,0 +1,198 @@
+{
+  "schema_version": 1,
+  "id": "desktop-launcher-v1",
+  "title": "Canvas launcher",
+  "inputs": [
+    {"id":"width","kind":"number","required":false},
+    {"id":"height","kind":"number","required":false},
+    {"id":"scope","kind":"text","required":false},
+    {
+      "id": "window-cycle",
+      "kind": "boolean",
+      "required": false
+    },
+    {
+      "id": "target",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "query",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "health",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "count",
+      "kind": "number",
+      "required": false
+    },
+    {
+      "id": "live",
+      "kind": "boolean",
+      "required": false
+    },
+    {
+      "id": "row0-title",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "row0-detail",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "row0-selected",
+      "kind": "boolean",
+      "required": false
+    },
+    {
+      "id": "row0-available",
+      "kind": "boolean",
+      "required": false
+    },
+    {
+      "id": "row1-title",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "row1-detail",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "row1-selected",
+      "kind": "boolean",
+      "required": false
+    },
+    {
+      "id": "row1-available",
+      "kind": "boolean",
+      "required": false
+    },
+    {
+      "id": "row2-title",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "row2-detail",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "row2-selected",
+      "kind": "boolean",
+      "required": false
+    },
+    {
+      "id": "row2-available",
+      "kind": "boolean",
+      "required": false
+    },
+    {
+      "id": "row3-title",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "row3-detail",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "row3-selected",
+      "kind": "boolean",
+      "required": false
+    },
+    {
+      "id": "row3-available",
+      "kind": "boolean",
+      "required": false
+    },
+    {
+      "id": "row4-title",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "row4-detail",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "row4-selected",
+      "kind": "boolean",
+      "required": false
+    },
+    {
+      "id": "row4-available",
+      "kind": "boolean",
+      "required": false
+    },
+    {
+      "id": "row5-title",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "row5-detail",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "row5-selected",
+      "kind": "boolean",
+      "required": false
+    },
+    {
+      "id": "row5-available",
+      "kind": "boolean",
+      "required": false
+    }
+  ],
+  "capabilities": {
+    "write_scene": true,
+    "read_inputs": [
+      "width", "height", "scope",
+      "window-cycle",
+      "target",
+      "query",
+      "health",
+      "count",
+      "live",
+      "row0-title",
+      "row0-detail",
+      "row0-selected",
+      "row0-available",
+      "row1-title",
+      "row1-detail",
+      "row1-selected",
+      "row1-available",
+      "row2-title",
+      "row2-detail",
+      "row2-selected",
+      "row2-available",
+      "row3-title",
+      "row3-detail",
+      "row3-selected",
+      "row3-available",
+      "row4-title",
+      "row4-detail",
+      "row4-selected",
+      "row4-available",
+      "row5-title",
+      "row5-detail",
+      "row5-selected",
+      "row5-available"
+    ],
+    "read_theme": true
+  },
+  "actions": [{"id":"select","destination":"canvas.shell","kind":"select"}]
+}

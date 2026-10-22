@@ -1,0 +1,5 @@
+local p=event.payload if type(p)~="table" then error("bifrost health requires payload") end
+if p.error then return {kind="snapshot",widget={kind="status_list",title="Production gateway",nodes={{label="Bifrost",state="critical",detail=tostring(p.error)}}},data={state="unavailable",source="bifrost",detail=tostring(p.error)}} end
+local failures=tonumber(p.failures) or 0 local throttled=tonumber(p.throttled) or 0 local latency=tonumber(p.mean_duration_seconds)
+local nodes={{label="Gateway",state="good",detail="ai.fpl.dev · production"},{label="Mean duration",state="neutral",detail=latency and string.format("%.2f seconds",latency) or "No samples"},{label="Upstream failures",state=failures>0 and "warning" or "good",detail=tostring(failures).." lifetime"},{label="Policy rejections",state=throttled>0 and "warning" or "good",detail=tostring(throttled).." lifetime"}}
+return {kind="snapshot",widget={kind="status_list",title="Production gateway",nodes=nodes},data={state="ready",source="bifrost",provenance="live"}}

@@ -1,0 +1,5 @@
+{"routes":[
+  {"source":"alfalfa","contract":"canvas.widget.snapshot.v1","dest":["stream.sock"]},
+  {"source":"machine","contract":"canvas.widget.snapshot.v1","dest":["stream.sock"]},
+  {"source":"*","contract":"*","dest":["stream.sock"]}
+]}

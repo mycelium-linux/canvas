@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.fpl.canvas</string>
+  <!-- Canvas guards itself with flock(2) on runtime.lock, so a second copy
+       refuses to start. That guard is defeated by deleting the lock file:
+       the running process keeps its flock on the unlinked inode while the
+       newcomer creates a fresh one, and both then fight over the same
+       displays. Supervising it here is what keeps the count at one. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/ajmwagar/Applications/DockCanvas.app/Contents/MacOS/dock-canvas</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <!-- Long enough that a crash-loop is visible in the log rather than a
+       wall of restarts, short enough that a real crash comes back fast. -->
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>/Users/ajmwagar/Library/Logs/canvas.log</string>
+  <key>StandardErrorPath</key><string>/Users/ajmwagar/Library/Logs/canvas.log</string>
+</dict>
+</plist>

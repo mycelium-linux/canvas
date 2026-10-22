@@ -1,0 +1,23 @@
+{
+  "installation_id": "home",
+  "producer_id": "macbook-neo-display",
+  "hub_endpoint": "127.0.0.1:18794",
+  "token_file": "/Users/ajmwagar/.config/canvas/macbook-neo-display.token",
+  "zones": ["living-room"],
+  "capabilities": ["display", "canvas.display", "canvas.rlcd", "canvas.workspace_mirror"],
+  "screen_anchors": ["screen-neo"],
+  "schema_version": 1,
+  "mirror": {"enabled": true, "zone": "living-room", "output_id": "screen-neo"},
+  "actors": [
+    {
+      "producer": "canvas-central-studio",
+      "id": "alfalfa:workspace-presentation",
+      "commands": ["workspace_sync", "workspace_switch", "workspace_reset"]
+    },
+    {
+      "producer": "sound-neo-status",
+      "id": "jarvis:voice-status",
+      "commands": ["upsert_indicator", "dismiss_indicator"]
+    }
+  ]
+}

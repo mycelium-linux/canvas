@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "id": "tv-dvd-bounce",
+  "project_id": "dvd-bounce",
+  "revision": 1,
+  "theme": {"source": "project"},
+  "background": {"kind": "shader", "shader_id": "dvd-bounce", "speed": 1.0},
+  "chrome": {"canvas_padding": 0, "surface_gap": 0, "title": "hidden"},
+  "surfaces": [],
+  "layout": {"kind": "empty"},
+  "pages": [], "active_page": 0, "bindings": [], "focused_surface_id": null
+}

@@ -1,0 +1,23 @@
+{
+  "installation_id": "home",
+  "producer_id": "home-pi-display",
+  "hub_endpoint": "127.0.0.1:18790",
+  "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+  "zones": ["living-room"],
+  "capabilities": ["display", "canvas.audio_level", "canvas.rlcd", "canvas.workspace_mirror"],
+  "screen_anchors": ["screen-tv"],
+  "schema_version": 1,
+  "mirror": {"enabled": true, "zone": "living-room", "output_id": "screen-tv"},
+  "actors": [
+    {
+      "producer": "canvas-central-studio",
+      "id": "alfalfa:workspace-presentation",
+      "commands": ["inspect", "stream_descriptors", "apply_document", "workspace_sync", "workspace_switch", "workspace_reset"]
+    },
+    {
+      "producer": "sound-neo-status",
+      "id": "jarvis:voice-status",
+      "commands": ["upsert_indicator", "dismiss_indicator"]
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+[package]
+name = "canvas-model-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Theme-native GPU model renderer and Canvas video producer"
+
+[dependencies]
+anyhow.workspace = true
+bytemuck = { version = "1.24", features = ["derive"] }
+canvas-core.workspace = true
+fpl-gfx = { path = "../../../gfx" }
+glam = { version = "0.30", features = ["bytemuck"] }
+mlua = { version = "0.12.1", features = ["luau", "serialize"] }
+pollster = "0.4"
+serde.workspace = true
+serde_json.workspace = true
+stl_io = "0.8"
+wgpu = "27"
+
+[lib]
+name = "canvas_model_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "canvas-model-host"
+path = "src/main.rs"
+
+[dev-dependencies]
+tempfile.workspace = true

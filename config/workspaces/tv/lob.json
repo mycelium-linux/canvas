@@ -1,0 +1,323 @@
+{
+ "schema_version": 1,
+ "id": "lob-workspace",
+ "project_id": "lob",
+ "revision": 2,
+ "theme": {
+  "source": "project"
+ },
+ "background": {
+  "kind": "shader",
+  "shader_id": "smoke-rings",
+  "speed": 0.35
+ },
+ "chrome": {
+  "title": "hidden",
+  "canvas_padding": 10,
+  "surface_gap": 10
+ },
+ "surfaces": [
+  {
+   "id": "lob-schematic",
+   "title": "Schematic",
+   "content": {
+    "kind": "live_image",
+    "source_id": "lob-schematic"
+   },
+   "inputs": []
+  },
+  {
+   "id": "lob-board-top",
+   "title": "Board \u00b7 top",
+   "content": {
+    "kind": "live_image",
+    "source_id": "lob-board-top"
+   },
+   "inputs": []
+  },
+  {
+   "id": "lob-fan",
+   "title": "Decisions",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "lob-fan",
+     "kind": "dag_graph",
+     "title": "Awaiting decision",
+     "nodes": [],
+     "edges": [],
+     "theme": null,
+     "refresh_ms": 250,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "fan",
+          "contract": "lob.pipeline.status.v1"
+    }
+   ]
+  },
+  {
+   "id": "lob-brief",
+   "title": "Brief",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "lob-brief",
+     "kind": "event_log",
+     "title": "Brief \u00b7 idle",
+     "entries": [],
+     "theme": null,
+     "refresh_ms": 250,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "lob:spec",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "brief",
+          "contract": "lob.pipeline.status.v1"
+    }
+   ]
+  },
+  {
+   "id": "lob-pipeline",
+   "title": "Pipeline",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "lob-pipeline",
+     "kind": "event_log",
+     "title": "Pipeline \u00b7 idle",
+     "entries": [],
+     "theme": null,
+     "refresh_ms": 250,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "lob:run",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "pipeline",
+          "contract": "lob.pipeline.status.v1"
+    }
+   ]
+  },
+  {
+   "id": "lob-confidence",
+   "title": "Decision confidence",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "lob-confidence",
+     "kind": "ranked_bar",
+     "title": "Awaiting decision",
+     "bars": [
+      {
+       "label": "waiting",
+       "value": 0.0
+      }
+     ],
+     "unit": "%",
+     "theme": null,
+     "refresh_ms": 250,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     }
+    }
+   },
+   "inputs": [
+    {
+     "id": "confidence",
+          "contract": "lob.pipeline.status.v1"
+    }
+   ]
+  },
+  {
+   "id": "lob-ask",
+   "title": "Ask lob",
+      "content": {
+        "kind": "prompt",
+        "target": "lob",
+        "placeholder": "Describe the board or circuit you want…",
+        "task_kinds": ["PCB", "Part", "Code"]
+      },
+   "inputs": []
+  }
+ ],
+ "layout": {
+  "kind": "canvas",
+  "placements": [
+   {
+    "surface_id": "lob-schematic",
+    "bounds": {
+     "x": 0.01,
+     "y": 0.02,
+     "width": 0.44,
+     "height": 0.56
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "lob-board-top",
+    "bounds": {
+     "x": 0.46,
+     "y": 0.02,
+     "width": 0.34,
+     "height": 0.56
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "lob-fan",
+    "bounds": {
+     "x": 0.81,
+     "y": 0.02,
+     "width": 0.18,
+     "height": 0.56
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "lob-brief",
+    "bounds": {
+     "x": 0.01,
+     "y": 0.7595999999999999,
+     "width": 0.3,
+     "height": 0.22039999999999998
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "lob-pipeline",
+    "bounds": {
+     "x": 0.32,
+     "y": 0.6,
+     "width": 0.34,
+     "height": 0.38
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "lob-confidence",
+    "bounds": {
+     "x": 0.67,
+     "y": 0.6,
+     "width": 0.32,
+     "height": 0.38
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "lob-ask",
+    "bounds": {
+     "x": 0.01,
+     "y": 0.6,
+     "width": 0.3,
+     "height": 0.1444
+    },
+    "layer": 0
+   }
+  ]
+ },
+ "bindings": [
+  {
+   "id": "lob-fan-live",
+   "source": {
+    "owner": "legion-of-bom",
+    "stream": "lob-fan",
+        "contract": "lob.pipeline.status.v1"
+   },
+   "target": {
+    "surface_id": "lob-fan",
+    "input_id": "fan"
+   },
+      "adapter": "lob-pipeline-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "lob-brief-live",
+   "source": {
+    "owner": "legion-of-bom",
+    "stream": "lob-brief",
+        "contract": "lob.pipeline.status.v1"
+   },
+   "target": {
+    "surface_id": "lob-brief",
+    "input_id": "brief"
+   },
+      "adapter": "lob-pipeline-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "lob-pipeline-live",
+   "source": {
+    "owner": "legion-of-bom",
+    "stream": "lob-pipeline",
+        "contract": "lob.pipeline.status.v1"
+   },
+   "target": {
+    "surface_id": "lob-pipeline",
+    "input_id": "pipeline"
+   },
+      "adapter": "lob-pipeline-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "lob-confidence-live",
+   "source": {
+    "owner": "legion-of-bom",
+    "stream": "lob-confidence",
+        "contract": "lob.pipeline.status.v1"
+   },
+   "target": {
+    "surface_id": "lob-confidence",
+    "input_id": "confidence"
+   },
+      "adapter": "lob-pipeline-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  }
+ ],
+ "focused_surface_id": null
+}

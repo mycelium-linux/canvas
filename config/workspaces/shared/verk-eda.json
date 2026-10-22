@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "tv-verk-eda",
+  "project_id": "verk-eda",
+  "revision": 2,
+  "theme": {"source": "project"},
+  "surfaces": [
+    {"id": "schematic", "title": "LED-Blinker-Circuit · native reference", "inputs": [], "content": {"kind": "asset", "asset": {"sha256": "026f40387cb37884f75f1dec30262155755f3cdec1b36773c085ca076919f38a", "media_type": "application/pdf", "byte_length": 14334}}},
+    {"id": "evidence", "title": "Verk · schematic evidence", "inputs": [], "content": {"kind": "widget", "spec": {"schema_version": 2, "id": "evidence", "kind": "rich_card", "title": "LED-Blinker-Circuit", "body": "ID 580061c37e63\n\n8 components\n7 nets · 22 connected pins\n\nExact graph replay\nConnectivity + component identity\n\nNative source drawing\nNot a recreated page layout\nERC / SPICE not run\n\n333 graph-verified schematics\nResearch-held · rights unverified", "format": "markdown", "citations": [], "chrome": "frameless", "data": {"state": "ready", "provenance": "sample", "source": "Verk owner DCP replay receipt + KiCad native reference"}}}}
+  ],
+  "layout": {"kind": "canvas", "placements": [
+    {"surface_id": "schematic", "bounds": {"x": 0.01, "y": 0.01, "width": 0.65, "height": 0.98}, "layer": 0},
+    {"surface_id": "evidence", "bounds": {"x": 0.68, "y": 0.01, "width": 0.31, "height": 0.98}, "layer": 1}
+  ]}
+}

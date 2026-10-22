@@ -1,7 +1,7 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "ops-nodes",
-  "kind": "node_summary",
+  "kind": "status_list",
   "title": "Compute mesh",
   "nodes": [
     {"label":"Avery's Mac Studio","state":"good","detail":"local"},

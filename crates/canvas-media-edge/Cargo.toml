@@ -1,0 +1,58 @@
+[package]
+name = "canvas-media-edge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Headless Unibus media-plane adapter for native Canvas camera surfaces"
+
+[features]
+default = ["native-window-capture"]
+native-window-capture = ["dep:screencapturekit"]
+
+[dependencies]
+anyhow.workspace = true
+canvas = { workspace = true }
+canvas-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+unibus-media = { path = "../../../unibus/crates/unibus-media" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit = { version = "11", features = ["macos_15_0"], optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lib]
+name = "canvas_media_edge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "canvas-tv"
+path = "src/bin/tv.rs"
+
+[[bin]]
+name = "canvas-media-edge"
+path = "src/main.rs"
+
+[[bin]]
+name = "canvas-media-announce"
+path = "src/bin/announce.rs"
+
+[[bin]]
+name = "canvas-simulator-stream"
+path = "src/bin/simulator.rs"
+
+[[bin]]
+name = "canvas-android-stream"
+path = "src/bin/android.rs"
+
+[[bin]]
+name = "canvas-window-stream"
+path = "src/bin/window.rs"
+required-features = ["native-window-capture"]
+
+[[bin]]
+name = "canvas-native-window"
+path = "src/bin/native-window.rs"
+required-features = ["native-window-capture"]

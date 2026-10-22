@@ -1,0 +1,183 @@
+{
+  "description": "Read-only source-backed detail pages. Merge surfaces by id and append pages; retain overview. Rebase video placements on the owner's main layout if it changes. Rotation is configured in menu.json.",
+  "surfaces": [
+    {
+      "id": "verk-teachers",
+      "title": "Teachers / recorded inventory",
+      "inputs": [],
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "verk-teachers",
+          "kind": "rich_card",
+          "title": "Teachers / recorded inventory",
+          "body": "BOM choices     1,000 tasks / 1,000 labels\nAcceptable-action sets · unbound training-only\n\nCAD shell recovery     96 tasks / 96 labels\nNative corrective labels · exploratory only\n\nTaiga CAD oracle     1,000 tasks / 24,435 labels\nUpstream action-set oracle · raw / exploratory\n\nAudio repair     9 tasks / 27 labels\nChecker labels · unsigned receipts\n\nSchematic repair     6 tasks / 6 labels\nChecker-backed · exploratory / unbound",
+          "format": "markdown",
+          "citations": [],
+          "chrome": "frameless",
+          "data": {
+            "state": "ready",
+            "provenance": "live",
+            "source": "pdf:4bab5bdda6a00389976746945834cf73d9f4bab871ccab73dbd397f544365835",
+            "detail": "Read-only documented snapshot; not live telemetry"
+          },
+          "refresh_ms": null
+        }
+      }
+    },
+    {
+      "id": "verk-admission",
+      "title": "Data / evidence boundaries",
+      "inputs": [],
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "verk-admission",
+          "kind": "rich_card",
+          "title": "Data / evidence boundaries",
+          "body": "SPLIT WHOLE FAMILIES\nTrain / validation / holdout assigned before variants.\nAudit all splits together; reject request/family leakage.\n\nBIND EVERY LABEL\nOffered actions + independent acceptable-action sets.\nPin engine, generator, teacher, rights and evidence.\nPrediction is not a teacher; build success is not conformance.\n\nREPLAY BEFORE CLAIMING CAPABILITY\nIndependent geometry / electrical outcome checks.\nPreserve failed attempts; freeze checkpoint + corpus.\n\nInventory snapshot, not live training or admission proof.",
+          "format": "markdown",
+          "citations": [],
+          "chrome": "frameless",
+          "data": {
+            "state": "ready",
+            "provenance": "live",
+            "source": "verk/VERK_DATASETS.md",
+            "detail": "Read-only documented snapshot; not live telemetry"
+          },
+          "refresh_ms": null
+        }
+      }
+    },
+    {
+      "id": "verk-students",
+      "title": "Students / two separate architectures",
+      "inputs": [],
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "verk-students",
+          "kind": "rich_card",
+          "title": "Students / two separate architectures",
+          "body": "TAIGA REPRODUCTION · RETAINED S1\nWidth 128 · feed-forward 384 · four heads.\nThree encoder blocks → two decoder blocks.\nTyped state / goal / candidate tokens.\nSeparate upstream training and frozen comparison.\n\nNATIVE UMIE POLICY · IMPLEMENTED\nSingle pre-LN transformer block · four-head attention.\nResidual attention → GELU feed-forward → linear score.\nDeterministic domain encoders + bounded candidates.\nCPU reference / resident CUDA / resident Metal.\n\nDo not conflate the retained S1 and native policy.",
+          "format": "markdown",
+          "citations": [],
+          "chrome": "frameless",
+          "data": {
+            "state": "ready",
+            "provenance": "live",
+            "source": "umie/docs/verk-training-architecture.mmd",
+            "detail": "Read-only documented snapshot; not live telemetry"
+          },
+          "refresh_ms": null
+        }
+      }
+    },
+    {
+      "id": "verk-flow",
+      "title": "Owner pipeline / current limits",
+      "inputs": [],
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "verk-flow",
+          "kind": "rich_card",
+          "title": "Owner pipeline / current limits",
+          "body": "DOMAIN OWNERS\nTyped goals + revision-bound geometry → offered actions.\nTransmog executes; engineering checks remain external.\n\nPRIVATE DATA → COMPUTE → REPLAY\nTeacher → independent admission → source-isolated corpus.\nVersioned encoder → validated recipe → UMIE training.\nPinned checkpoint → validation selection → native replay.\n\nEXPLORATORY / NOT GENERAL CAD\nBroader-family recovery episodes remain planned.\nPrimitive fixtures do not establish production admission.\nNo general printability or engine certification.\n\nStatic architecture view · no fabricated live metrics.",
+          "format": "markdown",
+          "citations": [],
+          "chrome": "frameless",
+          "data": {
+            "state": "ready",
+            "provenance": "live",
+            "source": "umie/docs/verk-training-architecture.mmd",
+            "detail": "Read-only documented snapshot; not live telemetry"
+          },
+          "refresh_ms": null
+        }
+      }
+    }
+  ],
+  "pages": [
+    {
+      "name": "Teachers + data",
+      "layout": {
+        "kind": "canvas",
+        "placements": [
+          {
+            "bounds": {
+              "height": 1,
+              "width": 0.46000000834465027,
+              "x": 0,
+              "y": 0
+            },
+            "layer": 0,
+            "surface_id": "verk-mill-lathe-replay"
+          },
+          {
+            "surface_id": "verk-teachers",
+            "bounds": {
+              "x": 0.46,
+              "y": 0,
+              "width": 0.54,
+              "height": 0.5
+            },
+            "layer": 0
+          },
+          {
+            "surface_id": "verk-admission",
+            "bounds": {
+              "x": 0.46,
+              "y": 0.5,
+              "width": 0.54,
+              "height": 0.5
+            },
+            "layer": 0
+          }
+        ]
+      }
+    },
+    {
+      "name": "Students + pipeline",
+      "layout": {
+        "kind": "canvas",
+        "placements": [
+          {
+            "bounds": {
+              "height": 1,
+              "width": 0.46000000834465027,
+              "x": 0,
+              "y": 0
+            },
+            "layer": 0,
+            "surface_id": "verk-mill-lathe-replay"
+          },
+          {
+            "surface_id": "verk-students",
+            "bounds": {
+              "x": 0.46,
+              "y": 0,
+              "width": 0.54,
+              "height": 0.5
+            },
+            "layer": 0
+          },
+          {
+            "surface_id": "verk-flow",
+            "bounds": {
+              "x": 0.46,
+              "y": 0.5,
+              "width": 0.54,
+              "height": 0.5
+            },
+            "layer": 0
+          }
+        ]
+      }
+    }
+  ]
+}

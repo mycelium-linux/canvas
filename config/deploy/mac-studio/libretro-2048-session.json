@@ -1,0 +1,31 @@
+{
+ "bus": {
+  "installation_id": "home",
+  "producer_id": "mac-studio-game-2048",
+  "hub_endpoint": "127.0.0.1:18791",
+  "token_file": "/Users/ajmwagar/.config/unibus/tokens/mac-studio-game.token",
+  "zones": [
+   "living-room"
+  ],
+  "capabilities": [
+   "game.input"
+  ],
+  "screen_anchors": [],
+  "schema_version": 1,
+  "read_timeout_ms": 60000
+ },
+ "session_id": "retro-2048",
+ "core_path": "/Users/ajmwagar/Library/Application Support/FPL/libretro/cores/2048_libretro.dylib",
+ "content_path": null,
+ "system_dir": "/Users/ajmwagar/Library/Application Support/FPL/libretro/system",
+ "save_dir": "/Users/ajmwagar/Library/Application Support/FPL/libretro/saves",
+ "ffmpeg_path": "/opt/homebrew/bin/ffmpeg",
+ "stream_endpoint": "udp://127.0.0.1:55105",
+ "advertised_endpoint": "udp://0.0.0.0:55105",
+ "encoder": "apple_video_toolbox",
+ "player_slots": 2,
+ "observation_socket_path": "/Users/ajmwagar/Library/Caches/FPL/libretro-observation.sock",
+ "mirror_endpoints": [
+  "udp://100.120.101.5:55105"
+ ]
+}

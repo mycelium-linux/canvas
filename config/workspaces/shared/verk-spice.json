@@ -1,0 +1,11 @@
+{
+ "schema_version":1,"id":"tv-verk-spice","project_id":"verk-spice","revision":1,"theme":{"source":"project"},
+ "surfaces":[
+  {"id":"scope","title":"Reference experiment · not the LED blinker","inputs":[],"content":{"kind":"widget","spec":{"schema_version":2,"id":"scope","kind":"signal_view","title":"Waiting for a verified owner transient","frame":{"view":"scope","range":{"minimum":0,"maximum":5.5},"samples":[]},"chrome":"frameless","data":{"state":"no_data","provenance":"sample","source":"No completed owner experiment provisioned"}}}},
+  {"id":"evidence","title":"Simulation evidence","inputs":[],"content":{"kind":"widget","spec":{"schema_version":2,"id":"evidence","kind":"rich_card","title":"Owner simulation pending","body":"An exact connectivity replay is not an electrical simulation. Show only a completed, digest-verified owner artifact.","format":"markdown","citations":[],"chrome":"frameless","data":{"state":"no_data","provenance":"sample","source":"Legion experiment receipt"}}}}
+ ],
+ "layout":{"kind":"canvas","placements":[
+  {"surface_id":"scope","bounds":{"x":0.01,"y":0.01,"width":0.65,"height":0.98},"layer":0},
+  {"surface_id":"evidence","bounds":{"x":0.68,"y":0.01,"width":0.31,"height":0.98},"layer":1}
+ ]}
+}

@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "id": "wikiracing-workspace",
+  "project_id": "wikiracing",
+  "revision": 1,
+  "theme": { "source": "project" },
+  "background": { "kind": "theme" },
+  "chrome": {
+    "title": "hidden",
+    "canvas_padding": 0,
+    "surface_gap": 0
+  },
+  "surfaces": [
+    {
+      "id": "wiki-race-hud",
+      "title": "Wiki race controller",
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "wiki-race-hud",
+          "kind": "module",
+          "module": "wiki-race-v1",
+          "inputs": {
+            "start": { "type": "text", "value": "Kevin Costner" },
+            "target": { "type": "text", "value": "Nebuchadnezzar" },
+            "status": { "type": "status", "level": "neutral", "label": "READY" },
+            "clicks": { "type": "number", "value": 0.0 },
+            "raceclock": { "type": "text", "value": "00:00.00" },
+            "wallclock": { "type": "text", "value": "00:00.00" },
+            "trace": { "type": "text", "value": "waiting for controller" }
+          },
+          "theme": null,
+          "refresh_ms": 1000,
+          "chrome": "frameless",
+          "data": {
+            "state": "ready",
+            "source": "surf wiki race",
+            "observed_at": null,
+            "window": null,
+            "detail": null,
+            "provenance": "live"
+          }
+        }
+      },
+      "inputs": [{ "id": "race", "contract": "canvas.widget.snapshot.v1" }]
+    },
+    {
+      "id": "surf-browser",
+      "title": "Surf · Wikipedia",
+      "content": {
+        "kind": "live_video",
+        "source_id": "surf-tv",
+        "width": 1280,
+        "height": 720
+      },
+      "inputs": []
+    }
+  ],
+  "layout": {
+    "kind": "canvas",
+    "placements": [
+      {
+        "surface_id": "wiki-race-hud",
+        "bounds": { "x": 0.0, "y": 0.0, "width": 1.0, "height": 0.28 },
+        "layer": 1
+      },
+      {
+        "surface_id": "surf-browser",
+        "bounds": { "x": 0.16, "y": 0.28, "width": 0.68, "height": 0.68 },
+        "layer": 0
+      }
+    ]
+  },
+  "pages": [],
+  "active_page": 0,
+  "bindings": [{
+    "id": "wiki-race-state",
+    "source": { "owner": "surf", "stream": "wiki-race", "contract": "canvas.widget.snapshot.v1" },
+    "target": { "surface_id": "wiki-race-hud", "input_id": "race" },
+    "adapter": "wiki-race-state-v1",
+    "delivery": { "mode": "latest" }
+  }],
+  "focused_surface_id": "surf-browser"
+}

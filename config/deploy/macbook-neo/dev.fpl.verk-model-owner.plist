@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>dev.fpl.verk-model-owner</string>
+<key>ProgramArguments</key><array><string>/bin/bash</string><string>-c</string><string>set -o pipefail; verk-model-observation watch 5 tree-batch cad-recovery /usr/bin/ssh -n -T -o BatchMode=yes -o ConnectTimeout=3 -o ServerAliveInterval=2 -o ServerAliveCountMax=1 ajmwagar@100.108.9.93 cat /tmp/verk-recovered-tree24-evidence-20261010/batch-progress.json | unibus-stream publish /Users/ajmwagar/.config/unibus/verk/verk-cad-owner.json verk/models/cad-recovery verk.model-observation.v1</string></array>
+<key>ProcessType</key><string>Interactive</string>
+<key>EnvironmentVariables</key><dict><key>PATH</key><string>/Users/ajmwagar/.local/bin:/opt/homebrew/bin:/usr/bin:/bin</string></dict>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer>
+<key>StandardErrorPath</key><string>/Users/ajmwagar/.local/share/canvas-android/verk-owner.log</string>
+<key>StandardOutPath</key><string>/Users/ajmwagar/.local/share/canvas-android/verk-owner.log</string>
+</dict></plist>

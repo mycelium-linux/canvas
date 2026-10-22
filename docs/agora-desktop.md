@@ -19,7 +19,7 @@ Generate the shared Coherence artifacts at the repository root, then run the
 Linux setup script on Agora One:
 
 ```sh
-cargo run -p dock-core --bin dockctl -- export-desktop config/linux
+cargo run -p canvas-core --bin canvas-core-ctl -- export-desktop config/linux
 sh scripts/setup-agora-desktop.sh
 ```
 
@@ -41,7 +41,7 @@ registry is `~/.local/state/dock/desktop.json`. GNOME's global activation
 environment remains unchanged. Start after reboot with:
 
 ```sh
-ssh -o BatchMode=yes agora-one .local/bin/dock-linux desktop-start
+ssh -o BatchMode=yes agora-one .local/bin/canvas-linux desktop-start
 ssh -o BatchMode=yes agora-one 'cd ~/src/dock && sh scripts/setup-agora-multi-monitor-stream.sh'
 ```
 
@@ -73,19 +73,19 @@ provides the continuous desktop and normal keyboard/mouse interaction.
 ## Project and agent control
 
 ```sh
-dock-linux desktop-recall dock
-dock-linux session-ensure dock /home/ajmwagar/src/dock
-dock-linux session-attach dock
-dock-linux desktop-browser dock
-dock-linux desktop-status dock
-dock-linux desktop-capture-file dock
+canvas-linux desktop-recall dock
+canvas-linux session-ensure dock /home/ajmwagar/src/dock
+canvas-linux session-attach dock
+canvas-linux desktop-browser dock
+canvas-linux desktop-status dock
+canvas-linux desktop-capture-file dock
 ```
 
 `desktop-recall` applies the generated Coherence theme, sets a tabbed workspace,
 and verifies both the active workspace and resulting layout. Each browser or
 terminal receives the full workspace instead of being compressed into a narrow
 horizontal slice. Use `Alt+h` and `Alt+l` to move between tabs. Existing windows
-remain alive when switching projects. Dock uses
+remain alive when switching projects. Canvas uses
 the dark colorway with a cyan accent; Studio uses the light colorway with blue.
 Terminal palettes stay with their project. The same commands drive human
 project recall and the iced app. Browser and terminal launch wait for the
@@ -94,13 +94,13 @@ actual assigned window to map, rather than reporting a queued launch as ready.
 Agent input requires an explicit backend grant:
 
 ```sh
-dock-linux desktop-control dock agent
-dock-linux desktop-focus dock WINDOW_ID
-dock-linux desktop-click dock 965 500 left
-dock-linux desktop-key dock CTRL+l
-dock-linux desktop-text dock 'example text'
-dock-linux desktop-capture-file dock
-dock-linux desktop-control dock human
+canvas-linux desktop-control dock agent
+canvas-linux desktop-focus dock WINDOW_ID
+canvas-linux desktop-click dock 965 500 left
+canvas-linux desktop-key dock CTRL+l
+canvas-linux desktop-text dock 'example text'
+canvas-linux desktop-capture-file dock
+canvas-linux desktop-control dock human
 ```
 
 `desktop-status` provides live window IDs and geometry. The coordinates above
@@ -123,7 +123,7 @@ fail. Automatic clients read `ownership.epoch` from `desktop-status` and grant
 with `desktop-control PROJECT agent EXPECTED_EPOCH`. Every human revocation
 increments the epoch, so a delayed automatic grant cannot undo a newer takeover.
 The three-argument grant remains an explicit manual operation.
-This is cooperative control among Dock clients, not an OS sandbox against
+This is cooperative control among Canvas clients, not an OS sandbox against
 arbitrary programs running as the same Unix user. Normal VNC human input remains
 available. Project switching does not suspend its processes; process freeze and
 coding-session abort are separate operations.

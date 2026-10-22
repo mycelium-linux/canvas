@@ -1,0 +1,15 @@
+{
+  "schema_version":2,"id":"ops-sunburst","kind":"hierarchy","title":"Dependency surface","style":"sunburst","unit":"crates","focus":null,
+  "nodes":[
+    {"id":"dock","label":"Dock","value":100,"parent":null},
+    {"id":"canvas","label":"Canvas","value":55,"parent":"dock"},
+    {"id":"unibus","label":"Unibus","value":28,"parent":"dock"},
+    {"id":"coherence","label":"Coherence","value":17,"parent":"dock"},
+    {"id":"widgets","label":"Widgets","value":28,"parent":"canvas"},
+    {"id":"core","label":"Core","value":17,"parent":"canvas"},
+    {"id":"mac","label":"macOS","value":10,"parent":"canvas"},
+    {"id":"router","label":"Router","value":18,"parent":"unibus"},
+    {"id":"transport","label":"Transport","value":10,"parent":"unibus"}
+  ],
+  "data":{"state":"ready","source":"demo/hierarchy","provenance":"demo"},"chrome":"drag_only"
+}

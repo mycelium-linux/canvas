@@ -1,0 +1,18 @@
+{
+  "bus": {
+    "installation_id": "home",
+    "producer_id": "mac-studio-controller",
+    "hub_endpoint": "127.0.0.1:18791",
+    "token_file": "/Users/ajmwagar/.config/unibus/tokens/mac-studio-game.token",
+    "zones": ["living-room"],
+    "capabilities": ["input.gamepad.source"],
+    "screen_anchors": [],
+    "schema_version": 1,
+    "read_timeout_ms": 60000
+  },
+  "socket_path": "/Users/ajmwagar/Library/Caches/FPL/gamepad.sock",
+  "session_id": "retro-2048",
+  "controller_id": "studio-test",
+  "player_slot": 1,
+  "lease_ms": 120
+}

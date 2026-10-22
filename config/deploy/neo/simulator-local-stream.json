@@ -1,0 +1,23 @@
+{
+  "bus": {
+    "installation_id": "home",
+    "producer_id": "neo-simulator-local",
+    "hub_endpoint": "127.0.0.1:18794",
+    "token_file": "/Users/ajmwagar/.config/canvas/home-pi.token",
+    "zones": ["living-room"],
+    "capabilities": ["canvas.media"],
+    "screen_anchors": ["screen-neo"],
+    "schema_version": 1
+  },
+  "destination": "living-room",
+  "ffmpeg": "/opt/homebrew/bin/ffmpeg",
+  "selector": {"bundle_id": "com.apple.iphonesimulator", "title_contains": "iPhone 17 Pro"},
+  "stream_id": "simulator-neo-local",
+  "display_name": "Simulator · Neo",
+  "stream_endpoint": "udp://127.0.0.1:55218?pkt_size=1316",
+  "advertised_endpoint": "udp://127.0.0.1:55218",
+  "capture_scale": 2.0,
+  "max_height": 1530,
+  "fps": 30,
+  "ttl_ms": 30000
+}

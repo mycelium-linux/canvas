@@ -1,0 +1,188 @@
+{
+  "schema_version": 1,
+  "id": "printers-workspace",
+  "project_id": "printers",
+  "revision": 1,
+  "theme": {
+    "source": "project"
+  },
+  "background": {
+    "kind": "theme"
+  },
+  "chrome": {
+    "title": "hidden",
+    "canvas_padding": 8,
+    "surface_gap": 8
+  },
+  "surfaces": [
+    {
+      "id": "printer-1",
+      "title": "Lab printer 1",
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "printer-1",
+          "kind": "module",
+          "module": "printer-status-v1",
+          "inputs": {},
+          "refresh_ms": 1000,
+          "chrome": "frameless",
+          "data": {
+            "state": "no_data",
+            "source": "awaiting enrollment",
+            "provenance": "live"
+          }
+        }
+      },
+      "inputs": [
+        {
+          "id": "status",
+          "contract": "canvas.widget.snapshot.v1"
+        }
+      ]
+    },
+    {
+      "id": "printer-2",
+      "title": "Lab printer 2",
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "printer-2",
+          "kind": "module",
+          "module": "printer-status-v1",
+          "inputs": {},
+          "refresh_ms": 1000,
+          "chrome": "frameless",
+          "data": {
+            "state": "no_data",
+            "source": "awaiting enrollment",
+            "provenance": "live"
+          }
+        }
+      },
+      "inputs": [
+        {
+          "id": "status",
+          "contract": "canvas.widget.snapshot.v1"
+        }
+      ]
+    },
+    {
+      "id": "printer-3",
+      "title": "Lab printer 3",
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "printer-3",
+          "kind": "module",
+          "module": "printer-status-v1",
+          "inputs": {},
+          "refresh_ms": 1000,
+          "chrome": "frameless",
+          "data": {
+            "state": "no_data",
+            "source": "awaiting enrollment",
+            "provenance": "live"
+          }
+        }
+      },
+      "inputs": [
+        {
+          "id": "status",
+          "contract": "canvas.widget.snapshot.v1"
+        }
+      ]
+    }
+  ],
+  "layout": {
+    "kind": "canvas",
+    "placements": [
+      {
+        "surface_id": "printer-1",
+        "bounds": {
+          "x": 0,
+          "y": 0.05,
+          "width": 0.3333333333333333,
+          "height": 0.9
+        },
+        "layer": 0
+      },
+      {
+        "surface_id": "printer-2",
+        "bounds": {
+          "x": 0.3333333333333333,
+          "y": 0.05,
+          "width": 0.3333333333333333,
+          "height": 0.9
+        },
+        "layer": 0
+      },
+      {
+        "surface_id": "printer-3",
+        "bounds": {
+          "x": 0.6666666666666666,
+          "y": 0.05,
+          "width": 0.3333333333333333,
+          "height": 0.9
+        },
+        "layer": 0
+      }
+    ]
+  },
+  "pages": [],
+  "active_page": 0,
+  "bindings": [
+    {
+      "id": "printer-1-status",
+      "source": {
+        "owner": "bambu",
+        "stream": "printer-1-not-enrolled",
+        "contract": "canvas.widget.snapshot.v1"
+      },
+      "target": {
+        "surface_id": "printer-1",
+        "input_id": "status"
+      },
+      "adapter": "printer-status-v1",
+      "delivery": {
+        "mode": "latest"
+      }
+    },
+    {
+      "id": "printer-2-status",
+      "source": {
+        "owner": "bambu",
+        "stream": "printer-2-not-enrolled",
+        "contract": "canvas.widget.snapshot.v1"
+      },
+      "target": {
+        "surface_id": "printer-2",
+        "input_id": "status"
+      },
+      "adapter": "printer-status-v1",
+      "delivery": {
+        "mode": "latest"
+      }
+    },
+    {
+      "id": "printer-3-status",
+      "source": {
+        "owner": "bambu",
+        "stream": "printer-3-not-enrolled",
+        "contract": "canvas.widget.snapshot.v1"
+      },
+      "target": {
+        "surface_id": "printer-3",
+        "input_id": "status"
+      },
+      "adapter": "printer-status-v1",
+      "delivery": {
+        "mode": "latest"
+      }
+    }
+  ],
+  "focused_surface_id": "printer-1"
+}

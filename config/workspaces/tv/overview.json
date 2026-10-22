@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "id": "overview-workspace",
+  "project_id": "overview",
+  "revision": 1,
+  "theme": { "source": "project" },
+  "background": { "kind": "shader", "shader_id": "smoke-rings", "speed": 0.6 },
+  "chrome": { "title": "hidden", "canvas_padding": 24, "surface_gap": 14 },
+  "surfaces": [
+    {
+      "id": "clock",
+      "title": "Clock",
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "schema_version": 2,
+          "id": "clock",
+          "kind": "clock",
+          "format": "%H:%M:%S",
+          "mode": "analog",
+          "theme": null,
+          "refresh_ms": 16,
+          "chrome": "frameless",
+          "data": { "state": "ready", "source": null, "observed_at": null, "window": null, "detail": null, "provenance": "live" }
+        }
+      },
+      "inputs": []
+    },
+    {
+      "id": "hyperspace",
+      "title": "Hyperspace",
+      "content": { "kind": "live_video", "source_id": "hyperspace", "width": 480, "height": 270 },
+      "inputs": []
+    },
+    {
+      "id": "cat",
+      "title": "CAT",
+      "content": { "kind": "live_video", "source_id": "cat", "width": 704, "height": 480 },
+      "inputs": []
+    },
+    {
+      "id": "door",
+      "title": "DOOR",
+      "content": { "kind": "live_video", "source_id": "door", "width": 704, "height": 480 },
+      "inputs": []
+    }
+  ],
+  "layout": {
+    "kind": "canvas",
+    "placements": [
+      { "surface_id": "clock", "bounds": { "x": 0.0, "y": 0.0, "width": 0.36, "height": 0.50 }, "layer": 0 },
+      { "surface_id": "hyperspace", "bounds": { "x": 0.0, "y": 0.50, "width": 0.36, "height": 0.50 }, "layer": 0 },
+      { "surface_id": "cat", "bounds": { "x": 0.36, "y": 0.0, "width": 0.64, "height": 0.50 }, "layer": 0 },
+      { "surface_id": "door", "bounds": { "x": 0.36, "y": 0.50, "width": 0.64, "height": 0.50 }, "layer": 0 }
+    ]
+  },
+  "bindings": [],
+  "focused_surface_id": null
+}

@@ -1,0 +1,3226 @@
+{
+  "active_page": 0,
+  "background": {
+    "kind": "shader",
+    "shader_id": "smoke-rings",
+    "speed": 0.25
+  },
+  "bindings": [],
+  "chrome": {
+    "canvas_padding": 18,
+    "surface_gap": 12,
+    "title": "hidden"
+  },
+  "focused_surface_id": null,
+  "id": "widget-catalog",
+  "layout": {
+    "kind": "canvas",
+    "placements": [
+      {
+        "bounds": {
+          "height": 0.3333333333333333,
+          "width": 0.3333333333333333,
+          "x": 0.0,
+          "y": 0.0
+        },
+        "layer": 0,
+        "surface_id": "demo-cdg"
+      },
+      {
+        "bounds": {
+          "height": 0.3333333333333333,
+          "width": 0.3333333333333333,
+          "x": 0.3333333333333333,
+          "y": 0.0
+        },
+        "layer": 0,
+        "surface_id": "demo-chart"
+      },
+      {
+        "bounds": {
+          "height": 0.3333333333333333,
+          "width": 0.3333333333333333,
+          "x": 0.6666666666666666,
+          "y": 0.0
+        },
+        "layer": 0,
+        "surface_id": "clock"
+      },
+      {
+        "bounds": {
+          "height": 0.3333333333333333,
+          "width": 0.3333333333333333,
+          "x": 0.0,
+          "y": 0.3333333333333333
+        },
+        "layer": 0,
+        "surface_id": "demo-gauge"
+      },
+      {
+        "bounds": {
+          "height": 0.3333333333333333,
+          "width": 0.3333333333333333,
+          "x": 0.3333333333333333,
+          "y": 0.3333333333333333
+        },
+        "layer": 0,
+        "surface_id": "demo-hyperspace"
+      },
+      {
+        "bounds": {
+          "height": 0.3333333333333333,
+          "width": 0.3333333333333333,
+          "x": 0.6666666666666666,
+          "y": 0.3333333333333333
+        },
+        "layer": 0,
+        "surface_id": "demo-launcher"
+      },
+      {
+        "bounds": {
+          "height": 0.3333333333333333,
+          "width": 0.3333333333333333,
+          "x": 0.0,
+          "y": 0.6666666666666666
+        },
+        "layer": 0,
+        "surface_id": "demo-media-card"
+      },
+      {
+        "bounds": {
+          "height": 0.3333333333333333,
+          "width": 0.3333333333333333,
+          "x": 0.3333333333333333,
+          "y": 0.6666666666666666
+        },
+        "layer": 0,
+        "surface_id": "demo-meter"
+      },
+      {
+        "bounds": {
+          "height": 0.3333333333333333,
+          "width": 0.3333333333333333,
+          "x": 0.6666666666666666,
+          "y": 0.6666666666666666
+        },
+        "layer": 0,
+        "surface_id": "demo-module"
+      }
+    ]
+  },
+  "pages": [
+    {
+      "layout": {
+        "kind": "canvas",
+        "placements": [
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.0,
+              "y": 0.0
+            },
+            "layer": 0,
+            "surface_id": "demo-status"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.3333333333333333,
+              "y": 0.0
+            },
+            "layer": 0,
+            "surface_id": "demo-text"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.6666666666666666,
+              "y": 0.0
+            },
+            "layer": 0,
+            "surface_id": "demo-ticker"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.0,
+              "y": 0.3333333333333333
+            },
+            "layer": 0,
+            "surface_id": "mpd-lyrics"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.3333333333333333,
+              "y": 0.3333333333333333
+            },
+            "layer": 0,
+            "surface_id": "mcp-neural-graph"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.6666666666666666,
+              "y": 0.3333333333333333
+            },
+            "layer": 0,
+            "surface_id": "mycelium-network-topology"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.0,
+              "y": 0.6666666666666666
+            },
+            "layer": 0,
+            "surface_id": "ops-approval"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.3333333333333333,
+              "y": 0.6666666666666666
+            },
+            "layer": 0,
+            "surface_id": "ops-box-distribution"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.6666666666666666,
+              "y": 0.6666666666666666
+            },
+            "layer": 0,
+            "surface_id": "ops-bullet-chart"
+          }
+        ]
+      },
+      "name": "Widgets 2"
+    },
+    {
+      "layout": {
+        "kind": "canvas",
+        "placements": [
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.0,
+              "y": 0.0
+            },
+            "layer": 0,
+            "surface_id": "ops-command-palette"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.3333333333333333,
+              "y": 0.0
+            },
+            "layer": 0,
+            "surface_id": "ops-correlation"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.6666666666666666,
+              "y": 0.0
+            },
+            "layer": 0,
+            "surface_id": "ops-dag"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.0,
+              "y": 0.3333333333333333
+            },
+            "layer": 0,
+            "surface_id": "ops-event-river"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.3333333333333333,
+              "y": 0.3333333333333333
+            },
+            "layer": 0,
+            "surface_id": "ops-events"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.6666666666666666,
+              "y": 0.3333333333333333
+            },
+            "layer": 0,
+            "surface_id": "ops-flame"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.0,
+              "y": 0.6666666666666666
+            },
+            "layer": 0,
+            "surface_id": "ops-gantt"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.3333333333333333,
+              "y": 0.6666666666666666
+            },
+            "layer": 0,
+            "surface_id": "ops-heatmap"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.6666666666666666,
+              "y": 0.6666666666666666
+            },
+            "layer": 0,
+            "surface_id": "ops-latency"
+          }
+        ]
+      },
+      "name": "Widgets 3"
+    },
+    {
+      "layout": {
+        "kind": "canvas",
+        "placements": [
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.0,
+              "y": 0.0
+            },
+            "layer": 0,
+            "surface_id": "ops-media-transport"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.3333333333333333,
+              "y": 0.0
+            },
+            "layer": 0,
+            "surface_id": "ops-model-telemetry"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.6666666666666666,
+              "y": 0.0
+            },
+            "layer": 0,
+            "surface_id": "ops-nodes"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.0,
+              "y": 0.3333333333333333
+            },
+            "layer": 0,
+            "surface_id": "ops-pie-chart"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.3333333333333333,
+              "y": 0.3333333333333333
+            },
+            "layer": 0,
+            "surface_id": "ops-radial-gauges"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.6666666666666666,
+              "y": 0.3333333333333333
+            },
+            "layer": 0,
+            "surface_id": "ops-ranked-bar"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.0,
+              "y": 0.6666666666666666
+            },
+            "layer": 0,
+            "surface_id": "ops-rich-code"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.3333333333333333,
+              "y": 0.6666666666666666
+            },
+            "layer": 0,
+            "surface_id": "ops-sankey"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.6666666666666666,
+              "y": 0.6666666666666666
+            },
+            "layer": 0,
+            "surface_id": "ops-service-topology"
+          }
+        ]
+      },
+      "name": "Widgets 4"
+    },
+    {
+      "layout": {
+        "kind": "canvas",
+        "placements": [
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.0,
+              "y": 0.0
+            },
+            "layer": 0,
+            "surface_id": "ops-slo-burn"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.3333333333333333,
+              "y": 0.0
+            },
+            "layer": 0,
+            "surface_id": "ops-spatial-tracks"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.6666666666666666,
+              "y": 0.0
+            },
+            "layer": 0,
+            "surface_id": "ops-spectral-waterfall"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.0,
+              "y": 0.3333333333333333
+            },
+            "layer": 0,
+            "surface_id": "ops-stacked-bar"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.3333333333333333,
+              "y": 0.3333333333333333
+            },
+            "layer": 0,
+            "surface_id": "ops-cpu"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.6666666666666666,
+              "y": 0.3333333333333333
+            },
+            "layer": 0,
+            "surface_id": "ops-state-timeline"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.0,
+              "y": 0.6666666666666666
+            },
+            "layer": 0,
+            "surface_id": "ops-sunburst"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.3333333333333333,
+              "y": 0.6666666666666666
+            },
+            "layer": 0,
+            "surface_id": "ops-targets"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.6666666666666666,
+              "y": 0.6666666666666666
+            },
+            "layer": 0,
+            "surface_id": "ops-throughput"
+          }
+        ]
+      },
+      "name": "Widgets 5"
+    },
+    {
+      "layout": {
+        "kind": "canvas",
+        "placements": [
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.0,
+              "y": 0.0
+            },
+            "layer": 0,
+            "surface_id": "ops-treemap"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.3333333333333333,
+              "y": 0.0
+            },
+            "layer": 0,
+            "surface_id": "ops-violin-distribution"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.6666666666666666,
+              "y": 0.0
+            },
+            "layer": 0,
+            "surface_id": "ops-waterfall"
+          },
+          {
+            "bounds": {
+              "height": 0.3333333333333333,
+              "width": 0.3333333333333333,
+              "x": 0.0,
+              "y": 0.3333333333333333
+            },
+            "layer": 0,
+            "surface_id": "quant-candles"
+          }
+        ]
+      },
+      "name": "Widgets 6"
+    }
+  ],
+  "project_id": "dock",
+  "revision": 2,
+  "schema_version": 1,
+  "surfaces": [
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "current_frame": 420,
+          "data": {
+            "provenance": "demo",
+            "state": "ready"
+          },
+          "duration_ms": 60000,
+          "id": "demo-cdg",
+          "kind": "cdg_viewer",
+          "playing": false,
+          "position_ms": 14000,
+          "scale": 1.0,
+          "schema_version": 2,
+          "source": "catalog.cdg",
+          "title": "Karaoke",
+          "total_frames": 1800
+        }
+      },
+      "id": "demo-cdg",
+      "inputs": [],
+      "title": "cdg viewer"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "chart_type": "line",
+          "data": {
+            "detail": "Catalog specimen: attach a content-addressed dataset",
+            "provenance": "demo",
+            "state": "no_data"
+          },
+          "id": "demo-chart",
+          "kind": "chart",
+          "renderer": "plotters",
+          "schema_version": 2,
+          "source": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "id": "demo-chart",
+      "inputs": [],
+      "title": "chart"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "format": "%H:%M:%S",
+          "id": "clock",
+          "kind": "clock",
+          "mode": "analog",
+          "schema_version": 2
+        }
+      },
+      "id": "clock",
+      "inputs": [],
+      "title": "clock"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "id": "demo-gauge",
+          "kind": "gauge",
+          "label": "Canvas readiness",
+          "schema_version": 2,
+          "value": 72.0
+        }
+      },
+      "id": "demo-gauge",
+      "inputs": [],
+      "title": "gauge"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "data": {
+            "provenance": "demo",
+            "state": "ready"
+          },
+          "id": "demo-hyperspace",
+          "kind": "hyperspace_shader",
+          "scale": 1.0,
+          "schema_version": 2,
+          "shader_id": "hyperspace_tunnel",
+          "speed": 0.6
+        }
+      },
+      "id": "demo-hyperspace",
+      "inputs": [],
+      "title": "hyperspace shader"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "data": {
+            "provenance": "demo",
+            "state": "ready"
+          },
+          "id": "demo-launcher",
+          "items": [
+            {
+              "label": "Home",
+              "project_id": "home",
+              "unread": false
+            },
+            {
+              "label": "Synesthesia",
+              "project_id": "synesthesia",
+              "unread": true
+            },
+            {
+              "label": "Mycelium",
+              "project_id": "mycelium",
+              "unread": false
+            }
+          ],
+          "kind": "launcher",
+          "orientation": "horizontal",
+          "pinned": [
+            "home"
+          ],
+          "schema_version": 2
+        }
+      },
+      "id": "demo-launcher",
+      "inputs": [],
+      "title": "launcher"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "album": "Kid A",
+          "artist": "Radiohead",
+          "data": {
+            "provenance": "demo",
+            "state": "ready"
+          },
+          "duration_seconds": 251,
+          "elapsed_seconds": 73,
+          "id": "demo-media-card",
+          "kind": "media_card",
+          "observed_at_ms": 0,
+          "playing": false,
+          "schema_version": 2,
+          "source": "MPD · Scarlett 18i20 1–2",
+          "title": "Everything in Its Right Place"
+        }
+      },
+      "id": "demo-media-card",
+      "inputs": [],
+      "title": "media card"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "id": "demo-meter",
+          "kind": "meter",
+          "schema_version": 2,
+          "style": "vu",
+          "value": 0.68
+        }
+      },
+      "id": "demo-meter",
+      "inputs": [],
+      "title": "meter"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "data": {
+            "provenance": "demo",
+            "state": "ready"
+          },
+          "id": "demo-module",
+          "inputs": {},
+          "kind": "module",
+          "module": "activity-graph",
+          "schema_version": 2
+        }
+      },
+      "id": "demo-module",
+      "inputs": [],
+      "title": "module"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "id": "demo-status",
+          "kind": "status",
+          "schema_version": 2,
+          "state": "present"
+        }
+      },
+      "id": "demo-status",
+      "inputs": [],
+      "title": "status"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "data": {
+            "provenance": "demo",
+            "state": "ready"
+          },
+          "id": "demo-text",
+          "kind": "text",
+          "schema_version": 2,
+          "text": "Canvas renders read-only surfaces. This widget carries prose, not data."
+        }
+      },
+      "id": "demo-text",
+      "inputs": [],
+      "title": "text"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "data": {
+            "provenance": "demo",
+            "source": "demonstration values",
+            "state": "ready"
+          },
+          "entries": [
+            {
+              "label": "AAPL",
+              "state": "good",
+              "value": 187.5
+            },
+            {
+              "label": "NVDA",
+              "state": "good",
+              "value": 134.25
+            },
+            {
+              "label": "TSLA",
+              "state": "warning",
+              "value": 248.1
+            },
+            {
+              "label": "BTC",
+              "state": "good",
+              "value": 67234.5
+            }
+          ],
+          "id": "demo-ticker",
+          "kind": "ticker",
+          "schema_version": 2
+        }
+      },
+      "id": "demo-ticker",
+      "inputs": [],
+      "title": "ticker"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "artist": "Sample Artist",
+          "artwork_source": "mpd-album-art",
+          "chrome": "frameless",
+          "data": {
+            "provenance": "live",
+            "source": "mpd-client"
+          },
+          "duration_ms": 180000,
+          "highlight_intensity": 0.8,
+          "id": "mpd-lyrics",
+          "kind": "lyrics_display",
+          "lines": [
+            {
+              "end_ms": 5000,
+              "start_ms": 0,
+              "text": "This is a sample lyric line",
+              "words": []
+            },
+            {
+              "end_ms": 10000,
+              "start_ms": 5000,
+              "text": "This is the next line",
+              "words": []
+            },
+            {
+              "end_ms": 15000,
+              "start_ms": 10000,
+              "text": "Keep singing along",
+              "words": []
+            }
+          ],
+          "playing": true,
+          "position_ms": 7500,
+          "refresh_ms": 100,
+          "schema_version": 2,
+          "scroll_offset": 1.5,
+          "style": "hyperspace",
+          "title": "Now Playing"
+        }
+      },
+      "id": "mpd-lyrics",
+      "inputs": [],
+      "title": "lyrics display"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "data": {
+            "provenance": "sample",
+            "source": "mcp.observe.effect.v1",
+            "state": "ready"
+          },
+          "edges": [
+            {
+              "from": "client:codex",
+              "heat": 0.32,
+              "to": "gateway:fpl-mcp"
+            },
+            {
+              "from": "gateway:fpl-mcp",
+              "heat": 0.65,
+              "to": "desktop:studio"
+            },
+            {
+              "from": "desktop:studio",
+              "heat": 0.92,
+              "to": "connector:blender"
+            },
+            {
+              "from": "gateway:fpl-mcp",
+              "heat": 0.0,
+              "to": "connector:github"
+            }
+          ],
+          "id": "mcp-neural-graph",
+          "kind": "neural_graph",
+          "nodes": [
+            {
+              "group": "client",
+              "heat": 0.15,
+              "id": "client:codex",
+              "label": "Codex",
+              "state": "good"
+            },
+            {
+              "group": "gateway",
+              "heat": 0.72,
+              "id": "gateway:fpl-mcp",
+              "label": "FPL MCP",
+              "state": "good"
+            },
+            {
+              "group": "device",
+              "heat": 1.0,
+              "id": "desktop:studio",
+              "label": "Studio",
+              "state": "good"
+            },
+            {
+              "group": "connector",
+              "heat": 0.84,
+              "id": "connector:blender",
+              "label": "Blender",
+              "state": "good"
+            },
+            {
+              "group": "connector",
+              "heat": 0.0,
+              "id": "connector:github",
+              "label": "GitHub",
+              "state": "neutral"
+            }
+          ],
+          "schema_version": 2,
+          "title": "MCP neural activity"
+        }
+      },
+      "id": "mcp-neural-graph",
+      "inputs": [],
+      "title": "neural graph"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "conflicts": 0,
+          "data": {
+            "provenance": "demo",
+            "source": "demo:mycelium",
+            "state": "ready",
+            "window": "live"
+          },
+          "id": "mycelium-network-topology",
+          "kind": "network_topology",
+          "links": [
+            {
+              "from": "router",
+              "kind": "trunk",
+              "label": "eth1.35",
+              "state": "good",
+              "to": "studio"
+            },
+            {
+              "from": "router",
+              "kind": "trunk",
+              "label": "eth1.35",
+              "state": "good",
+              "to": "pi"
+            },
+            {
+              "from": "router",
+              "kind": "access",
+              "label": "eth1.50",
+              "state": "warning",
+              "to": "camera"
+            }
+          ],
+          "nodes": [
+            {
+              "detail": "gateway",
+              "id": "router",
+              "kind": "gateway",
+              "label": "EdgeRouter",
+              "segments": [
+                "lan:core",
+                "vlan:35",
+                "vlan:50"
+              ],
+              "state": "good"
+            },
+            {
+              "detail": "10.35.0.12",
+              "id": "studio",
+              "kind": "host",
+              "label": "Mac Studio",
+              "segments": [
+                "vlan:35"
+              ],
+              "state": "good"
+            },
+            {
+              "detail": "10.35.0.13",
+              "id": "pi",
+              "kind": "host",
+              "label": "Home Pi",
+              "segments": [
+                "vlan:35"
+              ],
+              "state": "good"
+            },
+            {
+              "detail": "10.50.0.22",
+              "id": "camera",
+              "kind": "host",
+              "label": "Frigate camera",
+              "segments": [
+                "vlan:50"
+              ],
+              "state": "warning"
+            }
+          ],
+          "schema_version": 2,
+          "segments": [
+            {
+              "gateway": "192.168.20.1",
+              "id": "lan:core",
+              "kind": "lan",
+              "label": "Core LAN",
+              "subnet": "192.168.20.0/24"
+            },
+            {
+              "id": "vlan:35",
+              "kind": "vlan",
+              "label": "Audio",
+              "subnet": "10.35.0.0/24",
+              "vlan": 35
+            },
+            {
+              "id": "vlan:50",
+              "kind": "vlan",
+              "label": "IoT",
+              "subnet": "10.50.0.0/24",
+              "vlan": 50
+            }
+          ],
+          "title": "Home network"
+        }
+      },
+      "id": "mycelium-network-topology",
+      "inputs": [],
+      "title": "network topology"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "approve_action": "approval.approve",
+          "chrome": "drag_only",
+          "data": {
+            "provenance": "demo",
+            "source": "demo/approval",
+            "state": "ready"
+          },
+          "deny_action": "approval.deny",
+          "expires_at": "in 10 minutes",
+          "id": "ops-approval",
+          "kind": "approval_card",
+          "provenance": "JARVIS / deploy-agent",
+          "request_id": "deploy-home-pi-1842",
+          "schema_version": 2,
+          "scope": [
+            "host:home-pi",
+            "service:canvas",
+            "restart"
+          ],
+          "status": "pending",
+          "summary": "Replace the running Canvas binary and restart the display service on the TV edge.",
+          "title": "Deploy Canvas to home-pi?"
+        }
+      },
+      "id": "ops-approval",
+      "inputs": [],
+      "title": "approval card"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "chrome": "drag_only",
+          "data": {
+            "provenance": "demo",
+            "source": "demo/distribution",
+            "state": "ready"
+          },
+          "groups": [
+            {
+              "label": "edge",
+              "samples": [
+                12,
+                14,
+                15,
+                15,
+                16,
+                17,
+                18,
+                18,
+                19,
+                21,
+                24,
+                31
+              ]
+            },
+            {
+              "label": "api",
+              "samples": [
+                19,
+                21,
+                22,
+                23,
+                24,
+                25,
+                27,
+                29,
+                34,
+                38,
+                45,
+                61
+              ]
+            },
+            {
+              "label": "database",
+              "samples": [
+                4,
+                5,
+                5,
+                6,
+                6,
+                7,
+                7,
+                8,
+                9,
+                11,
+                14,
+                22
+              ]
+            }
+          ],
+          "id": "ops-box-distribution",
+          "kind": "distribution",
+          "schema_version": 2,
+          "style": "box",
+          "title": "Request latency",
+          "unit": "ms"
+        }
+      },
+      "id": "ops-box-distribution",
+      "inputs": [],
+      "title": "distribution"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "chrome": "drag_only",
+          "data": {
+            "provenance": "demo",
+            "source": "demo/targets",
+            "state": "ready"
+          },
+          "id": "ops-bullet-chart",
+          "kind": "metric_board",
+          "metrics": [
+            {
+              "forecast": 96,
+              "label": "Reliability",
+              "max": 100,
+              "state": "warning",
+              "target": 99,
+              "value": 92
+            },
+            {
+              "forecast": 91,
+              "label": "Coverage",
+              "max": 100,
+              "state": "good",
+              "target": 90,
+              "value": 84
+            },
+            {
+              "forecast": 82,
+              "label": "Delivery",
+              "max": 100,
+              "state": "warning",
+              "target": 85,
+              "value": 76
+            },
+            {
+              "forecast": 70,
+              "label": "Budget",
+              "max": 100,
+              "state": "good",
+              "target": 75,
+              "value": 61
+            }
+          ],
+          "schema_version": 2,
+          "style": "bullet",
+          "title": "Quarter targets",
+          "unit": "%"
+        }
+      },
+      "id": "ops-bullet-chart",
+      "inputs": [],
+      "title": "metric board"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "chrome": "drag_only",
+          "data": {
+            "provenance": "demo",
+            "source": "demo/commands",
+            "state": "ready"
+          },
+          "id": "ops-command-palette",
+          "kind": "command_palette",
+          "query": "open project",
+          "results": [
+            {
+              "detail": "Electronics workspace",
+              "id": "project-ohm",
+              "kind": "project",
+              "label": "Ohm",
+              "shortcut": "⌘1"
+            },
+            {
+              "detail": "Fabrication lifecycle",
+              "id": "project-fab",
+              "kind": "project",
+              "label": "Fab",
+              "shortcut": "⌘2"
+            },
+            {
+              "detail": "Home camera grid",
+              "id": "view-security",
+              "kind": "view",
+              "label": "Security cameras"
+            },
+            {
+              "detail": "Present current project state",
+              "id": "tool-briefing",
+              "kind": "tool",
+              "label": "Start briefing"
+            }
+          ],
+          "schema_version": 2,
+          "selected": 0
+        }
+      },
+      "id": "ops-command-palette",
+      "inputs": [],
+      "title": "command palette"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "chrome": "drag_only",
+          "columns": [
+            "latency",
+            "errors",
+            "cpu",
+            "queue"
+          ],
+          "data": {
+            "provenance": "demo",
+            "source": "demo/correlation",
+            "state": "ready",
+            "window": "15m"
+          },
+          "id": "ops-correlation",
+          "kind": "heatmap",
+          "rows": [
+            "latency",
+            "errors",
+            "cpu",
+            "queue"
+          ],
+          "schema_version": 2,
+          "style": "matrix",
+          "title": "Service correlation",
+          "unit": "rho",
+          "values": [
+            [
+              1.0,
+              0.82,
+              0.64,
+              0.71
+            ],
+            [
+              0.82,
+              1.0,
+              0.41,
+              0.77
+            ],
+            [
+              0.64,
+              0.41,
+              1.0,
+              0.36
+            ],
+            [
+              0.71,
+              0.77,
+              0.36,
+              1.0
+            ]
+          ]
+        }
+      },
+      "id": "ops-correlation",
+      "inputs": [],
+      "title": "heatmap"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "data": {
+            "provenance": "demo",
+            "state": "ready"
+          },
+          "edges": [
+            {
+              "from": "root",
+              "heat": 0.72,
+              "to": "audio"
+            },
+            {
+              "from": "root",
+              "heat": 0.61,
+              "to": "display"
+            }
+          ],
+          "id": "ops-dag",
+          "kind": "dag_graph",
+          "nodes": [
+            {
+              "group": "control",
+              "heat": 1,
+              "id": "root",
+              "label": "Operator",
+              "state": "good"
+            },
+            {
+              "group": "worker",
+              "heat": 0.72,
+              "id": "audio",
+              "label": "Audio",
+              "state": "good"
+            },
+            {
+              "group": "worker",
+              "heat": 0.61,
+              "id": "display",
+              "label": "Display",
+              "state": "warning"
+            }
+          ],
+          "schema_version": 2,
+          "title": "Agent lineage"
+        }
+      },
+      "id": "ops-dag",
+      "inputs": [],
+      "title": "dag graph"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "data": {
+            "provenance": "demo",
+            "source": "demo:events",
+            "state": "ready",
+            "window": "60m"
+          },
+          "id": "ops-event-river",
+          "kind": "span_timeline",
+          "schema_version": 2,
+          "spans": [
+            {
+              "end": 8,
+              "id": "d1",
+              "label": "deploy",
+              "lane": "deploys",
+              "start": 8,
+              "state": "good"
+            },
+            {
+              "end": 42,
+              "id": "d2",
+              "label": "deploy",
+              "lane": "deploys",
+              "start": 42,
+              "state": "good"
+            },
+            {
+              "end": 18,
+              "id": "a1",
+              "label": "latency",
+              "lane": "alerts",
+              "start": 18,
+              "state": "warning"
+            },
+            {
+              "end": 36,
+              "id": "a2",
+              "label": "failure",
+              "lane": "alerts",
+              "start": 36,
+              "state": "critical"
+            },
+            {
+              "end": 23,
+              "id": "r1",
+              "label": "review",
+              "lane": "agents",
+              "start": 14,
+              "state": "neutral"
+            },
+            {
+              "end": 48,
+              "id": "r2",
+              "label": "build",
+              "lane": "agents",
+              "start": 28,
+              "state": "good"
+            }
+          ],
+          "style": "event_river",
+          "title": "Operations river",
+          "unit": "minutes"
+        }
+      },
+      "id": "ops-event-river",
+      "inputs": [],
+      "title": "span timeline"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "entries": [
+            {
+              "level": "good",
+              "message": "Canvas deployment completed",
+              "timestamp": "06:34:10"
+            },
+            {
+              "level": "warning",
+              "message": "MCP Bridge latency above 250 ms",
+              "timestamp": "06:35:22"
+            },
+            {
+              "level": "neutral",
+              "message": "Elmer's stream resumed at seq 1842",
+              "timestamp": "06:36:04"
+            }
+          ],
+          "follow": true,
+          "id": "ops-events",
+          "kind": "event_log",
+          "paused": false,
+          "query": null,
+          "schema_version": 2,
+          "title": "Recent events"
+        }
+      },
+      "id": "ops-events",
+      "inputs": [],
+      "title": "event log"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "data": {
+            "provenance": "demo",
+            "source": "demo:profile",
+            "state": "ready",
+            "window": "10s"
+          },
+          "id": "ops-flame",
+          "kind": "span_timeline",
+          "schema_version": 2,
+          "spans": [
+            {
+              "end": 100,
+              "id": "root",
+              "label": "canvas frame",
+              "start": 0
+            },
+            {
+              "end": 24,
+              "id": "layout",
+              "label": "layout",
+              "parent": "root",
+              "start": 0
+            },
+            {
+              "end": 91,
+              "id": "render",
+              "label": "render",
+              "parent": "root",
+              "start": 24
+            },
+            {
+              "end": 72,
+              "id": "charts",
+              "label": "charts",
+              "parent": "render",
+              "start": 31
+            },
+            {
+              "end": 100,
+              "id": "present",
+              "label": "present",
+              "parent": "root",
+              "start": 91
+            }
+          ],
+          "style": "flame",
+          "title": "CPU profile",
+          "unit": "samples"
+        }
+      },
+      "id": "ops-flame",
+      "inputs": [],
+      "title": "span timeline"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "data": {
+            "provenance": "demo",
+            "source": "demo:agents",
+            "state": "ready",
+            "window": "60m"
+          },
+          "id": "ops-gantt",
+          "kind": "span_timeline",
+          "schema_version": 2,
+          "spans": [
+            {
+              "end": 18,
+              "id": "research",
+              "label": "Research",
+              "lane": "Researcher",
+              "start": 0,
+              "state": "good"
+            },
+            {
+              "end": 42,
+              "id": "build",
+              "label": "Build",
+              "lane": "Builder",
+              "parent": "research",
+              "start": 12,
+              "state": "good"
+            },
+            {
+              "end": 51,
+              "id": "review",
+              "label": "Review",
+              "lane": "Reviewer",
+              "parent": "build",
+              "start": 38,
+              "state": "warning"
+            },
+            {
+              "end": 60,
+              "id": "deploy",
+              "label": "Deploy",
+              "lane": "Operator",
+              "parent": "review",
+              "start": 49,
+              "state": "neutral"
+            }
+          ],
+          "style": "gantt",
+          "title": "Agent execution",
+          "unit": "minutes"
+        }
+      },
+      "id": "ops-gantt",
+      "inputs": [],
+      "title": "span timeline"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "columns": [
+            "09",
+            "10",
+            "11",
+            "12",
+            "13",
+            "14"
+          ],
+          "data": {
+            "provenance": "demo",
+            "state": "ready",
+            "window": "6h"
+          },
+          "id": "ops-heatmap",
+          "kind": "heatmap",
+          "rows": [
+            "mlx",
+            "vllm",
+            "llama.cpp",
+            "macos-say-tts"
+          ],
+          "schema_version": 2,
+          "title": "Runtime latency by hour",
+          "unit": "ms",
+          "values": [
+            [
+              120,
+              138,
+              141,
+              402,
+              388,
+              150
+            ],
+            [
+              88,
+              91,
+              87,
+              95,
+              210,
+              102
+            ],
+            [
+              310,
+              296,
+              305,
+              288,
+              301,
+              297
+            ],
+            [
+              42,
+              40,
+              45,
+              44,
+              41,
+              43
+            ]
+          ]
+        }
+      },
+      "id": "ops-heatmap",
+      "inputs": [],
+      "title": "heatmap"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "buckets": [
+            {
+              "count": 18,
+              "upper_bound": 5
+            },
+            {
+              "count": 42,
+              "upper_bound": 10
+            },
+            {
+              "count": 91,
+              "upper_bound": 25
+            },
+            {
+              "count": 74,
+              "upper_bound": 50
+            },
+            {
+              "count": 38,
+              "upper_bound": 100
+            },
+            {
+              "count": 14,
+              "upper_bound": 250
+            },
+            {
+              "count": 4,
+              "upper_bound": 500
+            }
+          ],
+          "id": "ops-latency",
+          "kind": "histogram",
+          "schema_version": 2,
+          "title": "Request latency",
+          "unit": "ms"
+        }
+      },
+      "id": "ops-latency",
+      "inputs": [],
+      "title": "histogram"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "bitrate_kbps": 3200,
+          "buffer_ms": 72,
+          "chrome": "drag_only",
+          "codec": "H.264 High",
+          "data": {
+            "provenance": "demo",
+            "source": "demo/media",
+            "state": "ready",
+            "window": "live"
+          },
+          "delay_ms": 118,
+          "fps": 24,
+          "height": 720,
+          "id": "ops-media-transport",
+          "kind": "media_transport",
+          "route": [
+            "mac-studio",
+            "unibus/video",
+            "home-pi",
+            "Canvas"
+          ],
+          "schema_version": 2,
+          "source": "mac-studio",
+          "state": "good",
+          "title": "Hyperspace stream",
+          "width": 1280
+        }
+      },
+      "id": "ops-media-transport",
+      "inputs": [],
+      "title": "media transport"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "annotations": [
+            {
+              "id": "bow",
+              "label": "Bow",
+              "position": [
+                -0.65,
+                0.05,
+                0.42
+              ],
+              "state": "good",
+              "value": "2.1 mm"
+            },
+            {
+              "id": "cabin",
+              "label": "Cabin temp",
+              "position": [
+                0.12,
+                0.58,
+                0.08
+              ],
+              "state": "warning",
+              "value": "42 °C"
+            },
+            {
+              "id": "stern",
+              "label": "Stern",
+              "position": [
+                0.66,
+                -0.12,
+                -0.35
+              ],
+              "state": "good",
+              "value": "nominal"
+            }
+          ],
+          "chrome": "drag_only",
+          "data": {
+            "provenance": "demo",
+            "source": "demo/model",
+            "state": "ready"
+          },
+          "exploded": 0.18,
+          "id": "ops-model-telemetry",
+          "kind": "model_telemetry",
+          "model": "3DBenchy.glb",
+          "schema_version": 2,
+          "title": "Benchy telemetry",
+          "view": "isometric"
+        }
+      },
+      "id": "ops-model-telemetry",
+      "inputs": [],
+      "title": "model telemetry"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "id": "ops-nodes",
+          "kind": "status_list",
+          "nodes": [
+            {
+              "detail": "local",
+              "label": "Avery's Mac Studio",
+              "state": "good"
+            },
+            {
+              "detail": "gpu",
+              "label": "Agora One",
+              "state": "good"
+            },
+            {
+              "detail": "252 ms",
+              "label": "MCP Bridge",
+              "state": "warning"
+            },
+            {
+              "detail": "streaming",
+              "label": "Elmer's",
+              "state": "neutral"
+            }
+          ],
+          "schema_version": 2,
+          "title": "Compute mesh"
+        }
+      },
+      "id": "ops-nodes",
+      "inputs": [],
+      "title": "status list"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "data": {
+            "provenance": "demo",
+            "state": "ready"
+          },
+          "id": "ops-pie-chart",
+          "kind": "pie_chart",
+          "period": "Last hour",
+          "schema_version": 2,
+          "title": "Traffic share",
+          "unit": "req/s",
+          "values": [
+            {
+              "label": "Canvas",
+              "value": 48
+            },
+            {
+              "label": "Unibus",
+              "value": 31
+            },
+            {
+              "label": "Mycelium",
+              "value": 14
+            },
+            {
+              "label": "Isochrone",
+              "value": 7
+            }
+          ]
+        }
+      },
+      "id": "ops-pie-chart",
+      "inputs": [],
+      "title": "pie chart"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "chrome": "drag_only",
+          "data": {
+            "provenance": "demo",
+            "source": "demo/metrics",
+            "state": "ready"
+          },
+          "id": "ops-radial-gauges",
+          "kind": "metric_board",
+          "metrics": [
+            {
+              "label": "CPU",
+              "max": 100,
+              "state": "good",
+              "target": 80,
+              "value": 67
+            },
+            {
+              "label": "Memory",
+              "max": 100,
+              "state": "warning",
+              "target": 85,
+              "value": 82
+            },
+            {
+              "label": "GPU",
+              "max": 100,
+              "state": "good",
+              "target": 90,
+              "value": 54
+            },
+            {
+              "label": "Thermal",
+              "max": 100,
+              "state": "warning",
+              "target": 78,
+              "value": 71
+            }
+          ],
+          "schema_version": 2,
+          "style": "radial",
+          "title": "Node pressure",
+          "unit": "%"
+        }
+      },
+      "id": "ops-radial-gauges",
+      "inputs": [],
+      "title": "metric board"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "bars": [
+            {
+              "label": "qwen3-8b-mlx-4bit",
+              "state": "critical",
+              "value": 154173
+            },
+            {
+              "label": "voxcpm2-jarvis-cuda",
+              "state": "warning",
+              "value": 6685
+            },
+            {
+              "label": "qwen3-30b-a3b-q3",
+              "state": "warning",
+              "value": 5502
+            },
+            {
+              "label": "macos-say-tts",
+              "value": 43
+            }
+          ],
+          "data": {
+            "provenance": "demo",
+            "state": "ready",
+            "window": "now"
+          },
+          "id": "ops-ranked-bar",
+          "kind": "ranked_bar",
+          "schema_version": 2,
+          "title": "Slowest runtimes",
+          "unit": "ms"
+        }
+      },
+      "id": "ops-ranked-bar",
+      "inputs": [],
+      "title": "ranked bar"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "body": "- let fps = 60;\n+ let fps = profile.target_fps.min(24);\n\n// Theme and cadence remain host-owned.",
+          "chrome": "drag_only",
+          "citations": [
+            {
+              "label": "canvas-edge",
+              "url": "fpl://dock/canvas-edge"
+            }
+          ],
+          "data": {
+            "provenance": "demo",
+            "source": "demo/briefing",
+            "state": "ready"
+          },
+          "format": "diff",
+          "id": "ops-rich-code",
+          "kind": "rich_card",
+          "language": "rust",
+          "schema_version": 2,
+          "title": "Deployment change"
+        }
+      },
+      "id": "ops-rich-code",
+      "inputs": [],
+      "title": "rich card"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "data": {
+            "provenance": "demo",
+            "state": "ready"
+          },
+          "id": "ops-sankey",
+          "kind": "sankey",
+          "links": [
+            {
+              "from": "source",
+              "to": "bus",
+              "value": 84
+            },
+            {
+              "from": "bus",
+              "to": "pi",
+              "value": 81
+            },
+            {
+              "from": "pi",
+              "to": "display",
+              "value": 79
+            }
+          ],
+          "nodes": [
+            {
+              "id": "source",
+              "label": "Mac Studio"
+            },
+            {
+              "id": "bus",
+              "label": "Unibus"
+            },
+            {
+              "id": "pi",
+              "label": "home-pi"
+            },
+            {
+              "id": "display",
+              "label": "Canvas"
+            }
+          ],
+          "schema_version": 2,
+          "title": "Signal route",
+          "unit": "Mb/s"
+        }
+      },
+      "id": "ops-sankey",
+      "inputs": [],
+      "title": "sankey"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "data": {
+            "provenance": "demo",
+            "source": "demo:topology",
+            "state": "ready",
+            "window": "live"
+          },
+          "edges": [
+            {
+              "from": "edge",
+              "heat": 0.76,
+              "to": "auth"
+            },
+            {
+              "from": "auth",
+              "heat": 0.69,
+              "to": "api"
+            },
+            {
+              "from": "api",
+              "heat": 1.0,
+              "to": "models"
+            },
+            {
+              "from": "api",
+              "heat": 0.48,
+              "to": "cache"
+            }
+          ],
+          "id": "ops-service-topology",
+          "kind": "neural_graph",
+          "nodes": [
+            {
+              "group": "ingress",
+              "heat": 0.72,
+              "id": "edge",
+              "label": "Edge",
+              "state": "good"
+            },
+            {
+              "group": "control",
+              "heat": 0.34,
+              "id": "auth",
+              "label": "Auth",
+              "state": "good"
+            },
+            {
+              "group": "control",
+              "heat": 1.0,
+              "id": "api",
+              "label": "API",
+              "state": "good"
+            },
+            {
+              "group": "compute",
+              "heat": 0.88,
+              "id": "models",
+              "label": "Models",
+              "state": "warning"
+            },
+            {
+              "group": "data",
+              "heat": 0.46,
+              "id": "cache",
+              "label": "Cache",
+              "state": "good"
+            }
+          ],
+          "schema_version": 2,
+          "title": "Service topology"
+        }
+      },
+      "id": "ops-service-topology",
+      "inputs": [],
+      "title": "neural graph"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "data": {
+            "provenance": "demo",
+            "state": "ready",
+            "window": "3d"
+          },
+          "id": "ops-slo-burn",
+          "kind": "rate_bars",
+          "objective": 99.9,
+          "schema_version": 2,
+          "title": "Gateway error budget",
+          "windows": [
+            {
+              "burn_rate": 0.4,
+              "label": "1h"
+            },
+            {
+              "burn_rate": 1.2,
+              "label": "6h"
+            },
+            {
+              "burn_rate": 2.8,
+              "label": "24h"
+            },
+            {
+              "burn_rate": 0.9,
+              "label": "3d"
+            }
+          ]
+        }
+      },
+      "id": "ops-slo-burn",
+      "inputs": [],
+      "title": "rate bars"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "bounds": {
+            "max_x": 8,
+            "max_z": 5,
+            "min_x": 0,
+            "min_z": 0
+          },
+          "chrome": "drag_only",
+          "data": {
+            "provenance": "demo",
+            "source": "demo/spatial-tracks",
+            "state": "ready",
+            "window": "latest"
+          },
+          "id": "ops-spatial-tracks",
+          "kind": "spatial_tracks",
+          "schema_version": 2,
+          "title": "Studio occupancy",
+          "tracks": [
+            {
+              "confidence": 0.93,
+              "id": 7,
+              "motion": 68,
+              "position": {
+                "x": 5.9,
+                "z": 3.4
+              },
+              "trail": [
+                {
+                  "x": 1.2,
+                  "z": 1.0
+                },
+                {
+                  "x": 2.6,
+                  "z": 1.4
+                },
+                {
+                  "x": 4.1,
+                  "z": 2.3
+                },
+                {
+                  "x": 5.9,
+                  "z": 3.4
+                }
+              ]
+            },
+            {
+              "confidence": 0.81,
+              "id": 12,
+              "motion": 24,
+              "position": {
+                "x": 2.1,
+                "z": 4.0
+              },
+              "trail": [
+                {
+                  "x": 3.0,
+                  "z": 4.5
+                },
+                {
+                  "x": 2.5,
+                  "z": 4.2
+                },
+                {
+                  "x": 2.1,
+                  "z": 4.0
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "id": "ops-spatial-tracks",
+      "inputs": [],
+      "title": "spatial tracks"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "chrome": "drag_only",
+          "data": {
+            "provenance": "demo",
+            "source": "demo/sdr",
+            "state": "ready",
+            "window": "rolling"
+          },
+          "history": 96,
+          "id": "ops-spectral-waterfall",
+          "kind": "spectral_waterfall",
+          "max_frequency": 108,
+          "min_frequency": 88,
+          "rows": [
+            [
+              0.05,
+              0.08,
+              0.12,
+              0.18,
+              0.11,
+              0.07,
+              0.14,
+              0.31,
+              0.78,
+              0.25,
+              0.12,
+              0.09,
+              0.18,
+              0.61,
+              0.22,
+              0.08,
+              0.05,
+              0.04,
+              0.07,
+              0.12,
+              0.09,
+              0.05,
+              0.04,
+              0.03
+            ],
+            [
+              0.04,
+              0.07,
+              0.1,
+              0.16,
+              0.13,
+              0.08,
+              0.16,
+              0.35,
+              0.84,
+              0.29,
+              0.11,
+              0.08,
+              0.21,
+              0.67,
+              0.25,
+              0.09,
+              0.05,
+              0.05,
+              0.08,
+              0.13,
+              0.08,
+              0.05,
+              0.03,
+              0.03
+            ],
+            [
+              0.05,
+              0.09,
+              0.14,
+              0.2,
+              0.12,
+              0.07,
+              0.13,
+              0.28,
+              0.72,
+              0.23,
+              0.1,
+              0.09,
+              0.17,
+              0.58,
+              0.2,
+              0.08,
+              0.06,
+              0.04,
+              0.06,
+              0.11,
+              0.1,
+              0.06,
+              0.04,
+              0.03
+            ],
+            [
+              0.04,
+              0.08,
+              0.11,
+              0.17,
+              0.14,
+              0.09,
+              0.18,
+              0.38,
+              0.91,
+              0.32,
+              0.13,
+              0.08,
+              0.23,
+              0.73,
+              0.27,
+              0.1,
+              0.05,
+              0.05,
+              0.09,
+              0.15,
+              0.09,
+              0.05,
+              0.03,
+              0.02
+            ],
+            [
+              0.06,
+              0.1,
+              0.15,
+              0.21,
+              0.13,
+              0.08,
+              0.15,
+              0.33,
+              0.8,
+              0.27,
+              0.11,
+              0.1,
+              0.19,
+              0.64,
+              0.23,
+              0.09,
+              0.07,
+              0.05,
+              0.07,
+              0.12,
+              0.11,
+              0.07,
+              0.04,
+              0.03
+            ],
+            [
+              0.05,
+              0.08,
+              0.12,
+              0.18,
+              0.11,
+              0.07,
+              0.14,
+              0.3,
+              0.75,
+              0.24,
+              0.12,
+              0.09,
+              0.18,
+              0.6,
+              0.21,
+              0.08,
+              0.05,
+              0.04,
+              0.07,
+              0.13,
+              0.09,
+              0.05,
+              0.04,
+              0.03
+            ],
+            [
+              0.04,
+              0.07,
+              0.1,
+              0.16,
+              0.13,
+              0.08,
+              0.17,
+              0.36,
+              0.87,
+              0.3,
+              0.11,
+              0.08,
+              0.22,
+              0.69,
+              0.26,
+              0.09,
+              0.05,
+              0.05,
+              0.08,
+              0.14,
+              0.08,
+              0.05,
+              0.03,
+              0.03
+            ],
+            [
+              0.05,
+              0.09,
+              0.14,
+              0.19,
+              0.12,
+              0.07,
+              0.13,
+              0.29,
+              0.7,
+              0.22,
+              0.1,
+              0.09,
+              0.16,
+              0.56,
+              0.19,
+              0.08,
+              0.06,
+              0.04,
+              0.06,
+              0.1,
+              0.1,
+              0.06,
+              0.04,
+              0.03
+            ],
+            [
+              0.04,
+              0.08,
+              0.11,
+              0.17,
+              0.14,
+              0.09,
+              0.19,
+              0.4,
+              0.95,
+              0.34,
+              0.13,
+              0.08,
+              0.24,
+              0.76,
+              0.28,
+              0.1,
+              0.05,
+              0.05,
+              0.09,
+              0.16,
+              0.09,
+              0.05,
+              0.03,
+              0.02
+            ],
+            [
+              0.06,
+              0.1,
+              0.15,
+              0.22,
+              0.13,
+              0.08,
+              0.16,
+              0.34,
+              0.82,
+              0.28,
+              0.11,
+              0.1,
+              0.2,
+              0.66,
+              0.24,
+              0.09,
+              0.07,
+              0.05,
+              0.07,
+              0.12,
+              0.11,
+              0.07,
+              0.04,
+              0.03
+            ]
+          ],
+          "schema_version": 2,
+          "title": "FM spectrum",
+          "unit": "MHz"
+        }
+      },
+      "id": "ops-spectral-waterfall",
+      "inputs": [],
+      "title": "spectral waterfall"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "bars": [
+            {
+              "label": "agora-one",
+              "values": [
+                1840,
+                96,
+                12
+              ]
+            },
+            {
+              "label": "dustkernel",
+              "values": [
+                1210,
+                44,
+                3
+              ]
+            },
+            {
+              "label": "mac-studio",
+              "values": [
+                905,
+                18,
+                0
+              ]
+            }
+          ],
+          "data": {
+            "provenance": "demo",
+            "state": "ready",
+            "window": "24h"
+          },
+          "id": "ops-stacked-bar",
+          "kind": "stacked_bar",
+          "schema_version": 2,
+          "series": [
+            "ok",
+            "retried",
+            "failed"
+          ],
+          "title": "Requests by outcome",
+          "unit": "req"
+        }
+      },
+      "id": "ops-stacked-bar",
+      "inputs": [],
+      "title": "stacked bar"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "change": -4.8,
+          "history": [
+            42,
+            45,
+            39,
+            52,
+            47,
+            44,
+            38,
+            36,
+            33
+          ],
+          "id": "ops-cpu",
+          "kind": "stat",
+          "label": "CPU saturation",
+          "schema_version": 2,
+          "state": "good",
+          "unit": "%",
+          "value": 33.2
+        }
+      },
+      "id": "ops-cpu",
+      "inputs": [],
+      "title": "stat"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "data": {
+            "provenance": "demo",
+            "state": "ready",
+            "window": "1h"
+          },
+          "id": "ops-state-timeline",
+          "kind": "state_timeline",
+          "lanes": [
+            {
+              "label": "agora-one",
+              "segments": [
+                {
+                  "end": 0.62,
+                  "label": "up",
+                  "start": 0.0,
+                  "state": "good"
+                },
+                {
+                  "end": 0.71,
+                  "label": "degraded",
+                  "start": 0.62,
+                  "state": "warning"
+                },
+                {
+                  "end": 1.0,
+                  "label": "up",
+                  "start": 0.71,
+                  "state": "good"
+                }
+              ]
+            },
+            {
+              "label": "dustkernel",
+              "segments": [
+                {
+                  "end": 0.88,
+                  "label": "up",
+                  "start": 0.0,
+                  "state": "good"
+                },
+                {
+                  "end": 1.0,
+                  "label": "unreachable",
+                  "start": 0.88,
+                  "state": "critical"
+                }
+              ]
+            }
+          ],
+          "schema_version": 2,
+          "title": "Node availability"
+        }
+      },
+      "id": "ops-state-timeline",
+      "inputs": [],
+      "title": "state timeline"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "chrome": "drag_only",
+          "data": {
+            "provenance": "demo",
+            "source": "demo/hierarchy",
+            "state": "ready"
+          },
+          "focus": null,
+          "id": "ops-sunburst",
+          "kind": "hierarchy",
+          "nodes": [
+            {
+              "id": "dock",
+              "label": "Dock",
+              "parent": null,
+              "value": 100
+            },
+            {
+              "id": "canvas",
+              "label": "Canvas",
+              "parent": "dock",
+              "value": 55
+            },
+            {
+              "id": "unibus",
+              "label": "Unibus",
+              "parent": "dock",
+              "value": 28
+            },
+            {
+              "id": "coherence",
+              "label": "Coherence",
+              "parent": "dock",
+              "value": 17
+            },
+            {
+              "id": "widgets",
+              "label": "Widgets",
+              "parent": "canvas",
+              "value": 28
+            },
+            {
+              "id": "core",
+              "label": "Core",
+              "parent": "canvas",
+              "value": 17
+            },
+            {
+              "id": "mac",
+              "label": "macOS",
+              "parent": "canvas",
+              "value": 10
+            },
+            {
+              "id": "router",
+              "label": "Router",
+              "parent": "unibus",
+              "value": 18
+            },
+            {
+              "id": "transport",
+              "label": "Transport",
+              "parent": "unibus",
+              "value": 10
+            }
+          ],
+          "schema_version": 2,
+          "style": "sunburst",
+          "title": "Dependency surface",
+          "unit": "crates"
+        }
+      },
+      "id": "ops-sunburst",
+      "inputs": [],
+      "title": "hierarchy"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "columns": [
+            "Target",
+            "State",
+            "Last scrape"
+          ],
+          "id": "ops-targets",
+          "kind": "table",
+          "rows": [
+            [
+              "canvas",
+              "healthy",
+              "8s"
+            ],
+            [
+              "mcp-bridge",
+              "healthy",
+              "12s"
+            ],
+            [
+              "elmers",
+              "degraded",
+              "31s"
+            ]
+          ],
+          "schema_version": 2,
+          "title": "Scrape targets"
+        }
+      },
+      "id": "ops-targets",
+      "inputs": [],
+      "title": "table"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "id": "ops-throughput",
+          "kind": "time_series",
+          "schema_version": 2,
+          "series": [
+            {
+              "label": "api",
+              "points": [
+                {
+                  "x": 0,
+                  "y": 118
+                },
+                {
+                  "x": 1,
+                  "y": 126
+                },
+                {
+                  "x": 2,
+                  "y": 121
+                },
+                {
+                  "x": 3,
+                  "y": 142
+                },
+                {
+                  "x": 4,
+                  "y": 151
+                },
+                {
+                  "x": 5,
+                  "y": 147
+                },
+                {
+                  "x": 6,
+                  "y": 164
+                }
+              ]
+            },
+            {
+              "label": "worker",
+              "points": [
+                {
+                  "x": 0,
+                  "y": 76
+                },
+                {
+                  "x": 1,
+                  "y": 81
+                },
+                {
+                  "x": 2,
+                  "y": 79
+                },
+                {
+                  "x": 3,
+                  "y": 88
+                },
+                {
+                  "x": 4,
+                  "y": 91
+                },
+                {
+                  "x": 5,
+                  "y": 96
+                },
+                {
+                  "x": 6,
+                  "y": 101
+                }
+              ]
+            }
+          ],
+          "title": "Request throughput",
+          "unit": "req/s"
+        }
+      },
+      "id": "ops-throughput",
+      "inputs": [],
+      "title": "time series"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "chrome": "drag_only",
+          "data": {
+            "provenance": "demo",
+            "source": "demo/hierarchy",
+            "state": "ready"
+          },
+          "focus": null,
+          "id": "ops-treemap",
+          "kind": "hierarchy",
+          "nodes": [
+            {
+              "id": "total",
+              "label": "Project",
+              "parent": null,
+              "value": 100
+            },
+            {
+              "id": "runtime",
+              "label": "Runtime",
+              "parent": "total",
+              "value": 46
+            },
+            {
+              "id": "ui",
+              "label": "Canvas UI",
+              "parent": "total",
+              "value": 31
+            },
+            {
+              "id": "infra",
+              "label": "Infrastructure",
+              "parent": "total",
+              "value": 23
+            },
+            {
+              "id": "render",
+              "label": "Rendering",
+              "parent": "runtime",
+              "value": 27
+            },
+            {
+              "id": "bus",
+              "label": "Unibus",
+              "parent": "runtime",
+              "value": 19
+            },
+            {
+              "id": "widgets",
+              "label": "Widgets",
+              "parent": "ui",
+              "value": 19
+            },
+            {
+              "id": "themes",
+              "label": "Themes",
+              "parent": "ui",
+              "value": 12
+            }
+          ],
+          "schema_version": 2,
+          "style": "treemap",
+          "title": "Token allocation",
+          "unit": "tokens"
+        }
+      },
+      "id": "ops-treemap",
+      "inputs": [],
+      "title": "hierarchy"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "chrome": "drag_only",
+          "data": {
+            "provenance": "demo",
+            "source": "demo/distribution",
+            "state": "ready"
+          },
+          "groups": [
+            {
+              "label": "macOS",
+              "samples": [
+                7,
+                8,
+                8,
+                9,
+                9,
+                9,
+                10,
+                10,
+                10,
+                11,
+                12,
+                13,
+                16,
+                19
+              ]
+            },
+            {
+              "label": "Pi 4",
+              "samples": [
+                28,
+                31,
+                34,
+                36,
+                38,
+                40,
+                41,
+                42,
+                44,
+                48,
+                53,
+                61,
+                72,
+                85
+              ]
+            },
+            {
+              "label": "Linux GPU",
+              "samples": [
+                5,
+                6,
+                6,
+                6,
+                7,
+                7,
+                8,
+                8,
+                8,
+                9,
+                9,
+                10,
+                12,
+                14
+              ]
+            }
+          ],
+          "id": "ops-violin-distribution",
+          "kind": "distribution",
+          "schema_version": 2,
+          "style": "violin",
+          "title": "Frame time density",
+          "unit": "ms"
+        }
+      },
+      "id": "ops-violin-distribution",
+      "inputs": [],
+      "title": "distribution"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "data": {
+            "provenance": "demo",
+            "source": "demo:trace",
+            "state": "ready",
+            "window": "one request"
+          },
+          "id": "ops-waterfall",
+          "kind": "span_timeline",
+          "schema_version": 2,
+          "spans": [
+            {
+              "end": 184,
+              "id": "request",
+              "label": "POST /v1/respond",
+              "start": 0,
+              "state": "good"
+            },
+            {
+              "end": 19,
+              "id": "auth",
+              "label": "authenticate",
+              "parent": "request",
+              "start": 4,
+              "state": "good"
+            },
+            {
+              "end": 34,
+              "id": "route",
+              "label": "route model",
+              "parent": "request",
+              "start": 21,
+              "state": "good"
+            },
+            {
+              "end": 168,
+              "id": "infer",
+              "label": "inference",
+              "parent": "request",
+              "start": 35,
+              "state": "warning"
+            },
+            {
+              "end": 184,
+              "id": "encode",
+              "label": "encode",
+              "parent": "request",
+              "start": 169,
+              "state": "good"
+            }
+          ],
+          "style": "waterfall",
+          "title": "Request waterfall",
+          "unit": "ms"
+        }
+      },
+      "id": "ops-waterfall",
+      "inputs": [],
+      "title": "span timeline"
+    },
+    {
+      "content": {
+        "kind": "widget",
+        "spec": {
+          "chrome": "drag_only",
+          "id": "quant-candles",
+          "kind": "quant",
+          "schema_version": 2,
+          "widget": {
+            "candles": [
+              {
+                "close": 6486.75,
+                "high": 6488.25,
+                "low": 6479.5,
+                "open": 6482.0,
+                "time": 1,
+                "volume": 1820
+              },
+              {
+                "close": 6488.5,
+                "high": 6491.0,
+                "low": 6484.25,
+                "open": 6486.75,
+                "time": 2,
+                "volume": 1460
+              },
+              {
+                "close": 6483.0,
+                "high": 6489.75,
+                "low": 6481.25,
+                "open": 6488.5,
+                "time": 3,
+                "volume": 2110
+              },
+              {
+                "close": 6486.25,
+                "high": 6487.5,
+                "low": 6480.75,
+                "open": 6483.0,
+                "time": 4,
+                "volume": 1330
+              },
+              {
+                "close": 6492.75,
+                "high": 6494.5,
+                "low": 6485.0,
+                "open": 6486.25,
+                "time": 5,
+                "volume": 2480
+              },
+              {
+                "close": 6495.0,
+                "high": 6497.25,
+                "low": 6490.5,
+                "open": 6492.75,
+                "time": 6,
+                "volume": 1740
+              },
+              {
+                "close": 6489.25,
+                "high": 6496.0,
+                "low": 6487.75,
+                "open": 6495.0,
+                "time": 7,
+                "volume": 2260
+              },
+              {
+                "close": 6491.75,
+                "high": 6493.5,
+                "low": 6486.0,
+                "open": 6489.25,
+                "time": 8,
+                "volume": 1560
+              },
+              {
+                "close": 6498.5,
+                "high": 6499.75,
+                "low": 6490.25,
+                "open": 6491.75,
+                "time": 9,
+                "volume": 2710
+              },
+              {
+                "close": 6497.0,
+                "high": 6502.25,
+                "low": 6495.75,
+                "open": 6498.5,
+                "time": 10,
+                "volume": 1920
+              },
+              {
+                "close": 6503.25,
+                "high": 6504.5,
+                "low": 6496.25,
+                "open": 6497.0,
+                "time": 11,
+                "volume": 2840
+              },
+              {
+                "close": 6505.75,
+                "high": 6507.0,
+                "low": 6500.5,
+                "open": 6503.25,
+                "time": 12,
+                "volume": 2050
+              }
+            ],
+            "interval": "5m",
+            "show_volume": true,
+            "symbol": "ESU6",
+            "visualization": "candlestick"
+          }
+        }
+      },
+      "id": "quant-candles",
+      "inputs": [],
+      "title": "quant"
+    }
+  ],
+  "theme": {
+    "source": "project"
+  }
+}

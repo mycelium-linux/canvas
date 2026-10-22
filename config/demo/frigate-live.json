@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "id": "frigate-live",
+  "project_id": "dock",
+  "revision": 1,
+  "theme": { "source": "project" },
+  "surfaces": [
+    {
+      "id": "door",
+      "title": "Door — live",
+      "content": { "kind": "live_image", "source_id": "door" },
+      "inputs": []
+    },
+    {
+      "id": "cat",
+      "title": "Cat — live",
+      "content": { "kind": "live_image", "source_id": "cat" },
+      "inputs": []
+    }
+  ],
+  "bindings": [],
+  "layout": {
+    "kind": "canvas",
+    "placements": [
+      {
+        "surface_id": "door",
+        "bounds": { "x": 0.0, "y": 0.0, "width": 0.5, "height": 1.0 },
+        "layer": 0
+      },
+      {
+        "surface_id": "cat",
+        "bounds": { "x": 0.5, "y": 0.0, "width": 0.5, "height": 1.0 },
+        "layer": 0
+      }
+    ]
+  }
+}

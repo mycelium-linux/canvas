@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>dev.fpl.canvas-verk-showcase</string>
+<key>ProgramArguments</key><array>
+<string>/Users/ajmwagar/.local/bin/canvas-model-host-verk</string>
+<string>/Users/ajmwagar/.cache/dock/canvas/verk-showcase-models/scene.lua</string>
+<string>/Users/ajmwagar/.cache/dock/canvas/verk-showcase-models</string>
+<string>udp://100.120.101.5:55228</string>
+<string>1280</string><string>720</string><string>30</string><string>videotoolbox</string>
+<string>verk-recovered-showcase</string>
+</array>
+<key>EnvironmentVariables</key><dict>
+<key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+<key>CANVAS_MODEL_STATE_FILE</key><string>/Users/ajmwagar/.cache/dock/canvas/verk-showcase-models/render-state.json</string>
+<key>CANVAS_MODEL_PUBLISH_LOCAL_FRAME</key><string>0</string>
+</dict>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+<key>ProcessType</key><string>Interactive</string><key>ThrottleInterval</key><integer>10</integer>
+<key>StandardOutPath</key><string>/Users/ajmwagar/Library/Logs/canvas-verk-showcase.log</string>
+<key>StandardErrorPath</key><string>/Users/ajmwagar/Library/Logs/canvas-verk-showcase.log</string>
+</dict></plist>

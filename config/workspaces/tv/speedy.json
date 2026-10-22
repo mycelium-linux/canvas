@@ -1,0 +1,508 @@
+{
+ "schema_version": 1,
+ "id": "speedy-workspace",
+ "project_id": "speedy",
+ "revision": 10,
+ "theme": {
+  "source": "project"
+ },
+ "background": {
+  "kind": "shader",
+  "shader_id": "smoke-rings",
+  "speed": 0.7
+ },
+ "chrome": {
+  "title": "hidden",
+  "canvas_padding": 2,
+  "surface_gap": 3
+ },
+ "surfaces": [
+  {
+   "id": "umk3-game",
+   "title": "Ultimate Mortal Kombat 3",
+   "content": {
+    "kind": "live_video",
+    "source_id": "retro-umk3",
+    "width": 298,
+    "height": 224
+   },
+   "inputs": []
+  },
+  {
+   "id": "smk-game",
+   "title": "Super Mario Kart",
+   "content": {
+    "kind": "live_video",
+    "source_id": "retro-smk",
+    "width": 298,
+    "height": 224
+   },
+   "inputs": []
+  },
+  {
+   "id": "smb-game",
+   "title": "Super Mario Bros.",
+   "content": {
+    "kind": "live_video",
+    "source_id": "retro-smb",
+    "width": 292,
+    "height": 240
+   },
+   "inputs": []
+  },
+  {
+   "id": "tetris-game",
+   "title": "Tetris",
+   "content": {
+    "kind": "live_video",
+    "source_id": "retro-gb-tetris",
+    "width": 160,
+    "height": 144
+   },
+   "inputs": []
+  },
+  {
+   "id": "retro2048-game",
+   "title": "2048",
+   "content": {
+    "kind": "live_video",
+    "source_id": "retro-2048",
+    "width": 320,
+    "height": 240
+   },
+   "inputs": []
+  },
+  {
+   "id": "freedoom-game",
+   "title": "FreeDoom",
+   "content": {
+    "kind": "live_video",
+    "source_id": "retro-freedoom",
+    "width": 267,
+    "height": 200
+   },
+   "inputs": []
+  },
+  {
+   "id": "umk3-decision",
+   "title": "Ultimate Mortal Kombat 3 decision",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "umk3-decision",
+     "kind": "event_log",
+     "title": "Ultimate Mortal Kombat 3 decision",
+     "theme": null,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     },
+     "entries": [],
+     "refresh_ms": 50
+    }
+   },
+   "inputs": [
+    {
+     "id": "decision",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "smk-decision",
+   "title": "Super Mario Kart decision",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "smk-decision",
+     "kind": "event_log",
+     "title": "Super Mario Kart decision",
+     "theme": null,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     },
+     "entries": [],
+     "refresh_ms": 50
+    }
+   },
+   "inputs": [
+    {
+     "id": "decision",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "smb-decision",
+   "title": "Super Mario Bros. decision",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "smb-decision",
+     "kind": "event_log",
+     "title": "Super Mario Bros. decision",
+     "theme": null,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     },
+     "entries": [],
+     "refresh_ms": 50
+    }
+   },
+   "inputs": [
+    {
+     "id": "decision",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "tetris-decision",
+   "title": "Tetris decision",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "tetris-decision",
+     "kind": "event_log",
+     "title": "Tetris decision",
+     "theme": null,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     },
+     "entries": [],
+     "refresh_ms": 50
+    }
+   },
+   "inputs": [
+    {
+     "id": "decision",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "retro2048-decision",
+   "title": "2048 decision",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "retro2048-decision",
+     "kind": "event_log",
+     "title": "2048 decision",
+     "theme": null,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     },
+     "entries": [],
+     "refresh_ms": 50
+    }
+   },
+   "inputs": [
+    {
+     "id": "decision",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  },
+  {
+   "id": "freedoom-decision",
+   "title": "FreeDoom decision",
+   "content": {
+    "kind": "widget",
+    "spec": {
+     "schema_version": 2,
+     "id": "freedoom-decision",
+     "kind": "event_log",
+     "title": "FreeDoom decision",
+     "theme": null,
+     "chrome": "frameless",
+     "data": {
+      "state": "loading",
+      "source": "unibus:rlcd.decision.v1",
+      "observed_at": null,
+      "window": "live",
+      "detail": null,
+      "provenance": "live"
+     },
+     "entries": [],
+     "refresh_ms": 50
+    }
+   },
+   "inputs": [
+    {
+     "id": "decision",
+     "contract": "canvas.widget.snapshot.v1"
+    }
+   ]
+  }
+ ],
+ "layout": {
+  "kind": "canvas",
+  "placements": [
+   {
+    "surface_id": "umk3-game",
+    "bounds": {
+     "x": 0.004,
+     "y": 0.006,
+     "width": 0.492,
+     "height": 0.4
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "umk3-decision",
+    "bounds": {
+     "x": 0.004,
+     "y": 0.412,
+     "width": 0.492,
+     "height": 0.086
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "smk-game",
+    "bounds": {
+     "x": 0.504,
+     "y": 0.006,
+     "width": 0.492,
+     "height": 0.4
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "smk-decision",
+    "bounds": {
+     "x": 0.504,
+     "y": 0.412,
+     "width": 0.492,
+     "height": 0.086
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "smb-game",
+    "bounds": {
+     "x": 0.004,
+     "y": 0.502,
+     "width": 0.492,
+     "height": 0.4
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "smb-decision",
+    "bounds": {
+     "x": 0.004,
+     "y": 0.908,
+     "width": 0.492,
+     "height": 0.086
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "tetris-game",
+    "bounds": {
+     "x": 0.504,
+     "y": 0.502,
+     "width": 0.492,
+     "height": 0.4
+    },
+    "layer": 0
+   },
+   {
+    "surface_id": "tetris-decision",
+    "bounds": {
+     "x": 0.504,
+     "y": 0.908,
+     "width": 0.492,
+     "height": 0.086
+    },
+    "layer": 0
+   }
+  ]
+ },
+ "bindings": [
+  {
+   "id": "umk3-decision-live",
+   "source": {
+    "owner": "mac-studio-speedy-umk3",
+    "stream": "retro-umk3",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "umk3-decision",
+    "input_id": "decision"
+   },
+   "adapter": "widget-snapshot-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "smk-decision-live",
+   "source": {
+    "owner": "mac-studio-speedy-smk",
+    "stream": "retro-smk",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "smk-decision",
+    "input_id": "decision"
+   },
+   "adapter": "widget-snapshot-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "smb-decision-live",
+   "source": {
+    "owner": "mac-studio-speedy-smb",
+    "stream": "retro-smb",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "smb-decision",
+    "input_id": "decision"
+   },
+   "adapter": "widget-snapshot-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "tetris-decision-live",
+   "source": {
+    "owner": "mac-studio-speedy-tetris",
+    "stream": "retro-gb-tetris",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "tetris-decision",
+    "input_id": "decision"
+   },
+   "adapter": "widget-snapshot-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "retro2048-decision-live",
+   "source": {
+    "owner": "mac-studio-speedy-2048",
+    "stream": "retro-2048",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "retro2048-decision",
+    "input_id": "decision"
+   },
+   "adapter": "widget-snapshot-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  },
+  {
+   "id": "freedoom-decision-live",
+   "source": {
+    "owner": "mac-studio-speedy-freedoom",
+    "stream": "retro-freedoom",
+    "contract": "canvas.widget.snapshot.v1"
+   },
+   "target": {
+    "surface_id": "freedoom-decision",
+    "input_id": "decision"
+   },
+   "adapter": "widget-snapshot-v1",
+   "delivery": {
+    "mode": "latest"
+   }
+  }
+ ],
+ "focused_surface_id": null,
+ "pages": [
+  {
+   "name": "Arcade B",
+   "layout": {
+    "kind": "canvas",
+    "placements": [
+     {
+      "surface_id": "retro2048-game",
+      "bounds": {
+       "x": 0.004,
+       "y": 0.006,
+       "width": 0.492,
+       "height": 0.86
+      },
+      "layer": 0
+     },
+     {
+      "surface_id": "retro2048-decision",
+      "bounds": {
+       "x": 0.004,
+       "y": 0.872,
+       "width": 0.492,
+       "height": 0.12
+      },
+      "layer": 0
+     },
+     {
+      "surface_id": "freedoom-game",
+      "bounds": {
+       "x": 0.504,
+       "y": 0.006,
+       "width": 0.492,
+       "height": 0.86
+      },
+      "layer": 0
+     },
+     {
+      "surface_id": "freedoom-decision",
+      "bounds": {
+       "x": 0.504,
+       "y": 0.872,
+       "width": 0.492,
+       "height": 0.12
+      },
+      "layer": 0
+     }
+    ]
+   }
+  }
+ ],
+ "active_page": 0
+}

@@ -1,0 +1,17 @@
+[Unit]
+Description=Canvas Unibus edge adapter
+After=network-online.target unibus-router.service canvas-surface.service
+Wants=network-online.target
+Requires=unibus-router.service canvas-surface.service
+
+[Service]
+Type=simple
+User=ajm
+Environment=HOME=/home/ajm
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStart=/usr/local/bin/canvas-edge /home/ajm/.config/canvas/edge.json
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

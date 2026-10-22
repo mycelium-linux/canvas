@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "tv-airplay",
+  "project_id": "airplay",
+  "revision": 1,
+  "theme": {"source": "project"},
+  "background": {"kind": "theme"},
+  "chrome": {"canvas_padding": 0, "surface_gap": 0, "title": "hidden"},
+  "surfaces": [
+    {
+      "id": "cast-airplay-video",
+      "title": "AirPlay",
+      "inputs": [],
+      "content": {"kind": "stream", "url": "http://192.168.2.67:8099/live.m3u8"}
+    }
+  ],
+  "layout": {"kind": "surface", "surface_id": "cast-airplay-video"},
+  "pages": [],
+  "active_page": 0,
+  "bindings": [],
+  "focused_surface_id": null
+}

@@ -1,0 +1,20 @@
+[package]
+name = "canvas-alfalfa"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Producer that surfaces Alfalfa fleet and per-project metrics (marbles, PRs, stages) as Canvas widget snapshots"
+
+[dependencies]
+canvas-core = { workspace = true }
+canvas-feeds = { path = "../canvas-feeds" }
+serde_json = { workspace = true }
+sha2 = "0.10"
+
+[lib]
+name = "canvas_alfalfa"
+path = "src/lib.rs"
+
+[[bin]]
+name = "canvas-alfalfa"
+path = "src/main.rs"

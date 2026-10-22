@@ -1,0 +1,17 @@
+[Unit]
+Description=Canvas native hardware media edge
+After=network-online.target unibus-router.service canvas-surface.service
+Wants=network-online.target
+Requires=unibus-router.service canvas-surface.service
+
+[Service]
+Type=simple
+User=ajm
+Environment=HOME=/home/ajm
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStart=/usr/local/bin/canvas-media-edge /home/ajm/.config/canvas/media-edge.json
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

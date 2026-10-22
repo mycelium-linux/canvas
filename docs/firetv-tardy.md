@@ -1,0 +1,249 @@
+# Public Tardy reels on FireTV
+
+The `Tardy` workspace shows a portrait public reel, its source caption, the
+existing Neo/Codex agent dashboard, and the shared analog clock. Reels advance
+automatically. The existing video mute button controls TV-local audio.
+
+`canvas-tardy-tv` is an independently deployable Rust adapter. It reads the
+anonymous `https://api.tardy.news/v1/feed?limit=100` endpoint and filters real
+video reels. The authenticated reels endpoint is deliberately not used. There
+are no Tardy credentials, account creation, posting, engagement writes or private
+feed requests. `tardy.new` did not resolve during deployment; this uses the
+working production API from the local Tardy checkout.
+
+The feed response is bounded to 3 MiB, media to 100 MiB, and selection to 32
+deduplicated reels of 1–300 seconds. Only explicit HTTPS Tardy media/R2 hosts
+are admitted; HTTP redirects are disabled. Signed media URLs remain transient
+and are not logged or saved into workspace documents. The adapter downloads
+public MP4 bytes into its own temporary cache and transfers them to Agora.
+
+Agora's adapter-owned `canvas-tardy-reel.service` remuxes the selected video
+without video transcoding, encodes its audio as AAC, and publishes HLS through
+the existing private, client-allowlisted media server. Its playlist is explicitly
+`http://192.168.2.67:18089/tardy-public.m3u8`. Each playback generation changes the
+Canvas URL to restart the decoder, including when revisiting the same post.
+The adapter waits for a new playlist before switching presentation. It stops
+only its own transient producer, never another media service.
+
+Network failures update the caption panel to a visible degraded state. Reels
+are polled/started only while this workspace is selected; leaving does not steal
+selection or continuously download videos. A finite current relay may finish
+after leaving. This is an initial sequential viewer, not the complete mobile
+Tardy feed UI: there are no likes/comments, presence routing, or remote next/back
+controls yet. Current selection follows the order of each anonymous feed read.
+
+## Agent panel
+
+`canvas-tardy-tv --agents SERIAL` consumes the existing private
+`~/.local/share/agent-telemetry/agent-widget.json` source. It does not inspect
+processes or infer another provider's state. It forwards a bounded transient
+`surface_snapshot` every two seconds through `canvas-tvctl`; counts are not
+saved as apparently live document edits. Fresh partial coverage stays partial,
+and observations over 30 seconds old are stale. The Canvas endpoint also owns
+receiver-side expiry when deliveries stop.
+Receiver expiry follows each surface's declared `refresh_ms`: three refresh
+periods plus one second of jitter allowance, bounded to 3–300 seconds. The agent
+surfaces declare a two-second cadence, yielding seven seconds before a missed
+delivery is marked stale. The presenter keeps a separate 30-second observation
+deadline: repeat delivery never makes an old owner observation fresh. Adapter
+polling uses a two-second deadline rather than adding sleep after ADB work.
+`canvas-tardy-tv --check-agents SNAPSHOT` validates the typed presentation locally
+without touching the TV; empty Lua task tables are normalized to empty arrays.
+
+This avoids the old retained-widget
+watch path's `no_data` label for a transient status surface. This deployment
+changes the Tardy panel only; the older Home panel updater is unchanged.
+
+### Waiting for you and session details
+
+The summary uses the shared `fpl-gfx` attention instrument, not a platform-specific
+table: response bubble, approval shield, working spark, resting dash and broken
+unknown ring. Counts and short labels supplement shape and semantic theme roles;
+color alone never carries meaning. Lua supplies the observed counts via
+`SignalFrame::Attention`. GFX owns only bounded geometry and label placement,
+not provider parsing, clocks or actions. Stale frames show em dashes, never
+positive waiting counts. The same frame works through desktop GFX and the
+FireTV signal adapter, with no fake traffic or perpetual animation.
+
+Freshness never reduces the signal panel's opacity. Partial coverage keeps
+observed symbols and labels legible; stale data uses the visible freshness
+footer and em-dash readings instead of fading the entire instrument.
+
+The forwarding adapter retains status-list compatibility until the target
+surface is explicitly migrated to `signal_view`; do not send an attention frame
+to an older APK without the corresponding GFX decoder.
+
+The opt-in `agent.sessions.v2` presenter in
+`config/binders/agent-dashboard-v2.lua` adds separate Needs input / Needs approval
+counts and four priority-ordered task tiles beneath the public caption.
+Tiles show safe project/task labels, owner/provider and time first observed waiting.
+Task tiles now carry an opaque display identity, bounded owner-derived detail,
+and elapsed time since Canvas first observed the same state/task. This is not
+execution duration. Active status does not imply a known current tool: the
+detail explicitly says when that field is not supplied. Waiting reasons remain
+explicit provider observations, not transcript or terminal guesses.
+
+Use the remote directions to focus the task grid (Right from the reel), then
+directions to select, OK to expand within that same window, and Back to return
+to the grid. Selection follows identity through reordered updates and is cleared
+when the session disappears, the workspace switches, or the endpoint restarts.
+The authenticated control command uses the same shared navigation:
+`{"command":"surface_navigate","surface_id":"agent-details","action":"open"}`
+(inside a normal version-1 request). Actions are `focus`, `left`, `right`, `up`,
+`down`, `open`, and `back`. They carry no provider execution/approval authority.
+Stale detail is visibly unknown; all responses and approvals stay in the owning app.
+Unknown titles stay unnamed; no prompt, preview, transcript or full path is used.
+Waiting sessions sort first, oldest observed wait first, then active/unknown/idle.
+The analog clock and reel remain unchanged. These are read-only task tiles,
+not controls that answer a question or approve an agent action.
+
+The Lua presenter accepts authenticated snapshots/events, bounds owner and
+session retention, rejects replay/invalid generations and ages old sessions to
+unknown after 30 seconds. Old waits stop counting or displaying a growing timer.
+Only Neo/Codex is connected in the current installation; the contract supports
+other explicit owners but does not imply that their collectors are installed.
+
+Use `config/deploy/firetv/agent-attention-runtime.example.json` with private token
+and owner socket paths. Explicitly enable `--display-details` only for authorized
+viewers; the V1 source and normalizer remain metadata-free by default.
+On macOS, install the Lua consumer in the adapter's application-data directory,
+not Documents: a newly signed launch-agent binary can block on a protected-folder
+permission prompt. This installation uses
+`~/.local/share/agent-telemetry/agent-dashboard-v2.lua`; copy the reviewed binder
+there when deploying an update.
+
+`SignalFrame::TaskDeck` is the shared GFX project-first tile primitive. Lua owns
+selection and ordering, not GFX; the task deck repeats neither a total-session
+table nor provider interpretation. Stale deck frames force unknown symbols and
+suppress wait metadata without opacity fading.
+
+The caption uses `SignalFrame::Brief`: source kicker, headline, bounded verbatim
+caption excerpt and source footer. Long text is visibly marked as an excerpt;
+this is not an AI summary. Author/post UUIDs and transport debugging stay out of
+the reading surface. Both primitives use injected semantic theme roles and the
+same desktop/FireTV geometry. Text wrapping is conservative when host font
+measurement is unavailable; hosts still clip/ellipsize within declared bounds.
+
+```sh
+lua config/binders/tests/agent-dashboard-v2-test.lua config/binders/agent-dashboard-v2.lua
+```
+
+## Build and run
+
+```sh
+cargo check --manifest-path crates/canvas-tardy-tv/Cargo.toml --locked
+cargo test --manifest-path crates/canvas-tardy-tv/Cargo.toml --locked
+cargo clippy --manifest-path crates/canvas-tardy-tv/Cargo.toml --locked --all-targets -- -D warnings
+cargo build --manifest-path crates/canvas-tardy-tv/Cargo.toml --locked
+canvas-tardy-tv 192.168.2.97:5555
+canvas-tardy-tv --agents 192.168.2.97:5555
+```
+
+The two `config/deploy/neo/dev.fpl.canvas-tv-tardy*.plist` launch agents supervise
+these modes. They require the existing SSH identity for `agora-one`, `ffmpeg`
+there, and the already-authorized `canvas-tvctl`/ADB route. The source paths and
+relay identity are explicit for this installation, not automatic discovery.
+
+Merge `config/deploy/firetv/tardy.json` into the current catalog/documents with a
+fresh revision-bound `canvas-tvctl` install; never replace unrelated workspaces.
+The APK change is only the shared `canvas-menu.json` asset. No JNI/video rebuild
+is needed for this adapter.
+# Shared presentation export
+
+## Neo and Studio mirrors
+
+`canvas-presentation-mirror follow ADB_SERIAL` emits bounded presentation
+snapshots from the authenticated TV endpoint. `canvas-presentation-mirror receive`
+consumes those snapshots on a desktop: it imports changed layouts through
+Canvas control and sends only transient WidgetKind/data snapshots through
+`canvas.widget.snapshot.v1`. Existing Canvas digest-verified chunking handles
+macOS's datagram limit; neither task lists nor captions are trimmed to fit.
+The receiver keeps only the latest pending generation. Seven seconds without
+delivery marks retained panels stale, independently of owner observation age.
+
+This first deployment mirrors Tardy only. TV remote selection/expansion is
+authoritative; Neo and Studio are read-only mirrors, not extra approval agents.
+It is presentation synchronization, not frame-locked video playback. Each
+desktop decodes the same reel privately and preserves its normalized placement.
+Studio uses only its primary output. Canvas's desktop shell remains local.
+
+Presentation backhaul now uses **Unibus leased stream fan-out**: one publisher
+on Neo reads the authenticated TV presentation, while Neo and Studio subscribe
+independently to `canvas/tv/tardy/presentation` (`canvas.presentation.v1`).
+The existing Home-Pi router owns fan-out, with separate publisher/consumer tokens.
+Consumers pin the authenticated publisher `canvas-tv-presentation`, contract,
+fresh delivery timestamp and increasing sequence. The generic `unibus-stream`
+CLI preserves its older one-shot interface and adds bounded JSON-lines publish
+and subscribe modes. Presentations exceeding its 64 KiB contract fail visibly;
+they are never silently trimmed. The current sample is approximately 6 KiB.
+SSH still encrypts access to the router's loopback listener via local port 19496;
+it no longer pipes presentation JSON from Neo into a remote receiver.
+Mycelium locates hosts; it does not own view state or authorization. This slice
+uses explicit deployment endpoints, not automatic discovery or a new mesh protocol.
+No public listener, new discovery service, or widened media HTTP allowlist is
+introduced. `CANVAS_MIRROR_MEDIA_ORIGIN=http://127.0.0.1:18089` selects the
+operator-owned SSH media tunnel. The independent `canvas-tv` decoder reports
+source-derived geometry with `describe PRIVATE_URL`; that same width/height is
+passed explicitly to the decoder and Canvas surface. Portrait reels therefore
+stay portrait rather than being padded into a landscape frame. The receiver
+never guesses stride/resolution.
+Build it with `--no-default-features` to avoid unrelated macOS capture SDKs;
+normal capture builds retain their existing default feature.
+
+Manual recovery (installed paths):
+
+1. Inspect TV with `canvasctl --android 192.168.2.97:5555`; select Tardy there.
+2. On each desktop, verify `canvasctl` and the Canvas app are a matched build.
+3. Restart `dev.fpl.canvas-dashboard-media-tunnel` on Neo and Studio.
+4. Restart `dev.fpl.canvas-presentation-tunnel` on both desktops, then Neo's
+   `dev.fpl.canvas-presentation-publisher` and each desktop's
+   `dev.fpl.canvas-dashboard-mirror`. LaunchAgent definitions are in
+   `config/deploy/neo/` (Studio uses `dev.fpl.canvas-dashboard-studio.plist`
+   installed as `dev.fpl.canvas-dashboard-mirror.plist`). Tokens are private
+   files under `~/.config/unibus/canvas-presentation/`, never repo assets.
+5. Use Canvas's `screenshot` control request for renderer verification; OS
+   capture can omit protected windows. Check mirror logs for rejected frames.
+
+Do not put transient snapshots into `workspaces.json`, or mark a repeated
+delivery as a new owner observation. The publisher reads the named Tardy
+workspace, independently of the TV's selected workspace. TV selection no longer
+pauses the desktop feed or clears another workspace's transient frames.
+
+The authenticated presentation endpoint accepts `read_presentation` without a
+mutation revision. It returns the active document plus a `surfaces` map of
+transient signal/status snapshots, including task selection and expansion.
+Unlike `read_document`, this represents the view currently being rendered.
+It does not change the endpoint revision or checkpoint; restarted receivers
+must not restore its live data as fresh. Receivers must independently track
+delivery expiry and preserve the exported owner observation/stale metadata.
+
+`workspace_presentation` with `name` (a catalog project ID) returns the same
+contract for a declared workspace without selecting it. The CLI equivalent is
+`workspace presentation tardy`. `canvas-presentation-mirror follow SERIAL
+[PROJECT]` subscribes to that named projection (default: `tardy`). Unknown
+projects fail explicitly. Surface snapshots target declared workspace IDs,
+not the active display; retention keys include both workspace and surface IDs.
+Revision-bound patches can update declared background workspaces, but preserve
+the selected project. None of this expands the existing transport authorization.
+
+The transport runbook is in Unibus's `docs/stream-json.md`. Video remains on
+the existing private HLS/media path; only presentation/layout/task state moved
+in this slice. Desktop navigation is still read-only relative to the TV.
+
+### Recovery checks
+
+Check Home-Pi's `unibus-router.service` (not `unibusd`) and its loopback
+listener on 18790. On Neo, restart only the presentation tunnel, publisher,
+and dashboard mirror LaunchAgents if their connections are broken. The source
+uses `workspace_presentation`: switching the TV must not pause publication.
+Restart `dev.fpl.canvas-tv-tardy` if captions stop updating after ADB reconnects.
+Verify Canvas's event count increases and capture a renderer screenshot; an
+owner's transient snapshot can still report `no_data` while the document renders
+a ready caption, so verify presentation as well as transport status.
+
+For `media geometry unavailable`, check Agora's media HTTP listener, not just
+the FFmpeg producer. Install `config/deploy/agora-one/canvas-tv-media-http.service`
+into Agora's user systemd directory and enable it. It serves only the existing
+media directory on the private LAN address. Verify `/tardy-public.m3u8` returns
+HTTP 200 both on that address and through Neo's loopback media tunnel on 18089.
+Do not expose this unauthenticated media edge to the public Internet.

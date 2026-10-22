@@ -1,0 +1,14 @@
+{
+  "schema_version":1,"id":"fungos-desktop","project_id":"fungos","revision":1,
+  "theme":{"source":"project"},"background":{"kind":"theme"},
+  "chrome":{"title":"hidden","canvas_padding":12,"surface_gap":8},
+  "surfaces":[
+    {"id":"clock","title":"Clock","content":{"kind":"widget","spec":{"schema_version":2,"id":"clock","kind":"clock","format":"%H:%M:%S","mode":"analog","theme":null,"refresh_ms":16,"chrome":"frameless","data":{"state":"ready","provenance":"live"}}},"inputs":[]},
+    {"id":"welcome","title":"Desktop","content":{"kind":"widget","spec":{"schema_version":2,"id":"welcome","kind":"module","module":"desktop-welcome-v1","inputs":{},"theme":null,"refresh_ms":null,"chrome":"frameless","data":{"state":"ready","provenance":"live"}}},"inputs":[]}
+  ],
+  "layout":{"kind":"canvas","placements":[
+    {"surface_id":"clock","bounds":{"x":0.38,"y":0.13,"width":0.24,"height":0.38},"layer":0},
+    {"surface_id":"welcome","bounds":{"x":0.26,"y":0.57,"width":0.48,"height":0.20},"layer":0}
+  ]},
+  "bindings":[],"pages":[],"active_page":0,"focused_surface_id":null
+}

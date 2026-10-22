@@ -1,0 +1,22 @@
+[
+  {"name": "bifrost_backend_up", "type": "gauge", "series": 14, "labels": ["backend"]},
+  {"name": "bifrost_provider_price_usd_per_million_tokens", "type": "gauge", "series": 9, "labels": ["provider", "model"]},
+  {"name": "bifrost_yggdrasil_accelerator_memory_bytes", "type": "gauge", "series": 4, "labels": ["node", "gpu"]},
+  {"name": "bifrost_yggdrasil_accelerator_memory_used_bytes", "type": "gauge", "series": 4, "labels": ["node", "gpu"]},
+  {"name": "bifrost_yggdrasil_accelerator_power_watts", "type": "gauge", "series": 4, "labels": ["node", "gpu"]},
+  {"name": "bifrost_yggdrasil_accelerator_utilization_pct", "type": "gauge", "series": 4, "labels": ["node", "gpu"]},
+  {"name": "bifrost_yggdrasil_runtime_inflight_requests", "type": "gauge", "series": 6, "labels": ["node"]},
+  {"name": "bifrost_yggdrasil_runtime_latency_ms", "type": "gauge", "series": 6, "labels": ["runtime"]},
+  {"name": "palisade_active_connections", "type": "gauge", "series": 1, "labels": []},
+  {"name": "palisade_bytes_transferred_total", "type": "counter", "series": 2, "labels": ["direction"]},
+  {"name": "palisade_request_failures_total", "type": "counter", "series": 3, "labels": ["code"]},
+  {"name": "palisade_request_latency_seconds_bucket", "type": "histogram", "series": 36, "labels": ["le", "route"]},
+  {"name": "palisade_request_latency_seconds_count", "type": "counter", "series": 3, "labels": ["route"]},
+  {"name": "palisade_request_latency_seconds_sum", "type": "counter", "series": 3, "labels": ["route"]},
+  {"name": "invoker_cold_starts_total", "type": "counter", "series": 2, "labels": ["function"]},
+  {"name": "invoker_errors_total", "type": "counter", "series": 5, "labels": ["function"]},
+  {"name": "invoker_requests_total", "type": "counter", "series": 5, "labels": ["function"]},
+  {"name": "fpl_auth_active_sessions", "type": "gauge", "series": 1, "labels": []},
+  {"name": "fpl_auth_vouch_requests_total", "type": "counter", "series": 4, "labels": ["outcome"]},
+  {"name": "up", "type": "gauge", "series": 19, "labels": ["job", "instance"]}
+]

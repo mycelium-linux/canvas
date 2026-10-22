@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "calendar-v1",
+  "title": "Calendar",
+  "inputs": [
+    { "id": "view", "kind": "text", "required": false },
+    { "id": "anchor", "kind": "text", "required": false },
+    { "id": "agenda", "kind": "text", "required": false }
+  ],
+  "capabilities": {
+    "write_scene": true,
+    "read_inputs": ["view", "anchor", "agenda"],
+    "read_theme": true
+  }
+}

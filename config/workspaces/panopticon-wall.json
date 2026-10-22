@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "tv-panopticon-wall",
+  "project_id": "panopticon-wall",
+  "revision": 1,
+  "theme": {"source": "project"},
+  "surfaces": [
+    {"id": "panopticon-map", "title": "Panopticon regional map", "content": {"kind": "widget", "spec": {"schema_version": 2, "id": "panopticon-map", "kind": "signal_view", "chrome": "frameless", "refresh_ms": 10000, "frame": {"view": "geo_map", "map": {"extent": {"south_deg": 46.8, "north_deg": 48.7, "west_deg": -123.5, "east_deg": -121.5}, "markers": [], "paths": [], "selected": null}}, "data": {"state": "disconnected", "source": "Panopticon owner feed not attached"}}}},
+    {"id": "panopticon-source", "title": "Source health", "content": {"kind": "widget", "spec": {"schema_version": 2, "id": "panopticon-source", "kind": "rich_card", "title": "Panopticon", "body": "Waiting for verified owner input", "format": "markdown", "chrome": "frameless"}}},
+    {"id":"panopticon-detail","title":"Selected contact","content":{"kind":"widget","spec":{"schema_version":2,"id":"panopticon-detail","kind":"rich_card","title":"Select an aircraft","body":"Waiting for current owner observations","format":"markdown","chrome":"frameless","data":{"state":"loading"}}}},
+    {"id":"panopticon-chart","title":"Altitude distribution","content":{"kind":"widget","spec":{"schema_version":2,"id":"panopticon-chart","kind":"signal_view","chrome":"frameless","refresh_ms":10000,"frame":{"view":"plot","plot":{"x":{"label":"Barometric altitude","unit":"ft","minimum":-5000,"maximum":5000},"y":{"label":"Aircraft per band","unit":"count","minimum":0,"maximum":1},"series":[{"id":"altitude-bands","label":"Waiting for owner observations","role":"primary","points":[]}],"viewport":null}},"data":{"state":"loading"}}}}
+  ],
+  "layout": {"kind":"split","axis":"horizontal","ratio":0.7,"first":{"kind":"split","axis":"vertical","ratio":0.65,"first":{"kind":"surface","surface_id":"panopticon-map"},"second":{"kind":"surface","surface_id":"panopticon-chart"}},"second":{"kind":"split","axis":"vertical","ratio":0.7,"first":{"kind":"surface","surface_id":"panopticon-detail"},"second":{"kind":"surface","surface_id":"panopticon-source"}}}
+}

@@ -1,0 +1,14 @@
+{
+  "schema_version": 2,
+  "id": "ops-ranked-bar",
+  "kind": "ranked_bar",
+  "title": "Slowest runtimes",
+  "bars": [
+    {"label": "qwen3-8b-mlx-4bit", "value": 154173, "state": "critical"},
+    {"label": "voxcpm2-jarvis-cuda", "value": 6685, "state": "warning"},
+    {"label": "qwen3-30b-a3b-q3", "value": 5502, "state": "warning"},
+    {"label": "macos-say-tts", "value": 43}
+  ],
+  "unit": "ms",
+  "data": {"state": "ready", "provenance": "demo", "window": "now"}
+}

@@ -1,11 +1,11 @@
 #!/bin/sh
 # Run on Agora after building Dock and the existing FPL Desktop Bridge owner CLI.
 set -eu
-mcp_source=${1:-"$HOME/.local/src/dock-linux"}
-test -x "$mcp_source/target/debug/dock-linux"
+mcp_source=${1:-"$HOME/.local/src/canvas-linux"}
+test -x "$mcp_source/target/debug/canvas-linux"
 mkdir -p "$HOME/.local/bin" "$HOME/.config/systemd/user"
-install -m 755 "$mcp_source/target/debug/dock-linux" "$HOME/.local/bin/dock-linux.new"
-mv -f "$HOME/.local/bin/dock-linux.new" "$HOME/.local/bin/dock-linux"
+install -m 755 "$mcp_source/target/debug/canvas-linux" "$HOME/.local/bin/canvas-linux.new"
+mv -f "$HOME/.local/bin/canvas-linux.new" "$HOME/.local/bin/canvas-linux"
 python3 - <<'PY'
 import json,os,pathlib,tempfile,secrets
 home=pathlib.Path.home()
@@ -23,7 +23,7 @@ for project,port in [('dock',18760),('studio',18761)]:
     stat=secret.lstat()
     import stat as statmod
     if not statmod.S_ISREG(stat.st_mode) or stat.st_mode & 0o077 or stat.st_uid!=os.getuid():raise SystemExit('Unsafe local MCP credential permissions')
-    desired={'id':ident,'title':'Dock '+project+' desktop','kind':'mcp-streamable-http','enabled':True,'localUrl':f'http://127.0.0.1:{port}/mcp','localAuthTokenFile':str(secret),'capabilities':['desktop.inspect','desktop.capture','desktop.input'],'metadata':{'app':'dock','adapter':'dock-linux','capabilityId':'dock.desktop.'+project,'managedBy':'dock'}}
+    desired={'id':ident,'title':'Dock '+project+' desktop','kind':'mcp-streamable-http','enabled':True,'localUrl':f'http://127.0.0.1:{port}/mcp','localAuthTokenFile':str(secret),'capabilities':['desktop.inspect','desktop.capture','desktop.input'],'metadata':{'app':'dock','adapter':'canvas-linux','capabilityId':'dock.desktop.'+project,'managedBy':'dock'}}
     existing=next((c for c in cfg['connectors'] if c['id']==ident),None)
     previous=dict(desired);previous.pop('localAuthTokenFile')
     if existing and existing!=desired and existing!=previous: raise SystemExit('Connector collision: '+ident+'; preserve owner configuration')
@@ -46,7 +46,7 @@ for project in dock studio; do
 Description=Dock project MCP adapter ($project)
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/dock-linux mcp-serve $project $port
+ExecStart=%h/.local/bin/canvas-linux mcp-serve $project $port
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true

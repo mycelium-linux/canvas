@@ -1,0 +1,16 @@
+{
+  "schema_version": 2,
+  "id": "ops-waterfall",
+  "kind": "span_timeline",
+  "title": "Request waterfall",
+  "style": "waterfall",
+  "unit": "ms",
+  "spans": [
+    {"id":"request","label":"POST /v1/respond","start":0,"end":184,"state":"good"},
+    {"id":"auth","label":"authenticate","start":4,"end":19,"parent":"request","state":"good"},
+    {"id":"route","label":"route model","start":21,"end":34,"parent":"request","state":"good"},
+    {"id":"infer","label":"inference","start":35,"end":168,"parent":"request","state":"warning"},
+    {"id":"encode","label":"encode","start":169,"end":184,"parent":"request","state":"good"}
+  ],
+  "data": {"state":"ready","source":"demo:trace","provenance":"demo","window":"one request"}
+}

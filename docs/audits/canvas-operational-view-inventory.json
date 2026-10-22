@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "status": "audit_proposal",
+  "audited_at": "2026-09-08",
+  "runtime_contract": false,
+  "scope_note": "Named widget compositions only; workspace switching and MCP activation contracts are out of scope.",
+  "views": [
+    {
+      "id": "bifrost/runtime",
+      "question": "Are model-serving capacity, latency, cache efficiency, and fallback cost healthy?",
+      "sources": ["prometheus:bifrost"],
+      "widgets": ["health_stat", "queue_timeseries", "completion_rate", "token_rate", "kv_cache_gauge", "latency_quantiles", "prefix_cache_ratio", "fallback_events", "paid_call_cost"]
+    },
+    {
+      "id": "elmers/now",
+      "question": "What is Elmer's doing now, what needs attention, and is it staying within budget?",
+      "sources": ["prometheus:elmers", "sse:elmers"],
+      "widgets": ["loop_health", "in_flight_runs", "attention_list", "recent_outcomes", "workflow_rate", "budget_stat", "model_usage_ranked_bars"]
+    },
+    {
+      "id": "elmers/brain",
+      "question": "Which capabilities and MCP tools are connected and firing right now?",
+      "sources": ["sse:elmers", "sse:mcp_bridge"],
+      "widgets": ["activity_graph", "event_rail", "source_freshness", "selection_inspector"]
+    },
+    {
+      "id": "elmers/agent-economics",
+      "question": "Where are model turns, tokens, budget, and time being spent?",
+      "sources": ["prometheus:elmers"],
+      "widgets": ["budget_headroom", "tokens_ranked_bars", "turns_table", "model_mix", "work_timeseries"]
+    },
+    {
+      "id": "auth/access-health",
+      "question": "Can people authenticate and are access flows succeeding?",
+      "sources": ["prometheus:fpl_auth"],
+      "widgets": ["sso_health", "active_sessions", "live_magic_links", "login_outcomes", "oidc_outcomes", "failure_events"]
+    },
+    {
+      "id": "invoker/traffic",
+      "question": "Are functions available, fast, and serving traffic without errors or cold-start regressions?",
+      "sources": ["prometheus:invoker"],
+      "widgets": ["scrape_health", "function_count", "request_rate", "error_rate", "duration_quantiles", "cold_starts", "traffic_timeseries"]
+    },
+    {
+      "id": "lab/morning-brief",
+      "question": "What requires business attention today?",
+      "sources": ["connector:lab_tracker"],
+      "widgets": ["active_leads", "followups_due", "jobs_in_production", "monthly_revenue", "unpaid_cuts", "overdue_followups", "tasks_today"]
+    },
+    {
+      "id": "lab/pipeline",
+      "question": "Where are leads accumulating or falling out of the pipeline?",
+      "sources": ["connector:lab_tracker"],
+      "widgets": ["pipeline_funnel", "stage_conversion", "industry_ranked_bars", "aging_table"]
+    },
+    {
+      "id": "jarvis/presence",
+      "question": "Can JARVIS see, hear, locate, and announce to the user reliably?",
+      "sources": ["sse:jarvis_presence", "stream:jarvis_audio"],
+      "widgets": ["presence_orb", "camera_preview", "audio_meter", "voice_state_timeline", "connector_freshness", "announcement_history"]
+    },
+    {
+      "id": "panopticon/world-watch",
+      "question": "What locations, entities, and domain signals need attention?",
+      "sources": ["connector:panopticon"],
+      "widgets": ["map", "layer_legend", "watchlist", "freshness", "alert_rail", "selection_inspector"]
+    },
+    {
+      "id": "panopticon/trip-planning",
+      "question": "What route, stops, hazards, weather, tides, and timing matter for this sailing or camping trip?",
+      "sources": ["connector:panopticon", "connector:weather", "connector:marine"],
+      "widgets": ["route_map", "waypoint_list", "weather_timeline", "tide_current_plot", "trip_summary", "contact_card"]
+    },
+    {
+      "id": "ohmos/fleet",
+      "question": "Which devices are healthy, stale, provisioning, or disconnected?",
+      "sources": ["prometheus:ohmos"],
+      "widgets": ["fleet_health", "device_state_table", "state_timeline", "recent_failures", "version_distribution"]
+    }
+  ],
+  "widget_families": [
+    "widget_frame",
+    "stat",
+    "time_series",
+    "histogram",
+    "heatmap",
+    "ranked_bar",
+    "stacked_bar",
+    "state_timeline",
+    "slo_burn_rate",
+    "table",
+    "event_log",
+    "notification_center",
+    "topology_dag",
+    "map_navigation",
+    "contact_card",
+    "audio_meter",
+    "oscilloscope_spectrum",
+    "animation_scene"
+  ]
+}

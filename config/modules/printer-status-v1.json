@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "id": "printer-status-v1",
+  "title": "Printer status",
+  "inputs": [
+    {
+      "id": "serial",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "link",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "state",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "job",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "observed",
+      "kind": "number",
+      "required": false
+    },
+    {
+      "id": "expires",
+      "kind": "number",
+      "required": false
+    },
+    {
+      "id": "progress-percent",
+      "kind": "number",
+      "required": false
+    },
+    {
+      "id": "progress-percenttime",
+      "kind": "number",
+      "required": false
+    },
+    {
+      "id": "remaining-minutes",
+      "kind": "number",
+      "required": false
+    },
+    {
+      "id": "remaining-minutestime",
+      "kind": "number",
+      "required": false
+    },
+    {
+      "id": "layer",
+      "kind": "number",
+      "required": false
+    },
+    {
+      "id": "layertime",
+      "kind": "number",
+      "required": false
+    },
+    {
+      "id": "layers",
+      "kind": "number",
+      "required": false
+    },
+    {
+      "id": "layerstime",
+      "kind": "number",
+      "required": false
+    },
+    {
+      "id": "nozzle-c",
+      "kind": "number",
+      "required": false
+    },
+    {
+      "id": "nozzle-ctime",
+      "kind": "number",
+      "required": false
+    },
+    {
+      "id": "nozzle-target-c",
+      "kind": "number",
+      "required": false
+    },
+    {
+      "id": "nozzle-target-ctime",
+      "kind": "number",
+      "required": false
+    },
+    {
+      "id": "bed-c",
+      "kind": "number",
+      "required": false
+    },
+    {
+      "id": "bed-ctime",
+      "kind": "number",
+      "required": false
+    },
+    {
+      "id": "bed-target-c",
+      "kind": "number",
+      "required": false
+    },
+    {
+      "id": "bed-target-ctime",
+      "kind": "number",
+      "required": false
+    }
+  ],
+  "capabilities": {
+    "write_scene": true,
+    "read_inputs": [
+      "serial",
+      "link",
+      "state",
+      "job",
+      "observed",
+      "expires",
+      "progress-percent",
+      "progress-percenttime",
+      "remaining-minutes",
+      "remaining-minutestime",
+      "layer",
+      "layertime",
+      "layers",
+      "layerstime",
+      "nozzle-c",
+      "nozzle-ctime",
+      "nozzle-target-c",
+      "nozzle-target-ctime",
+      "bed-c",
+      "bed-ctime",
+      "bed-target-c",
+      "bed-target-ctime"
+    ],
+    "read_theme": true
+  },
+  "actions": []
+}

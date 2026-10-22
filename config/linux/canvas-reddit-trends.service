@@ -1,0 +1,19 @@
+[Unit]
+Description=Canvas Reddit war-room feed
+After=network-online.target canvas-surface.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ajm
+Environment=HOME=/home/ajm
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStart=/usr/local/bin/canvas-reddit-trends --config /etc/canvas/reddit-trends.json
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,19 @@
+[Unit]
+Description=Fan out the libretro H.264 transport to Canvas edges
+After=network-online.target
+Wants=network-online.target
+Before=canvas-media-edge.service
+
+[Service]
+Type=simple
+User=ajm
+ExecStart=/usr/bin/gst-launch-1.0 -q tcpserversrc host=127.0.0.1 port=5005 ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=2000000000 leaky=downstream ! tcpserversink host=127.0.0.1 port=6005 sync=false
+Restart=always
+RestartSec=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+{
+  "source": "https://github.com/FuturePresentLabs/coherence/tree/407f86638f5879f687b5fbe4321e897ae67511d3/crates/coherence-native",
+  "revision": "407f86638f5879f687b5fbe4321e897ae67511d3",
+  "captured": "2026-10-05",
+  "files": {
+    "Cargo.toml": "b0cb8e9ba651232c9e47892b28eef623ca855b24b4ebf6d349db2d9bc5cce6d7",
+    "tests/adapters.rs": "6446687ba84db04fbf27cb6b5b826b73204924e6a2bf42f41b3f64662bbae8b3",
+    "README.md": "c2086c32abf79226cdc67394a92dbc86e25a898ecdcde343c92f41956ba56c0f",
+    "examples/shared-theme.rs": "e4297b387ec55ae1c9a5dc3fb0fb3d624b16142429d889502aac85db2195c56c",
+    "src/egui.rs": "3fc3ce7a97f32bc7e006558613ba0088424e9b1abb13abd3445e23b0fd5a1383",
+    "src/gfx.rs": "5167cadbc59cd481c67c9cce485a2b0f86087414ec562d70406059059dbabb5b",
+    "src/lib.rs": "8f2e3f8211129aadf496a0b52bed449379d5311483976a48ef2e18b230abb03d"
+  }
+}

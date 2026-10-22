@@ -1,0 +1,38 @@
+version = 1
+resource = []
+experiments = []
+
+[project]
+id = "dock"
+name = "Canvas"
+purpose = "The shared visualization plane between a person, their agents, and the systems that own the data. Presents surfaces; never owns the data behind them."
+owner = "Avery Wagar"
+status = "active"
+
+[appearance]
+colorway = "profile"
+
+
+[[goals]]
+id = "canvas-pi-display"
+outcome = "Canvas runs as a dumb client on Raspberry Pi 3B+ with low GPU load"
+success_criteria = "Canvas displays on Pi 3B+ with <50% CPU, no shader-heavy backgrounds, images load, touch works"
+status = "queued"
+
+[[goals]]
+id = "canvas-now-playing"
+outcome = "Sexy Now Playing widget for music integration"
+success_criteria = "Widget shows current track, artwork, playback controls from Spotify/Apple Music, styled with Coherence"
+status = "queued"
+
+[[goals]]
+id = "canvas-alfalfa-widgets"
+outcome = "Alfalfa stats, dirty tree, active beads and agents as Canvas widgets"
+success_criteria = "Widgets show real-time per-project: active agents, running/ready beads, dirty worktrees, pool capacity. Updates via SSE."
+status = "queued"
+
+[[goals]]
+id = "canvas-screen-layouts"
+outcome = "Managed screen layout system with infinite flexible layouts per screen"
+success_criteria = "Each display independently configurable with zones/layouts, saved/loaded, screens dynamically reassignable"
+status = "queued"

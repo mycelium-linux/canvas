@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>dev.fpl.panopticon-bus-tunnel</string>
+<key>ProgramArguments</key><array><string>/usr/bin/ssh</string><string>-N</string><string>-o</string><string>BatchMode=yes</string><string>-o</string><string>ExitOnForwardFailure=yes</string><string>-o</string><string>ServerAliveInterval=15</string><string>-o</string><string>ServerAliveCountMax=3</string><string>-L</string><string>127.0.0.1:18810:127.0.0.1:18790</string><string>agora-one</string></array>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer>
+<key>StandardErrorPath</key><string>/Users/ajmwagar/.config/canvas-panopticon/tunnel.log</string>
+</dict></plist>

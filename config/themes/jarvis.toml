@@ -1,0 +1,54 @@
+schema_version = 1
+id = "jarvis"
+name = "JARVIS"
+subtitle = "Luminous instrumentation"
+
+[motion]
+micro_ms = 95
+transition_ms = 260
+entrance_ms = 380
+stagger_ms = 55
+easing = "fluid"
+
+[palette]
+background = "#020a11"
+background_strong = "#041420"
+surface = "#071d29"
+surface_muted = "#0a2a39"
+text = "#dcf9ff"
+text_muted = "#75acba"
+primary = "#31e6ff"
+success = "#56f2c0"
+warning = "#ffc857"
+danger = "#ff5970"
+info = "#58b8ff"
+border = "#13485b"
+border_strong = "#27a8c2"
+
+[charts]
+categorical = ["#31e6ff", "#9b7cff", "#ff72d2", "#72f4a8", "#ffd166", "#5aa9ff"]
+
+[chrome]
+titlebar_height = 26.0
+control_style = "glyphs"
+title_alignment = "left"
+border_width = 1.5
+border_radius = 3.0
+shadow_blur = 28.0
+shadow_offset = 5.0
+shadow_opacity = 0.42
+header_opacity = 0.72
+uppercase_titles = true
+focus_edge = "top"
+
+[effects]
+glow = 0.46
+scanlines = 0.04
+noise = 0.01
+corner_style = "cut"
+density = 0.94
+
+[typography]
+font_family = "Rajdhani, Eurostile, system-ui, sans-serif"
+mono_family = "Berkeley Mono, IBM Plex Mono, ui-monospace, monospace"
+letter_spacing = 0.35

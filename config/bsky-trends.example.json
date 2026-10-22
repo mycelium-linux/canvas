@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "owner": "feeds",
+  "stream": "bsky-war-room",
+  "refresh_seconds": 30,
+  "max_items": 12,
+  "recency_half_life_minutes": 90,
+  "weights": { "likes": 1, "reposts": 3, "replies": 2, "quotes": 3, "bookmarks": 0 },
+  "saved": [{
+    "id": "home",
+    "label": "Following",
+    "query": "home",
+    "topics": [],
+    "accounts": [],
+    "include": [],
+    "exclude": ["airdrop", "giveaway"],
+    "language": null
+  }]
+}

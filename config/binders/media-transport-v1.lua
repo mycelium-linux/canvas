@@ -1,0 +1,4 @@
+local p=event.payload
+if type(p)~="table" or type(p.route)~="table" then error("media-transport-v1 requires route") end
+local route=canvas.array(); for _,hop in ipairs(p.route) do route[#route+1]=tostring(hop) end
+return {kind="snapshot",widget={kind="media_transport",title=tostring(p.title or "Media transport"),source=tostring(p.source or event.source or "media"),codec=tostring(p.codec or "unknown"),width=math.max(1,math.floor(tonumber(p.width) or 1)),height=math.max(1,math.floor(tonumber(p.height) or 1)),fps=tonumber(p.fps) or 0,bitrate_kbps=tonumber(p.bitrate_kbps) or 0,buffer_ms=tonumber(p.buffer_ms) or 0,delay_ms=tonumber(p.delay_ms) or 0,route=route,state=p.state and tostring(p.state) or nil},data={state=p.data_state or "ready",source=tostring(p.source or event.source or "media"),provenance="live"}}

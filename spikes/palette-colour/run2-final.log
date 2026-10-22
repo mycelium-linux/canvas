@@ -1,0 +1,141 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling palette-colour-spike v0.0.0 (/Users/ajmwagar/src/fpl/dock/spikes/palette-colour)
+warning: function `hand_oklch` is never used
+   --> src/main.rs:101:4
+    |
+101 | fn hand_oklch(v: PalOklch<f32>) -> hand::Oklch {
+    |    ^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `palette-colour-spike` (bin "palette-colour-spike") generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 43s
+     Running `target/debug/palette-colour-spike`
+SPIKE palette 0.7.7 vs hand-written OKLCH in crates/canvas-widgets/src/live.rs
+
+== 1. sRGB -> OKLCH agreement on real theme roles ==
+   (Canvas uses Ottosson's composed sRGB<->Oklab matrices;
+    palette routes LinSrgb -> XYZ D65 -> Oklab. Same space, different arithmetic.)
+  78 role colours across 6 palettes
+  worst dL   = 0.0000001   (coherence-dark/primary [154, 175, 255])
+  worst dC   = 0.0000002   (coherence-dark/success [126, 211, 161])
+  worst dHue = 0.00049 deg (catppuccin-latte/surface_muted [188, 192, 204])
+  worst round-trip dE2000 = 0.00009 (catppuccin-latte/surface [204, 208, 218])
+
+== 2. Series ramp: hand-written vs each route ==
+palette                         i  hand     | pal+bsearch dE2000 | pal+Clamp   dE2000 | pal+Okhsl   dE2000 | hand+clip   dE2000
+coherence-dark                  0  #9aafff  | #9aafff      0.000 | #9aafff      0.000 | #9aafff      0.000 | #9aafff      0.000
+                                1  #d8c7ff  | #d8c7ff      0.000 | #dcc0ff      2.532 | #d4cde5      9.366 | #dcc0ff      2.532
+                                2  #da99dd  | #da99dd      0.000 | #da99dd      0.000 | #da99dd      0.000 | #da99dd      0.000
+                                3  #ffc1a9  | #ffc1a9      0.000 | #ffb894      4.300 | #dccec9     13.995 | #ffb894      4.300
+                                4  #acbf65  | #acbf65      0.000 | #acbf65      0.000 | #acbf65      0.000 | #acbf65      0.000
+                                5  #aad7ff  | #aad7ff      0.000 | #8ed9ff      6.004 | #c4d4e2      8.710 | #8ed9ff      6.004
+coherence-light                 0  #3656b2  | #3656b2      0.000 | #3656b2      0.000 | #3656b2      0.000 | #3656b2      0.000
+                                1  #7359bc  | #7359bc      0.000 | #7359bc      0.000 | #7359bc      0.000 | #7359bc      0.000
+                                2  #813b92  | #813b92      0.000 | #813b92      0.000 | #813b92      0.000 | #813b92      0.000
+                                3  #a94380  | #a94380      0.000 | #a94380      0.000 | #a94380      0.000 | #a94380      0.000
+                                4  #5f6400  | #5f6401      0.127 | #606400      0.410 | #5f6400      0.000 | #606400      0.410
+                                5  #017f7a  | #017f7a      0.000 | #008881      3.088 | #007f7a      0.015 | #008881      3.088
+catppuccin-mocha                0  #cba6f7  | #cba6f7      0.000 | #cba6f7      0.000 | #cba6f7      0.000 | #cba6f7      0.000
+                                1  #ffc0f6  | #ffc0f6      0.000 | #ffbbfc      2.484 | #ffc0f6      0.048 | #ffbbfc      2.484
+                                2  #f8a275  | #f8a275      0.000 | #f8a275      0.000 | #f8a275      0.000 | #f8a275      0.000
+                                3  #78f2d3  | #78f2d3      0.000 | #78f2d3      0.000 | #78f2d3      0.000 | #78f2d3      0.000
+                                4  #40d0d9  | #40d0d9      0.000 | #40d0d9      0.000 | #40d0d9      0.000 | #40d0d9      0.000
+                                5  #a4e2ff  | #a4e2ff      0.000 | #7be7ff      6.860 | #bedeed      6.190 | #7be7ff      6.860
+catppuccin-latte                0  #7e5cbf  | #7e5cbf      0.000 | #7e5cbf      0.000 | #7e5cbf      0.000 | #7e5cbf      0.000
+                                1  #b263b9  | #b263b9      0.000 | #b263b9      0.000 | #b263b9      0.000 | #b263b9      0.000
+                                2  #b1477e  | #b1477e      0.000 | #b1477e      0.000 | #b1477e      0.000 | #b1477e      0.000
+                                3  #009e74  | #009e74      0.000 | #00a271      1.838 | #009e74      0.002 | #00a271      1.838
+                                4  #008482  | #008482      0.000 | #008c8b      2.947 | #008482      0.011 | #008c8b      2.947
+                                5  #0096b5  | #0096b5      0.000 | #0099c4      3.790 | #0094ff     16.763 | #0099c4      3.790
+tokyo-night                     0  #7aa2f7  | #7aa2f7      0.000 | #7aa2f7      0.000 | #7aa2f7      0.000 | #7aa2f7      0.000
+                                1  #bfb4ff  | #bfb4ff      0.000 | #c0b0ff      1.220 | #bfbdd1     13.536 | #c0b0ff      1.220
+                                2  #c689da  | #c689da      0.000 | #c689da      0.000 | #c689da      0.000 | #c689da      0.000
+                                3  #fb9cd4  | #fb9cd4      0.000 | #fb9cd4      0.000 | #fb9cd4      0.000 | #fb9cd4      0.000
+                                4  #47bd89  | #47bd89      0.000 | #47bd89      0.000 | #47bd89      0.000 | #47bd89      0.000
+                                5  #2fdace  | #2fdace      0.000 | #2fdace      0.000 | #2fdace      0.000 | #2fdace      0.000
+primary-collides-with-danger    0  #a83f04  | #a83f04      0.000 | #a83f04      0.000 | #a83f04      0.000 | #a83f04      0.000
+                                1  #6f8101  | #6f8101      0.000 | #6e8200      0.421 | #6f8100      0.070 | #6e8200      0.421
+                                2  #016aa9  | #016aa9      0.000 | #0069b4      1.838 | #006aaa      0.029 | #0069b4      1.838
+                                3  #5a6dce  | #5a6dce      0.000 | #5a6dce      0.000 | #5a6dce      0.000 | #5a6dce      0.000
+                                4  #724cad  | #724cad      0.000 | #724cad      0.000 | #724cad      0.000 | #724cad      0.000
+                                5  #a253a6  | #a253a6      0.000 | #a253a6      0.000 | #a253a6      0.000 | #a253a6      0.000
+
+  pal+bsearch  mean dE2000 = 0.0035   worst = 0.1266  (coherence-light series 4)
+  pal+Clamp    mean dE2000 = 1.0481   worst = 6.8596  (catppuccin-mocha series 5)
+  pal+Okhsl    mean dE2000 = 1.9093   worst = 16.7625  (catppuccin-latte series 5)
+  hand+clip    mean dE2000 = 1.0481   worst = 6.8596  (catppuccin-mocha series 5)
+  reference: dE2000 1.0 = JND for adjacent patches; 2.3 = noticeable at a glance
+
+== 3. Gamut policy on out-of-gamut OKLCH ==
+   palette 0.7.7 exposes NO public gamut-mapping API. `Clamp` clamps
+   components; the Ottosson cusp approximation exists only as the private
+   `ok_utils::find_gamut_intersection`, reachable in public API only by
+   round-tripping through Okhsl/Okhsv and clamping saturation by hand.
+
+  case                                 L     C    hue  oog | hand      d_hue | pal+bsearch  d_hue | pal+Clamp    d_hue | pal+Okhsl    d_hue | hand+clip    d_hue
+  light saturated blue              0.75 0.200  264.0  yes | #85acff    0.00 | #85acff       0.00 | #6ba7ff       5.87 | #84acff       0.00 | #6ba7ff       5.87
+  light saturated blue (brighter)   0.85 0.200  264.0  yes | #b6ceff    0.00 | #b6ceff       0.00 | #8ac8ff      17.84 | #188eff      10.67 | #8ac8ff      17.84
+  mid saturated blue                0.50 0.250  264.0   no | #104aee    0.00 | #104aee       0.00 | #104aee       0.00 | #104aee       0.00 | #104aee       0.00
+  light saturated violet            0.80 0.220  300.0  yes | #c9acff    0.00 | #c9acff       0.00 | #d596ff      10.87 | #c4b5e2       0.00 | #d596ff      10.87
+  light saturated red               0.75 0.220   25.0  yes | #ff847d    0.00 | #ff847d       0.00 | #ff6662       0.63 | #ff847d       0.00 | #ff6662       0.63
+  light saturated green             0.92 0.250  145.0  yes | #a2ffa5    0.00 | #a2ffa5       0.00 | #59ff6e       0.36 | #f3dcf4     180.00 | #59ff6e       0.36
+
+  clipping's worst hue shift in the blue region (h 240-290): 49.10 deg  (L=0.95 C=0.26 h=253)
+  sweep: 215225 of 332640 OKLCH samples fall outside sRGB
+    pal+bsearch  worst hue shift   0.00 deg (L=0.94 C=0.11 h=260         ) | worst dE2000 vs hand   0.581 (L=0.30 C=0.27 h=264)
+    pal+Clamp    worst hue shift  64.77 deg (L=0.30 C=0.32 h=94          ) | worst dE2000 vs hand  31.392 (L=0.95 C=0.32 h=38)
+    pal+Okhsl    worst hue shift 180.00 deg (L=0.30 C=0.10 h=52          ) | worst dE2000 vs hand  97.056 (L=0.58 C=0.31 h=344)
+    hand+clip    worst hue shift  64.77 deg (L=0.30 C=0.32 h=94          ) | worst dE2000 vs hand  31.392 (L=0.95 C=0.32 h=38)
+
+== 4. Does the status-hue guarantee survive each route? ==
+   guard = 25 deg either side of every status hue; live.rs asserts >= 24 deg
+  coherence-dark                 hand 30.68 holds    | pal+bsearch 30.68 holds    s3/danger | pal+Clamp 16.59 VIOLATED s5/info | pal+Okhsl 30.68 holds    s3/danger | hand+clip 16.59 VIOLATED s5/info
+  coherence-light                hand 27.42 holds    | pal+bsearch 27.42 holds    s5/info | pal+Clamp 28.37 holds    s5/info | pal+Okhsl 27.42 holds    s5/info | hand+clip 28.37 holds    s5/info
+  catppuccin-mocha               hand 31.33 holds    | pal+bsearch 31.33 holds    s1/danger | pal+Clamp 32.05 holds    s3/success | pal+Okhsl 31.33 holds    s1/danger | hand+clip 32.05 holds    s3/success
+  catppuccin-latte               hand 25.55 holds    | pal+bsearch 25.55 holds    s3/success | pal+Clamp 22.77 VIOLATED s3/success | pal+Okhsl 11.55 VIOLATED s5/info | hand+clip 22.77 VIOLATED s3/success
+  tokyo-night                    hand 26.07 holds    | pal+bsearch 26.07 holds    s3/danger | pal+Clamp 26.07 holds    s3/danger | pal+Okhsl 26.07 holds    s3/danger | hand+clip 26.07 holds    s3/danger
+  primary-collides-with-danger   hand 25.00 holds    | pal+bsearch 25.00 holds    s0/danger | pal+Clamp 25.00 holds    s0/danger | pal+Okhsl 25.00 holds    s0/danger | hand+clip 25.00 holds    s0/danger
+
+== 5. Stale-value chroma drain (drain(palette, 0.35)) ==
+  worst dE2000 across every role of every palette: 0.60286  (tokyo-night/background_strong)
+
+== 6. What Canvas would and would not stop maintaining ==
+  to_oklch                                         replaced by palette
+  oklch_to_linear                                  replaced by palette
+  srgb_decode / srgb_encode                        replaced by palette
+  in_srgb_gamut                                    replaced by palette
+  from_oklch (gamut policy)                        STAYS hand-written
+  categorical_arcs                                 STAYS hand-written
+  arc_span / arc_hue / arc_offset                  STAYS hand-written
+  series_colors                                    STAYS hand-written
+  drain                                            STAYS hand-written
+  STATUS_HUE_GUARD and the chroma/lightness rules  STAYS hand-written
+
+== 7. Is the ramp's own separation floor (0.05 Oklab) perceptually real? ==
+  palette                          min dEok min dE2000 | stale dEok stale dE2000
+  coherence-dark                     0.0683     11.177 |     0.0683     11.301
+  coherence-light                    0.0901     11.465 |     0.0686      9.615
+  catppuccin-mocha                   0.0952     12.479 |     0.0691     10.819
+  catppuccin-latte                   0.0843     12.415 |     0.0780     10.986
+  tokyo-night                        0.1054     12.628 |     0.0718     10.755
+  primary-collides-with-danger       0.0909     11.502 |     0.0711      9.923
+
+  worst live ramp: dE2000 11.177 (coherence-dark)
+  worst stale ramp: dE2000 9.615 (coherence-light)
+  reference: dE2000 ~1 = JND; a categorical ramp wants >= ~10 between neighbours
+
+== code footprint (measured in crates/canvas-widgets/src/live.rs) ==
+  Oklch struct                         5 lines  -> palette::Oklch
+  to_oklch                            16 lines  -> Oklch::from_color(Srgb)
+  oklch_to_linear + in_srgb_gamut     16 lines  -> Srgb::from_color + is_within_bounds
+  srgb_decode / srgb_encode           14 lines  -> palette encoding
+  from_oklch gamut policy             17 lines  -> STAYS - palette has none
+  series_colors                       26 lines  -> STAYS
+  categorical_arcs                    31 lines  -> STAYS
+  arc_span / arc_hue / arc_offset     28 lines  -> STAYS
+  drain + channel_u8                  32 lines  -> STAYS
+  ramp constants                       8 lines  -> STAYS
+  replaceable 51 lines of 193; 142 lines stay hand-written either way

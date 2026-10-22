@@ -1,0 +1,19 @@
+{
+  "bus": {
+    "installation_id": "lab",
+    "producer_id": "canvas-printers",
+    "hub_endpoint": "127.0.0.1:18790",
+    "token_file": "/absolute/private/unibus/canvas-printers.token",
+    "zones": [
+      "lab"
+    ],
+    "capabilities": [],
+    "schema_version": 2
+  },
+  "printers": {
+    "bambu:REPLACE_SERIAL_1": "lab-printer-1",
+    "bambu:REPLACE_SERIAL_2": "lab-printer-2",
+    "bambu:REPLACE_SERIAL_3": "lab-printer-3"
+  },
+  "project_id": "printers"
+}

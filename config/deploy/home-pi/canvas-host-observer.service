@@ -1,0 +1,18 @@
+[Unit]
+Description=Canvas live home-pi service observer
+After=canvas-surface.service
+Wants=canvas-surface.service
+
+[Service]
+Type=simple
+User=ajm
+Environment=HOME=/home/ajm
+Environment=XDG_CONFIG_HOME=/home/ajm/.config
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStart=/usr/local/bin/canvas-host-observer
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "id": "music-nowplaying",
+  "version": "1.0.0",
+  "source": "sse:music",
+  "binder": "music-nowplaying-v1",
+  "widget_kind": "stat",
+  "provenance": "live",
+  "refresh_ms": 2000
+}

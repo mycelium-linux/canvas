@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "id": "tv-conways",
+  "project_id": "conways",
+  "revision": 1,
+  "theme": {"source": "project"},
+  "chrome": {"canvas_padding": 0, "surface_gap": 0, "title": "hidden"},
+  "surfaces": [{"id": "life", "title": "Conway’s Game of Life", "content": {"kind": "conways"}}],
+  "layout": {"kind": "surface", "surface_id": "life"},
+  "pages": [], "active_page": 0, "bindings": [], "focused_surface_id": null
+}

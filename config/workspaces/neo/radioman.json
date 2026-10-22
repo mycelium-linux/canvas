@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "id": "radioman-live",
+  "project_id": "radioman",
+  "revision": 1,
+  "theme": { "source": "project" },
+  "background": { "kind": "shader", "shader_id": "smoke-rings", "speed": 0.16 },
+  "chrome": { "title": "hidden", "canvas_padding": 12, "surface_gap": 10 },
+  "surfaces": [{
+    "id": "ism-915-spectrum", "title": "915 MHz ISM",
+    "content": { "kind": "widget", "spec": {
+      "schema_version": 2, "id": "ism-915-spectrum", "kind": "spectral_waterfall",
+      "title": "915 MHz · ISM / LoRa", "rows": [], "min_frequency": 913.976,
+      "max_frequency": 916.024, "unit": "MHz", "history": 360,
+      "theme": null, "refresh_ms": 50, "chrome": "frameless",
+      "data": { "state": "loading", "source": "radioman/spectrum", "observed_at": null, "window": "live", "detail": "Awaiting Radioman RF frames", "provenance": "live" }
+    }},
+    "inputs": [{ "id": "spectrum", "contract": "canvas.widget.snapshot.v1" }]
+  }],
+  "layout": { "kind": "surface", "surface_id": "ism-915-spectrum" },
+  "bindings": [{
+    "id": "radioman-spectrum-live",
+    "source": { "owner": "radioman", "stream": "spectrum", "contract": "radioman.spectrum.v1" },
+    "target": { "surface_id": "ism-915-spectrum", "input_id": "spectrum" },
+    "adapter": "spectral-frame-v1", "delivery": { "mode": "latest" }
+  }],
+  "pages": [], "active_page": 0, "focused_surface_id": null
+}

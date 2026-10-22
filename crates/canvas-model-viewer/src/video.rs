@@ -1,0 +1,739 @@
+//! Retained WGPU video surface for the native model viewer.
+//!
+//! The portable producer contract remains an atomically replaced RGBA frame.
+//! Unlike iced's immutable image handles, this widget allocates one GPU texture
+//! and updates it in place. Platform-native imports (DMA-BUF on Linux, IOSurface
+//! on macOS, shared handles on Windows) can implement the same source boundary
+//! later without changing Canvas documents or layout code.
+
+use iced::widget::shader::{self, Shader};
+use iced::{Element, Length, Rectangle};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+use unibus_media::VideoAlphaMask;
+
+use canvas_core::external_surface::SurfaceTransport;
+
+const REDRAW_INTERVAL: std::time::Duration = std::time::Duration::from_millis(42);
+
+/// Size of the shader's `Uniforms`: two vec2s, staleness, and scalar padding.
+///
+/// The WGSL struct, this buffer and the bind group layout's `min_binding_size`
+/// must agree. Growing the struct without the layout aborts the process on
+/// pipeline creation rather than failing soft.
+const UNIFORM_BYTES: u64 = fpl_gfx::retained_video::UNIFORM_BYTES;
+
+/// A producer at 24 fps that misses this much is not merely between frames.
+const FRESH_SECONDS: f32 = 3.0;
+/// Fully drained by here: no feed this quiet is still reporting the present.
+const STALE_SECONDS: f32 = 20.0;
+
+/// How dead a feed looks, from its silence.
+///
+/// Unreadable metadata counts as fully stale rather than fully fresh: a
+/// surface that cannot say when it last moved is not evidence that it just
+/// did, and this is what a security board is read from.
+fn staleness_of(age: std::time::Duration) -> f32 {
+    let seconds = age.as_secs_f32();
+    ((seconds - FRESH_SECONDS) / (STALE_SECONDS - FRESH_SECONDS)).clamp(0.0, 1.0)
+}
+
+/// What the surface saw, in surface coordinates. The widget reports gestures
+/// and refuses to interpret them: where the camera ends up is decided by the
+/// orbit controller, which is testable without a window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OrbitEvent {
+    Press(iced::Point),
+    Drag(iced::Point, iced::Size),
+    Release,
+    Zoom(f32),
+}
+
+/// Emits an application message for a gesture. `Arc` rather than a plain
+/// closure because iced rebuilds the widget tree constantly and the hook is
+/// cloned with it.
+type OrbitHook<Message> = std::sync::Arc<dyn Fn(OrbitEvent) -> Message + Send + Sync>;
+
+struct Program<Message> {
+    source: FrameSource,
+    /// `None` for a surface that is only being watched, such as a camera.
+    on_orbit: Option<OrbitHook<Message>>,
+}
+
+impl<Message> std::fmt::Debug for Program<Message> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Program")
+            .field("source", &self.source)
+            .field("orbitable", &self.on_orbit.is_some())
+            .finish()
+    }
+}
+
+impl<Message> Clone for Program<Message> {
+    fn clone(&self) -> Self {
+        Self {
+            source: self.source.clone(),
+            on_orbit: self.on_orbit.clone(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct State {
+    ticket: u64,
+    /// Whether the press that began a drag landed on this surface.
+    dragging: bool,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self {
+            ticket: NEXT.fetch_add(1, Ordering::Relaxed),
+            dragging: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Primitive {
+    ticket: u64,
+    source: FrameSource,
+}
+
+#[derive(Debug, Clone)]
+enum FrameSource {
+    File {
+        path: PathBuf,
+        width: u32,
+        height: u32,
+    },
+    External(crate::external_surface::ExternalSurfaceFrame),
+}
+
+struct TextureState {
+    texture: wgpu::Texture,
+    alpha_texture: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
+    uniform: wgpu::Buffer,
+    width: u32,
+    height: u32,
+    stamp: Option<(SystemTime, u64)>,
+    external_stamp: Option<u64>,
+    generation: u64,
+    /// Last (expected, actual) byte count reported, so a persistent mismatch
+    /// is one line rather than one per frame.
+    reported_mismatch: Option<(usize, usize)>,
+    source_generation: u64,
+    alpha_stamp: Option<(SystemTime, SystemTime, u64)>,
+    native_hold: Option<DeferredNativeHold>,
+}
+
+struct DeferredNativeHold {
+    surface: Option<std::sync::Arc<crate::native_surface::NativeSurface>>,
+    queue: wgpu::Queue,
+}
+
+impl Drop for DeferredNativeHold {
+    fn drop(&mut self) {
+        if let Some(surface) = self.surface.take() {
+            // Replacement/trim occurs in prepare, before this frame's draw.
+            // Earlier uses of this texture are in already-submitted work.
+            self.queue.on_submitted_work_done(move || drop(surface));
+        }
+    }
+}
+
+struct Pipeline {
+    render_pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    textures: BTreeMap<u64, TextureState>,
+    generation: u64,
+}
+
+impl Pipeline {
+    fn texture_state(
+        &self,
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        source_generation: u64,
+        format: wgpu::TextureFormat,
+        texture: Option<wgpu::Texture>,
+    ) -> TextureState {
+        let texture = texture.unwrap_or_else(|| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Canvas retained video frame"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let alpha_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Canvas retained video alpha plane"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let alpha_view = alpha_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Canvas retained video uniforms"),
+            size: UNIFORM_BYTES,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Canvas retained video bind group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&alpha_view),
+                },
+            ],
+        });
+        TextureState {
+            texture,
+            alpha_texture,
+            bind_group,
+            uniform,
+            width,
+            height,
+            stamp: None,
+            external_stamp: None,
+            generation: self.generation,
+            reported_mismatch: None,
+            source_generation,
+            alpha_stamp: None,
+            native_hold: None,
+        }
+    }
+}
+
+impl<Message> shader::Program<Message> for Program<Message> {
+    type State = State;
+    type Primitive = Primitive;
+
+    fn update(
+        &self,
+        _state: &mut Self::State,
+        event: &iced::Event,
+        _bounds: Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Option<iced::widget::Action<Message>> {
+        // A file changing does not itself wake iced. Let the presentation
+        // primitive own its redraw cadence, just like the animated background,
+        // without mutating the workspace revision on every video frame.
+        if let iced::Event::Window(iced::window::Event::RedrawRequested(now)) = event {
+            let interval = match &self.source {
+                FrameSource::External(frame) if frame.native_surface.is_some() => {
+                    std::time::Duration::from_millis(33)
+                }
+                _ => REDRAW_INTERVAL,
+            };
+            return Some(iced::widget::Action::request_redraw_at(
+                *now + interval,
+            ));
+        }
+        let Some(hook) = self.on_orbit.as_ref() else {
+            return None;
+        };
+        let surface = iced::Size::new(_bounds.width, _bounds.height);
+        // Only gestures that started on this surface are followed. A press
+        // elsewhere that happens to drag across a model must not seize its
+        // camera, and the button release that ends such a drag arrives here
+        // too -- releasing a grab this surface never took would be harmless
+        // but releasing one it *did* take, because another surface saw the
+        // press, would strand the camera mid-turn.
+        match event {
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
+                let position = _cursor.position_in(_bounds)?;
+                _state.dragging = true;
+                Some(iced::widget::Action::publish(hook(OrbitEvent::Press(
+                    position,
+                ))))
+            }
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. }) if _state.dragging => {
+                // Deliberately not `position_in`: a drag that leaves the
+                // surface keeps turning the model until the button comes up,
+                // which is what makes a long sweep possible on a small tile.
+                let position = _cursor.position()?;
+                let local = iced::Point::new(position.x - _bounds.x, position.y - _bounds.y);
+                Some(iced::widget::Action::publish(hook(OrbitEvent::Drag(
+                    local, surface,
+                ))))
+            }
+            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left))
+                if _state.dragging =>
+            {
+                _state.dragging = false;
+                Some(iced::widget::Action::publish(hook(OrbitEvent::Release)))
+            }
+            iced::Event::Mouse(iced::mouse::Event::WheelScrolled { delta }) => {
+                _cursor.position_in(_bounds)?;
+                let steps = match delta {
+                    iced::mouse::ScrollDelta::Lines { y, .. } => *y,
+                    // Pixel deltas are far finer grained than a notched wheel;
+                    // scaled so a trackpad swipe is a comparable amount of zoom.
+                    iced::mouse::ScrollDelta::Pixels { y, .. } => *y / 50.0,
+                };
+                (steps != 0.0).then(|| iced::widget::Action::publish(hook(OrbitEvent::Zoom(steps))))
+            }
+            _ => None,
+        }
+    }
+
+    fn draw(
+        &self,
+        state: &Self::State,
+        _cursor: iced::mouse::Cursor,
+        _bounds: Rectangle,
+    ) -> Self::Primitive {
+        Primitive {
+            ticket: state.ticket,
+            source: self.source.clone(),
+        }
+    }
+}
+
+impl shader::Pipeline for Pipeline {
+    fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+        let fpl_gfx::retained_video::Pipeline {
+            render_pipeline,
+            bind_group_layout,
+            sampler,
+        } = fpl_gfx::retained_video::Pipeline::new(device, format);
+        Self {
+            render_pipeline,
+            bind_group_layout,
+            sampler,
+            textures: BTreeMap::new(),
+            generation: 0,
+        }
+    }
+
+    fn trim(&mut self) {
+        self.generation = self.generation.saturating_add(1);
+        let oldest = self.generation.saturating_sub(2);
+        self.textures.retain(|_, value| value.generation >= oldest);
+    }
+}
+
+impl Primitive {
+    /// The size to read frames at: what the decoder published, or what the
+    /// document guessed if it has not published yet.
+    ///
+    /// The decoder wins because it is the process that chose the size. The
+    /// document's value is only a starting guess, and when the two disagreed
+    /// the old behaviour was to keep believing the document and discard every
+    /// frame — a surface frozen on its last good picture with nothing logged.
+    fn resolved_size(&self) -> (u32, u32) {
+        match &self.source {
+            FrameSource::File {
+                path,
+                width,
+                height,
+            } => canvas_core::video_frame_size_file_for(path)
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .and_then(|text| canvas_core::parse_frame_size(&text))
+                .unwrap_or((*width, *height)),
+            FrameSource::External(frame) => (frame.descriptor.width, frame.descriptor.height),
+        }
+    }
+
+    fn source_generation(&self) -> u64 {
+        match &self.source {
+            FrameSource::File { .. } => 0,
+            FrameSource::External(frame) => frame.descriptor.generation,
+        }
+    }
+}
+
+impl shader::Primitive for Primitive {
+    type Pipeline = Pipeline;
+
+    fn prepare(
+        &self,
+        pipeline: &mut Self::Pipeline,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        bounds: &Rectangle,
+        _viewport: &shader::Viewport,
+    ) {
+        let (source_width, source_height) = self.resolved_size();
+        let needs_texture = pipeline.textures.get(&self.ticket).is_none_or(|state| {
+            state.width != source_width
+                || state.height != source_height
+                || state.source_generation != self.source_generation()
+        });
+        // iced may preserve shader widget state when a workspace inserts or
+        // replaces a surface at the same tree position. The retained ticket is
+        // therefore stable across a source-size change; recreate the texture
+        // before uploading instead of asking wgpu to overrun the old extent.
+        if needs_texture {
+            let (format, imported) = match &self.source {
+                FrameSource::File { .. } => (wgpu::TextureFormat::Rgba8UnormSrgb, None),
+                FrameSource::External(frame) => {
+                    let descriptor = &frame.descriptor;
+                    let format = match crate::external_surface::wgpu_format(
+                        descriptor.format,
+                        descriptor.color_space,
+                    ) {
+                        Ok(format) => format,
+                        Err(error) => {
+                            eprintln!(
+                                "Canvas external surface {} generation {}: {error}",
+                                descriptor.source_id, descriptor.generation
+                            );
+                            return;
+                        }
+                    };
+                    let imported = match &descriptor.transport {
+                        SurfaceTransport::SharedMemory { .. } => None,
+                        SurfaceTransport::IoSurface { .. } | SurfaceTransport::IoSurfaceMachPort { .. } => {
+                            match crate::external_surface::import_retained_iosurface(device, frame) {
+                                Ok(texture) => Some(texture),
+                                Err(error) => {
+                                    eprintln!(
+                                        "Canvas external surface {} generation {}: {error}",
+                                        descriptor.source_id, descriptor.generation
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                        SurfaceTransport::DmaBuf { .. } => {
+                            eprintln!(
+                                "Canvas external surface {} generation {}: DMA-BUF import is not available on this renderer",
+                                descriptor.source_id, descriptor.generation
+                            );
+                            return;
+                        }
+                    };
+                    (format, imported)
+                }
+            };
+            let mut state = pipeline.texture_state(
+                device,
+                source_width,
+                source_height,
+                self.source_generation(),
+                format,
+                imported,
+            );
+            if let FrameSource::External(frame) = &self.source {
+                state.native_hold = frame.native_surface.clone().map(|surface| DeferredNativeHold {
+                    surface: Some(surface), queue: queue.clone(),
+                });
+            }
+            pipeline.textures.insert(self.ticket, state);
+        }
+        let state = pipeline
+            .textures
+            .get_mut(&self.ticket)
+            .expect("retained video texture was inserted");
+        state.generation = pipeline.generation;
+        let metadata = match &self.source {
+            FrameSource::File { path, .. } => std::fs::metadata(path).ok(),
+            FrameSource::External(_) => None,
+        };
+        // Age the picture by how long the producer has been silent, not by how
+        // long this surface has been open: a feed that died an hour ago must
+        // not look the same as one delivering frames right now.
+        let staleness = match &self.source {
+            FrameSource::File { .. } => metadata
+                .as_ref()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+                .map_or(1.0, staleness_of),
+            FrameSource::External(frame) => SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .and_then(|now| {
+                    now.as_nanos()
+                        .checked_sub(u128::from(frame.presented_at_unix_ns))
+                })
+                .and_then(|age| u64::try_from(age).ok())
+                .map(std::time::Duration::from_nanos)
+                .map_or(1.0, staleness_of),
+        };
+        let mut has_alpha = false;
+        if let FrameSource::File { path, .. } = &self.source {
+            let alpha_path = path.with_extension("alpha");
+            let alpha_metadata_path = path.with_extension("alpha.json");
+            let descriptor = std::fs::read(&alpha_metadata_path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<VideoAlphaMask>(&bytes).ok());
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+                .unwrap_or(u64::MAX);
+            if let Some(descriptor) = descriptor.filter(|descriptor| {
+                descriptor.width == source_width
+                    && descriptor.height == source_height
+                    && descriptor.valid_until_unix_ms > now_ms
+            }) {
+                let alpha_metadata = std::fs::metadata(&alpha_path).ok();
+                let descriptor_metadata = std::fs::metadata(&alpha_metadata_path).ok();
+                let stamp = alpha_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .zip(
+                        descriptor_metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.modified().ok()),
+                    )
+                    .map(|(alpha_time, descriptor_time)| {
+                        (alpha_time, descriptor_time, descriptor.generation)
+                    });
+                let expected = source_width as usize * source_height as usize;
+                if let Some(stamp) = stamp {
+                    if state.alpha_stamp != Some(stamp) {
+                        if let Ok(bytes) = std::fs::read(&alpha_path)
+                            && bytes.len() == expected
+                        {
+                            queue.write_texture(
+                                wgpu::TexelCopyTextureInfo {
+                                    texture: &state.alpha_texture,
+                                    mip_level: 0,
+                                    origin: wgpu::Origin3d::ZERO,
+                                    aspect: wgpu::TextureAspect::All,
+                                },
+                                &bytes,
+                                wgpu::TexelCopyBufferLayout {
+                                    offset: 0,
+                                    bytes_per_row: Some(source_width),
+                                    rows_per_image: Some(source_height),
+                                },
+                                wgpu::Extent3d {
+                                    width: source_width,
+                                    height: source_height,
+                                    depth_or_array_layers: 1,
+                                },
+                            );
+                            state.alpha_stamp = Some(stamp);
+                        }
+                    }
+                    has_alpha = state.alpha_stamp == Some(stamp);
+                }
+            }
+        }
+        let uniforms = fpl_gfx::retained_video::Uniforms {
+            viewport: [bounds.width, bounds.height],
+            source: [source_width as f32, source_height as f32],
+            staleness,
+            has_alpha: if has_alpha { 1.0 } else { 0.0 },
+            premultiplied: if matches!(&self.source, FrameSource::External(frame) if frame.descriptor.alpha_mode == canvas_core::external_surface::AlphaMode::Premultiplied) { 1.0 } else { 0.0 },
+            native_alpha: if matches!(&self.source, FrameSource::External(frame) if frame.descriptor.alpha_mode != canvas_core::external_surface::AlphaMode::Opaque) { 1.0 } else { 0.0 },
+        };
+        queue.write_buffer(&state.uniform, 0, &uniforms.to_bytes());
+
+        if let FrameSource::External(frame) = &self.source {
+            if state.external_stamp == Some(frame.presented_at_unix_ns) {
+                return;
+            }
+            match frame.shared_pixels() {
+                Ok(Some(bytes)) => {
+                    let SurfaceTransport::SharedMemory { stride, .. } = &frame.descriptor.transport
+                    else {
+                        unreachable!("shared pixels require shared-memory transport")
+                    };
+                    queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &state.texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        bytes,
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(*stride),
+                            rows_per_image: Some(frame.descriptor.height),
+                        },
+                        wgpu::Extent3d {
+                            width: frame.descriptor.width,
+                            height: frame.descriptor.height,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!(
+                        "Canvas external surface {} generation {}: {error}",
+                        frame.descriptor.source_id, frame.descriptor.generation
+                    );
+                    return;
+                }
+            }
+            state.external_stamp = Some(frame.presented_at_unix_ns);
+            return;
+        }
+
+        let FrameSource::File { path, .. } = &self.source else {
+            return;
+        };
+
+        let Some(metadata) = metadata else {
+            return;
+        };
+        let stamp = (metadata.modified().unwrap_or(UNIX_EPOCH), metadata.len());
+        if state.stamp == Some(stamp) {
+            return;
+        }
+        let expected = source_width as usize * source_height as usize * 4;
+        let Ok(bytes) = std::fs::read(path) else {
+            return;
+        };
+        if bytes.len() != expected {
+            // Reported once per distinct mismatch rather than per frame: at 24
+            // frames a second a per-frame line is a log flood, and staying
+            // quiet is what let a 720p stream sit invisible behind a 320x180
+            // declaration.
+            if state.reported_mismatch != Some((expected, bytes.len())) {
+                state.reported_mismatch = Some((expected, bytes.len()));
+                eprintln!(
+                    "Canvas retained video {}: frame is {} bytes, expected {} for {source_width}x{source_height} — dropping frames until the sizes agree",
+                    path.display(),
+                    bytes.len(),
+                    expected
+                );
+            }
+            return;
+        }
+        state.reported_mismatch = None;
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &state.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(source_width * 4),
+                rows_per_image: Some(source_height),
+            },
+            wgpu::Extent3d {
+                width: source_width,
+                height: source_height,
+                depth_or_array_layers: 1,
+            },
+        );
+        state.stamp = Some(stamp);
+    }
+
+    fn draw(&self, pipeline: &Self::Pipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
+        let Some(state) = pipeline.textures.get(&self.ticket) else {
+            return true;
+        };
+        render_pass.set_pipeline(&pipeline.render_pipeline);
+        render_pass.set_bind_group(0, &state.bind_group, &[]);
+        render_pass.draw(0..3, 0..1);
+        true
+    }
+}
+
+pub fn view<'a, Message: 'a>(
+    path: PathBuf,
+    width: u32,
+    height: u32,
+    on_orbit: Option<OrbitHook<Message>>,
+) -> Element<'a, Message> {
+    Shader::new(Program {
+        source: FrameSource::File {
+            path,
+            width,
+            height,
+        },
+        on_orbit,
+    })
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
+/// Compose a producer-owned external frame through the same retained shader
+/// used by decoded video. The caller owns registry freshness and rebuilds the
+/// widget when a newer presentation timestamp or generation is accepted.
+pub fn external_view<'a, Message: 'a>(
+    frame: crate::external_surface::ExternalSurfaceFrame,
+) -> Element<'a, Message> {
+    Shader::new(Program {
+        source: FrameSource::External(frame),
+        on_orbit: None,
+    })
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
+#[cfg(test)]
+mod staleness_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn a_live_feed_is_untouched() {
+        assert_eq!(staleness_of(Duration::from_millis(40)), 0.0);
+        assert_eq!(staleness_of(Duration::from_secs_f32(FRESH_SECONDS)), 0.0);
+    }
+
+    /// A brief hitch must not make a working camera look broken.
+    #[test]
+    fn a_stutter_is_not_a_failure() {
+        assert!(staleness_of(Duration::from_secs(4)) < 0.15);
+    }
+
+    /// The failure this exists for: cameras that stopped hours ago were still
+    /// being drawn at full colour, indistinguishable from live.
+    #[test]
+    fn a_feed_that_died_hours_ago_is_fully_drained() {
+        assert_eq!(staleness_of(Duration::from_secs(38_724)), 1.0);
+        assert_eq!(staleness_of(Duration::from_secs_f32(STALE_SECONDS)), 1.0);
+    }
+
+    #[test]
+    fn decay_is_monotonic() {
+        let curve: Vec<f32> = (0..30)
+            .map(|s| staleness_of(Duration::from_secs(s)))
+            .collect();
+        assert!(curve.windows(2).all(|pair| pair[1] >= pair[0]), "{curve:?}");
+    }
+}

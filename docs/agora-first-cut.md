@@ -7,18 +7,18 @@ RTX 3060 (driver 595.84), systemd 259. A physical Dell display is connected at
 
 ## Rust process adapter
 
-`crates/dock-linux` is installed at `~/.local/bin/dock-linux` on Agora One.
+`crates/canvas-linux` is installed at `~/.local/bin/canvas-linux` on Agora One.
 It accepts argument vectors and emits JSON with `schema_version: 1`, `ok`, and
 either `result` or `error`; errors also exit nonzero. Transport is existing SSH,
 not a new listening service.
 
 ```sh
-ssh -o BatchMode=yes agora-one .local/bin/dock-linux capabilities
-ssh -o BatchMode=yes agora-one .local/bin/dock-linux run demo /tmp -- /usr/bin/sleep 300
-ssh -o BatchMode=yes agora-one .local/bin/dock-linux status demo
-ssh -o BatchMode=yes agora-one .local/bin/dock-linux pause demo
-ssh -o BatchMode=yes agora-one .local/bin/dock-linux resume demo
-ssh -o BatchMode=yes agora-one .local/bin/dock-linux logs demo
+ssh -o BatchMode=yes agora-one .local/bin/canvas-linux capabilities
+ssh -o BatchMode=yes agora-one .local/bin/canvas-linux run demo /tmp -- /usr/bin/sleep 300
+ssh -o BatchMode=yes agora-one .local/bin/canvas-linux status demo
+ssh -o BatchMode=yes agora-one .local/bin/canvas-linux pause demo
+ssh -o BatchMode=yes agora-one .local/bin/canvas-linux resume demo
+ssh -o BatchMode=yes agora-one .local/bin/canvas-linux logs demo
 ```
 
 Project identifiers contain 1–64 lowercase ASCII letters, digits or hyphens.
@@ -57,7 +57,7 @@ frozen and grows after thaw, then stops the unit and removes its temporary
 files. Run on a Linux host with a systemd user session:
 
 ```sh
-cargo test -p dock-linux -- --include-ignored
+cargo test -p canvas-linux -- --include-ignored
 ```
 
 ## Streaming installed
@@ -105,7 +105,7 @@ For a bounded preparation window, the Rust adapter now owns the wake sequence
 and a temporary GNOME idle inhibitor:
 
 ```sh
-ssh -o BatchMode=yes agora-one .local/bin/dock-linux prepare-stream 600
+ssh -o BatchMode=yes agora-one .local/bin/canvas-linux prepare-stream 600
 ```
 
 The duration must be 30–900 seconds. A transient user service named

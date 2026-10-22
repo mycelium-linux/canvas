@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.fpl.canvas-model-transmog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/ajmwagar/.local/bin/canvas-model-host</string>
+    <string>/Users/ajmwagar/.config/dock/canvas/model-scenes/transmog-build.lua</string>
+    <!-- transmog's stream directory (its stream flag): step-0.stl, step-1.stl, … as it builds.
+         The scene reads whichever is newest; nothing rewrites the scene. -->
+    <string>/Users/ajmwagar/.cache/dock/canvas/transmog-steps</string>
+    <!-- Remote screens, comma separated: macbook-neo over the tailnet and home-pi over
+         the studio LAN. Kept here and not only on the installed copy, because
+         installing this file has silently dropped destinations before. Studio
+         Canvas reads the host's raw local frame instead. -->
+    <!-- One route per receiving host. Sending the same MPEG-TS packets to
+         Neo's Tailscale and LAN addresses interleaves duplicate continuity
+         counters at its wildcard UDP socket and corrupts hardware decode. -->
+    <string>udp://100.120.101.5:55207</string>
+    <!-- 1280x720 at 24fps. Measured on this Mac: the render and the
+         VideoToolbox encode hold 20fps at 720p exactly as they did at 320x180,
+         so the small frame was buying nothing. Bitrate is derived from the
+         frame size by the host, not set here. -->
+    <string>1280</string>
+    <string>720</string>
+    <string>24</string>
+    <string>videotoolbox</string>
+    <string>transmog-step</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <!-- Interactive, because without it launchd gives this job background QoS
+       and macOS parks it on the efficiency cores: measured 7-8fps under
+       launchd against a flat 20fps for the same binary and arguments from a
+       shell, with no memory growth in either. The render is not the
+       bottleneck; the scheduler was. -->
+  <key>ProcessType</key><string>Interactive</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>StandardOutPath</key><string>/Users/ajmwagar/Library/Logs/canvas-model-transmog.log</string>
+  <key>StandardErrorPath</key><string>/Users/ajmwagar/Library/Logs/canvas-model-transmog.log</string>
+</dict>
+</plist>

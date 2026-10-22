@@ -1,6 +1,7 @@
 {
-  "schema_version": 1,
-  "id": "demo-clock",
+  "schema_version": 2,
+  "id": "clock",
   "kind": "clock",
-  "format": "%H:%M:%S"
+  "format": "%H:%M:%S",
+  "mode": "analog"
 }

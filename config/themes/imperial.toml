@@ -1,0 +1,54 @@
+schema_version = 1
+id = "imperial"
+name = "Imperial"
+subtitle = "Severe command console"
+
+[motion]
+micro_ms = 65
+transition_ms = 190
+entrance_ms = 220
+stagger_ms = 35
+easing = "precise"
+
+[palette]
+background = "#08090b"
+background_strong = "#0e1013"
+surface = "#15171b"
+surface_muted = "#202328"
+text = "#edeff2"
+text_muted = "#91969e"
+primary = "#f0f1f3"
+success = "#72c991"
+warning = "#e7b854"
+danger = "#ef3e46"
+info = "#a7afba"
+border = "#34383f"
+border_strong = "#686e78"
+
+[charts]
+categorical = ["#f0f1f3", "#ef3e46", "#9aa2ad", "#d9a441", "#6f7f93", "#b7bcc4"]
+
+[chrome]
+titlebar_height = 24.0
+control_style = "glyphs"
+title_alignment = "center"
+border_width = 1.0
+border_radius = 0.0
+shadow_blur = 8.0
+shadow_offset = 2.0
+shadow_opacity = 0.22
+header_opacity = 0.96
+uppercase_titles = true
+focus_edge = "left"
+
+[effects]
+glow = 0.05
+scanlines = 0.0
+noise = 0.0
+corner_style = "square"
+density = 0.88
+
+[typography]
+font_family = "DIN Alternate, Arial Narrow, system-ui, sans-serif"
+mono_family = "IBM Plex Mono, ui-monospace, monospace"
+letter_spacing = 0.8

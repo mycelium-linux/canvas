@@ -1,0 +1,19 @@
+[Unit]
+Description=Canvas Verk model stream to bounded local HLS
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/mkdir -p /tmp/verk-showcase-hls
+ExecStart=/usr/bin/ffmpeg -hide_banner -loglevel warning -i udp://127.0.0.1:55228?fifo_size=65536&overrun_nonfatal=1 -map 0:v:0 -c copy -f hls -hls_time 1 -hls_list_size 4 -hls_flags delete_segments+independent_segments+append_list+discont_start -hls_segment_filename /tmp/verk-showcase-hls/model-%%05d.ts /tmp/verk-showcase-hls/live.m3u8
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/tmp
+
+[Install]
+WantedBy=default.target

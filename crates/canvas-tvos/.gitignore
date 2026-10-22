@@ -1,0 +1,5 @@
+/target/
+/build/
+/apple/Assets.xcassets/*
+!/apple/Assets.xcassets/Contents.json
+/apple/CanvasTV.xcodeproj/xcuserdata/

@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "id": "desktop-bar-v1",
+  "title": "Canvas desktop bar",
+  "inputs": [
+    {"id":"width","kind":"number","required":true},
+    {"id":"height","kind":"number","required":true},
+    {"id":"padding","kind":"number","required":true},
+    {"id":"labelsize","kind":"number","required":true},
+    {"id":"workspace","kind":"text","required":true},
+    {"id":"page","kind":"text","required":false},
+    {"id":"clock","kind":"text","required":true},
+    {"id":"sources","kind":"number","required":true},
+    {"id":"back","kind":"boolean","required":true},
+    {"id":"forward","kind":"boolean","required":true},
+    {"id":"create","kind":"boolean","required":true}
+  ],
+  "capabilities": {
+    "write_scene":true,
+    "read_inputs":["width","height","padding","labelsize","workspace","page","clock","sources","back","forward","create"],
+    "read_theme":true
+  },
+  "actions": [
+    {"id":"back","destination":"canvas.shell","kind":"back"},
+    {"id":"forward","destination":"canvas.shell","kind":"forward"},
+    {"id":"launcher","destination":"canvas.shell","kind":"launcher"},
+    {"id":"create","destination":"canvas.shell","kind":"create"}
+  ]
+}

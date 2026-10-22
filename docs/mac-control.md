@@ -14,12 +14,12 @@ scripts/install-mac-control.sh
 
 The fixed installation is `~/Applications/Dock Control.app`, bundle identifier
 `com.futurepresentlabs.dock.control`. The installer launches it through
-LaunchServices, independently of the terminal and iced application. Grant **Dock
+LaunchServices, independently of the terminal and iced application. Grant **Canvas
 Control** access in System Settings → Privacy & Security → Accessibility. macOS
 requires the user's grant; the helper can request the standard prompt but cannot
 grant access. An already running client can retry after access is granted.
 
-Normal `cargo build`, `cargo run -p dock-mac`, and repeated installer calls **do
+Normal `cargo build`, `cargo run -p canvas-mac`, and repeated installer calls **do
 not replace the installed helper**. The source-built binary is not the production
 permission holder. To launch the existing app after logging in:
 
@@ -53,9 +53,9 @@ have deadlines. The helper accepts status, permission prompt, inventory,
 focus, frame placement, and fullscreen operations; there is no command execution
 operation. Clients and agents running under the same macOS account can use this
 interface. This is an OS-account boundary, not isolation between same-user apps
-or an agent authorization policy; orchestration policy remains in Dock.
+or an agent authorization policy; orchestration policy remains in Canvas.
 
-`dock-control` exposes the Rust protocol and `request(Operation)` client. Frames
+`canvas-control` exposes the Rust protocol and `request(Operation)` client. Frames
 are integer logical desktop points, with origin at the primary display's top
 left; displays to its left or above can have negative coordinates. Display IDs
 use CoreGraphics display UUIDs. Frame acknowledgements contain the actual window

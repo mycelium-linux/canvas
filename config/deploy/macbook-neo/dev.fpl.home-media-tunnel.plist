@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.fpl.home-media-tunnel</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/ssh</string>
+    <string>-o</string><string>BatchMode=yes</string>
+    <string>-o</string><string>ExitOnForwardFailure=yes</string>
+    <string>-o</string><string>ServerAliveInterval=15</string>
+    <string>-o</string><string>ServerAliveCountMax=3</string>
+    <string>-N</string>
+    <string>-L</string><string>127.0.0.1:18794:127.0.0.1:18790</string>
+    <string>-L</string><string>127.0.0.1:6005:127.0.0.1:6005</string>
+    <string>-L</string><string>127.0.0.1:6006:127.0.0.1:6006</string>
+    <string>-L</string><string>127.0.0.1:6007:127.0.0.1:6007</string>
+    <string>-L</string><string>127.0.0.1:6008:127.0.0.1:6008</string>
+    <string>ajm@home-pi.local</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>StandardOutPath</key><string>/Users/ajmwagar/Library/Logs/home-media-tunnel.log</string>
+  <key>StandardErrorPath</key><string>/Users/ajmwagar/Library/Logs/home-media-tunnel.log</string>
+</dict>
+</plist>

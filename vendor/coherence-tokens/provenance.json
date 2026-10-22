@@ -1,9 +1,11 @@
 {
-  "source": "/Users/ajmwagar/src/fpl/coherence/crates/coherence-tokens",
-  "captured": "2026-09-06",
+  "source": "https://github.com/FuturePresentLabs/coherence/tree/407f86638f5879f687b5fbe4321e897ae67511d3/crates/coherence-tokens",
+  "revision": "407f86638f5879f687b5fbe4321e897ae67511d3",
+  "captured": "2026-10-05",
   "files": {
-    "Cargo.toml": "630bb9df86faec2366c3eaff18da11af641e84b8e7db2ec0ec786dbb7ceec087",
-    "src/lib.rs": "b775229e5c3e3ada24d20be68294d940101d55cfc096057557e86b098839e10f",
-    "src/generated.rs": "69e1eedad6b7cd2c3f0180faaaf36111514ec7ee981be3e29ecdfe731e87195e"
+    "Cargo.toml": "1f100e0e83eea82d9f7524838a3c90bb2abdac936ae2d6c3c34c7d425583ef1e",
+    "README.md": "74ac1ab43f9a643a4d670c3b471015271920570fe3bcb7e3726bb663c0187288",
+    "src/lib.rs": "7193a3f984ea05701d4bb1392b461109b8aa9adc913d70eecc76d6ad7bb42246",
+    "src/generated.rs": "c7a0ff992e4f3c7783899e5f2ea18c8741f1e8ab8d111fd91db9a477f2807451"
   }
 }

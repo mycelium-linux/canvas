@@ -1,0 +1,24 @@
+[package]
+name = "canvas-model-viewer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+canvas-core.workspace = true
+fpl-gfx = { path = "../../../gfx", default-features = false, features = ["wgpu"] }
+canvas-widgets = { path = "../canvas-widgets", features = ["live"] }
+iced = { version = "0.14", default-features = false, features = ["wgpu", "canvas"] }
+wgpu = "27"
+serde.workspace = true
+serde_json.workspace = true
+memmap2 = "0.9"
+unibus-media = { path = "../../../unibus/crates/unibus-media" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = "0.32"
+objc = "0.2"
+wgpu-hal = "27"
+
+[dev-dependencies]
+tempfile.workspace = true

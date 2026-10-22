@@ -1,0 +1,8 @@
+{
+  "bus":{"installation_id":"fpl-cloud","producer_id":"panopticon-tv-presenter","hub_endpoint":"127.0.0.1:18810","token_file":"presenter.token","zones":["panopticon"],"capabilities":["panopticon.wall.viewer"],"schema_version":2,"read_timeout_ms":500},
+  "source_producer":"panopticon-studio-source",
+  "widget_host":"/Users/ajmwagar/.local/lib/canvas-panopticon/widget_projection",
+  "binder":"/Users/ajmwagar/.local/lib/canvas-panopticon/panopticon-wall-v1.lua",
+  "tvctl":"/Users/ajmwagar/.local/bin/canvas-tvctl",
+  "endpoint":"192.168.2.97:5555"
+}

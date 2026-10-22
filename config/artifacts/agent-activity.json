@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "id": "agent-activity",
+  "version": "1.0.0",
+  "source": "opencode:activity",
+  "binder": "agent-activity-v1",
+  "widget_kind": "table",
+  "provenance": "live",
+  "refresh_ms": 5000
+}

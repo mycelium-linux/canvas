@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.fpl.unibus-audio-sink</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/ajmwagar/.local/bin/unibus-audio-sink</string>
+    <string>/Users/ajmwagar/.config/unibus/audio-sink.json</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/ajmwagar/Library/Logs/unibus-audio-sink.log</string>
+  <key>StandardErrorPath</key><string>/Users/ajmwagar/Library/Logs/unibus-audio-sink.log</string>
+</dict>
+</plist>

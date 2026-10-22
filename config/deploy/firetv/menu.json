@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "page_rotation_ms": {"taig-simulator": 15000},
+  "library_project": "studio",
+  "include_unlisted": true,
+  "hidden_projects": ["clock", "ipfs-reading", "ipfs-hmm"],
+  "items": [
+    {
+      "label": "Home",
+      "project_id": "resume"
+    },
+    {
+      "label": "Studio",
+      "project_id": "studio"
+    },
+    {
+      "label": "Tardy",
+      "project_id": "tardy"
+    },
+    {
+      "label": "Holodeck",
+      "project_id": "holodeck"
+    },
+    {
+      "label": "Security",
+      "project_id": "security"
+    },
+    {
+      "id": "media",
+      "label": "TV & AirPlay",
+      "children": [
+        {
+          "label": "TV",
+          "project_id": "television"
+        },
+        {
+          "label": "AirPlay",
+          "project_id": "airplay"
+        }
+      ]
+    },
+    {
+      "id": "toys",
+      "label": "Toys",
+      "children": [
+        {
+          "label": "Ball",
+          "project_id": "cat-toy-ball"
+        },
+        {
+          "label": "DVD",
+          "project_id": "dvd-bounce"
+        },
+        {
+          "label": "Boids",
+          "project_id": "cat-toy-boids"
+        },
+        {
+          "label": "Aquarium",
+          "project_id": "cat-toy-aquarium"
+        },
+        {
+          "label": "Life",
+          "project_id": "conways"
+        }
+      ]
+    }
+  ]
+}

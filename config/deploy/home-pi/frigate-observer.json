@@ -1,0 +1,18 @@
+{
+  "bus": {
+    "installation_id": "home",
+    "producer_id": "home-pi-frigate-observer",
+    "hub_endpoint": "127.0.0.1:18790",
+    "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+    "zones": ["living-room"],
+    "capabilities": ["camera.detections.source"],
+    "screen_anchors": [],
+    "schema_version": 1
+  },
+  "api_base": "http://192.168.30.12:5000",
+  "destination": "living-room",
+  "cameras": ["cat", "door"],
+  "poll_ms": 500,
+  "ttl_ms": 2000,
+  "source_max_age_ms": 2000
+}

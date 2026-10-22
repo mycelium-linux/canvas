@@ -1,0 +1,54 @@
+schema_version = 1
+id = "pip-boy"
+name = "Pip-Boy"
+subtitle = "Field terminal phosphor"
+
+[motion]
+micro_ms = 70
+transition_ms = 180
+entrance_ms = 260
+stagger_ms = 95
+easing = "terminal"
+
+[palette]
+background = "#050d06"
+background_strong = "#081609"
+surface = "#0a1c0c"
+surface_muted = "#0d2810"
+text = "#b9f7a3"
+text_muted = "#72a868"
+primary = "#74ff57"
+success = "#74ff57"
+warning = "#e9c45b"
+danger = "#ff6854"
+info = "#9aeb78"
+border = "#254d28"
+border_strong = "#4da44d"
+
+[charts]
+categorical = ["#74ff57", "#b8ff5c", "#4ee8a1", "#d6d957", "#63c85b", "#f2f7a1"]
+
+[chrome]
+titlebar_height = 32.0
+control_style = "segments"
+title_alignment = "left"
+border_width = 2.0
+border_radius = 7.0
+shadow_blur = 12.0
+shadow_offset = 3.0
+shadow_opacity = 0.32
+header_opacity = 0.92
+uppercase_titles = true
+focus_edge = "border"
+
+[effects]
+glow = 0.24
+scanlines = 0.34
+noise = 0.09
+corner_style = "rounded"
+density = 1.08
+
+[typography]
+font_family = "Berkeley Mono, IBM Plex Mono, ui-monospace, monospace"
+mono_family = "Berkeley Mono, IBM Plex Mono, ui-monospace, monospace"
+letter_spacing = 0.55

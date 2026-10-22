@@ -1,0 +1,60 @@
+[package]
+name = "canvas-feeds"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reusable producers that surface public endpoints (Hacker News, Reddit, RSS, xkcd) as Canvas widget snapshots and live_image frames"
+
+[dependencies]
+canvas-core = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+rumqttc = { version = "0.25", default-features = false }
+tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
+
+[lib]
+name = "canvas_feeds"
+path = "src/lib.rs"
+
+[[bin]]
+name = "canvas-feeds"
+path = "src/main.rs"
+
+[[bin]]
+name = "canvas-comics"
+path = "src/bin/canvas-comics.rs"
+
+[[bin]]
+name = "canvas-now-playing"
+path = "src/bin/canvas-now-playing.rs"
+
+[[bin]]
+name = "canvas-host-observer"
+path = "src/bin/canvas-host-observer.rs"
+
+[[bin]]
+name = "canvas-mycelium-observer"
+path = "src/bin/canvas-mycelium-observer.rs"
+
+[[bin]]
+name = "canvas-mycelium-events"
+path = "src/bin/canvas-mycelium-events.rs"
+
+[[bin]]
+name = "canvas-synesthesia-observer"
+path = "src/bin/canvas-synesthesia-observer.rs"
+
+[[bin]]
+name = "canvas-x-trends"
+path = "src/bin/canvas-x-trends.rs"
+
+[[bin]]
+name = "canvas-bsky-trends"
+path = "src/bin/canvas-bsky-trends.rs"
+
+[[bin]]
+name = "canvas-reddit-trends"
+path = "src/bin/canvas-reddit-trends.rs"

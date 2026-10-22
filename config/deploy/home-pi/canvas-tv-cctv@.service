@@ -1,0 +1,15 @@
+[Unit]
+Description=Relay %i CCTV to Canvas TV HLS
+After=network-online.target canvas-tv-cctv-http.service
+Wants=network-online.target
+Requires=canvas-tv-cctv-http.service
+
+[Service]
+Type=simple
+User=ajm
+ExecStart=/usr/bin/ffmpeg -nostdin -hide_banner -loglevel error -rtsp_transport tcp -i rtsp://192.168.30.12:8554/%i_sub -map 0:v:0 -c:v copy -an -f hls -hls_time 2 -hls_list_size 4 -hls_start_number_source epoch -hls_flags delete_segments+temp_file+independent_segments -hls_segment_filename /run/canvas-tv-cctv/%i-%%d.ts /run/canvas-tv-cctv/%i.m3u8
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

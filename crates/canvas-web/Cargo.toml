@@ -1,0 +1,36 @@
+[package]
+name = "canvas-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+native-host = []
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+canvas-core.workspace = true
+iced = { version = "0.14", default-features = false, features = ["wgpu", "webgl", "tiny-skia", "canvas", "thread-pool"] }
+serde.workspace = true
+serde_json.workspace = true
+toml = "0.8"
+wasm-bindgen = "0.2"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["CanvasRenderingContext2d", "CssStyleDeclaration", "Document", "Element", "EventTarget", "HtmlCanvasElement", "HtmlImageElement", "KeyboardEvent", "MouseEvent", "PointerEvent", "WheelEvent", "Window"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+anyhow.workspace = true
+axum = "0.8"
+canvas.workspace = true
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+
+[[bin]]
+name = "canvas-web-host"
+path = "src/bin/canvas-web-host.rs"
+required-features = ["native-host"]

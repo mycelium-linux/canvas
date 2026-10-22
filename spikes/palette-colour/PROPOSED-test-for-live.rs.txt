@@ -1,0 +1,98 @@
+PROPOSED addition to crates/canvas-widgets/src/live.rs test module.
+NOT APPLIED — this spike owns only spikes/palette-colour/.
+
+Why: live.rs:1155-1157 states in a doc comment that channel clipping "moves the
+hue — by 14 deg on a light saturated blue, straight into the window the status
+guard keeps clear". Nothing tests this. `grep -c '#\[test\]' live.rs` = 15, and
+none of them exercise the clipping alternative. The chroma-reducing binary
+search in `from_oklch` is load-bearing for `a_series_colour_is_never_a_status_colour`,
+and if someone "simplified" it to a clamp, that test would still pass on
+coherence-light, catppuccin-mocha, tokyo-night and the collision fixture — it
+only fails on coherence-dark and catppuccin-latte. That is exactly the kind of
+regression a test should catch and this one currently would not, on 4 of 6
+palettes.
+
+Measured by spikes/palette-colour (see run2-final.log):
+  coherence-dark  series 5, chroma-reduced: 30.68 deg from every status hue (holds)
+  coherence-dark  series 5, channel-clipped: 16.59 deg from `info`  (VIOLATES the 25 deg guard)
+  catppuccin-latte series 3, channel-clipped: 22.77 deg from `success` (VIOLATES)
+  worst hue shift from clipping, blue region h 240-290: 49.10 deg at L=0.95 C=0.26 h=253
+  the doc comment's own case, L=0.85 C=0.20 h=264: 17.84 deg
+
+---------------------------------------------------------------------------
+
+    /// The gamut policy in [`from_oklch`] is load-bearing, not a detail.
+    ///
+    /// Clipping each channel where it leaves sRGB is the obvious alternative
+    /// and it is wrong: it moves the hue, and on a dark theme it moves a
+    /// series colour far enough to land inside a status window. Reducing
+    /// chroma keeps the hue the ramp chose. This test is what stops the
+    /// binary search being "simplified" away.
+    #[test]
+    fn clipping_instead_of_reducing_chroma_breaks_the_status_guard() {
+        // The rejected policy, so the assertion below compares two real ramps
+        // rather than trusting a comment.
+        fn by_clipping(value: Oklch) -> Color {
+            let [r, g, b] = oklch_to_linear(value);
+            Color::from_rgb(srgb_encode(r), srgb_encode(g), srgb_encode(b))
+        }
+        fn ramp(palette: &ThemePalette, to_color: fn(Oklch) -> Color) -> Vec<Color> {
+            let base = to_oklch(color(palette.primary));
+            let open = categorical_arcs(&[
+                to_oklch(color(palette.success)).h,
+                to_oklch(color(palette.warning)).h,
+                to_oklch(color(palette.danger)).h,
+                to_oklch(color(palette.info)).h,
+            ]);
+            let span = arc_span(&open);
+            let start = arc_offset(&open, base.h);
+            let chroma = base.c.clamp(SERIES_CHROMA_MIN, SERIES_CHROMA_MAX);
+            (0..SERIES_COLORS)
+                .map(|index| {
+                    let lift = if index % 2 == 0 { 1.0 } else { 1.0 + SERIES_LIGHTNESS_STEP };
+                    to_color(Oklch {
+                        l: (base.l * lift).clamp(SERIES_LIGHTNESS_MIN, SERIES_LIGHTNESS_MAX),
+                        c: chroma,
+                        h: arc_hue(&open, start + span * index as f32 / SERIES_COLORS as f32),
+                    })
+                })
+                .collect()
+        }
+        let closest = |colors: &[Color], palette: &ThemePalette| {
+            let status = [
+                to_oklch(color(palette.success)).h,
+                to_oklch(color(palette.warning)).h,
+                to_oklch(color(palette.danger)).h,
+                to_oklch(color(palette.info)).h,
+            ];
+            colors
+                .iter()
+                .flat_map(|c| {
+                    let h = to_oklch(*c).h;
+                    status.into_iter().map(move |s| hue_gap(h, s))
+                })
+                .fold(f32::INFINITY, f32::min)
+        };
+
+        use canvas_core::{Accent, ThemeMode, ThemeSelection};
+        let dark = ThemeSelection::coherence(ThemeMode::Dark, Accent::Brand).palette();
+
+        // `series_colors` itself is the reducing ramp; assert the two agree on
+        // that, so this test cannot pass by measuring something else.
+        assert_eq!(ramp(&dark, from_oklch), series_colors(&dark));
+
+        let reduced = closest(&ramp(&dark, from_oklch), &dark);
+        let clipped = closest(&ramp(&dark, by_clipping), &dark);
+        assert!(
+            reduced >= STATUS_HUE_GUARD - 1.0,
+            "reducing chroma left a series {reduced:.2} deg from a status hue"
+        );
+        assert!(
+            clipped < STATUS_HUE_GUARD - 1.0,
+            "clipping no longer breaks the guard ({clipped:.2} deg); if the ramp \
+             changed, re-derive the policy rather than deleting this test"
+        );
+        // Measured 16.59 deg against a 25 deg guard: this is not a rounding
+        // margin, it is a series colour that reads as `info`.
+        assert!(clipped < 20.0, "clipping drifted to {clipped:.2} deg");
+    }

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Canvas Live Dashboards"
+  short_description: "Show live project work across Canvas screens"
+  default_prompt: "Use $canvas-live to show live project progress on the selected Canvas screens while continuing the main task."

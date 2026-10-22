@@ -1,0 +1,42 @@
+{
+  "bus": {
+    "installation_id": "home",
+    "producer_id": "macbook-neo-agent-bridge",
+    "hub_endpoint": "127.0.0.1:18794",
+    "token_file": "/Users/ajmwagar/.config/unibus/tokens/macbook-neo-agent-bridge.token",
+    "zones": [
+      "living-room"
+    ],
+    "capabilities": [
+      "canvas.agent"
+    ],
+    "screen_anchors": [],
+    "schema_version": 1
+  },
+  "targets": [
+    {
+      "name": "operator",
+      "kind": "edgerunner",
+      "base_url": "http://100.80.85.86:8087"
+    },
+    {
+      "name": "transmog",
+      "kind": "edgerunner",
+      "base_url": "http://100.80.85.86:8087",
+      "project": "transmog",
+      "create": {
+        "repo_url": "https://github.com/FuturePresentLabs/transmog.git"
+      }
+    },
+    {
+      "name": "lob",
+      "kind": "edgerunner",
+      "base_url": "http://100.80.85.86:8087",
+      "project": "lob",
+      "create": {
+        "repo_url": "https://github.com/FuturePresentLabs/legion-of-bom.git"
+      }
+    }
+  ],
+  "roster_interval_ms": 5000
+}

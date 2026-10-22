@@ -1,0 +1,99 @@
+[package]
+name = "canvas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+lua-scenes = ["dep:mlua", "dep:unibus-sdk"]
+mcp = ["dep:rmcp", "dep:schemars", "dep:tokio", "dep:axum", "dep:reqwest", "canvas-widgets/schema", "canvas-workspace/schema"]
+
+[dependencies]
+fpl-gfx.workspace = true
+canvas-workspace = { path = "../canvas-workspace" }
+base64 = "0.22"
+csv = "1.4"
+canvas-control = { path = "../canvas-control" }
+canvas-alfalfa = { path = "../canvas-alfalfa" }
+canvas-bifrost = { path = "../canvas-bifrost" }
+canvas-fab = { path = "../canvas-fab" }
+canvas-feeds = { path = "../canvas-feeds" }
+canvas-shroud = { path = "../canvas-shroud" }
+canvas-widgets = { path = "../canvas-widgets", features = ["live"] }
+canvas-model-viewer = { path = "../canvas-model-viewer" }
+anyhow.workspace = true
+canvas-core.workspace = true
+iced = { version = "0.14", default-features = false, features = ["wgpu", "tokio", "canvas", "image-without-codecs", "x11", "wayland", "markdown", "highlighter"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+libc = "0.2"
+mlua = { version = "0.12.1", features = ["luau", "serialize"], optional = true }
+serde.workspace = true
+serde_json.workspace = true
+toml = "0.8"
+sha2 = "0.10"
+schemars = { version = "1", optional = true }
+sysinfo = "0.36"
+unibus.workspace = true
+unibus-device = { path = "../../../unibus/crates/unibus-device" }
+unibus-sdk = { path = "../../../unibus/crates/unibus-sdk", optional = true }
+stream-descriptors.workspace = true
+unibus-media = { path = "../../../unibus/crates/unibus-media" }
+wgpu = "27"
+rmcp = { version = "3.2", default-features = false, features = ["server", "transport-io", "transport-streamable-http-server"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "net", "signal"], optional = true }
+axum = { version = "0.8", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"], optional = true }
+subtle = "2.6"
+roxmltree = "0.20"
+svgtypes = "0.15"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSWindow"] }
+objc2-foundation = { version = "0.2", features = ["NSThread"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+rmcp = { version = "3.2", default-features = false, features = ["client", "server", "transport-io"] }
+
+[[example]]
+name = "holodeck_ui"
+path = "../../examples/holodeck_ui.rs"
+required-features = ["lua-scenes"]
+
+[[bin]]
+name = "canvas"
+path = "src/main.rs"
+
+[[bin]]
+name = "canvas-edge"
+path = "src/bin/canvas-edge.rs"
+required-features = ["lua-scenes"]
+
+[[bin]]
+name = "canvas-radioman-observer"
+path = "src/bin/canvas-radioman-observer.rs"
+required-features = ["lua-scenes"]
+
+[[bin]]
+name = "canvas-printer-observer"
+path = "src/bin/canvas-printer-observer.rs"
+required-features = ["lua-scenes"]
+
+[[bin]]
+name = "canvasctl"
+path = "src/bin/canvasctl.rs"
+
+[[bin]]
+name = "canvas-workspace-capture"
+path = "src/bin/canvas-workspace-capture.rs"
+
+[[bin]]
+name = "canvas-briefing-record"
+path = "src/bin/canvas-briefing-record.rs"
+required-features = ["lua-scenes"]
+
+[[bin]]
+name = "canvas-mcp"
+path = "src/bin/canvas-mcp.rs"
+required-features = ["mcp"]

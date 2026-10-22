@@ -1,0 +1,18 @@
+[package]
+name = "canvas-shroud"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Canvas producer for Shroud-owned regional runtime metrics"
+
+[dependencies]
+canvas-feeds = { path = "../canvas-feeds" }
+serde_json = { workspace = true }
+
+[lib]
+name = "canvas_shroud"
+path = "src/lib.rs"
+
+[[bin]]
+name = "canvas-shroud"
+path = "src/main.rs"

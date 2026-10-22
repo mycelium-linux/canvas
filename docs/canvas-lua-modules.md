@@ -11,6 +11,13 @@ The manifest explicitly lists readable input IDs, whether theme tokens are
 visible, and which declared host resources may be presented. Unknown manifest
 fields fail parsing. There are no filesystem, network, process, package, native
 module, clock, random, GPU, media decode, or workspace mutation capabilities.
+Optional manifest `actions` declare route IDs, destination principals and message
+kinds. `widget.button` declares a bounded themed control and object body. Only
+a matching enabled `activate` event returns an action intent; Lua never sends
+network traffic itself. The trusted Rust host dispatches validated intents over
+Unibus, outside scene generation, and retains transport authority. Load, pulse
+and reload do not emit commands. See [the wiki HUD runbook](wiki-race-lua-hud.md).
+
 The same Luau sandbox, memory ceiling, interrupt budget, source limit, asset
 grants, and combined node limit apply to every lifecycle call.
 
@@ -20,11 +27,11 @@ with typed `load`, `data_changed`, `activate`, `pulse`, or `reload` events.
 Pulse time is supplied by the scheduler; scripts cannot read a clock. A failed
 update or reload leaves the prior retained output and generation untouched.
 
-`module.theme` is derived at invocation time from `dock_core::ProjectTheme` and
+`module.theme` is derived at invocation time from `canvas_core::ProjectTheme` and
 therefore from the vendored Coherence tokens. Lua receives semantic colors and
 metrics without owning or duplicating a palette. See the executable
-[`graph.lua`](../crates/dock-canvas/examples/lua/graph.lua) and
-[`pnl-status.lua`](../crates/dock-canvas/examples/lua/pnl-status.lua) examples.
+[`graph.lua`](../crates/canvas/examples/lua/graph.lua) and
+[`pnl-status.lua`](../crates/canvas/examples/lua/pnl-status.lua) examples.
 
 Video/NVR and maps enter as `video_stream` and `map_viewport` references. A
 reference contains only stable owner, ID, kind, and contract data. Lua can place

@@ -1,0 +1,1 @@
+{"schema_version":2,"id":"demo-launcher","kind":"launcher","items":[{"project_id":"home","label":"Home","unread":false},{"project_id":"synesthesia","label":"Synesthesia","unread":true},{"project_id":"mycelium","label":"Mycelium","unread":false}],"pinned":["home"],"orientation":"horizontal","data":{"state":"ready","provenance":"demo"}}

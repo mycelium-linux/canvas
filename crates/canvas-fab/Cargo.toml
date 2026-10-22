@@ -1,0 +1,18 @@
+[package]
+name = "canvas-fab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Canvas producer for Fab-owned build and deployment lifecycle metrics"
+
+[dependencies]
+canvas-feeds = { path = "../canvas-feeds" }
+serde_json = { workspace = true }
+
+[lib]
+name = "canvas_fab"
+path = "src/lib.rs"
+
+[[bin]]
+name = "canvas-fab"
+path = "src/main.rs"
