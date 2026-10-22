@@ -30,12 +30,27 @@ jobs:
       # for those path crates so they match the source the branch was built
       # against. The gfx patch likewise needs a revision with the `schema`
       # feature used by canvas-workspace.
+      # FuturePresentLabs/unibus is private. The workflow needs a token that
+      # can read it both for the sibling checkout and for cargo's git
+      # dependency on ssh://git@github.com/FuturePresentLabs/unibus.git.
+      # Set a repository secret named UNIBUS_TOKEN with contents:read on that
+      # repository (a fine-grained PAT is sufficient).
+      - name: Require unibus token
+        env:
+          UNIBUS_TOKEN: ${{ secrets.UNIBUS_TOKEN }}
+        run: |
+          if [ -z "$UNIBUS_TOKEN" ]; then
+            echo "::error::UNIBUS_TOKEN secret is required to read private FuturePresentLabs/unibus"
+            exit 1
+          fi
+
       - name: Check out unibus sibling
         uses: actions/checkout@v4
         with:
           repository: FuturePresentLabs/unibus
           ref: 318424cdf91c6eebdd2024b779771c225e83025c
           path: _unibus
+          token: ${{ secrets.UNIBUS_TOKEN }}
 
       - name: Check out gfx sibling
         uses: actions/checkout@v4
@@ -51,6 +66,12 @@ jobs:
           ln -s "$PWD/_unibus" ../unibus
           ln -s "$PWD/_gfx" ../gfx
           ls -ld ../unibus ../gfx
+
+      - name: Authenticate cargo unibus git fetch
+        env:
+          UNIBUS_TOKEN: ${{ secrets.UNIBUS_TOKEN }}
+        run: |
+          git config --global url."https://x-access-token:${UNIBUS_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
 
       - name: Cargo check
         run: cargo check --workspace --all-targets
