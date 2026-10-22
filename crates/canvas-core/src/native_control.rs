@@ -7,8 +7,8 @@ pub const SWITCHER_APP_ID: &str = "dev.fpl.canvas.switcher";
 
 /// One geometry source for the native output and its Lua presentation window.
 pub fn switcher_frame(area: crate::layout::Rect) -> crate::layout::Rect {
-    let width = area.width.saturating_sub(48).max(1).min(900);
-    let height = area.height.saturating_sub(48).max(1).min(180);
+    let width = area.width.saturating_sub(48).clamp(1, 900);
+    let height = area.height.saturating_sub(48).clamp(1, 180);
     crate::layout::Rect {
         x: area.x + ((area.width.saturating_sub(width)) / 2) as i32,
         y: area.y + ((area.height.saturating_sub(height)) / 2) as i32,
