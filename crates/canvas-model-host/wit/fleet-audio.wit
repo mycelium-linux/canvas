@@ -1,0 +1,45 @@
+// Slice-2 contract: fleet:audio@1.0.0
+//
+// The app pushes bounded PCM into a host ring buffer; the native T0 host owns
+// the device sink (sink selection is host policy, never app input). This
+// package is DEFINED, not shipped: no runtime import exists until the host
+// grants it through the manifest ∩ grants ∩ policy intersection.
+//
+// Limits (host-enforced, not expressible as WIT types):
+// - at most 8192 frames per push
+// - at most 32768 frames queued per app
+// - the sink is chosen by host policy; apps cannot name or enumerate devices
+// - no callbacks, no clock, no sample format negotiation beyond this record
+package fleet:audio@1.0.0;
+
+interface audio {
+    record pcm {
+        sample-rate: u32,
+        channels: u8,
+        /// Number of frames represented by `samples`.
+        frames: u32,
+        /// Interleaved samples, `frames * channels` values.
+        samples: list<f32>,
+    }
+
+    /// Per-interface error; intentionally not shared with fleet:gpu.
+    enum error {
+        /// Capability not granted to this app by the host.
+        denied,
+        /// Malformed PCM (frame/sample count mismatch, unsupported rate).
+        invalid,
+        /// Exceeded per-push or queued-frame budget.
+        over-budget,
+        /// Host sink is not ready.
+        not-ready,
+    }
+
+    /// Enqueue PCM; returns the number of frames queued.
+    push: func(pcm: pcm) -> result<u32, error>;
+
+    /// Frames that can be pushed right now without blocking.
+    capacity: func() -> u32;
+
+    /// Cumulative sink underruns; observability only, never control input.
+    underruns: func() -> u64;
+}

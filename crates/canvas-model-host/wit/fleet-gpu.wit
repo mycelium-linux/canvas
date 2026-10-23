@@ -1,0 +1,80 @@
+// Slice-2 contract: fleet:gpu@1.0.0
+//
+// The app submits a bounded draw list; the native T0 host (Canvas, wgpu) owns
+// the device, pipelines, and presentation. This package is DEFINED, not shipped:
+// no runtime import exists until the host grants it through the manifest ∩
+// grants ∩ policy intersection (see wit/README.md).
+//
+// Limits (host-enforced, not expressible as WIT types):
+// - at most 4096 items per draw list
+// - at most 1 MiB encoded draw-list payload per submit
+// - at most one in-flight frame per app (submit until cancel/completion)
+// - no shader bytes, pipelines, or raw buffers cross this boundary
+// - meshes are content identifiers (CIDs), never filesystem paths
+// - no per-frame callbacks; the app learns about a frame only by frame id
+package fleet:gpu@1.0.0;
+
+interface gpu {
+    record vec3 {
+        x: f32,
+        y: f32,
+        z: f32,
+    }
+
+    /// 8-bit sRGB channels, matching the native theme material.
+    record rgb {
+        r: u8,
+        g: u8,
+        b: u8,
+    }
+
+    record material {
+        color: rgb,
+        glow: f32,
+        wireframe: bool,
+        opacity: f32,
+    }
+
+    record transform {
+        translation: vec3,
+        /// Euler angles in degrees, applied in x, y, z order.
+        rotation-deg: vec3,
+        scale: vec3,
+    }
+
+    record draw-item {
+        /// Mesh content identifier; a host-resolved asset, never a path.
+        mesh-cid: string,
+        transform: transform,
+        material: material,
+    }
+
+    record camera {
+        position: vec3,
+        target: vec3,
+        fov-deg: f32,
+    }
+
+    record draw-list {
+        camera: camera,
+        items: list<draw-item>,
+    }
+
+    /// Per-interface error; intentionally not shared with fleet:audio.
+    enum error {
+        /// Capability not granted to this app by the host.
+        denied,
+        /// Malformed draw list or unresolvable mesh CID.
+        invalid,
+        /// Exceeded item count / byte / in-flight frame budget.
+        over-budget,
+        /// Host device or surface is not ready.
+        not-ready,
+    }
+
+    /// Queue one draw list; returns the host-assigned frame id.
+    submit: func(%list: draw-list) -> result<u32, error>;
+
+    /// Drop a queued or in-flight frame owned by this app.
+    cancel: func(frame: u32) -> result<_, error>;
+}

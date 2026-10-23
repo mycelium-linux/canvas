@@ -30,3 +30,4 @@ path = "src/main.rs"
 [dev-dependencies]
 tempfile.workspace = true
 wat = "1"
+wit-parser = "0.215"
