@@ -1,0 +1,53 @@
+{
+  "packages": [
+    {
+      "id": "fleet:gpu@1.0.0",
+      "interfaces": ["gpu"],
+      "functions": {
+        "submit": {
+          "params": { "list": "draw-list" },
+          "ok": "u32",
+          "err": "error"
+        },
+        "cancel": {
+          "params": { "frame": "u32" },
+          "ok": null,
+          "err": "error"
+        }
+      },
+      "required-records": [
+        "vec3",
+        "rgb",
+        "material",
+        "transform",
+        "draw-item",
+        "camera",
+        "draw-list"
+      ],
+      "forbidden-symbols": ["fs", "file", "path", "net", "http", "dns", "clock", "env", "random"]
+    },
+    {
+      "id": "fleet:audio@1.0.0",
+      "interfaces": ["audio"],
+      "functions": {
+        "push": {
+          "params": { "pcm": "pcm" },
+          "ok": "u32",
+          "err": "error"
+        },
+        "capacity": {
+          "params": {},
+          "ok": "u32",
+          "err": null
+        },
+        "underruns": {
+          "params": {},
+          "ok": "u64",
+          "err": null
+        }
+      },
+      "required-records": ["pcm"],
+      "forbidden-symbols": ["fs", "file", "path", "net", "http", "dns", "clock", "env", "random"]
+    }
+  ]
+}
