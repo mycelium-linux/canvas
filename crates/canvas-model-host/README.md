@@ -176,6 +176,9 @@ Now every ecosystem dependency is pinned by git revision:
   `318424cdf91c6eebdd2024b779771c225e83025c` (the first rev that carries
   `crates/stream-descriptors`). The existing `unibus` pin stays at
   `b47a6cc...`, so canvas-core's wire contract is unchanged.
+- The vendored `coherence-native` names the same `fpl-gfx` rev so the graph
+  has one gfx identity, not two incompatible copies. Its `provenance.json`
+  checksum is updated to match the dependency-only manifest edit.
 
 `fpl-gfx` moved from per-crate path dependencies to `workspace = true` in the
 crates that used `../../../gfx`. The only non-model-host manifest changes are
