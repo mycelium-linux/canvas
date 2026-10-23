@@ -15,7 +15,7 @@ canvas = { workspace = true }
 canvas-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-unibus-media = { path = "../../../unibus/crates/unibus-media" }
+unibus-media = { git = "ssh://git@github.com/FuturePresentLabs/unibus.git", rev = "318424cdf91c6eebdd2024b779771c225e83025c" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 screencapturekit = { version = "11", features = ["macos_15_0"], optional = true }

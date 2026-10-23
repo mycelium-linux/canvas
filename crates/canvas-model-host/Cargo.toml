@@ -4,12 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Theme-native GPU model renderer and Canvas video producer"
+default-run = "canvas-model-host"
 
 [dependencies]
 anyhow.workspace = true
 bytemuck = { version = "1.24", features = ["derive"] }
 canvas-core.workspace = true
-fpl-gfx = { path = "../../../gfx" }
+fpl-gfx = { workspace = true, features = ["wgpu"] }
 glam = { version = "0.30", features = ["bytemuck"] }
 mlua = { version = "0.12.1", features = ["luau", "serialize"] }
 pollster = "0.4"

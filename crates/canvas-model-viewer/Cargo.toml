@@ -6,14 +6,14 @@ license.workspace = true
 
 [dependencies]
 canvas-core.workspace = true
-fpl-gfx = { path = "../../../gfx", default-features = false, features = ["wgpu"] }
+fpl-gfx = { workspace = true, features = ["wgpu"] }
 canvas-widgets = { path = "../canvas-widgets", features = ["live"] }
 iced = { version = "0.14", default-features = false, features = ["wgpu", "canvas"] }
 wgpu = "27"
 serde.workspace = true
 serde_json.workspace = true
 memmap2 = "0.9"
-unibus-media = { path = "../../../unibus/crates/unibus-media" }
+unibus-media = { git = "ssh://git@github.com/FuturePresentLabs/unibus.git", rev = "318424cdf91c6eebdd2024b779771c225e83025c" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 metal = "0.32"

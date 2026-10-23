@@ -9,7 +9,7 @@ default = []
 schema = ["dep:schemars", "canvas-widgets/schema", "fpl-gfx/schema"]
 
 [dependencies]
-fpl-gfx = { path = "../../../gfx", default-features = false }
+fpl-gfx = { workspace = true }
 canvas-core.workspace = true
 canvas-widgets = { path = "../canvas-widgets", default-features = false }
 serde.workspace = true
