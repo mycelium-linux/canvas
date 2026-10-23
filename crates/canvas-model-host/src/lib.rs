@@ -12,6 +12,7 @@ use std::path::PathBuf;
 pub mod lua;
 pub mod mesh;
 pub mod renderer;
+pub mod wasm;
 
 pub const MODEL_SCENE_CONTRACT: &str = "canvas.model.scene.v1";
 
