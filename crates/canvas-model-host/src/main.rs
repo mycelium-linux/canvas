@@ -3,6 +3,7 @@ use canvas_core::VisualTheme;
 use canvas_core::{Accent, ThemeMode, ThemeSelection};
 use canvas_model_host::{
     CameraFlight, Material, SceneContext, SceneState, glam::Vec3, lua, mesh, renderer::Renderer,
+    wasm,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -188,7 +189,7 @@ fn main() -> Result<()> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.len() != 8 {
         bail!(
-            "usage: canvas-model-host <scene.lua> <asset-root> <endpoint> <width> <height> <fps> <videotoolbox|nvenc|vaapi> <stream-id>"
+            "usage: canvas-model-host <scene.lua|scene.wasm> <asset-root> <endpoint> <width> <height> <fps> <videotoolbox|nvenc|vaapi> <stream-id>"
         );
     }
     let scene_path = PathBuf::from(&args[0]);
@@ -409,6 +410,20 @@ fn main() -> Result<()> {
 }
 
 fn read_scene(path: &Path, assets: &SceneContext) -> Result<SceneState> {
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("wasm"))
+    {
+        let wasm::SceneRun { scene, report } = wasm::evaluate_file(path, assets)?;
+        eprintln!(
+            "canvas-model-host: wasm scene {} fuel={} elapsed_ms={:.2}",
+            path.display(),
+            report.fuel_consumed,
+            report.elapsed_ms
+        );
+        return Ok(scene);
+    }
     let source =
         std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     lua::evaluate_with(&source, assets)
