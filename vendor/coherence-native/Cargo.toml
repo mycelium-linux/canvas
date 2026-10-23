@@ -11,7 +11,7 @@ readme = "README.md"
 
 [dependencies]
 coherence-tokens = { path = "../coherence-tokens", version = "0.2.3" }
-fpl-gfx = { git = "https://github.com/ajmwagar/gfx.git", rev = "ba980e8251ec65d3fc25bcd9cfa3b882ca0e1034", default-features = false, optional = true }
+fpl-gfx = { git = "https://github.com/ajmwagar/gfx.git", rev = "08cacbe245867d487f5ac1b44da9ae49d96e1890", default-features = false, optional = true }
 egui = { version = "=0.33.3", default-features = false, optional = true }
 
 [features]

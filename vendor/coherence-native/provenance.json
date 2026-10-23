@@ -3,7 +3,7 @@
   "revision": "8d4c86c38e326299f4f61ac596525bd6fdc25e46",
   "captured": "2026-10-19",
   "files": {
-    "Cargo.toml": "b0cb8e9ba651232c9e47892b28eef623ca855b24b4ebf6d349db2d9bc5cce6d7",
+    "Cargo.toml": "d74a04d7c7ae3c2de964c9be0791f42bda054c5571b615990d227dde4c9e9385",
     "tests/adapters.rs": "6446687ba84db04fbf27cb6b5b826b73204924e6a2bf42f41b3f64662bbae8b3",
     "README.md": "c2086c32abf79226cdc67394a92dbc86e25a898ecdcde343c92f41956ba56c0f",
     "examples/shared-theme.rs": "e4297b387ec55ae1c9a5dc3fb0fb3d624b16142429d889502aac85db2195c56c",

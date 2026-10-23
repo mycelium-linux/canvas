@@ -459,7 +459,7 @@ dependencies = [
  "canvas-widgets",
  "canvas-workspace",
  "csv",
- "fpl-gfx 0.1.0 (git+https://github.com/ajmwagar/gfx.git?rev=08cacbe245867d487f5ac1b44da9ae49d96e1890)",
+ "fpl-gfx",
  "iced",
  "image",
  "libc",
@@ -709,7 +709,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "canvas-core",
- "fpl-gfx 0.1.0 (git+https://github.com/ajmwagar/gfx.git?rev=08cacbe245867d487f5ac1b44da9ae49d96e1890)",
+ "fpl-gfx",
  "glam 0.30.10",
  "mlua",
  "pollster",
@@ -728,7 +728,7 @@ version = "0.1.0"
 dependencies = [
  "canvas-core",
  "canvas-widgets",
- "fpl-gfx 0.1.0 (git+https://github.com/ajmwagar/gfx.git?rev=08cacbe245867d487f5ac1b44da9ae49d96e1890)",
+ "fpl-gfx",
  "iced",
  "memmap2",
  "metal",
@@ -795,7 +795,7 @@ dependencies = [
  "bytemuck",
  "canvas-core",
  "coherence-native",
- "fpl-gfx 0.1.0 (git+https://github.com/ajmwagar/gfx.git?rev=08cacbe245867d487f5ac1b44da9ae49d96e1890)",
+ "fpl-gfx",
  "iced",
  "iced_wgpu",
  "image",
@@ -817,7 +817,7 @@ dependencies = [
  "canvas-core",
  "canvas-widgets",
  "csv",
- "fpl-gfx 0.1.0 (git+https://github.com/ajmwagar/gfx.git?rev=08cacbe245867d487f5ac1b44da9ae49d96e1890)",
+ "fpl-gfx",
  "schemars",
  "serde",
  "serde_json",
@@ -944,7 +944,7 @@ name = "coherence-native"
 version = "0.1.0"
 dependencies = [
  "coherence-tokens",
- "fpl-gfx 0.1.0 (git+https://github.com/ajmwagar/gfx.git?rev=ba980e8251ec65d3fc25bcd9cfa3b882ca0e1034)",
+ "fpl-gfx",
 ]
 
 [[package]]
@@ -1787,15 +1787,6 @@ dependencies = [
  "serde",
  "thiserror 2.0.20",
  "wgpu",
-]
-
-[[package]]
-name = "fpl-gfx"
-version = "0.1.0"
-source = "git+https://github.com/ajmwagar/gfx.git?rev=ba980e8251ec65d3fc25bcd9cfa3b882ca0e1034#ba980e8251ec65d3fc25bcd9cfa3b882ca0e1034"
-dependencies = [
- "serde",
- "thiserror 2.0.20",
 ]
 
 [[package]]
