@@ -185,25 +185,180 @@ fn read_viewer_camera(path: &Path, now_ms: u64) -> Option<canvas_core::model_cam
     camera.is_current(now_ms).then_some(camera)
 }
 
-fn main() -> Result<()> {
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
-    if args.len() != 8 {
-        bail!(
-            "usage: canvas-model-host <scene.lua|scene.wasm> <asset-root> <endpoint> <width> <height> <fps> <videotoolbox|nvenc|vaapi> <stream-id>"
-        );
+const USAGE: &str = "usage:\n  canvas-model-host (wasm|lua) scene <scene-path> --assets <asset-dir> [--fuel <n>] [--json]\n  canvas-model-host <scene.lua|scene.wasm> <asset-root> <endpoint> <width> <height> <fps> <videotoolbox|nvenc|vaapi> <stream-id>";
+
+/// A CLI failure knows whether it was the caller's invocation or the
+/// scene's fault, because those have different exit codes.
+enum CliFailure {
+    /// Bad arguments or flags: exit 2, matching common CLI convention.
+    Usage(String),
+    /// The scene was read, evaluated, or validated and failed: exit 1.
+    Runtime(anyhow::Error),
+}
+
+fn usage(message: impl Into<String>) -> CliFailure {
+    CliFailure::Usage(message.into())
+}
+
+impl From<anyhow::Error> for CliFailure {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Runtime(error)
     }
+}
+
+impl From<std::io::Error> for CliFailure {
+    fn from(error: std::io::Error) -> Self {
+        Self::Runtime(error.into())
+    }
+}
+
+fn main() {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if let Err(failure) = dispatch(&args) {
+        match failure {
+            CliFailure::Usage(message) => {
+                eprintln!("canvas-model-host: {message}\n\n{USAGE}");
+                std::process::exit(2);
+            }
+            CliFailure::Runtime(error) => {
+                eprintln!("canvas-model-host: {error:#}");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+fn dispatch(args: &[String]) -> Result<(), CliFailure> {
+    match args.first().map(String::as_str) {
+        Some("wasm" | "lua") => run_scene(args),
+        _ => {
+            if args.len() != 8 {
+                return Err(usage("expected 8 streaming arguments"));
+            }
+            run_stream(args)
+        }
+    }
+}
+
+/// One shape for both scene runtimes.
+///
+/// `canvas-model-host (wasm|lua) scene <path> --assets <dir> --json` prints the
+/// same canonical `SceneState` JSON for either runtime and uses the same exit
+/// codes: 0 success, 2 bad invocation, 1 runtime/validation failure.
+fn run_scene(args: &[String]) -> Result<(), CliFailure> {
+    let runtime = args[0].as_str();
+    if args.get(1).map(String::as_str) != Some("scene") {
+        return Err(usage("expected `scene` after the runtime name"));
+    }
+
+    let mut scene_path: Option<PathBuf> = None;
+    let mut asset_root: Option<PathBuf> = None;
+    // Accepted for both runtimes so the invocation shape is identical. Lua
+    // scenes use their fixed instruction budget; wasm scenes honour this.
+    let mut fuel = wasm::FUEL_BUDGET;
+    let mut compact = false;
+    let mut index = 2;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--assets" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| usage("--assets requires a directory"))?;
+                asset_root = Some(PathBuf::from(value));
+            }
+            "--fuel" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| usage("--fuel requires a number"))?;
+                fuel = value.parse::<u64>().map_err(|_| {
+                    usage(format!(
+                        "--fuel must be a non-negative integer, got {value:?}"
+                    ))
+                })?;
+            }
+            "--json" => compact = true,
+            flag if flag.starts_with('-') => {
+                return Err(usage(format!("unknown flag {flag}")));
+            }
+            value if scene_path.is_none() => scene_path = Some(PathBuf::from(value)),
+            value => return Err(usage(format!("unexpected argument {value:?}"))),
+        }
+        index += 1;
+    }
+
+    let scene_path = scene_path.ok_or_else(|| usage("missing scene path"))?;
+    let asset_root = asset_root.ok_or_else(|| usage("--assets <dir> is required"))?;
+    if !asset_root.is_dir() {
+        return Err(CliFailure::Runtime(anyhow::anyhow!(
+            "asset root {} is not a directory",
+            asset_root.display()
+        )));
+    }
+    let context = SceneContext::scan(&asset_root);
+
+    let scene = match runtime {
+        "lua" => {
+            let source = std::fs::read_to_string(&scene_path).map_err(|error| {
+                CliFailure::Runtime(
+                    anyhow::Error::new(error).context(format!("read {}", scene_path.display())),
+                )
+            })?;
+            lua::evaluate_with(&source, &context).map_err(CliFailure::Runtime)?
+        }
+        "wasm" => {
+            let run = wasm::evaluate_file_with_fuel(&scene_path, &context, fuel)
+                .map_err(CliFailure::Runtime)?;
+            eprintln!(
+                "canvas-model-host: wasm scene {} fuel={} elapsed_ms={:.2}",
+                scene_path.display(),
+                run.report.fuel_consumed,
+                run.report.elapsed_ms
+            );
+            run.scene
+        }
+        other => return Err(usage(format!("unknown scene runtime {other:?}"))),
+    };
+
+    let output = if compact {
+        serde_json::to_vec(&scene)
+    } else {
+        serde_json::to_vec_pretty(&scene)
+    }
+    .map_err(|error| CliFailure::Runtime(anyhow::Error::new(error).context("encode scene JSON")))?;
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(&output)
+        .and_then(|()| stdout.write_all(b"\n"))
+        .and_then(|()| stdout.flush())
+        .map_err(|error| {
+            CliFailure::Runtime(anyhow::Error::new(error).context("write scene JSON"))
+        })?;
+    Ok(())
+}
+
+fn run_stream(args: &[String]) -> Result<(), CliFailure> {
     let scene_path = PathBuf::from(&args[0]);
     let asset_root = PathBuf::from(&args[1]);
     let endpoint = &args[2];
-    let width: u32 = args[3].parse().context("invalid width")?;
-    let height: u32 = args[4].parse().context("invalid height")?;
-    let fps: u32 = args[5].parse().context("invalid fps")?;
+    let width: u32 = args[3]
+        .parse()
+        .map_err(|_| usage(format!("invalid width {}", args[3])))?;
+    let height: u32 = args[4]
+        .parse()
+        .map_err(|_| usage(format!("invalid height {}", args[4])))?;
+    let fps: u32 = args[5]
+        .parse()
+        .map_err(|_| usage(format!("invalid fps {}", args[5])))?;
     // The id the frames arrive under on every screen. It is what a screen
     // names when it sends a camera pose back, so the host has to be told which
     // stream it is producing -- it can see its encoder and its endpoint, but
     // neither of those is the name anyone else uses for it.
     let stream_id = args[7].clone();
-    anyhow::ensure!((1..=30).contains(&fps), "fps must be 1..=30");
+    if !(1..=30).contains(&fps) {
+        return Err(usage("fps must be 1..=30"));
+    }
 
     // A scene cannot look at the asset root itself, so the host enumerates it
     // and re-enumerates whenever the set changes — that is what lets a scene
@@ -393,7 +548,9 @@ fn main() -> Result<()> {
                 .context("publish local model frame")?;
             if let Err(error) = stdin.write_all(&frame) {
                 let _ = encoder.kill();
-                return Err(error).context("write RGBA frame to hardware encoder");
+                return Err(CliFailure::Runtime(
+                    anyhow::Error::new(error).context("write RGBA frame to hardware encoder"),
+                ));
             }
             next_output += 1;
             frame_count += 1;

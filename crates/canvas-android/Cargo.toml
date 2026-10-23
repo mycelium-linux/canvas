@@ -28,7 +28,7 @@ serde = { version = "1", features = ["derive"], optional = true }
 getrandom = { version = "0.3", optional = true }
 subtle = { version = "2", optional = true }
 sha2 = { version = "0.10", optional = true }
-fpl-gfx = { path = "../../../gfx", default-features = false, optional = true }
+fpl-gfx = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.21", optional = true }

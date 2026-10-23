@@ -14,8 +14,8 @@ serde.workspace = true
 serde_json.workspace = true
 subtle = "2.6"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
-unibus = { path = "../../../unibus/crates/unibus" }
-unibus-media = { path = "../../../unibus/crates/unibus-media" }
+unibus = { git = "ssh://git@github.com/FuturePresentLabs/unibus.git", rev = "318424cdf91c6eebdd2024b779771c225e83025c" }
+unibus-media = { git = "ssh://git@github.com/FuturePresentLabs/unibus.git", rev = "318424cdf91c6eebdd2024b779771c225e83025c" }
 
 [dev-dependencies]
 canvas.workspace = true

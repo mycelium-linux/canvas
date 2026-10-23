@@ -459,7 +459,7 @@ dependencies = [
  "canvas-widgets",
  "canvas-workspace",
  "csv",
- "fpl-gfx",
+ "fpl-gfx 0.1.0 (git+https://github.com/ajmwagar/gfx.git?rev=08cacbe245867d487f5ac1b44da9ae49d96e1890)",
  "iced",
  "image",
  "libc",
@@ -543,7 +543,7 @@ dependencies = [
  "subtle",
  "tempfile",
  "tokio",
- "unibus 0.1.0",
+ "unibus 0.1.0 (git+ssh://git@github.com/FuturePresentLabs/unibus.git?rev=318424cdf91c6eebdd2024b779771c225e83025c)",
  "unibus-media",
 ]
 
@@ -709,7 +709,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "canvas-core",
- "fpl-gfx",
+ "fpl-gfx 0.1.0 (git+https://github.com/ajmwagar/gfx.git?rev=08cacbe245867d487f5ac1b44da9ae49d96e1890)",
  "glam 0.30.10",
  "mlua",
  "pollster",
@@ -728,7 +728,7 @@ version = "0.1.0"
 dependencies = [
  "canvas-core",
  "canvas-widgets",
- "fpl-gfx",
+ "fpl-gfx 0.1.0 (git+https://github.com/ajmwagar/gfx.git?rev=08cacbe245867d487f5ac1b44da9ae49d96e1890)",
  "iced",
  "memmap2",
  "metal",
@@ -795,7 +795,7 @@ dependencies = [
  "bytemuck",
  "canvas-core",
  "coherence-native",
- "fpl-gfx",
+ "fpl-gfx 0.1.0 (git+https://github.com/ajmwagar/gfx.git?rev=08cacbe245867d487f5ac1b44da9ae49d96e1890)",
  "iced",
  "iced_wgpu",
  "image",
@@ -817,7 +817,7 @@ dependencies = [
  "canvas-core",
  "canvas-widgets",
  "csv",
- "fpl-gfx",
+ "fpl-gfx 0.1.0 (git+https://github.com/ajmwagar/gfx.git?rev=08cacbe245867d487f5ac1b44da9ae49d96e1890)",
  "schemars",
  "serde",
  "serde_json",
@@ -944,7 +944,7 @@ name = "coherence-native"
 version = "0.1.0"
 dependencies = [
  "coherence-tokens",
- "fpl-gfx",
+ "fpl-gfx 0.1.0 (git+https://github.com/ajmwagar/gfx.git?rev=ba980e8251ec65d3fc25bcd9cfa3b882ca0e1034)",
 ]
 
 [[package]]
@@ -1780,12 +1780,22 @@ dependencies = [
 [[package]]
 name = "fpl-gfx"
 version = "0.1.0"
+source = "git+https://github.com/ajmwagar/gfx.git?rev=08cacbe245867d487f5ac1b44da9ae49d96e1890#08cacbe245867d487f5ac1b44da9ae49d96e1890"
 dependencies = [
  "bytemuck",
  "schemars",
  "serde",
  "thiserror 2.0.20",
  "wgpu",
+]
+
+[[package]]
+name = "fpl-gfx"
+version = "0.1.0"
+source = "git+https://github.com/ajmwagar/gfx.git?rev=ba980e8251ec65d3fc25bcd9cfa3b882ca0e1034#ba980e8251ec65d3fc25bcd9cfa3b882ca0e1034"
+dependencies = [
+ "serde",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4995,6 +5005,7 @@ dependencies = [
 [[package]]
 name = "stream-descriptors"
 version = "0.1.0"
+source = "git+ssh://git@github.com/FuturePresentLabs/unibus.git?rev=318424cdf91c6eebdd2024b779771c225e83025c#318424cdf91c6eebdd2024b779771c225e83025c"
 dependencies = [
  "serde",
  "serde_json",
@@ -5567,6 +5578,7 @@ dependencies = [
 [[package]]
 name = "unibus"
 version = "0.1.0"
+source = "git+ssh://git@github.com/FuturePresentLabs/unibus.git?rev=318424cdf91c6eebdd2024b779771c225e83025c#318424cdf91c6eebdd2024b779771c225e83025c"
 dependencies = [
  "anyhow",
  "serde",
@@ -5585,6 +5597,7 @@ dependencies = [
 [[package]]
 name = "unibus-device"
 version = "0.1.0"
+source = "git+ssh://git@github.com/FuturePresentLabs/unibus.git?rev=318424cdf91c6eebdd2024b779771c225e83025c#318424cdf91c6eebdd2024b779771c225e83025c"
 dependencies = [
  "serde",
 ]
@@ -5592,23 +5605,25 @@ dependencies = [
 [[package]]
 name = "unibus-media"
 version = "0.1.0"
+source = "git+ssh://git@github.com/FuturePresentLabs/unibus.git?rev=318424cdf91c6eebdd2024b779771c225e83025c#318424cdf91c6eebdd2024b779771c225e83025c"
 dependencies = [
  "anyhow",
  "serde",
  "serde_json",
  "sha2",
  "stream-descriptors",
- "unibus 0.1.0",
+ "unibus 0.1.0 (git+ssh://git@github.com/FuturePresentLabs/unibus.git?rev=318424cdf91c6eebdd2024b779771c225e83025c)",
 ]
 
 [[package]]
 name = "unibus-sdk"
 version = "0.1.0"
+source = "git+ssh://git@github.com/FuturePresentLabs/unibus.git?rev=318424cdf91c6eebdd2024b779771c225e83025c#318424cdf91c6eebdd2024b779771c225e83025c"
 dependencies = [
  "anyhow",
  "serde",
  "serde_json",
- "unibus 0.1.0",
+ "unibus 0.1.0 (git+ssh://git@github.com/FuturePresentLabs/unibus.git?rev=318424cdf91c6eebdd2024b779771c225e83025c)",
 ]
 
 [[package]]
