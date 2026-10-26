@@ -1,11 +1,13 @@
 //! S1 proof table: every `soil:ble` verb through a real component, plus the
 //! capability, lease, deadline and budget gates.
+//!
+//! The fixture `.wasm` is generated from WIT by the guest crate in
+//! `tests/fixtures/ble/guest`; see `examples/build-wasm-fixtures.rs`.
 
 #![cfg(feature = "soil-ble")]
 
 use canvas_model_host::ble::{
-    BleHost, Characteristic, Device, MAX_NEXT_EVENT_MS, MAX_SCAN_MS, MockBle, MockMode, Service,
-    mock_device,
+    BleHost, Characteristic, MAX_NEXT_EVENT_MS, MAX_SCAN_MS, MockBle, MockMode, Service, mock_device,
 };
 use canvas_model_host::ble_linker::{
     BleCtx, add_all_to_linker, add_to_linker, authorize, registered_verbs,
@@ -17,12 +19,17 @@ use std::sync::Arc;
 use wasmtime::component::{Component, Instance, Linker, Val};
 use wasmtime::{Config, Engine, Store};
 
+// Guest-side codes. The fixture returns 0/count on success and these codes for
+// typed errors, so the tests exercise the real component ABI without a second
+// copy of the record/list lowering.
+const DENIED: u32 = 100;
+const LEASED: u32 = 103;
+const TIMEOUT: u32 = 104;
+const OVER_BUDGET: u32 = 105;
+
 fn fixture() -> Vec<u8> {
-    std::fs::read(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/ble/soil-ble.wasm"),
-    )
-    .expect("read soil-ble fixture")
+    std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ble/soil-ble.wasm"))
+        .expect("read soil-ble fixture")
 }
 
 fn engine() -> Engine {
@@ -83,110 +90,62 @@ fn instantiate(
     (store, instance)
 }
 
-fn call(mut store: &mut Store<BleCtx>, instance: &Instance, name: &str, params: &[Val]) -> Vec<Val> {
+fn call_u64(mut store: &mut Store<BleCtx>, instance: &Instance, name: &str, params: &[Val]) -> u64 {
     let func = instance
         .get_func(&mut store, name)
         .unwrap_or_else(|| panic!("component exports {name}"));
     let mut results = vec![Val::Bool(false)];
     func.call(store, params, &mut results)
         .unwrap_or_else(|error| panic!("call {name}: {error:#}"));
-    results
-}
-
-fn ok_value(value: &Val) -> &Option<Box<Val>> {
-    match value {
-        Val::Result(Ok(value)) => value,
-        Val::Result(Err(error)) => panic!("expected ok, got error {error:?}"),
-        other => panic!("expected result, got {other:?}"),
+    match results[0] {
+        Val::U64(value) => value,
+        ref other => panic!("{name} returned {other:?}, expected u64"),
     }
 }
 
-fn error_code(value: &Val) -> &str {
-    match value {
-        Val::Result(Err(Some(error))) => match error.as_ref() {
-            Val::Enum(name) => name,
-            other => panic!("expected typed error enum, got {other:?}"),
-        },
-        Val::Result(Ok(value)) => panic!("expected error, got ok {value:?}"),
-        other => panic!("expected result, got {other:?}"),
-    }
-}
-
-fn list(value: &Option<Box<Val>>) -> &[Val] {
-    match value.as_deref() {
-        Some(Val::List(items)) => items,
-        other => panic!("expected list, got {other:?}"),
+fn call(mut store: &mut Store<BleCtx>, instance: &Instance, name: &str, params: &[Val]) -> u32 {
+    let func = instance
+        .get_func(&mut store, name)
+        .unwrap_or_else(|| panic!("component exports {name}"));
+    let mut results = vec![Val::Bool(false)];
+    func.call(store, params, &mut results)
+        .unwrap_or_else(|error| panic!("call {name}: {error:#}"));
+    match results[0] {
+        Val::U32(value) => value,
+        ref other => panic!("{name} returned {other:?}, expected u32"),
     }
 }
 
 #[test]
-#[ignore = "component fixture WAT rejected by wasmtime 24: instance not valid to be used as import"]
 fn soil_ble_all_eight_verbs_run_through_a_real_component() {
     let engine = engine();
     let mock = scripted();
     mock.push_notification("cmd", &[9, 8]);
     let (mut store, instance) = instantiate(&engine, &full_caps(), Arc::clone(&mock), false);
 
-    let scanned = call(&mut store, &instance, "scan", &[Val::U32(100)]);
-    let devices = list(ok_value(&scanned[0]));
-    assert_eq!(devices.len(), 1);
-    match &devices[0] {
-        Val::Record(fields) => {
-            let handle = fields.iter().find(|(name, _)| name == "handle").unwrap();
-            assert!(matches!(handle.1, Val::U32(7)));
-        }
-        other => panic!("expected device record, got {other:?}"),
-    }
-
-    let connected = call(&mut store, &instance, "connect", &[Val::U32(7)]);
-    ok_value(&connected[0]);
-    assert_eq!(mock.connected(), Some(7));
-
-    let services = call(&mut store, &instance, "services", &[]);
-    assert_eq!(list(ok_value(&services[0])).len(), 1);
-
-    let read = call(&mut store, &instance, "read", &[Val::String("cmd".into()), Val::U32(16)]);
-    assert_eq!(list(ok_value(&read[0])).len(), 3);
-
-    let written = call(
-        &mut store,
-        &instance,
-        "write",
-        &[Val::String("cmd".into()), Val::List(vec![Val::U8(4), Val::U8(5)])],
+    let packed = call_u64(&mut store, &instance, "run-all", &[Val::U32(100)]);
+    let fields: Vec<u64> = (0..8).map(|shift| (packed >> (shift * 8)) & 0xff).collect();
+    assert_eq!(
+        fields,
+        vec![1, 0, 1, 3, 0, 0, 1, 0],
+        "scan=1 device, connect=ok, services=1, read=3 bytes, write=ok, subscribe=ok, next-event=notification, disconnect=ok"
     );
-    ok_value(&written[0]);
     assert_eq!(mock.writes(), vec![("cmd".to_string(), vec![4, 5])]);
-
-    let subscribed = call(&mut store, &instance, "subscribe", &[Val::String("cmd".into())]);
-    ok_value(&subscribed[0]);
-    assert_eq!(store.data().host.subscription_count(), 1);
-
-    let event = call(&mut store, &instance, "next-event", &[Val::U32(250)]);
-    match ok_value(&event[0]).as_deref() {
-        Some(Val::Option(Some(event))) => match event.as_ref() {
-            Val::Variant(name, _) => assert_eq!(name, "notification"),
-            other => panic!("expected event variant, got {other:?}"),
-        },
-        other => panic!("expected some event, got {other:?}"),
-    }
-
-    let disconnected = call(&mut store, &instance, "disconnect", &[]);
-    ok_value(&disconnected[0]);
-    assert_eq!(mock.connected(), None);
+    assert_eq!(mock.connected(), None, "run-all disconnects at the end");
 }
 
 #[test]
-#[ignore = "component fixture WAT rejected by wasmtime 24: instance not valid to be used as import"]
 fn soil_ble_scan_is_delivered_with_only_the_observe_capability() {
     let engine = engine();
     let mock = scripted();
     let (mut store, instance) = instantiate(&engine, &caps(&["soil:ble.observe"]), mock, true);
-    let scanned = call(&mut store, &instance, "scan", &[Val::U32(100)]);
-    assert_eq!(list(ok_value(&scanned[0])).len(), 1);
+    assert_eq!(
+        call(&mut store, &instance, "run-scan", &[Val::U32(100)]),
+        1
+    );
 }
 
 #[test]
-#[ignore = "component fixture WAT rejected by wasmtime 24: instance not valid to be used as import"]
 fn soil_ble_write_is_denied_without_the_write_capability() {
     let engine = engine();
     let mock = scripted();
@@ -199,27 +158,34 @@ fn soil_ble_write_is_denied_without_the_write_capability() {
     let result = call(
         &mut store,
         &instance,
-        "write",
+        "run-write",
         &[Val::String("cmd".into()), Val::List(vec![Val::U8(1)])],
     );
-    assert_eq!(error_code(&result[0]), "denied");
-    assert!(mock.writes().is_empty(), "denied write must not reach the radio");
+    assert_eq!(result, DENIED);
+    assert!(
+        mock.writes().is_empty(),
+        "denied write must not reach the radio"
+    );
 }
 
 #[test]
-#[ignore = "component fixture WAT rejected by wasmtime 24: instance not valid to be used as import"]
 fn soil_ble_connect_is_denied_without_the_connect_capability() {
     let engine = engine();
     let mock = scripted();
-    let (mut store, instance) =
-        instantiate(&engine, &caps(&["soil:ble.observe"]), Arc::clone(&mock), true);
-    let result = call(&mut store, &instance, "connect", &[Val::U32(7)]);
-    assert_eq!(error_code(&result[0]), "denied");
+    let (mut store, instance) = instantiate(
+        &engine,
+        &caps(&["soil:ble.observe"]),
+        Arc::clone(&mock),
+        true,
+    );
+    assert_eq!(
+        call(&mut store, &instance, "run-connect", &[Val::U32(7)]),
+        DENIED
+    );
     assert_eq!(mock.connected(), None);
 }
 
 #[test]
-#[ignore = "component fixture WAT rejected by wasmtime 24: instance not valid to be used as import"]
 fn soil_ble_an_ungranted_verb_is_absent_from_the_production_linker() {
     let engine = engine();
     let component = Component::new(&engine, fixture()).expect("compile fixture component");
@@ -239,64 +205,66 @@ fn soil_ble_an_ungranted_verb_is_absent_from_the_production_linker() {
 }
 
 #[test]
-#[ignore = "component fixture WAT rejected by wasmtime 24: instance not valid to be used as import"]
 fn soil_ble_a_competing_soil_host_reports_leased() {
     let engine = engine();
     let mock = scripted();
     mock.held_elsewhere(true);
     let (mut store, instance) = instantiate(&engine, &full_caps(), mock, false);
-    let result = call(&mut store, &instance, "connect", &[Val::U32(7)]);
-    assert_eq!(error_code(&result[0]), "leased");
+    assert_eq!(
+        call(&mut store, &instance, "run-connect", &[Val::U32(7)]),
+        LEASED
+    );
 }
 
 #[test]
-#[ignore = "component fixture WAT rejected by wasmtime 24: instance not valid to be used as import"]
 fn soil_ble_deadline_and_budget_failures_are_typed() {
     let engine = engine();
-    let mock = scripted();
-    let (mut store, instance) = instantiate(&engine, &full_caps(), Arc::clone(&mock), false);
+    let over_mock = scripted();
+    let (mut over_store, over_instance) =
+        instantiate(&engine, &full_caps(), over_mock, false);
+    assert_eq!(
+        call(
+            &mut over_store,
+            &over_instance,
+            "run-scan",
+            &[Val::U32(MAX_SCAN_MS + 1)]
+        ),
+        OVER_BUDGET
+    );
 
-    let over = call(&mut store, &instance, "scan", &[Val::U32(MAX_SCAN_MS + 1)]);
-    assert_eq!(error_code(&over[0]), "over-budget");
-
-    mock.set_mode(MockMode::Timeout);
-    let timeout = call(&mut store, &instance, "scan", &[Val::U32(100)]);
-    assert_eq!(error_code(&timeout[0]), "timeout");
+    let timeout_mock = scripted();
+    timeout_mock.set_mode(MockMode::Timeout);
+    let (mut timeout_store, timeout_instance) =
+        instantiate(&engine, &full_caps(), timeout_mock, false);
+    assert_eq!(
+        call(
+            &mut timeout_store,
+            &timeout_instance,
+            "run-scan",
+            &[Val::U32(100)]
+        ),
+        TIMEOUT
+    );
 }
 
 #[test]
-#[ignore = "component fixture WAT rejected by wasmtime 24: instance not valid to be used as import"]
 fn soil_ble_next_event_returns_none_on_deadline_not_an_error() {
     let engine = engine();
     let mock = scripted();
     let (mut store, instance) = instantiate(&engine, &full_caps(), Arc::clone(&mock), false);
-    let result = call(
-        &mut store,
-        &instance,
-        "next-event",
-        &[Val::U32(MAX_NEXT_EVENT_MS)],
-    );
-    let value = ok_value(&result[0]);
-    assert!(
-        matches!(value.as_deref(), Some(Val::Option(None))),
-        "no event by the deadline is none: {value:?}"
+    assert_eq!(
+        call(
+            &mut store,
+            &instance,
+            "run-next-event",
+            &[Val::U32(MAX_NEXT_EVENT_MS)]
+        ),
+        0,
+        "no event by the deadline is none"
     );
     assert_eq!(mock.event_deadlines(), vec![MAX_NEXT_EVENT_MS]);
 }
 
-#[test]
-fn soil_ble_contract_bounds_are_shared_with_the_host() {
-    // A second line of defence: the linker must not grow its own copy of the
-    // contract bounds. This is the host's own value, used by the tests above.
-    assert_eq!(MAX_SCAN_MS, 30_000);
-    assert_eq!(MAX_NEXT_EVENT_MS, 1_000);
-    assert!(BleHost::new(MockBle::new()).scan(MAX_SCAN_MS + 1).is_err());
-    let _: BTreeSet<u32> = BTreeSet::new();
-    let _: Device;
-}
-
-/// Non-component proof of the same authority decision: the linker's verb plan
-/// only contains granted capabilities, and an ungranted verb is typed denied.
 #[test]
 fn soil_ble_linker_plan_and_denial_without_a_component() {
     let observe_only: BTreeSet<String> = ["soil:ble.observe".to_string()].into_iter().collect();
@@ -323,4 +291,11 @@ fn soil_ble_linker_plan_and_denial_without_a_component() {
     verbs.sort_unstable();
     assert!(verbs.contains(&"write"));
     assert_eq!(authorize(&nudged, "soil:ble.write"), Ok(()));
+}
+
+#[test]
+fn soil_ble_contract_bounds_are_shared_with_the_host() {
+    assert_eq!(MAX_SCAN_MS, 30_000);
+    assert_eq!(MAX_NEXT_EVENT_MS, 1_000);
+    assert!(BleHost::new(MockBle::new()).scan(MAX_SCAN_MS + 1).is_err());
 }

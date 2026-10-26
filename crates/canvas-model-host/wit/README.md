@@ -1,4 +1,4 @@
-# Slice-2 contracts: `soil:gpu@1.0.0` and `soil:audio@1.0.0`
+# Soil contracts: `soil:gpu@1.0.0`, `soil:audio@1.0.0`, and `soil:ble@1.0.0`
 
 These WIT packages are **defined, not shipped**. They describe the slice-2
 boundary between a wasm app and the native Canvas host; no import is linked
@@ -12,10 +12,22 @@ filesystem, network, clock, or device-enumeration surface expressible here:
 meshes are content identifiers (CIDs), the audio sink is host policy, and every
 error is a per-interface capability result.
 
-`conformance.json` is the machine-checked drift guard for slice 2: the tests
-resolve the WIT surface and compare function signatures structurally (parameter
-names and resolved type names, plus the `result` ok/err types), so a type drift
-fails even when the function name survives.
+`soil:ble@1.0.0` adds the BLE transport seam. The host owns the radio and the
+lease; a Spore sees eight verbs, Soil-issued device handles, typed errors, and
+no MAC, path, socket, clock, or ambient filesystem/network authority. The
+capability strings are `soil:ble.observe`, `soil:ble.connect`, and
+`soil:ble.write`; the ring protocol stays in the guest.
+
+Component fixtures are generated from WIT, never hand-written. The
+`tests/fixtures/ble/soil-ble.wasm` fixture is built by the guest crate in
+`tests/fixtures/ble/guest` and `wasm-tools component new`; the example
+`build-wasm-fixtures` runs both.
+
+`conformance.json` is the machine-checked drift guard: the tests resolve the WIT
+surface and compare function signatures structurally (parameter names and
+resolved type names, plus the `result` ok/err types), so a type drift fails even
+when the function name survives. It also pins the typed error enum and the
+`event` variant cases for `soil:ble`.
 
 Deliberate omissions:
 
