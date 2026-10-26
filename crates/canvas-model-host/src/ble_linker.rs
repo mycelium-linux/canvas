@@ -212,7 +212,9 @@ fn register_scan(ble: &mut LinkerInstance<'_, BleCtx>, host: &Arc<BleHost>) -> a
     ble.func_wrap(
         "scan",
         move |store: StoreContextMut<'_, BleCtx>, (timeout_ms,): (u32,)| {
-            check(&store.data(), "soil:ble.observe")?;
+            if let Err(error) = check(&store.data(), "soil:ble.observe") {
+                return Ok((Err(error),));
+            }
             Ok((host
                 .scan(timeout_ms)
                 .map(|devices| devices.into_iter().map(to_device).collect::<Vec<_>>())
@@ -229,7 +231,9 @@ fn register_connect(
     ble.func_wrap(
         "connect",
         move |store: StoreContextMut<'_, BleCtx>, (device,): (u32,)| {
-            check(&store.data(), "soil:ble.connect")?;
+            if let Err(error) = check(&store.data(), "soil:ble.connect") {
+                return Ok((Err(error),));
+            }
             Ok((host.connect(device).map_err(map),))
         },
     )
@@ -243,7 +247,9 @@ fn register_disconnect(
     ble.func_wrap(
         "disconnect",
         move |store: StoreContextMut<'_, BleCtx>, (): ()| {
-            check(&store.data(), "soil:ble.connect")?;
+            if let Err(error) = check(&store.data(), "soil:ble.connect") {
+                return Ok((Err(error),));
+            }
             Ok((host.disconnect().map_err(map),))
         },
     )
@@ -257,7 +263,9 @@ fn register_services(
     ble.func_wrap(
         "services",
         move |store: StoreContextMut<'_, BleCtx>, (): ()| {
-            check(&store.data(), "soil:ble.observe")?;
+            if let Err(error) = check(&store.data(), "soil:ble.observe") {
+                return Ok((Err(error),));
+            }
             Ok((host.services().map(to_services).map_err(map),))
         },
     )
@@ -268,7 +276,9 @@ fn register_read(ble: &mut LinkerInstance<'_, BleCtx>, host: &Arc<BleHost>) -> a
     ble.func_wrap(
         "read",
         move |store: StoreContextMut<'_, BleCtx>, (char_uuid, max_bytes): (String, u32)| {
-            check(&store.data(), "soil:ble.observe")?;
+            if let Err(error) = check(&store.data(), "soil:ble.observe") {
+                return Ok((Err(error),));
+            }
             Ok((host.read(&char_uuid, max_bytes).map_err(map),))
         },
     )
@@ -279,7 +289,9 @@ fn register_write(ble: &mut LinkerInstance<'_, BleCtx>, host: &Arc<BleHost>) -> 
     ble.func_wrap(
         "write",
         move |store: StoreContextMut<'_, BleCtx>, (char_uuid, data): (String, Vec<u8>)| {
-            check(&store.data(), "soil:ble.write")?;
+            if let Err(error) = check(&store.data(), "soil:ble.write") {
+                return Ok((Err(error),));
+            }
             Ok((host.write(&char_uuid, &data).map_err(map),))
         },
     )
@@ -293,7 +305,9 @@ fn register_subscribe(
     ble.func_wrap(
         "subscribe",
         move |store: StoreContextMut<'_, BleCtx>, (char_uuid,): (String,)| {
-            check(&store.data(), "soil:ble.observe")?;
+            if let Err(error) = check(&store.data(), "soil:ble.observe") {
+                return Ok((Err(error),));
+            }
             Ok((host.subscribe(&char_uuid).map_err(map),))
         },
     )
@@ -307,7 +321,9 @@ fn register_next_event(
     ble.func_wrap(
         "next-event",
         move |store: StoreContextMut<'_, BleCtx>, (timeout_ms,): (u32,)| {
-            check(&store.data(), "soil:ble.observe")?;
+            if let Err(error) = check(&store.data(), "soil:ble.observe") {
+                return Ok((Err(error),));
+            }
             Ok((host
                 .next_event(timeout_ms)
                 .map(|event| event.map(to_event))
