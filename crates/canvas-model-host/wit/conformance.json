@@ -1,7 +1,7 @@
 {
   "packages": [
     {
-      "id": "fleet:gpu@1.0.0",
+      "id": "soil:gpu@1.0.0",
       "interfaces": ["gpu"],
       "functions": {
         "submit": {
@@ -27,7 +27,7 @@
       "forbidden-symbols": ["fs", "file", "path", "net", "http", "dns", "clock", "env", "random"]
     },
     {
-      "id": "fleet:audio@1.0.0",
+      "id": "soil:audio@1.0.0",
       "interfaces": ["audio"],
       "functions": {
         "push": {

@@ -1,4 +1,4 @@
-# Slice-2 contracts: `fleet:gpu@1.0.0` and `fleet:audio@1.0.0`
+# Slice-2 contracts: `soil:gpu@1.0.0` and `soil:audio@1.0.0`
 
 These WIT packages are **defined, not shipped**. They describe the slice-2
 boundary between a wasm app and the native Canvas host; no import is linked
