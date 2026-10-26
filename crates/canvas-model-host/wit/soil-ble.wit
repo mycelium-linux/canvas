@@ -30,15 +30,24 @@ interface types {
   record characteristic { uuid: string, readable: bool, writable: bool, notifiable: bool }
   record service { uuid: string, characteristics: list<characteristic> }
 
-  variant event {
+  /// One notification payload. Named separately because this wit-parser
+  /// version does not accept named fields on a variant case.
+  record notification-payload {
     /// The characteristic is included: today's Soil discards it.
-    notification(char-uuid: string, data: list<u8>),
-    disconnected(reason: string),
+    char-uuid: string,
+    data: list<u8>,
+  }
+
+  record disconnect-reason { reason: string }
+
+  variant event {
+    notification(notification-payload),
+    disconnected(disconnect-reason),
   }
 }
 
 interface ble {
-  use types.{device, service, event};
+  use types.{device, device-handle, service, event};
 
   enum error {
     denied,        // capability or lease not granted to this Spore
