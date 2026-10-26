@@ -4,7 +4,9 @@ use canvas_workspace::{
     endpoint,
     observer::{Frame, Observation},
 };
-use fpl_gfx::{reactor::Activity, voice_popup};
+use fpl_gfx::reactor::Activity;
+#[cfg(feature = "voice-popup")]
+use fpl_gfx::voice_popup;
 use std::{
     io::{self, BufRead, Read, Write},
     sync::mpsc,
@@ -46,9 +48,17 @@ impl Projection {
         if let Some(caption) = frame.caption.filter(|s| !s.is_empty()) {
             self.caption = Some(caption);
         }
+        // Lingering is part of the gfx voice popup's timing. Without the
+        // `voice-popup` feature there is nothing to linger for, so dismissal is
+        // immediate; the feature restores the original delay exactly.
+        #[cfg(feature = "voice-popup")]
         if self.active && !active {
             self.idle_until = Some(now + Duration::from_secs_f32(voice_popup::LINGER_SECONDS));
         } else if active {
+            self.idle_until = None;
+        }
+        #[cfg(not(feature = "voice-popup"))]
+        {
             self.idle_until = None;
         }
         self.active = active;
@@ -193,6 +203,7 @@ mod tests {
             playback_level: None,
         }
     }
+    #[cfg(feature = "voice-popup")]
     #[test]
     fn idle_lingers_once_and_fresh_turn_drops_previous_heard_text() {
         let now = Instant::now();
