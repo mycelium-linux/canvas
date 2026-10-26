@@ -37,6 +37,16 @@ policy and theme export), `canvas-mac`, `canvas-linux`.
 
 ## Build and run
 
+**Requires a sibling `../gfx` checkout at gfx rev `83b7d46`.** The workspace
+resolves `fpl-gfx` to `../gfx` (`[workspace.dependencies]`) and pins the gfx git
+source to rev `83b7d46` via
+`[patch."https://github.com/ajmwagar/gfx.git"]`. A sibling gfx checkout at
+`83b7d46` is REQUIRED to build: without it the two gfx identities diverge and the
+build fails with `E0308` ("expected `fpl_gfx::theme::Theme`, found
+`fpl_gfx::Theme`"), and with no sibling at all the workspace cannot even load
+its manifests (`failed to read ../gfx/Cargo.toml`). **CI must check out
+gfx@83b7d46 alongside this repo.**
+
 The agent fleet itself is observable without a terminal: `scripts/cp-server.lua`
 exposes one tmux session as JSON with per-pane send, capture, and kill, and
 Canvas draws a widget per pane over it. See
