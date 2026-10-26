@@ -6,6 +6,7 @@
 //! transforming events into it are different jobs.
 
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use crate::{Error, Result};
 // The canonical registry lives in canvas-core; stream_binding re-exports it
@@ -13,6 +14,15 @@ use crate::{Error, Result};
 use canvas_core::is_declared_contract;
 
 pub const STREAM_SCHEMA_VERSION: u32 = 1;
+
+/// How long a live stream may go without an event before its widget is shown
+/// as `Stale`. Shared with the shell so health transitions and the binding
+/// layer cannot drift apart.
+pub const STREAM_STALE_AFTER: Duration = Duration::from_secs(60);
+
+/// How long a stream widget may wait for its first event before it is shown as
+/// `Disconnected`.
+pub const STREAM_FIRST_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Contract a briefing beat is published under.
 pub const BRIEFING_CONTRACT: &str = "canvas.briefing.beat.v1";
@@ -64,5 +74,16 @@ impl StreamEnvelope {
 
     pub fn age_ms(&self, now_ms: u64) -> u64 {
         now_ms.saturating_sub(self.emitted_at_ms)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_health_windows_are_stable() {
+        assert_eq!(STREAM_STALE_AFTER, Duration::from_secs(60));
+        assert_eq!(STREAM_FIRST_EVENT_TIMEOUT, Duration::from_secs(5));
     }
 }
