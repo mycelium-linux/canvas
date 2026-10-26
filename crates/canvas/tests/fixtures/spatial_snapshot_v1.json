@@ -1,0 +1,40 @@
+{
+  "contract": "panopticon.spatial.snapshot.v1",
+  "version": 1,
+  "source": {
+    "owner": "panopticon",
+    "id": "live-aviation"
+  },
+  "revision": 7,
+  "generated_at_unix_ms": 1799999999000,
+  "freshness": {
+    "max_age_secs": 30
+  },
+  "features": [
+    {
+      "domain": "adsb",
+      "entity_id": "icao-a1b2c3",
+      "geometry": {
+        "kind": "point",
+        "position": {
+          "latitude": 47.4502,
+          "longitude": -122.3088,
+          "altitude_m": 3048.0
+        }
+      },
+      "style_role": "domain.adsb",
+      "measures": {
+        "speed_knots": 420.0
+      },
+      "summary": {
+        "callsign": "N12345"
+      },
+      "provenance": [
+        {
+          "source_id": "adsb-exchange",
+          "record_id": "abc123"
+        }
+      ]
+    }
+  ]
+}
