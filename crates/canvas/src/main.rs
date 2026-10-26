@@ -63,11 +63,13 @@ use unibus_media::CameraDetections;
 
 mod default_background;
 mod hid_output;
+#[cfg(feature = "voice-popup")]
 mod indicator;
 mod keyboard_input;
 mod notification;
 mod presence;
 use ::canvas::screensaver;
+use ::canvas::stream_contract::{STREAM_FIRST_EVENT_TIMEOUT, STREAM_STALE_AFTER};
 use keyboard_input::*;
 mod terminal;
 mod transition;
@@ -96,10 +98,6 @@ struct TransientNotification {
     notification: Notification,
     shown_at: Instant,
 }
-#[cfg(feature = "lua-scenes")]
-const STREAM_FIRST_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(feature = "lua-scenes")]
-const STREAM_STALE_AFTER: Duration = Duration::from_secs(60);
 const SURFACE_CONTROL_HIT_SIZE: f64 = 18.0;
 const SURFACE_CONTROL_INSET: f64 = 4.0;
 const SURFACE_RESIZE_HANDLE_SIZE: f64 = 10.0;
@@ -1978,12 +1976,21 @@ impl App {
                 if self.expire_voice_indicator(Instant::now()) {
                     self.bump();
                 }
+                // The dismiss animation comes from the gfx `voice_popup`
+                // module, which is only available behind `voice-popup`. Without
+                // it, drop the transient state immediately so it cannot keep
+                // the animation subscription alive forever.
+                #[cfg(feature = "voice-popup")]
                 if self
                     .indicator_dismissing
                     .as_ref()
                     .is_some_and(|(_, since)| {
                         since.elapsed().as_secs_f32() >= fpl_gfx::voice_popup::DISMISS_SECONDS
                     })
+                {
+                    self.indicator_dismissing = None;
+                }
+                #[cfg(not(feature = "voice-popup"))]
                 {
                     self.indicator_dismissing = None;
                 }
@@ -11420,6 +11427,10 @@ impl App {
             );
         }
 
+        // Voice presentation needs the gfx `voice_popup` module; it is absent
+        // from the upstream gfx refs, so the whole overlay is feature-gated
+        // rather than faked. See `voice-popup` in Cargo.toml.
+        #[cfg(feature = "voice-popup")]
         if let Some(active) = self
             .visible_indicator_id
             .as_ref()
@@ -13912,17 +13923,20 @@ mod tests {
         assert_eq!(effective_stream_watermark(5000, 1), 0);
     }
 
+    #[cfg(feature = "lua-scenes")]
     #[test]
     fn a_running_producer_keeps_its_mark() {
         assert_eq!(effective_stream_watermark(41, 42), 41);
     }
 
     /// A duplicate or replay inside one run is not a restart.
+    #[cfg(feature = "lua-scenes")]
     #[test]
     fn an_equal_sequence_is_not_treated_as_a_restart() {
         assert_eq!(effective_stream_watermark(42, 42), 42);
     }
 
+    #[cfg(feature = "lua-scenes")]
     #[test]
     fn a_first_event_starts_from_zero() {
         assert_eq!(effective_stream_watermark(0, 1), 0);
