@@ -177,6 +177,36 @@ fn check(context: &BleCtx, cap: &str) -> Result<(), Error> {
     }
 }
 
+/// The authority decision a host function makes, shared with the non-component
+/// gating tests so there is no second copy of the rule.
+pub fn authorize(caps: &BTreeSet<String>, cap: &str) -> Result<(), BleError> {
+    if caps.contains(cap) {
+        Ok(())
+    } else {
+        Err(BleError::Denied)
+    }
+}
+
+const OBSERVE_VERBS: &[&str] = &["scan", "services", "read", "subscribe", "next-event"];
+const CONNECT_VERBS: &[&str] = &["connect", "disconnect"];
+const WRITE_VERBS: &[&str] = &["write"];
+
+/// The verbs a linker built from `caps` should carry. `register_all` mirrors
+/// [`add_all_to_linker`]; production leaves it false.
+pub fn registered_verbs(caps: &BTreeSet<String>, register_all: bool) -> Vec<&'static str> {
+    let mut verbs = Vec::new();
+    if register_all || caps.contains("soil:ble.observe") {
+        verbs.extend_from_slice(OBSERVE_VERBS);
+    }
+    if register_all || caps.contains("soil:ble.connect") {
+        verbs.extend_from_slice(CONNECT_VERBS);
+    }
+    if register_all || caps.contains("soil:ble.write") {
+        verbs.extend_from_slice(WRITE_VERBS);
+    }
+    verbs
+}
+
 fn register_scan(ble: &mut LinkerInstance<'_, BleCtx>, host: &Arc<BleHost>) -> anyhow::Result<()> {
     let host = Arc::clone(host);
     ble.func_wrap(
