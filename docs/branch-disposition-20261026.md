@@ -7,24 +7,27 @@ to `master` or `rename/dock-to-canvas`.
 
 ## The real base line
 
-Two refs matter, and they are not the same line:
+Fetching the remote changes the picture from the brief's local-only view. There are two
+local names and one remote line:
 
-| Ref | SHA | Commits not in the other line |
+| Ref | SHA | Relation to `origin/master` |
 | --- | --- | --- |
-| `origin/master` (GitHub default, `origin/HEAD`) | `cf32a13` | `rename/dock-to-canvas..origin/master` = **219** |
-| `rename/dock-to-canvas` (local default) | `f9aa610` | `origin/master..rename/dock-to-canvas` = **44** |
+| `origin/master` (GitHub default, `origin/HEAD`) | `cf32a13` | the remote line |
+| `origin/rename/dock-to-canvas` | `25121f0` | **ancestor**; 0 unique, 7 behind `origin/master` |
+| `rename/dock-to-canvas` (local default) | `f9aa610` | **diverged**; 44 unique, 219 behind `origin/master` |
 
-Their merge-base is `f226b87` (`feat(canvas): hot-reload Lua widget compositions`).
-Neither contains the other. `origin/master` additionally contains the merged rename
-consolidation (`861d9cc`, PR #4) and later CI/control-plane work.
-
-Consequence for the counts below: a ref whose merge-base is on the rename lineage reports
-one count against `rename/dock-to-canvas` and a much larger count against `origin/master`
-because the latter is missing the rename commits the ref is built on. The actual unique
-content is the count against the ref's own lineage. The master-vs-rename default-branch
-question is deliberately **not** resolved here.
+The local ref `rename/dock-to-canvas` is the same commit as
+`origin/pi/canvas-pre-rename-features` (`f9aa610`). It is not the remote
+`rename/dock-to-canvas`, and its merge-base with `origin/master` is `f226b87`. The remote
+rename was already folded into `origin/master` (merge `861d9cc`, PR #4); master is the real
+merged line. The master-vs-rename default-branch question is still deliberately **not**
+resolved here.
 
 ```text
+$ git rev-list --count origin/rename/dock-to-canvas..origin/master
+7
+$ git rev-list --count origin/master..origin/rename/dock-to-canvas
+0
 $ git rev-list --count rename/dock-to-canvas..origin/master
 219
 $ git rev-list --count origin/master..rename/dock-to-canvas
@@ -32,6 +35,13 @@ $ git rev-list --count origin/master..rename/dock-to-canvas
 $ git merge-base rename/dock-to-canvas origin/master
 f226b8799153fa066f20c1e02a4e33044ede8725
 ```
+
+Consequence for the counts below: refs built on the **local** rename line (`codex/gfx-ui-primitives`,
+`feat/shared-workspace-native-inbox`) report 1 unique commit against that line and 35/37
+against `origin/master`; the 35/37 is their 34/36 local-rename ancestors plus the one
+unique commit, not 35/37 independent changes. Refs whose merge-base is already in master
+(`recovery/*`, `origin/integration/*`) report the same count against both names. Landing
+base for new work is `origin/master`.
 
 ## Recomputed counts
 
@@ -77,8 +87,8 @@ merge-base origin/master origin/__dolt_remote_info__ = (none; unrelated history)
 
 The brief's lead counts are reproduced exactly, except that the brief attributed the
 35/37 figures loosely: they are the counts **against `origin/master`**, not the number
-of unique commits on the ref's own line. Against the rename line both refs have exactly
-**1** unique commit.
+of unique commits on the ref's own line. Against the local rename line both refs have
+exactly **1** unique commit; that local line is what inflated the master-facing count.
 
 ---
 
@@ -103,29 +113,35 @@ of unique commits on the ref's own line. Against the rename line both refs have 
 
 ## 2. `refs/heads/feat/shared-workspace-native-inbox` — LAND
 
-- Unique commits recomputed: **1** vs `rename/dock-to-canvas` (merge-base `e12ea0d`);
-  **37** vs `origin/master` (merge-base `f226b87`). The 37 is rename-line ancestry, not
-  37 independent changes.
+- Unique commits recomputed: **1** vs local `rename/dock-to-canvas` (merge-base
+  `e12ea0d`); **37** vs `origin/master` (merge-base `f226b87`). The 37 is local-rename
+  ancestry, not 37 independent changes. After cherry-picking onto `origin/master`, the
+  landing branch has exactly **1** unique commit:
+  `git rev-list --count origin/master..pi/shared-workspace-native-inbox` = `1`.
 - Unique commit: `f090466 Add read-only Marbles producer for native Canvas workspaces`
-  (2026-10-19). Adds the self-contained `crates/canvas-marbles` producer and
-  `docs/work-inbox.md`.
+  (2026-10-19), rebased without content changes to `e4a828d` on `origin/master`. Adds the
+  self-contained `crates/canvas-marbles` producer and `docs/work-inbox.md`.
 - Verdict: **land**.
 - What it delivers: a read-only Marbles CLI -> Canvas shared-workspace `task_deck`
   producer. Marbles remains the source of truth; the renderer owns layout/theme/input.
   It ships bounded reads, 16-record capacity, explicit stale/error frames, duplicate and
   cross-tracker rejection, and the documented Fire TV / Studio installation flow.
 - Why it still matters: it is the only ref in this set with no superseding implementation
-  on either base line. No other ref contains `crates/canvas-marbles` or
+  on `origin/master`. No other ref contains `crates/canvas-marbles` or
   `docs/work-inbox.md`. The committed docs record it as deployed to the `firetv-omni`
   receiver and Studio launchd producer.
-- PR: <https://github.com/FuturePresentLabs/dock/pull/8> against `rename/dock-to-canvas`
-  (the line its unique commit is measured against). No code changes were made; the
-  branch was pushed exactly as committed.
+- PR: <https://github.com/FuturePresentLabs/dock/pull/10> against `origin/master`, the
+  real remote line. No code changes were made; the original commit was cherry-picked.
+  PR #8 (opened before the remote topology was checked) targeted
+  `origin/rename/dock-to-canvas`, which is an ancestor of master and lacks the local
+  rename ancestry, so it was conflicting; #8 is closed as superseded by #10.
 - Deletion: **none now.** The local ref remains because it is checked out in the SPRAWL
   sibling `/Users/ajmwagar/src/fpl/dock-shared-workspace`, which has an uncommitted
   `crates/canvas-marbles/src/lib.rs`; that checkout was read only and was not modified.
-  The local ref can be deleted once that sibling is relocated, and the remote branch can
-  be deleted after PR #8 merges. This is the one intentional exception to local pruning.
+  The local ref can be deleted once that sibling is relocated. The superseded remote
+  branch `feat/shared-workspace-native-inbox` can be deleted after #10 merges; the
+  landing branch `pi/shared-workspace-native-inbox` can be deleted after merge too. This
+  is the one intentional exception to local ref pruning.
 
 ## 3. `refs/heads/recovery/pi-compositor-core` — ABANDON
 
@@ -287,7 +303,7 @@ whose dispositions are recorded above.
 | Ref | Verdict | Replacement / PR | Ref action |
 | --- | --- | --- | --- |
 | `codex/gfx-ui-primitives` | abandon | `296a8ee`, `93a8446`, public `gfx` `ba980e8` | local deleted |
-| `feat/shared-workspace-native-inbox` | land | PR #8 | kept: checked out in SPRAWL sibling |
+| `feat/shared-workspace-native-inbox` | land | PR #10 (rebased onto master); PR #8 closed | kept: checked out in SPRAWL sibling |
 | `recovery/pi-compositor-core` | abandon | master `28bcba5` + descendants | local deleted |
 | `recovery/pi-gpu-compositor` | abandon | `abf92f5`, then master `28bcba5` / `canvas-widget-host` | local deleted |
 | `origin/integration/pi-gpu-compositor` | abandon | master `28bcba5` | remote deletion pending |
