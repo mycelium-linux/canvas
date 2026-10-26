@@ -7,6 +7,10 @@ license.workspace = true
 [features]
 default = []
 lua-scenes = ["dep:mlua", "dep:unibus-sdk"]
+# The gfx `voice_popup` module is not committed upstream yet. Keep the call
+# sites compiled behind this off-by-default feature instead of deleting them;
+# the default build has no voice popup (see the cfg'd no-op call sites).
+voice-popup = []
 mcp = ["dep:rmcp", "dep:schemars", "dep:tokio", "dep:axum", "dep:reqwest", "canvas-widgets/schema", "canvas-workspace/schema"]
 
 [dependencies]
@@ -91,6 +95,17 @@ path = "src/bin/canvas-workspace-capture.rs"
 [[bin]]
 name = "canvas-briefing-record"
 path = "src/bin/canvas-briefing-record.rs"
+required-features = ["lua-scenes"]
+
+# These import `canvas::stream_binding`, which only exists with `lua-scenes`.
+[[bin]]
+name = "canvas-lob-status"
+path = "src/bin/canvas-lob-status.rs"
+required-features = ["lua-scenes"]
+
+[[bin]]
+name = "canvas-transmog-status"
+path = "src/bin/canvas-transmog-status.rs"
 required-features = ["lua-scenes"]
 
 [[bin]]
