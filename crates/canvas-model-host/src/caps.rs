@@ -28,12 +28,12 @@ use std::fmt;
 /// else is rejected rather than having the unknown entry dropped: silently
 /// dropping would turn a typo into a quiet loss of privilege.
 pub const KNOWN_CAPS: &[&str] = &[
-    "fleet:gpu",
-    "fleet:audio",
-    "fleet:storage.read",
-    "fleet:storage.write",
-    "fleet:net",
-    "fleet:screen",
+    "soil:gpu",
+    "soil:audio",
+    "soil:storage.read",
+    "soil:storage.write",
+    "soil:net",
+    "soil:screen",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,7 +251,7 @@ mod tests {
     /// conditions fails with the specific denial, never with a silent drop.
     #[test]
     fn truth_table_over_request_grant_allow_and_deny() {
-        let cap = "fleet:gpu";
+        let cap = "soil:gpu";
         for in_manifest in [false, true] {
             for in_grants in [false, true] {
                 for in_allowed in [false, true] {
@@ -313,11 +313,11 @@ mod tests {
     fn unknown_and_empty_caps_reject_the_manifest() {
         let (grants, policy) = permissive();
         let unknown = effective_caps(
-            &manifest(&["fleet:telepathy"], limits(64, 1_000, 2_000)),
+            &manifest(&["soil:telepathy"], limits(64, 1_000, 2_000)),
             &grants,
             &policy,
         );
-        assert_eq!(unknown, Err(Denial::UnknownCap("fleet:telepathy".into())));
+        assert_eq!(unknown, Err(Denial::UnknownCap("soil:telepathy".into())));
 
         let empty = effective_caps(&manifest(&[""], limits(64, 1_000, 2_000)), &grants, &policy);
         assert_eq!(empty, Err(Denial::UnknownCap(String::new())));
@@ -343,7 +343,7 @@ mod tests {
             ),
         ];
         for (requested, expected) in cases {
-            let result = effective_caps(&manifest(&["fleet:gpu"], requested), &grants, &policy);
+            let result = effective_caps(&manifest(&["soil:gpu"], requested), &grants, &policy);
             assert_eq!(result, Err(expected));
         }
     }
@@ -354,9 +354,9 @@ mod tests {
     #[test]
     fn principal_limits_clamp_down_and_name_the_fields() {
         let effective = effective_caps(
-            &manifest(&["fleet:gpu"], limits(512, 5_000, 9_000)),
-            &grants(&["fleet:gpu"], limits(256, 4_000, 3_000)),
-            &policy(&["fleet:gpu"], &[], limits(1_024, 9_000, 10_000)),
+            &manifest(&["soil:gpu"], limits(512, 5_000, 9_000)),
+            &grants(&["soil:gpu"], limits(256, 4_000, 3_000)),
+            &policy(&["soil:gpu"], &[], limits(1_024, 9_000, 10_000)),
         )
         .unwrap();
         assert_eq!(effective.limits, limits(256, 4_000, 3_000));
@@ -373,9 +373,9 @@ mod tests {
     #[test]
     fn only_the_reduced_fields_are_reported_as_clamped() {
         let effective = effective_caps(
-            &manifest(&["fleet:audio"], limits(512, 1_000, 2_000)),
-            &grants(&["fleet:audio"], limits(256, 1_000, 2_000)),
-            &policy(&["fleet:audio"], &[], limits(1_024, 9_000, 10_000)),
+            &manifest(&["soil:audio"], limits(512, 1_000, 2_000)),
+            &grants(&["soil:audio"], limits(256, 1_000, 2_000)),
+            &policy(&["soil:audio"], &[], limits(1_024, 9_000, 10_000)),
         )
         .unwrap();
         assert_eq!(effective.limits, limits(256, 1_000, 2_000));
@@ -387,7 +387,7 @@ mod tests {
         let mut policy = permissive().1;
         policy.min_memory_mb = 32;
         let result = effective_caps(
-            &manifest(&["fleet:gpu"], limits(16, 1_000, 2_000)),
+            &manifest(&["soil:gpu"], limits(16, 1_000, 2_000)),
             &permissive().0,
             &policy,
         );
@@ -399,7 +399,7 @@ mod tests {
         let (grants, policy) = permissive();
         assert_eq!(
             effective_caps(
-                &manifest(&["fleet:gpu"], limits(64, 0, 2_000)),
+                &manifest(&["soil:gpu"], limits(64, 0, 2_000)),
                 &grants,
                 &policy
             ),
@@ -407,7 +407,7 @@ mod tests {
         );
         assert_eq!(
             effective_caps(
-                &manifest(&["fleet:gpu"], limits(64, 1_000, 0)),
+                &manifest(&["soil:gpu"], limits(64, 1_000, 0)),
                 &grants,
                 &policy
             ),
@@ -419,12 +419,12 @@ mod tests {
     #[test]
     fn granted_but_unrequested_or_allowed_but_unrequested_is_not_effective() {
         let effective = effective_caps(
-            &manifest(&["fleet:gpu"], limits(64, 1_000, 2_000)),
+            &manifest(&["soil:gpu"], limits(64, 1_000, 2_000)),
             &grants(KNOWN_CAPS, limits(64, 1_000, 2_000)),
             &policy(KNOWN_CAPS, &[], limits(64, 1_000, 2_000)),
         )
         .unwrap();
-        assert_eq!(effective.caps, set(&["fleet:gpu"]));
+        assert_eq!(effective.caps, set(&["soil:gpu"]));
     }
 
     #[test]
@@ -432,11 +432,11 @@ mod tests {
         let source = serde_json::json!({
             "id": "org.fpl.clock",
             "version": "1.2.0",
-            "caps": ["fleet:audio", "fleet:gpu"],
+            "caps": ["soil:audio", "soil:gpu"],
             "limits": {"memory_mb": 64, "fuel": 500000000_u64, "epoch_ms": 2000}
         });
         let parsed: AppManifest = serde_json::from_value(source.clone()).unwrap();
-        assert_eq!(parsed.caps, set(&["fleet:gpu", "fleet:audio"]));
+        assert_eq!(parsed.caps, set(&["soil:gpu", "soil:audio"]));
         assert_eq!(serde_json::to_value(&parsed).unwrap(), source);
 
         let mut extra = source.clone();
@@ -454,12 +454,7 @@ mod tests {
     fn evaluation_is_deterministic() {
         let (base_grants, base_policy) = permissive();
         let app = manifest(
-            &[
-                "fleet:screen",
-                "fleet:gpu",
-                "fleet:storage.read",
-                "fleet:audio",
-            ],
+            &["soil:screen", "soil:gpu", "soil:storage.read", "soil:audio"],
             limits(64, 1_000, 2_000),
         );
         let first = effective_caps(&app, &base_grants, &base_policy).unwrap();
@@ -467,18 +462,13 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(
             first.caps.iter().cloned().collect::<Vec<_>>(),
-            vec![
-                "fleet:audio",
-                "fleet:gpu",
-                "fleet:screen",
-                "fleet:storage.read"
-            ]
+            vec!["soil:audio", "soil:gpu", "soil:screen", "soil:storage.read"]
         );
 
         let clamping = effective_caps(
-            &manifest(&["fleet:gpu"], limits(512, 5_000, 9_000)),
-            &grants(&["fleet:gpu"], limits(256, 4_000, 3_000)),
-            &policy(&["fleet:gpu"], &[], limits(1_024, 9_000, 10_000)),
+            &manifest(&["soil:gpu"], limits(512, 5_000, 9_000)),
+            &grants(&["soil:gpu"], limits(256, 4_000, 3_000)),
+            &policy(&["soil:gpu"], &[], limits(1_024, 9_000, 10_000)),
         )
         .unwrap();
         assert_eq!(
