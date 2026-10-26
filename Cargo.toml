@@ -22,7 +22,7 @@ serde_json = "1"
 schemars = "1"
 canvas-core = { path = "crates/canvas-core" }
 canvas = { path = "crates/canvas" }
-fpl-gfx = { git = "https://github.com/ajmwagar/gfx.git", rev = "ba980e8251ec65d3fc25bcd9cfa3b882ca0e1034" }
+fpl-gfx = { git = "https://github.com/ajmwagar/gfx.git", rev = "83b7d46593e892bc36fb0012d1d89cc850a0237c" }
 coherence-native = { path = "vendor/coherence-native", default-features = false, features = ["gfx"] }
 anyhow = "1"
 axum = "0.8"
