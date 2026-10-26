@@ -591,7 +591,7 @@ mod tests {
 
     #[test]
     fn scan_is_bounded_by_time_and_device_count() {
-        let mock = MockBle::new();
+        let mock = Arc::new(MockBle::new());
         let host = BleHost::new(Arc::clone(&mock));
         assert_eq!(host.scan(MAX_SCAN_MS + 1), Err(BleError::OverBudget));
 

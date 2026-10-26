@@ -17,12 +17,22 @@ fn main() -> anyhow::Result<()> {
         .join("fixtures")
         .join("scenes");
     for name in ["field-orbit", "follow-latest"] {
-        let source_path = fixtures.join(format!("{name}.wat"));
-        let wasm_path = fixtures.join(format!("{name}.wasm"));
-        let source = fs::read_to_string(&source_path)?;
-        let wasm = wat::parse_str(&source)?;
-        fs::write(&wasm_path, wasm)?;
-        println!("wrote {}", wasm_path.display());
+        compile(&fixtures, name)?;
     }
+    let ble = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("ble");
+    compile(&ble, "soil-ble")?;
+    Ok(())
+}
+
+fn compile(dir: &std::path::Path, name: &str) -> anyhow::Result<()> {
+    let source_path = dir.join(format!("{name}.wat"));
+    let wasm_path = dir.join(format!("{name}.wasm"));
+    let source = fs::read_to_string(&source_path)?;
+    let wasm = wat::parse_str(&source)?;
+    fs::write(&wasm_path, wasm)?;
+    println!("wrote {}", wasm_path.display());
     Ok(())
 }
