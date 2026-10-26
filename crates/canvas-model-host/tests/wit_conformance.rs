@@ -28,6 +28,15 @@ struct ExpectedPackage {
     functions: BTreeMap<String, ExpectedFunction>,
     required_records: Vec<String>,
     forbidden_symbols: Vec<String>,
+    /// Interface whose functions this fixture entry pins. Defaults to the
+    /// first interface for the older single-interface packages.
+    function_interface: String,
+    /// Interface whose records this fixture entry pins.
+    record_interface: String,
+    /// Variant name -> exact case names, on the record interface.
+    required_variants: BTreeMap<String, Vec<String>>,
+    /// Enum name -> exact case names, on the function interface.
+    required_enums: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -87,6 +96,31 @@ fn string_array(value: &Value, key: &str, package: &str) -> Vec<String> {
         .collect()
 }
 
+fn string_map(value: &Value, key: &str) -> BTreeMap<String, Vec<String>> {
+    value
+        .get(key)
+        .and_then(Value::as_object)
+        .map(|object| {
+            object
+                .iter()
+                .map(|(name, cases)| {
+                    let cases = cases
+                        .as_array()
+                        .unwrap_or_else(|| panic!("{key}.{name} must be an array"))
+                        .iter()
+                        .map(|case| {
+                            case.as_str()
+                                .unwrap_or_else(|| panic!("{key}.{name} cases must be strings"))
+                                .to_owned()
+                        })
+                        .collect();
+                    (name.clone(), cases)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn expected_packages() -> Vec<ExpectedPackage> {
     let fixture = fixture();
     let packages = fixture
@@ -109,8 +143,22 @@ fn expected_packages() -> Vec<ExpectedPackage> {
                 .iter()
                 .map(|(name, expected)| (name.clone(), expected_function(&id, name, expected)))
                 .collect();
+            let interfaces = string_array(package, "interfaces", &id);
+            let first = interfaces.first().cloned().unwrap_or_default();
             ExpectedPackage {
-                interfaces: string_array(package, "interfaces", &id),
+                function_interface: package
+                    .get("function-interface")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&first)
+                    .to_owned(),
+                record_interface: package
+                    .get("record-interface")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&first)
+                    .to_owned(),
+                required_variants: string_map(package, "required-variants"),
+                required_enums: string_map(package, "required-enums"),
+                interfaces,
                 functions,
                 required_records: string_array(package, "required-records", &id),
                 forbidden_symbols: string_array(package, "forbidden-symbols", &id),
@@ -163,8 +211,8 @@ fn wit_files_parse() {
     );
     assert_eq!(
         by_id.len(),
-        2,
-        "fixture must not name packages outside the two"
+        expected.len(),
+        "fixture must not name packages outside the fixture"
     );
     for package in by_id.values() {
         assert!(
@@ -217,6 +265,9 @@ fn fixture_matches_resolved_surface() {
             let interface = &resolve.interfaces[interface_id];
 
             for (name, expected_function) in &package.functions {
+                if interface_name != &package.function_interface {
+                    continue;
+                }
                 let function = interface.functions.get(name).unwrap_or_else(|| {
                     panic!(
                         "{}::{interface_name}: fixture function {name:?} is missing from WIT",
@@ -263,16 +314,22 @@ fn fixture_matches_resolved_surface() {
                 );
             }
 
-            let resolved_functions: BTreeSet<String> =
-                interface.functions.keys().cloned().collect();
-            let fixture_functions: BTreeSet<String> = package.functions.keys().cloned().collect();
-            assert_eq!(
-                resolved_functions, fixture_functions,
-                "{}::{interface_name}: exported functions must match the fixture exactly",
-                package.id
-            );
+            if interface_name == &package.function_interface {
+                let resolved_functions: BTreeSet<String> =
+                    interface.functions.keys().cloned().collect();
+                let fixture_functions: BTreeSet<String> =
+                    package.functions.keys().cloned().collect();
+                assert_eq!(
+                    resolved_functions, fixture_functions,
+                    "{}::{interface_name}: exported functions must match the fixture exactly",
+                    package.id
+                );
+            }
 
             for record in &package.required_records {
+                if interface_name != &package.record_interface {
+                    continue;
+                }
                 let type_id = *interface.types.get(record).unwrap_or_else(|| {
                     panic!(
                         "{}::{interface_name}: required record {record:?} is missing",
@@ -285,6 +342,57 @@ fn fixture_matches_resolved_surface() {
                     package.id,
                     resolve.types[type_id].kind.as_str()
                 );
+            }
+
+            if interface_name == &package.record_interface {
+                for (variant, cases) in &package.required_variants {
+                    let type_id = *interface.types.get(variant).unwrap_or_else(|| {
+                        panic!(
+                            "{}::{interface_name}: required variant {variant:?} is missing",
+                            package.id
+                        )
+                    });
+                    let TypeDefKind::Variant(variant_def) = &resolve.types[type_id].kind else {
+                        panic!(
+                            "{}::{interface_name}: {variant:?} must be a variant",
+                            package.id
+                        );
+                    };
+                    let actual: Vec<String> = variant_def
+                        .cases
+                        .iter()
+                        .map(|case| case.name.clone())
+                        .collect();
+                    assert_eq!(
+                        &actual, cases,
+                        "{}::{interface_name}: {variant:?} cases must match the fixture",
+                        package.id
+                    );
+                }
+            }
+
+            if interface_name == &package.function_interface {
+                for (enum_name, cases) in &package.required_enums {
+                    let type_id = *interface.types.get(enum_name).unwrap_or_else(|| {
+                        panic!(
+                            "{}::{interface_name}: required enum {enum_name:?} is missing",
+                            package.id
+                        )
+                    });
+                    let TypeDefKind::Enum(enum_def) = &resolve.types[type_id].kind else {
+                        panic!(
+                            "{}::{interface_name}: {enum_name:?} must be an enum",
+                            package.id
+                        );
+                    };
+                    let actual: Vec<String> =
+                        enum_def.cases.iter().map(|case| case.name.clone()).collect();
+                    assert_eq!(
+                        &actual, cases,
+                        "{}::{interface_name}: {enum_name:?} cases must match the fixture",
+                        package.id
+                    );
+                }
             }
 
             for (name, function) in &interface.functions {
@@ -352,10 +460,38 @@ fn type_display(resolve: &Resolve, ty: &Type) -> String {
             let def = &resolve.types[*id];
             match &def.name {
                 Some(name) => return name.clone(),
-                None => panic!(
-                    "cannot display unnamed {} type; name it in the WIT or decompose it in the fixture",
-                    def.kind.as_str()
-                ),
+                None => match &def.kind {
+                    TypeDefKind::List(ty) => return format!("list<{}>", type_display(resolve, ty)),
+                    TypeDefKind::Option(ty) => {
+                        return format!("option<{}>", type_display(resolve, ty));
+                    }
+                    TypeDefKind::Type(ty) => return type_display(resolve, ty),
+                    TypeDefKind::Tuple(tuple) => {
+                        let parts: Vec<String> = tuple
+                            .types
+                            .iter()
+                            .map(|ty| type_display(resolve, ty))
+                            .collect();
+                        return format!("tuple<{}>", parts.join(", "));
+                    }
+                    TypeDefKind::Result(result) => {
+                        let ok = result
+                            .ok
+                            .as_ref()
+                            .map(|ty| type_display(resolve, ty))
+                            .unwrap_or_default();
+                        let err = result
+                            .err
+                            .as_ref()
+                            .map(|ty| type_display(resolve, ty))
+                            .unwrap_or_default();
+                        return format!("result<{ok}, {err}>");
+                    }
+                    _ => panic!(
+                        "cannot display unnamed {} type; name it in the WIT or decompose it in the fixture",
+                        def.kind.as_str()
+                    ),
+                },
             }
         }
     }
