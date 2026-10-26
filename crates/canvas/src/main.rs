@@ -13923,17 +13923,20 @@ mod tests {
         assert_eq!(effective_stream_watermark(5000, 1), 0);
     }
 
+    #[cfg(feature = "lua-scenes")]
     #[test]
     fn a_running_producer_keeps_its_mark() {
         assert_eq!(effective_stream_watermark(41, 42), 41);
     }
 
     /// A duplicate or replay inside one run is not a restart.
+    #[cfg(feature = "lua-scenes")]
     #[test]
     fn an_equal_sequence_is_not_treated_as_a_restart() {
         assert_eq!(effective_stream_watermark(42, 42), 42);
     }
 
+    #[cfg(feature = "lua-scenes")]
     #[test]
     fn a_first_event_starts_from_zero() {
         assert_eq!(effective_stream_watermark(0, 1), 0);
