@@ -34,6 +34,11 @@ pub const KNOWN_CAPS: &[&str] = &[
     "soil:storage.write",
     "soil:net",
     "soil:screen",
+    // BLE is three caps, not one: observing a link, owning the radio, and
+    // mutating a characteristic are separate authorities (wit/soil-ble.wit).
+    "soil:ble.observe",
+    "soil:ble.connect",
+    "soil:ble.write",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

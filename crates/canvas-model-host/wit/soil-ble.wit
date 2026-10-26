@@ -1,0 +1,63 @@
+// soil:ble@1.0.0 — DEFINED IN SLICE S1; LINKED ONLY BEHIND THE `soil-ble`
+// FEATURE AND ONLY FOR GRANTED CAPABILITIES.
+//
+// This package is the BLE seam between a Spore and the Soil host. The host owns
+// the radio; a Spore sees eight verbs and bytes. Nothing is linked into a
+// component unless the manifest requested the capability, the principal granted
+// it, and host policy allowed the intersection (see caps.rs and ble_linker.rs).
+//
+// Limits (Soil-enforced, not expressible as WIT types):
+// - at most 64 devices per scan, 8 subscribed characteristics per link
+// - scan ≤ 30 s; next-event ≤ 1 s per call; every Soil call has a deadline
+// - read ≤ 512 B per call; write ≤ 512 B per call; the Spore chunks longer frames
+// - at most one link and one live radio lease per Soil host
+// - device handles are Soil-issued; no MAC/UUID path is accepted from a Spore
+// - no fs, net, clock, env, or device enumeration beyond scan results
+package soil:ble@1.0.0;
+
+interface types {
+  /// Soil-issued handle for a scan result. Opaque; not an address.
+  type device-handle = u32;
+
+  record device {
+    handle: device-handle,
+    name: option<string>,
+    rssi: option<s16>,
+    /// Stable cross-Soil-host identity once Soil has read DIS; absent until then.
+    ring-id: option<string>,
+  }
+
+  record characteristic { uuid: string, readable: bool, writable: bool, notifiable: bool }
+  record service { uuid: string, characteristics: list<characteristic> }
+
+  variant event {
+    /// The characteristic is included: today's Soil discards it.
+    notification(char-uuid: string, data: list<u8>),
+    disconnected(reason: string),
+  }
+}
+
+interface ble {
+  use types.{device, service, event};
+
+  enum error {
+    denied,        // capability or lease not granted to this Spore
+    not-found,     // unknown/stale device handle or characteristic
+    not-connected, // no live link
+    leased,        // another authenticated Soil host holds a live radio lease
+    timeout,       // a bounded Soil call hit its deadline
+    over-budget,   // frame/queue/scan limit exceeded
+    not-ready,     // adapter or link is still coming up
+    invalid,       // malformed argument (e.g. empty UUID)
+    io,            // backend failure; text is logged Soil-side, not echoed raw
+  }
+
+  scan: func(timeout-ms: u32) -> result<list<device>, error>;
+  connect: func(device: device-handle) -> result<_, error>;
+  disconnect: func() -> result<_, error>;
+  services: func() -> result<list<service>, error>;
+  read: func(char-uuid: string, max-bytes: u32) -> result<list<u8>, error>;
+  write: func(char-uuid: string, data: list<u8>) -> result<_, error>;
+  subscribe: func(char-uuid: string) -> result<_, error>;
+  next-event: func(timeout-ms: u32) -> result<option<event>, error>;
+}
