@@ -2,15 +2,21 @@
   "packages": [
     {
       "id": "soil:gpu@1.0.0",
-      "interfaces": ["gpu"],
+      "interfaces": [
+        "gpu"
+      ],
       "functions": {
         "submit": {
-          "params": { "list": "draw-list" },
+          "params": {
+            "list": "draw-list"
+          },
           "ok": "u32",
           "err": "error"
         },
         "cancel": {
-          "params": { "frame": "u32" },
+          "params": {
+            "frame": "u32"
+          },
           "ok": null,
           "err": "error"
         }
@@ -24,14 +30,28 @@
         "camera",
         "draw-list"
       ],
-      "forbidden-symbols": ["fs", "file", "path", "net", "http", "dns", "clock", "env", "random"]
+      "forbidden-symbols": [
+        "fs",
+        "file",
+        "path",
+        "net",
+        "http",
+        "dns",
+        "clock",
+        "env",
+        "random"
+      ]
     },
     {
       "id": "soil:audio@1.0.0",
-      "interfaces": ["audio"],
+      "interfaces": [
+        "audio"
+      ],
       "functions": {
         "push": {
-          "params": { "pcm": "pcm" },
+          "params": {
+            "pcm": "pcm"
+          },
           "ok": "u32",
           "err": "error"
         },
@@ -46,8 +66,122 @@
           "err": null
         }
       },
-      "required-records": ["pcm"],
-      "forbidden-symbols": ["fs", "file", "path", "net", "http", "dns", "clock", "env", "random"]
+      "required-records": [
+        "pcm"
+      ],
+      "forbidden-symbols": [
+        "fs",
+        "file",
+        "path",
+        "net",
+        "http",
+        "dns",
+        "clock",
+        "env",
+        "random"
+      ]
+    },
+    {
+      "id": "soil:ble@1.0.0",
+      "interfaces": [
+        "types",
+        "ble"
+      ],
+      "function-interface": "ble",
+      "record-interface": "types",
+      "functions": {
+        "scan": {
+          "params": {
+            "timeout-ms": "u32"
+          },
+          "ok": "list<device>",
+          "err": "error"
+        },
+        "connect": {
+          "params": {
+            "device": "device-handle"
+          },
+          "ok": null,
+          "err": "error"
+        },
+        "disconnect": {
+          "params": {},
+          "ok": null,
+          "err": "error"
+        },
+        "services": {
+          "params": {},
+          "ok": "list<service>",
+          "err": "error"
+        },
+        "read": {
+          "params": {
+            "char-uuid": "string",
+            "max-bytes": "u32"
+          },
+          "ok": "list<u8>",
+          "err": "error"
+        },
+        "write": {
+          "params": {
+            "char-uuid": "string",
+            "data": "list<u8>"
+          },
+          "ok": null,
+          "err": "error"
+        },
+        "subscribe": {
+          "params": {
+            "char-uuid": "string"
+          },
+          "ok": null,
+          "err": "error"
+        },
+        "next-event": {
+          "params": {
+            "timeout-ms": "u32"
+          },
+          "ok": "option<event>",
+          "err": "error"
+        }
+      },
+      "required-records": [
+        "device",
+        "characteristic",
+        "service",
+        "notification-payload",
+        "disconnect-reason"
+      ],
+      "forbidden-symbols": [
+        "fs",
+        "file",
+        "path",
+        "net",
+        "http",
+        "dns",
+        "clock",
+        "env",
+        "random"
+      ],
+      "required-variants": {
+        "event": [
+          "notification",
+          "disconnected"
+        ]
+      },
+      "required-enums": {
+        "error": [
+          "denied",
+          "not-found",
+          "not-connected",
+          "leased",
+          "timeout",
+          "over-budget",
+          "not-ready",
+          "invalid",
+          "io"
+        ]
+      }
     }
   ]
 }

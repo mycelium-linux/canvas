@@ -17,7 +17,16 @@ serde.workspace = true
 serde_json.workspace = true
 stl_io = "0.8"
 wgpu = "27"
-wasmtime = { version = "24", features = ["cranelift"] }
+wasmtime = { version = "34", features = ["cranelift"] }
+
+[features]
+default = []
+# S1 BLE seam. Off by default: `cargo test -p canvas-model-host` with the feature
+# off must stay green, and a host that never grants `soil:ble.*` must not carry
+# the import-linking code at all. Component-model support is what the linker and
+# the fixture Spore path need; wasmtime enables it by default today, but the gate
+# is stated here so the dependency is explicit rather than incidental.
+soil-ble = ["wasmtime/component-model"]
 
 [lib]
 name = "canvas_model_host"

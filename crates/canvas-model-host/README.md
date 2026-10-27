@@ -10,6 +10,14 @@ clock, the network, or the GPU. The host enumerates assets, hands the result
 in, and validates the scene with the same `SceneState` type and rules as the
 Lua path.
 
+## One runtime
+
+This crate is the single Canvas/Soil wasmtime host: core no-import scene modules
+and the component-model Soil capability path (`--features soil-ble`) share the
+same `wasmtime 34` dependency. `canvas-widgets` no longer carries a second
+wasmtime dependency. The Marbles view host uses the same wasmtime version and
+the same no-import core-wasm shape.
+
 ## Prerequisites
 
 - A Rust toolchain with `cargo` (the workspace uses edition 2024).

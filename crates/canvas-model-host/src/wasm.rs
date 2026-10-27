@@ -543,9 +543,9 @@ impl ResourceLimiter for SceneLimits {
 
     fn table_growing(
         &mut self,
-        current: u32,
-        desired: u32,
-        maximum: Option<u32>,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
     ) -> anyhow::Result<bool> {
         self.inner.table_growing(current, desired, maximum)
     }

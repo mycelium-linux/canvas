@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub mod caps;
+#[cfg(feature = "soil-ble")]
+pub mod ble;
+#[cfg(feature = "soil-ble")]
+pub mod ble_linker;
 pub mod lua;
 pub mod mesh;
 pub mod renderer;
