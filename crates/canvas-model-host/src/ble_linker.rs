@@ -29,7 +29,7 @@ use wasmtime::StoreContextMut;
 mod bindings {
     wasmtime::component::bindgen!({
         path: "wit/soil-ble.wit",
-        world: "soil-ble-test",
+        world: "canvas:soil-ble-test/soil-ble-test",
         inline: "
             package canvas:soil-ble-test@0.1.0;
 
