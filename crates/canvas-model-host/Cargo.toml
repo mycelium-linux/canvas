@@ -17,7 +17,7 @@ serde.workspace = true
 serde_json.workspace = true
 stl_io = "0.8"
 wgpu = "27"
-wasmtime = { version = "24", features = ["cranelift"] }
+wasmtime = { version = "34", features = ["cranelift"] }
 
 [features]
 default = []
