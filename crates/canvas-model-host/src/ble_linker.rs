@@ -22,8 +22,8 @@ use crate::ble::{BleBackend, BleError, BleHost, Event};
 use crate::caps::EffectiveCaps;
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use wasmtime::component::{Linker, LinkerInstance};
 use wasmtime::StoreContextMut;
+use wasmtime::component::{Linker, LinkerInstance};
 
 #[allow(clippy::all)]
 mod bindings {
@@ -159,13 +159,10 @@ fn to_services(services: Vec<crate::ble::Service>) -> Vec<Service> {
 
 fn to_event(event: Event) -> WitEvent {
     match event {
-        Event::Notification { char_uuid, data } => WitEvent::Notification(NotificationPayload {
-            char_uuid,
-            data,
-        }),
-        Event::Disconnected { reason } => {
-            WitEvent::Disconnected(DisconnectReason { reason })
+        Event::Notification { char_uuid, data } => {
+            WitEvent::Notification(NotificationPayload { char_uuid, data })
         }
+        Event::Disconnected { reason } => WitEvent::Disconnected(DisconnectReason { reason }),
     }
 }
 
@@ -212,7 +209,7 @@ fn register_scan(ble: &mut LinkerInstance<'_, BleCtx>, host: &Arc<BleHost>) -> a
     ble.func_wrap(
         "scan",
         move |store: StoreContextMut<'_, BleCtx>, (timeout_ms,): (u32,)| {
-            if let Err(error) = check(&store.data(), "soil:ble.observe") {
+            if let Err(error) = check(store.data(), "soil:ble.observe") {
                 return Ok((Err(error),));
             }
             Ok((host
@@ -231,7 +228,7 @@ fn register_connect(
     ble.func_wrap(
         "connect",
         move |store: StoreContextMut<'_, BleCtx>, (device,): (u32,)| {
-            if let Err(error) = check(&store.data(), "soil:ble.connect") {
+            if let Err(error) = check(store.data(), "soil:ble.connect") {
                 return Ok((Err(error),));
             }
             Ok((host.connect(device).map_err(map),))
@@ -247,7 +244,7 @@ fn register_disconnect(
     ble.func_wrap(
         "disconnect",
         move |store: StoreContextMut<'_, BleCtx>, (): ()| {
-            if let Err(error) = check(&store.data(), "soil:ble.connect") {
+            if let Err(error) = check(store.data(), "soil:ble.connect") {
                 return Ok((Err(error),));
             }
             Ok((host.disconnect().map_err(map),))
@@ -263,7 +260,7 @@ fn register_services(
     ble.func_wrap(
         "services",
         move |store: StoreContextMut<'_, BleCtx>, (): ()| {
-            if let Err(error) = check(&store.data(), "soil:ble.observe") {
+            if let Err(error) = check(store.data(), "soil:ble.observe") {
                 return Ok((Err(error),));
             }
             Ok((host.services().map(to_services).map_err(map),))
@@ -276,7 +273,7 @@ fn register_read(ble: &mut LinkerInstance<'_, BleCtx>, host: &Arc<BleHost>) -> a
     ble.func_wrap(
         "read",
         move |store: StoreContextMut<'_, BleCtx>, (char_uuid, max_bytes): (String, u32)| {
-            if let Err(error) = check(&store.data(), "soil:ble.observe") {
+            if let Err(error) = check(store.data(), "soil:ble.observe") {
                 return Ok((Err(error),));
             }
             Ok((host.read(&char_uuid, max_bytes).map_err(map),))
@@ -289,7 +286,7 @@ fn register_write(ble: &mut LinkerInstance<'_, BleCtx>, host: &Arc<BleHost>) -> 
     ble.func_wrap(
         "write",
         move |store: StoreContextMut<'_, BleCtx>, (char_uuid, data): (String, Vec<u8>)| {
-            if let Err(error) = check(&store.data(), "soil:ble.write") {
+            if let Err(error) = check(store.data(), "soil:ble.write") {
                 return Ok((Err(error),));
             }
             Ok((host.write(&char_uuid, &data).map_err(map),))
@@ -305,7 +302,7 @@ fn register_subscribe(
     ble.func_wrap(
         "subscribe",
         move |store: StoreContextMut<'_, BleCtx>, (char_uuid,): (String,)| {
-            if let Err(error) = check(&store.data(), "soil:ble.observe") {
+            if let Err(error) = check(store.data(), "soil:ble.observe") {
                 return Ok((Err(error),));
             }
             Ok((host.subscribe(&char_uuid).map_err(map),))
@@ -321,7 +318,7 @@ fn register_next_event(
     ble.func_wrap(
         "next-event",
         move |store: StoreContextMut<'_, BleCtx>, (timeout_ms,): (u32,)| {
-            if let Err(error) = check(&store.data(), "soil:ble.observe") {
+            if let Err(error) = check(store.data(), "soil:ble.observe") {
                 return Ok((Err(error),));
             }
             Ok((host

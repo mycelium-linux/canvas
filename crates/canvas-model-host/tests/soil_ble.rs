@@ -7,7 +7,8 @@
 #![cfg(feature = "soil-ble")]
 
 use canvas_model_host::ble::{
-    BleHost, Characteristic, MAX_NEXT_EVENT_MS, MAX_SCAN_MS, MockBle, MockMode, Service, mock_device,
+    BleHost, Characteristic, MAX_NEXT_EVENT_MS, MAX_SCAN_MS, MockBle, MockMode, Service,
+    mock_device,
 };
 use canvas_model_host::ble_linker::{
     BleCtx, add_all_to_linker, add_to_linker, authorize, registered_verbs,
@@ -139,10 +140,7 @@ fn soil_ble_scan_is_delivered_with_only_the_observe_capability() {
     let engine = engine();
     let mock = scripted();
     let (mut store, instance) = instantiate(&engine, &caps(&["soil:ble.observe"]), mock, true);
-    assert_eq!(
-        call(&mut store, &instance, "run-scan", &[Val::U32(100)]),
-        1
-    );
+    assert_eq!(call(&mut store, &instance, "run-scan", &[Val::U32(100)]), 1);
 }
 
 #[test]
@@ -220,8 +218,7 @@ fn soil_ble_a_competing_soil_host_reports_leased() {
 fn soil_ble_deadline_and_budget_failures_are_typed() {
     let engine = engine();
     let over_mock = scripted();
-    let (mut over_store, over_instance) =
-        instantiate(&engine, &full_caps(), over_mock, false);
+    let (mut over_store, over_instance) = instantiate(&engine, &full_caps(), over_mock, false);
     assert_eq!(
         call(
             &mut over_store,

@@ -317,10 +317,10 @@ impl BleHost {
             return Err(BleError::OverBudget);
         }
         let event = self.backend.next_event(timeout_ms)?;
-        if let Some(Event::Notification { data, .. }) = &event {
-            if data.len() > MAX_FRAME_BYTES {
-                return Err(BleError::OverBudget);
-            }
+        if let Some(Event::Notification { data, .. }) = &event
+            && data.len() > MAX_FRAME_BYTES
+        {
+            return Err(BleError::OverBudget);
         }
         Ok(event)
     }
@@ -403,22 +403,18 @@ impl MockBle {
 
     /// Queue a notification, delivered by the next `next-event` call.
     pub fn push_notification(&self, char_uuid: &str, data: &[u8]) -> &Self {
-        self.state()
-            .notifications
-            .push_back(Event::Notification {
-                char_uuid: char_uuid.to_owned(),
-                data: data.to_vec(),
-            });
+        self.state().notifications.push_back(Event::Notification {
+            char_uuid: char_uuid.to_owned(),
+            data: data.to_vec(),
+        });
         self
     }
 
     /// Queue a disconnect event.
     pub fn push_disconnect(&self, reason: &str) -> &Self {
-        self.state()
-            .notifications
-            .push_back(Event::Disconnected {
-                reason: reason.to_owned(),
-            });
+        self.state().notifications.push_back(Event::Disconnected {
+            reason: reason.to_owned(),
+        });
         self
     }
 
@@ -496,7 +492,11 @@ impl BleBackend for MockBle {
         if state.radio_held_elsewhere {
             return Err(BleError::Leased);
         }
-        if !state.scan_devices.iter().any(|entry| entry.handle == device) {
+        if !state
+            .scan_devices
+            .iter()
+            .any(|entry| entry.handle == device)
+        {
             return Err(BleError::NotFound);
         }
         state.connected = Some(device);
@@ -646,7 +646,8 @@ mod tests {
         let mock = Arc::new(MockBle::new());
         let host = connected_host(&mock);
         for index in 0..MAX_SUBSCRIPTIONS {
-            host.subscribe(&format!("char-{index}")).expect("within cap");
+            host.subscribe(&format!("char-{index}"))
+                .expect("within cap");
         }
         assert_eq!(host.subscription_count(), MAX_SUBSCRIPTIONS);
         assert_eq!(host.subscribe("char-over"), Err(BleError::OverBudget));

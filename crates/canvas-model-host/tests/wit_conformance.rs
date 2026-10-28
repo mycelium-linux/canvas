@@ -385,8 +385,11 @@ fn fixture_matches_resolved_surface() {
                             package.id
                         );
                     };
-                    let actual: Vec<String> =
-                        enum_def.cases.iter().map(|case| case.name.clone()).collect();
+                    let actual: Vec<String> = enum_def
+                        .cases
+                        .iter()
+                        .map(|case| case.name.clone())
+                        .collect();
                     assert_eq!(
                         &actual, cases,
                         "{}::{interface_name}: {enum_name:?} cases must match the fixture",
