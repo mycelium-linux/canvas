@@ -243,7 +243,9 @@
         "create-pipeline": {
           "params": {
             "shader": "u32",
-            "format": "texture-format"
+            "format": "texture-format",
+            "vertex-buffers": "list<vertex-buffer-layout>",
+            "bind-group-layouts": "list<u32>"
           },
           "ok": "u32",
           "err": "error"
@@ -262,13 +264,136 @@
           },
           "ok": "list<u8>",
           "err": "error"
+        },
+        "create-bind-group-layout": {
+          "params": {
+            "entries": "list<binding-layout>"
+          },
+          "ok": "u32",
+          "err": "error"
+        },
+        "create-bind-group": {
+          "params": {
+            "layout": "u32",
+            "entries": "list<binding-entry>"
+          },
+          "ok": "u32",
+          "err": "error"
+        },
+        "create-sampler": {
+          "params": {
+            "filter": "sampler-filter",
+            "address": "sampler-address"
+          },
+          "ok": "u32",
+          "err": "error"
+        },
+        "draw-mesh": {
+          "params": {
+            "texture": "u32",
+            "pipeline": "u32",
+            "vertex-buffer": "u32",
+            "index-buffer": "option<u32>",
+            "index-format": "index-format",
+            "index-count": "u32",
+            "instances": "u32",
+            "bind-groups": "list<u32>"
+          },
+          "ok": null,
+          "err": "error"
+        },
+        "create-command-encoder": {
+          "params": {},
+          "ok": "u32",
+          "err": "error"
+        },
+        "begin-render-pass": {
+          "params": {
+            "encoder": "u32",
+            "texture": "u32",
+            "clear": "color"
+          },
+          "ok": "u32",
+          "err": "error"
+        },
+        "set-pipeline": {
+          "params": {
+            "pass": "u32",
+            "pipeline": "u32"
+          },
+          "ok": null,
+          "err": "error"
+        },
+        "set-vertex-buffer": {
+          "params": {
+            "pass": "u32",
+            "slot": "u32",
+            "buffer": "u32"
+          },
+          "ok": null,
+          "err": "error"
+        },
+        "set-index-buffer": {
+          "params": {
+            "pass": "u32",
+            "buffer": "u32",
+            "format": "index-format"
+          },
+          "ok": null,
+          "err": "error"
+        },
+        "set-bind-group": {
+          "params": {
+            "pass": "u32",
+            "index": "u32",
+            "group": "u32"
+          },
+          "ok": null,
+          "err": "error"
+        },
+        "draw": {
+          "params": {
+            "pass": "u32",
+            "vertex-count": "u32",
+            "instances": "u32"
+          },
+          "ok": null,
+          "err": "error"
+        },
+        "draw-indexed": {
+          "params": {
+            "pass": "u32",
+            "index-count": "u32",
+            "base-vertex": "u32",
+            "instances": "u32"
+          },
+          "ok": null,
+          "err": "error"
+        },
+        "end-pass": {
+          "params": {
+            "pass": "u32"
+          },
+          "ok": null,
+          "err": "error"
+        },
+        "submit": {
+          "params": {
+            "encoder": "u32"
+          },
+          "ok": "u64",
+          "err": "error"
         }
       },
       "required-records": [
         "buffer-desc",
         "texture-desc",
         "color",
-        "adapter-info"
+        "adapter-info",
+        "vertex-attribute",
+        "vertex-buffer-layout",
+        "binding-layout",
+        "binding-entry"
       ],
       "forbidden-symbols": [
         "fs",

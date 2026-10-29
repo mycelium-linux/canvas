@@ -94,7 +94,7 @@ fn shader_authority_is_separate_from_gpu_access() {
         eprintln!("no WGPU adapter or component instantiate failed; skipping");
         return;
     };
-    assert_eq!(run(&mut store, &instance), -2, "shader must be denied");
+    assert_eq!(run(&mut store, &instance), -8, "shader must be denied");
 }
 
 #[test]

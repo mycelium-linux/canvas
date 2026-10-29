@@ -27,6 +27,44 @@ struct GpuState {
     textures: HashMap<u32, TextureEntry>,
     shaders: HashMap<u32, wgpu::ShaderModule>,
     pipelines: HashMap<u32, wgpu::RenderPipeline>,
+    bind_group_layouts: HashMap<u32, wgpu::BindGroupLayout>,
+    bind_groups: HashMap<u32, wgpu::BindGroup>,
+    samplers: HashMap<u32, wgpu::Sampler>,
+    encoders: HashMap<u32, wgpu::CommandEncoder>,
+    passes: HashMap<u32, PassEntry>,
+    submission: u64,
+}
+
+struct PassEntry {
+    encoder: u32,
+    texture: u32,
+    clear: wgpu::Color,
+    commands: Vec<PassCommand>,
+}
+
+enum PassCommand {
+    SetPipeline(u32),
+    SetVertexBuffer {
+        slot: u32,
+        buffer: u32,
+    },
+    SetIndexBuffer {
+        buffer: u32,
+        format: IndexFormat,
+    },
+    SetBindGroup {
+        index: u32,
+        group: u32,
+    },
+    Draw {
+        vertices: u32,
+        instances: u32,
+    },
+    DrawIndexed {
+        indices: u32,
+        base_vertex: u32,
+        instances: u32,
+    },
 }
 
 struct TextureEntry {
@@ -67,6 +105,94 @@ impl TextureFormat {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VertexFormat {
+    Float32x2,
+    Float32x3,
+    Float32x4,
+    Uint32,
+    Uint32x2,
+}
+
+impl VertexFormat {
+    fn wgpu(self) -> wgpu::VertexFormat {
+        match self {
+            Self::Float32x2 => wgpu::VertexFormat::Float32x2,
+            Self::Float32x3 => wgpu::VertexFormat::Float32x3,
+            Self::Float32x4 => wgpu::VertexFormat::Float32x4,
+            Self::Uint32 => wgpu::VertexFormat::Uint32,
+            Self::Uint32x2 => wgpu::VertexFormat::Uint32x2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VertexStep {
+    Vertex,
+    Instance,
+}
+
+#[derive(Clone, Debug)]
+pub struct VertexAttribute {
+    pub format: VertexFormat,
+    pub offset: u64,
+    pub shader_location: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct VertexBufferLayout {
+    pub array_stride: u64,
+    pub step_mode: VertexStep,
+    pub attributes: Vec<VertexAttribute>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BindingKind {
+    UniformBuffer,
+    StorageBuffer,
+    Texture,
+    Sampler,
+}
+
+#[derive(Clone, Debug)]
+pub struct BindingLayout {
+    pub binding: u32,
+    pub visibility: u32,
+    pub kind: BindingKind,
+}
+
+#[derive(Clone, Debug)]
+pub enum BindingResource {
+    Buffer(u32),
+    Texture(u32),
+    Sampler(u32),
+}
+
+#[derive(Clone, Debug)]
+pub struct BindingEntry {
+    pub binding: u32,
+    pub resource: BindingResource,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SamplerFilter {
+    Nearest,
+    Linear,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SamplerAddress {
+    ClampToEdge,
+    Repeat,
+    MirrorRepeat,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexFormat {
+    Uint16,
+    Uint32,
+}
+
 /// One bounded offscreen render.
 pub struct ProbeFrame {
     pub width: u32,
@@ -100,6 +226,12 @@ impl WebGpuHost {
                 textures: HashMap::new(),
                 shaders: HashMap::new(),
                 pipelines: HashMap::new(),
+                bind_group_layouts: HashMap::new(),
+                bind_groups: HashMap::new(),
+                samplers: HashMap::new(),
+                encoders: HashMap::new(),
+                passes: HashMap::new(),
+                submission: 0,
             }),
         })
     }
@@ -236,21 +368,70 @@ impl WebGpuHost {
         Ok(handle)
     }
 
-    pub fn create_pipeline(&self, shader: u32, format: TextureFormat) -> Result<u32> {
+    pub fn create_pipeline(
+        &self,
+        shader: u32,
+        format: TextureFormat,
+        vertex_buffers: &[VertexBufferLayout],
+        bind_group_layouts: &[u32],
+    ) -> Result<u32> {
         let mut state = self.state.lock().expect("soil:webgpu state poisoned");
         let module = state
             .shaders
             .get(&shader)
             .context("unknown shader handle")?;
+        let layouts: Vec<&wgpu::BindGroupLayout> = bind_group_layouts
+            .iter()
+            .map(|handle| {
+                state
+                    .bind_group_layouts
+                    .get(handle)
+                    .context("unknown bind-group-layout handle")
+            })
+            .collect::<Result<_>>()?;
+        let pipeline_layout =
+            state
+                .device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("soil-webgpu-pipeline-layout"),
+                    bind_group_layouts: &layouts,
+                    push_constant_ranges: &[],
+                });
+        let attribute_sets: Vec<Vec<wgpu::VertexAttribute>> = vertex_buffers
+            .iter()
+            .map(|layout| {
+                layout
+                    .attributes
+                    .iter()
+                    .map(|attribute| wgpu::VertexAttribute {
+                        format: attribute.format.wgpu(),
+                        offset: attribute.offset,
+                        shader_location: attribute.shader_location,
+                    })
+                    .collect()
+            })
+            .collect();
+        let vertex_layouts: Vec<wgpu::VertexBufferLayout<'_>> = vertex_buffers
+            .iter()
+            .zip(&attribute_sets)
+            .map(|(layout, attributes)| wgpu::VertexBufferLayout {
+                array_stride: layout.array_stride,
+                step_mode: match layout.step_mode {
+                    VertexStep::Vertex => wgpu::VertexStepMode::Vertex,
+                    VertexStep::Instance => wgpu::VertexStepMode::Instance,
+                },
+                attributes,
+            })
+            .collect();
         let pipeline = state
             .device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("soil-webgpu-pipeline"),
-                layout: None,
+                layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {
                     module,
                     entry_point: Some("vs"),
-                    buffers: &[],
+                    buffers: &vertex_layouts,
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -276,6 +457,440 @@ impl WebGpuHost {
             .context("soil:webgpu handles exhausted")?;
         state.pipelines.insert(handle, pipeline);
         Ok(handle)
+    }
+
+    pub fn create_bind_group_layout(&self, entries: &[BindingLayout]) -> Result<u32> {
+        let mut state = self.state.lock().expect("soil:webgpu state poisoned");
+        let entries: Vec<wgpu::BindGroupLayoutEntry> = entries
+            .iter()
+            .map(|entry| wgpu::BindGroupLayoutEntry {
+                binding: entry.binding,
+                visibility: visibility(entry.visibility),
+                ty: match entry.kind {
+                    BindingKind::UniformBuffer => wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    BindingKind::StorageBuffer => wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    BindingKind::Texture => wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    BindingKind::Sampler => {
+                        wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)
+                    }
+                },
+                count: None,
+            })
+            .collect();
+        let layout = state
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("soil-webgpu-bind-group-layout"),
+                entries: &entries,
+            });
+        let handle = state.next;
+        state.next = state
+            .next
+            .checked_add(1)
+            .context("soil:webgpu handles exhausted")?;
+        state.bind_group_layouts.insert(handle, layout);
+        Ok(handle)
+    }
+
+    pub fn create_bind_group(&self, layout: u32, entries: &[BindingEntry]) -> Result<u32> {
+        let mut state = self.state.lock().expect("soil:webgpu state poisoned");
+        let bind_group_layout = state
+            .bind_group_layouts
+            .get(&layout)
+            .context("unknown bind-group-layout handle")?
+            .clone();
+        let mut views: Vec<wgpu::TextureView> = Vec::new();
+        let mut texture_slots: Vec<Option<usize>> = Vec::with_capacity(entries.len());
+        for entry in entries {
+            match entry.resource {
+                BindingResource::Texture(handle) => {
+                    let texture = state
+                        .textures
+                        .get(&handle)
+                        .context("unknown texture in bind group")?;
+                    views.push(
+                        texture
+                            .texture
+                            .create_view(&wgpu::TextureViewDescriptor::default()),
+                    );
+                    texture_slots.push(Some(views.len() - 1));
+                }
+                _ => texture_slots.push(None),
+            }
+        }
+        let mut bind_group_entries = Vec::with_capacity(entries.len());
+        for (index, entry) in entries.iter().enumerate() {
+            let resource = match entry.resource {
+                BindingResource::Buffer(handle) => state
+                    .buffers
+                    .get(&handle)
+                    .context("unknown buffer in bind group")?
+                    .as_entire_binding(),
+                BindingResource::Texture(_) => {
+                    wgpu::BindingResource::TextureView(&views[texture_slots[index].unwrap()])
+                }
+                BindingResource::Sampler(handle) => wgpu::BindingResource::Sampler(
+                    state
+                        .samplers
+                        .get(&handle)
+                        .context("unknown sampler in bind group")?,
+                ),
+            };
+            bind_group_entries.push(wgpu::BindGroupEntry {
+                binding: entry.binding,
+                resource,
+            });
+        }
+        let entries = bind_group_entries;
+        let bind_group = state.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("soil-webgpu-bind-group"),
+            layout: &bind_group_layout,
+            entries: &entries,
+        });
+        let handle = state.next;
+        state.next = state
+            .next
+            .checked_add(1)
+            .context("soil:webgpu handles exhausted")?;
+        state.bind_groups.insert(handle, bind_group);
+        Ok(handle)
+    }
+
+    pub fn create_sampler(&self, filter: SamplerFilter, address: SamplerAddress) -> Result<u32> {
+        let mut state = self.state.lock().expect("soil:webgpu state poisoned");
+        let filter = match filter {
+            SamplerFilter::Nearest => wgpu::FilterMode::Nearest,
+            SamplerFilter::Linear => wgpu::FilterMode::Linear,
+        };
+        let address = match address {
+            SamplerAddress::ClampToEdge => wgpu::AddressMode::ClampToEdge,
+            SamplerAddress::Repeat => wgpu::AddressMode::Repeat,
+            SamplerAddress::MirrorRepeat => wgpu::AddressMode::MirrorRepeat,
+        };
+        let sampler = state.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("soil-webgpu-sampler"),
+            address_mode_u: address,
+            address_mode_v: address,
+            address_mode_w: address,
+            mag_filter: filter,
+            min_filter: filter,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let handle = state.next;
+        state.next = state
+            .next
+            .checked_add(1)
+            .context("soil:webgpu handles exhausted")?;
+        state.samplers.insert(handle, sampler);
+        Ok(handle)
+    }
+
+    pub fn create_command_encoder(&self) -> Result<u32> {
+        let mut state = self.state.lock().expect("soil:webgpu state poisoned");
+        let encoder = state
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("soil-webgpu-encoder"),
+            });
+        let handle = state.next;
+        state.next = state
+            .next
+            .checked_add(1)
+            .context("soil:webgpu handles exhausted")?;
+        state.encoders.insert(handle, encoder);
+        Ok(handle)
+    }
+
+    pub fn begin_render_pass(&self, encoder: u32, texture: u32, clear: [f32; 4]) -> Result<u32> {
+        let mut state = self.state.lock().expect("soil:webgpu state poisoned");
+        anyhow::ensure!(
+            state.encoders.contains_key(&encoder),
+            "unknown encoder handle"
+        );
+        anyhow::ensure!(
+            state.textures.contains_key(&texture),
+            "unknown texture handle"
+        );
+        let handle = state.next;
+        state.next = state
+            .next
+            .checked_add(1)
+            .context("soil:webgpu handles exhausted")?;
+        state.passes.insert(
+            handle,
+            PassEntry {
+                encoder,
+                texture,
+                clear: wgpu::Color {
+                    r: f64::from(clear[0]),
+                    g: f64::from(clear[1]),
+                    b: f64::from(clear[2]),
+                    a: f64::from(clear[3]),
+                },
+                commands: Vec::new(),
+            },
+        );
+        Ok(handle)
+    }
+
+    fn pass_mut(state: &mut GpuState, pass: u32) -> Result<&mut PassEntry> {
+        state.passes.get_mut(&pass).context("unknown pass handle")
+    }
+
+    pub fn set_pipeline(&self, pass: u32, pipeline: u32) -> Result<()> {
+        let mut state = self.state.lock().expect("soil:webgpu state poisoned");
+        Self::pass_mut(&mut state, pass)?
+            .commands
+            .push(PassCommand::SetPipeline(pipeline));
+        Ok(())
+    }
+
+    pub fn set_vertex_buffer(&self, pass: u32, slot: u32, buffer: u32) -> Result<()> {
+        let mut state = self.state.lock().expect("soil:webgpu state poisoned");
+        Self::pass_mut(&mut state, pass)?
+            .commands
+            .push(PassCommand::SetVertexBuffer { slot, buffer });
+        Ok(())
+    }
+
+    pub fn set_index_buffer(&self, pass: u32, buffer: u32, format: IndexFormat) -> Result<()> {
+        let mut state = self.state.lock().expect("soil:webgpu state poisoned");
+        Self::pass_mut(&mut state, pass)?
+            .commands
+            .push(PassCommand::SetIndexBuffer { buffer, format });
+        Ok(())
+    }
+
+    pub fn set_bind_group(&self, pass: u32, index: u32, group: u32) -> Result<()> {
+        let mut state = self.state.lock().expect("soil:webgpu state poisoned");
+        Self::pass_mut(&mut state, pass)?
+            .commands
+            .push(PassCommand::SetBindGroup { index, group });
+        Ok(())
+    }
+
+    pub fn draw(&self, pass: u32, vertices: u32, instances: u32) -> Result<()> {
+        anyhow::ensure!(
+            vertices > 0 && instances > 0,
+            "draw needs vertices and instances"
+        );
+        let mut state = self.state.lock().expect("soil:webgpu state poisoned");
+        Self::pass_mut(&mut state, pass)?
+            .commands
+            .push(PassCommand::Draw {
+                vertices,
+                instances,
+            });
+        Ok(())
+    }
+
+    pub fn draw_indexed(
+        &self,
+        pass: u32,
+        indices: u32,
+        base_vertex: u32,
+        instances: u32,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            indices > 0 && instances > 0,
+            "draw needs indices and instances"
+        );
+        let mut state = self.state.lock().expect("soil:webgpu state poisoned");
+        Self::pass_mut(&mut state, pass)?
+            .commands
+            .push(PassCommand::DrawIndexed {
+                indices,
+                base_vertex,
+                instances,
+            });
+        Ok(())
+    }
+
+    pub fn end_pass(&self, pass: u32) -> Result<()> {
+        let mut state = self.state.lock().expect("soil:webgpu state poisoned");
+        let entry = state.passes.remove(&pass).context("unknown pass handle")?;
+        let mut encoder = state
+            .encoders
+            .remove(&entry.encoder)
+            .context("unknown encoder")?;
+        let target = state
+            .textures
+            .get(&entry.texture)
+            .context("unknown texture")?;
+        let view = target
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        {
+            let mut render = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("soil-webgpu-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(entry.clear),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            for command in &entry.commands {
+                match command {
+                    PassCommand::SetPipeline(handle) => {
+                        let pipeline = state.pipelines.get(handle).context("unknown pipeline")?;
+                        render.set_pipeline(pipeline);
+                    }
+                    PassCommand::SetVertexBuffer { slot, buffer } => {
+                        let buffer = state.buffers.get(buffer).context("unknown vertex buffer")?;
+                        render.set_vertex_buffer(*slot, buffer.slice(..));
+                    }
+                    PassCommand::SetIndexBuffer { buffer, format } => {
+                        let buffer = state.buffers.get(buffer).context("unknown index buffer")?;
+                        render.set_index_buffer(
+                            buffer.slice(..),
+                            match format {
+                                IndexFormat::Uint16 => wgpu::IndexFormat::Uint16,
+                                IndexFormat::Uint32 => wgpu::IndexFormat::Uint32,
+                            },
+                        );
+                    }
+                    PassCommand::SetBindGroup { index, group } => {
+                        let group = state.bind_groups.get(group).context("unknown bind group")?;
+                        render.set_bind_group(*index, group, &[]);
+                    }
+                    PassCommand::Draw {
+                        vertices,
+                        instances,
+                    } => {
+                        render.draw(0..*vertices, 0..*instances);
+                    }
+                    PassCommand::DrawIndexed {
+                        indices,
+                        base_vertex,
+                        instances,
+                    } => {
+                        render.draw_indexed(
+                            0..*indices,
+                            i32::try_from(*base_vertex).context("base vertex exceeds i32")?,
+                            0..*instances,
+                        );
+                    }
+                }
+            }
+        }
+        state.encoders.insert(entry.encoder, encoder);
+        Ok(())
+    }
+
+    pub fn submit(&self, encoder: u32) -> Result<u64> {
+        let mut state = self.state.lock().expect("soil:webgpu state poisoned");
+        let encoder = state
+            .encoders
+            .remove(&encoder)
+            .context("unknown encoder handle")?;
+        state.queue.submit(Some(encoder.finish()));
+        state.submission += 1;
+        Ok(state.submission)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_mesh(
+        &self,
+        texture: u32,
+        pipeline: u32,
+        vertex_buffer: u32,
+        index_buffer: Option<u32>,
+        index_format: IndexFormat,
+        index_count: u32,
+        instances: u32,
+        bind_groups: &[u32],
+    ) -> Result<()> {
+        anyhow::ensure!(
+            index_count > 0 && instances > 0,
+            "draw needs vertices and instances"
+        );
+        let state = self.state.lock().expect("soil:webgpu state poisoned");
+        let target = state
+            .textures
+            .get(&texture)
+            .context("unknown texture handle")?;
+        let pipeline = state
+            .pipelines
+            .get(&pipeline)
+            .context("unknown pipeline handle")?;
+        let vertex_buffer = state
+            .buffers
+            .get(&vertex_buffer)
+            .context("unknown vertex buffer")?;
+        let index_buffer = index_buffer
+            .map(|handle| state.buffers.get(&handle).context("unknown index buffer"))
+            .transpose()?;
+        let bind_groups: Vec<&wgpu::BindGroup> = bind_groups
+            .iter()
+            .map(|handle| state.bind_groups.get(handle).context("unknown bind group"))
+            .collect::<Result<_>>()?;
+        let view = target
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = state
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("soil-webgpu-encoder"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("soil-webgpu-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.02,
+                            g: 0.03,
+                            b: 0.05,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            for (index, group) in bind_groups.iter().enumerate() {
+                pass.set_bind_group(index as u32, *group, &[]);
+            }
+            if let Some(index_buffer) = index_buffer {
+                pass.set_index_buffer(
+                    index_buffer.slice(..),
+                    match index_format {
+                        IndexFormat::Uint16 => wgpu::IndexFormat::Uint16,
+                        IndexFormat::Uint32 => wgpu::IndexFormat::Uint32,
+                    },
+                );
+                pass.draw_indexed(0..index_count, 0, 0..instances);
+            }
+        }
+        state.queue.submit(Some(encoder.finish()));
+        Ok(())
     }
 
     pub fn draw_triangle(&self, texture: u32, pipeline: u32) -> Result<()> {
@@ -387,6 +1002,41 @@ impl WebGpuHost {
         Ok(pixels)
     }
 
+    /// Read a texture and write it as a PNG for a Canvas `live_image` surface.
+    /// This is the presentation handoff: the host owns the file and the
+    /// surface; a Spore never names a display.
+    pub fn write_png(&self, texture: u32, path: &std::path::Path) -> Result<()> {
+        let state = self.state.lock().expect("soil:webgpu state poisoned");
+        let target = state
+            .textures
+            .get(&texture)
+            .context("unknown texture handle")?;
+        anyhow::ensure!(
+            target.format == wgpu::TextureFormat::Rgba8Unorm
+                || target.format == wgpu::TextureFormat::Rgba8UnormSrgb,
+            "PNG presentation requires an RGBA8 texture"
+        );
+        drop(state);
+        let pixels = self.read_pixels(texture)?;
+        let image = image::RgbaImage::from_raw(
+            self.texture_size(texture)?.0,
+            self.texture_size(texture)?.1,
+            pixels,
+        )
+        .context("RGBA8 length does not match texture size")?;
+        image.save(path).context("write PNG presentation frame")?;
+        Ok(())
+    }
+
+    fn texture_size(&self, texture: u32) -> Result<(u32, u32)> {
+        let state = self.state.lock().expect("soil:webgpu state poisoned");
+        let target = state
+            .textures
+            .get(&texture)
+            .context("unknown texture handle")?;
+        Ok((target.width, target.height))
+    }
+
     pub fn render_probe(&self, width: u32, height: u32) -> Result<ProbeFrame> {
         anyhow::ensure!(
             (1..=3840).contains(&width) && (1..=2160).contains(&height),
@@ -395,7 +1045,7 @@ impl WebGpuHost {
         let texture =
             self.create_texture(width, height, TextureFormat::Rgba8UnormSrgb, true, true)?;
         let shader = self.create_shader(PROBE_WGSL)?;
-        let pipeline = self.create_pipeline(shader, TextureFormat::Rgba8UnormSrgb)?;
+        let pipeline = self.create_pipeline(shader, TextureFormat::Rgba8UnormSrgb, &[], &[])?;
         self.draw_triangle(texture, pipeline)?;
         let pixels = self.read_pixels(texture)?;
         Ok(ProbeFrame {
@@ -404,6 +1054,20 @@ impl WebGpuHost {
             pixels,
         })
     }
+}
+
+fn visibility(bits: u32) -> wgpu::ShaderStages {
+    let mut stages = wgpu::ShaderStages::empty();
+    if bits & 1 != 0 {
+        stages |= wgpu::ShaderStages::VERTEX;
+    }
+    if bits & 2 != 0 {
+        stages |= wgpu::ShaderStages::FRAGMENT;
+    }
+    if bits & 4 != 0 {
+        stages |= wgpu::ShaderStages::COMPUTE;
+    }
+    stages
 }
 
 const PROBE_WGSL: &str = r#"
@@ -452,6 +1116,26 @@ mod tests {
         };
         assert!(host.render_probe(0, 48).is_err());
         assert!(host.render_probe(64, 2161).is_err());
+    }
+
+    #[test]
+    fn presentation_writes_a_png_frame() {
+        let Ok(host) = WebGpuHost::new() else {
+            return;
+        };
+        let texture = host
+            .create_texture(32, 16, TextureFormat::Rgba8UnormSrgb, true, true)
+            .unwrap();
+        let shader = host.create_shader(PROBE_WGSL).unwrap();
+        let pipeline = host
+            .create_pipeline(shader, TextureFormat::Rgba8UnormSrgb, &[], &[])
+            .unwrap();
+        host.draw_triangle(texture, pipeline).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("frame.png");
+        host.write_png(texture, &path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
     }
 
     #[test]

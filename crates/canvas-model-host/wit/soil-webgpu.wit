@@ -44,6 +44,72 @@ interface types {
     copy-dst,
   }
 
+  enum vertex-format {
+    float32x2,
+    float32x3,
+    float32x4,
+    uint32,
+    uint32x2,
+  }
+
+  enum vertex-step {
+    vertex,
+    instance,
+  }
+
+  record vertex-attribute {
+    format: vertex-format,
+    offset: u64,
+    location: u32,
+  }
+
+  record vertex-buffer-layout {
+    array-stride: u64,
+    step-mode: vertex-step,
+    attributes: list<vertex-attribute>,
+  }
+
+  enum binding-kind {
+    uniform-buffer,
+    storage-buffer,
+    texture,
+    sampler,
+  }
+
+  record binding-layout {
+    binding: u32,
+    /// Bitmask: 1=vertex, 2=fragment, 4=compute.
+    visibility: u32,
+    kind: binding-kind,
+  }
+
+  variant binding-resource {
+    buffer(u32),
+    texture(u32),
+    sampler(u32),
+  }
+
+  record binding-entry {
+    binding: u32,
+    value: binding-resource,
+  }
+
+  enum sampler-filter {
+    nearest,
+    linear,
+  }
+
+  enum sampler-address {
+    clamp-to-edge,
+    repeat,
+    mirror-repeat,
+  }
+
+  enum index-format {
+    uint16,
+    uint32,
+  }
+
   record buffer-desc {
     size: u64,
     usages: list<buffer-usage>,
@@ -73,7 +139,10 @@ interface types {
 }
 
 interface webgpu {
-  use types.{adapter-info, buffer-usage, texture-format};
+  use types.{
+    adapter-info, binding-entry, binding-layout, buffer-usage, color, index-format,
+    sampler-address, sampler-filter, texture-format, vertex-buffer-layout,
+  };
 
   enum error {
     /// `soil:webgpu` (or `soil:webgpu.shaders`) is not granted.
@@ -112,8 +181,42 @@ interface webgpu {
   /// `soil:webgpu.shaders` in addition to `soil:webgpu`.
   create-shader: func(wgsl: string) -> result<u32, error>;
 
-  /// Build a render pipeline for one shader and colour format.
-  create-pipeline: func(shader: u32, format: texture-format) -> result<u32, error>;
+  /// Build a render pipeline for one shader, colour format, vertex layouts,
+  /// and bind-group layouts.
+  create-pipeline: func(
+    shader: u32,
+    format: texture-format,
+    vertex-buffers: list<vertex-buffer-layout>,
+    bind-group-layouts: list<u32>,
+  ) -> result<u32, error>;
+
+  create-command-encoder: func() -> result<u32, error>;
+  begin-render-pass: func(encoder: u32, texture: u32, clear: color) -> result<u32, error>;
+  set-pipeline: func(pass: u32, pipeline: u32) -> result<_, error>;
+  set-vertex-buffer: func(pass: u32, slot: u32, buffer: u32) -> result<_, error>;
+  set-index-buffer: func(pass: u32, buffer: u32, format: index-format) -> result<_, error>;
+  set-bind-group: func(pass: u32, index: u32, group: u32) -> result<_, error>;
+  draw: func(pass: u32, vertex-count: u32, instances: u32) -> result<_, error>;
+  draw-indexed: func(pass: u32, index-count: u32, base-vertex: u32, instances: u32) -> result<_, error>;
+  end-pass: func(pass: u32) -> result<_, error>;
+  submit: func(encoder: u32) -> result<u64, error>;
+
+  create-bind-group-layout: func(entries: list<binding-layout>) -> result<u32, error>;
+  create-bind-group: func(layout: u32, entries: list<binding-entry>) -> result<u32, error>;
+  create-sampler: func(filter: sampler-filter, address: sampler-address) -> result<u32, error>;
+
+  /// Draw a mesh into a texture using Soil-issued vertex/index buffers and
+  /// bind groups.
+  draw-mesh: func(
+    texture: u32,
+    pipeline: u32,
+    vertex-buffer: u32,
+    index-buffer: option<u32>,
+    index-format: index-format,
+    index-count: u32,
+    instances: u32,
+    bind-groups: list<u32>,
+  ) -> result<_, error>;
 
   /// Draw a host-owned fullscreen triangle into a texture.
   draw-triangle: func(texture: u32, pipeline: u32) -> result<_, error>;

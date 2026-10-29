@@ -54,3 +54,17 @@ host policy allows the intersection. Shader bytes will be a separate
 
 Host-side implementation and feature gate: `src/webgpu.rs` and the
 `soil-webgpu` feature in `Cargo.toml`.
+
+### Linked WebGPU slice
+
+The linked subset now covers:
+
+- buffers with vertex/index/uniform/storage/copy usages
+- vertex layouts with typed attributes
+- bind-group layouts, bind groups, samplers
+- render pipelines with vertex and bind-group layouts
+- command encoders and render passes (`set-*`, `draw`, `draw-indexed`)
+- texture readback and PNG presentation handoff (`WebGpuHost::write_png`)
+
+The guest fixture builds a vertex buffer and uniform bind group, records a
+render pass, submits it, reads the texture back, and returns a checksum.

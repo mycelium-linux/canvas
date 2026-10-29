@@ -714,6 +714,7 @@ dependencies = [
  "canvas-core",
  "fpl-gfx",
  "glam 0.30.10",
+ "image",
  "mlua",
  "pollster",
  "serde",

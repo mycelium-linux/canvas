@@ -9,7 +9,11 @@
 //! indices, not wgpu objects or addresses.
 
 use crate::caps::EffectiveCaps;
-use crate::webgpu::{BufferUsage, TextureFormat, WebGpuHost};
+use crate::webgpu::{
+    BindingEntry, BindingKind, BindingLayout, BindingResource, BufferUsage, IndexFormat,
+    SamplerAddress, SamplerFilter, TextureFormat, VertexAttribute, VertexBufferLayout,
+    VertexFormat, VertexStep, WebGpuHost,
+};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use wasmtime::StoreContextMut;
@@ -31,7 +35,13 @@ mod bindings {
 }
 
 use bindings::soil::webgpu::types::{
-    AdapterInfo, BufferUsage as WitBufferUsage, TextureFormat as WitTextureFormat,
+    AdapterInfo, BindingEntry as WitBindingEntry, BindingKind as WitBindingKind,
+    BindingLayout as WitBindingLayout, BindingResource as WitBindingResource,
+    BufferUsage as WitBufferUsage, Color as WitColor, IndexFormat as WitIndexFormat,
+    SamplerAddress as WitSamplerAddress, SamplerFilter as WitSamplerFilter,
+    TextureFormat as WitTextureFormat, VertexAttribute as WitVertexAttribute,
+    VertexBufferLayout as WitVertexBufferLayout, VertexFormat as WitVertexFormat,
+    VertexStep as WitVertexStep,
 };
 use bindings::soil::webgpu::webgpu::Error;
 
@@ -75,6 +85,59 @@ fn buffer_usage(usage: WitBufferUsage) -> BufferUsage {
     }
 }
 
+fn vertex_format(format: WitVertexFormat) -> VertexFormat {
+    match format {
+        WitVertexFormat::Float32x2 => VertexFormat::Float32x2,
+        WitVertexFormat::Float32x3 => VertexFormat::Float32x3,
+        WitVertexFormat::Float32x4 => VertexFormat::Float32x4,
+        WitVertexFormat::Uint32 => VertexFormat::Uint32,
+        WitVertexFormat::Uint32x2 => VertexFormat::Uint32x2,
+    }
+}
+
+fn vertex_layout(layout: WitVertexBufferLayout) -> VertexBufferLayout {
+    VertexBufferLayout {
+        array_stride: layout.array_stride,
+        step_mode: match layout.step_mode {
+            WitVertexStep::Vertex => VertexStep::Vertex,
+            WitVertexStep::Instance => VertexStep::Instance,
+        },
+        attributes: layout
+            .attributes
+            .into_iter()
+            .map(|attribute: WitVertexAttribute| VertexAttribute {
+                format: vertex_format(attribute.format),
+                offset: attribute.offset,
+                shader_location: attribute.location,
+            })
+            .collect(),
+    }
+}
+
+fn binding_layout(layout: WitBindingLayout) -> BindingLayout {
+    BindingLayout {
+        binding: layout.binding,
+        visibility: layout.visibility,
+        kind: match layout.kind {
+            WitBindingKind::UniformBuffer => BindingKind::UniformBuffer,
+            WitBindingKind::StorageBuffer => BindingKind::StorageBuffer,
+            WitBindingKind::Texture => BindingKind::Texture,
+            WitBindingKind::Sampler => BindingKind::Sampler,
+        },
+    }
+}
+
+fn binding_entry(entry: WitBindingEntry) -> BindingEntry {
+    BindingEntry {
+        binding: entry.binding,
+        resource: match entry.value {
+            WitBindingResource::Buffer(handle) => BindingResource::Buffer(handle),
+            WitBindingResource::Texture(handle) => BindingResource::Texture(handle),
+            WitBindingResource::Sampler(handle) => BindingResource::Sampler(handle),
+        },
+    }
+}
+
 fn texture_format(format: WitTextureFormat) -> TextureFormat {
     match format {
         WitTextureFormat::Rgba8Unorm => TextureFormat::Rgba8Unorm,
@@ -105,6 +168,10 @@ pub fn add_to_linker(
     register_textures(&mut webgpu, &host)?;
     register_shaders(&mut webgpu, &host)?;
     register_pipelines(&mut webgpu, &host)?;
+    register_bind_groups(&mut webgpu, &host)?;
+    register_samplers(&mut webgpu, &host)?;
+    register_draw_mesh(&mut webgpu, &host)?;
+    register_passes(&mut webgpu, &host)?;
     register_probe(&mut webgpu, &host)?;
     Ok(context)
 }
@@ -225,15 +292,28 @@ fn register_pipelines(
     let create = Arc::clone(host);
     webgpu.func_wrap(
         "create-pipeline",
-        move |store: StoreContextMut<'_, WebGpuCtx>, (shader, format): (u32, WitTextureFormat)| {
+        move |store: StoreContextMut<'_, WebGpuCtx>,
+              (shader, format, vertex_buffers, bind_group_layouts): (
+            u32,
+            WitTextureFormat,
+            Vec<WitVertexBufferLayout>,
+            Vec<u32>,
+        )| {
             if !store.data().granted("soil:webgpu") {
                 return Ok((Err(Error::Denied),));
             }
             if !store.data().granted("soil:webgpu.shaders") {
                 return Ok((Err(Error::Denied),));
             }
+            let layouts: Vec<VertexBufferLayout> =
+                vertex_buffers.into_iter().map(vertex_layout).collect();
             Ok((create
-                .create_pipeline(shader, texture_format(format))
+                .create_pipeline(
+                    shader,
+                    texture_format(format),
+                    &layouts,
+                    &bind_group_layouts,
+                )
                 .map_err(map),))
         },
     )?;
@@ -245,6 +325,237 @@ fn register_pipelines(
                 return Ok((Err(Error::Denied),));
             }
             Ok((draw.draw_triangle(texture, pipeline).map_err(map),))
+        },
+    )
+}
+
+fn register_bind_groups(
+    webgpu: &mut LinkerInstance<'_, WebGpuCtx>,
+    host: &Arc<WebGpuHost>,
+) -> anyhow::Result<()> {
+    let create_layout = Arc::clone(host);
+    webgpu.func_wrap(
+        "create-bind-group-layout",
+        move |store: StoreContextMut<'_, WebGpuCtx>, (entries,): (Vec<WitBindingLayout>,)| {
+            if !store.data().granted("soil:webgpu") {
+                return Ok((Err(Error::Denied),));
+            }
+            let entries: Vec<BindingLayout> = entries.into_iter().map(binding_layout).collect();
+            Ok((create_layout
+                .create_bind_group_layout(&entries)
+                .map_err(map),))
+        },
+    )?;
+    let create_group = Arc::clone(host);
+    webgpu.func_wrap(
+        "create-bind-group",
+        move |store: StoreContextMut<'_, WebGpuCtx>,
+              (layout, entries): (u32, Vec<WitBindingEntry>)| {
+            if !store.data().granted("soil:webgpu") {
+                return Ok((Err(Error::Denied),));
+            }
+            let entries: Vec<BindingEntry> = entries.into_iter().map(binding_entry).collect();
+            Ok((create_group
+                .create_bind_group(layout, &entries)
+                .map_err(map),))
+        },
+    )
+}
+
+fn register_samplers(
+    webgpu: &mut LinkerInstance<'_, WebGpuCtx>,
+    host: &Arc<WebGpuHost>,
+) -> anyhow::Result<()> {
+    let create = Arc::clone(host);
+    webgpu.func_wrap(
+        "create-sampler",
+        move |store: StoreContextMut<'_, WebGpuCtx>,
+              (filter, address): (WitSamplerFilter, WitSamplerAddress)| {
+            if !store.data().granted("soil:webgpu") {
+                return Ok((Err(Error::Denied),));
+            }
+            let filter = match filter {
+                WitSamplerFilter::Nearest => SamplerFilter::Nearest,
+                WitSamplerFilter::Linear => SamplerFilter::Linear,
+            };
+            let address = match address {
+                WitSamplerAddress::ClampToEdge => SamplerAddress::ClampToEdge,
+                WitSamplerAddress::Repeat => SamplerAddress::Repeat,
+                WitSamplerAddress::MirrorRepeat => SamplerAddress::MirrorRepeat,
+            };
+            Ok((create.create_sampler(filter, address).map_err(map),))
+        },
+    )
+}
+
+fn register_draw_mesh(
+    webgpu: &mut LinkerInstance<'_, WebGpuCtx>,
+    host: &Arc<WebGpuHost>,
+) -> anyhow::Result<()> {
+    let draw = Arc::clone(host);
+    webgpu.func_wrap(
+        "draw-mesh",
+        move |store: StoreContextMut<'_, WebGpuCtx>,
+              (
+            texture,
+            pipeline,
+            vertex_buffer,
+            index_buffer,
+            index_format,
+            index_count,
+            instances,
+            bind_groups,
+        ): (
+            u32,
+            u32,
+            u32,
+            Option<u32>,
+            WitIndexFormat,
+            u32,
+            u32,
+            Vec<u32>,
+        )| {
+            if !store.data().granted("soil:webgpu") {
+                return Ok((Err(Error::Denied),));
+            }
+            let index_format = match index_format {
+                WitIndexFormat::Uint16 => IndexFormat::Uint16,
+                WitIndexFormat::Uint32 => IndexFormat::Uint32,
+            };
+            Ok((draw
+                .draw_mesh(
+                    texture,
+                    pipeline,
+                    vertex_buffer,
+                    index_buffer,
+                    index_format,
+                    index_count,
+                    instances,
+                    &bind_groups,
+                )
+                .map_err(map),))
+        },
+    )
+}
+
+fn register_passes(
+    webgpu: &mut LinkerInstance<'_, WebGpuCtx>,
+    host: &Arc<WebGpuHost>,
+) -> anyhow::Result<()> {
+    let create = Arc::clone(host);
+    webgpu.func_wrap(
+        "create-command-encoder",
+        move |store: StoreContextMut<'_, WebGpuCtx>, _: ()| {
+            if !store.data().granted("soil:webgpu") {
+                return Ok((Err(Error::Denied),));
+            }
+            Ok((create.create_command_encoder().map_err(map),))
+        },
+    )?;
+    let begin = Arc::clone(host);
+    webgpu.func_wrap(
+        "begin-render-pass",
+        move |store: StoreContextMut<'_, WebGpuCtx>,
+              (encoder, texture, clear): (u32, u32, WitColor)| {
+            if !store.data().granted("soil:webgpu") {
+                return Ok((Err(Error::Denied),));
+            }
+            Ok((begin
+                .begin_render_pass(encoder, texture, [clear.r, clear.g, clear.b, clear.a])
+                .map_err(map),))
+        },
+    )?;
+    let set_pipeline = Arc::clone(host);
+    webgpu.func_wrap(
+        "set-pipeline",
+        move |store: StoreContextMut<'_, WebGpuCtx>, (pass, pipeline): (u32, u32)| {
+            if !store.data().granted("soil:webgpu") {
+                return Ok((Err(Error::Denied),));
+            }
+            Ok((set_pipeline.set_pipeline(pass, pipeline).map_err(map),))
+        },
+    )?;
+    let set_vertex = Arc::clone(host);
+    webgpu.func_wrap(
+        "set-vertex-buffer",
+        move |store: StoreContextMut<'_, WebGpuCtx>, (pass, slot, buffer): (u32, u32, u32)| {
+            if !store.data().granted("soil:webgpu") {
+                return Ok((Err(Error::Denied),));
+            }
+            Ok((set_vertex
+                .set_vertex_buffer(pass, slot, buffer)
+                .map_err(map),))
+        },
+    )?;
+    let set_index = Arc::clone(host);
+    webgpu.func_wrap(
+        "set-index-buffer",
+        move |store: StoreContextMut<'_, WebGpuCtx>,
+              (pass, buffer, format): (u32, u32, WitIndexFormat)| {
+            if !store.data().granted("soil:webgpu") {
+                return Ok((Err(Error::Denied),));
+            }
+            let format = match format {
+                WitIndexFormat::Uint16 => IndexFormat::Uint16,
+                WitIndexFormat::Uint32 => IndexFormat::Uint32,
+            };
+            Ok((set_index
+                .set_index_buffer(pass, buffer, format)
+                .map_err(map),))
+        },
+    )?;
+    let set_group = Arc::clone(host);
+    webgpu.func_wrap(
+        "set-bind-group",
+        move |store: StoreContextMut<'_, WebGpuCtx>, (pass, index, group): (u32, u32, u32)| {
+            if !store.data().granted("soil:webgpu") {
+                return Ok((Err(Error::Denied),));
+            }
+            Ok((set_group.set_bind_group(pass, index, group).map_err(map),))
+        },
+    )?;
+    let draw = Arc::clone(host);
+    webgpu.func_wrap(
+        "draw",
+        move |store: StoreContextMut<'_, WebGpuCtx>,
+              (pass, vertices, instances): (u32, u32, u32)| {
+            if !store.data().granted("soil:webgpu") {
+                return Ok((Err(Error::Denied),));
+            }
+            Ok((draw.draw(pass, vertices, instances).map_err(map),))
+        },
+    )?;
+    let draw_indexed = Arc::clone(host);
+    webgpu.func_wrap(
+        "draw-indexed",
+        move |store: StoreContextMut<'_, WebGpuCtx>,
+              (pass, indices, base_vertex, instances): (u32, u32, u32, u32)| {
+            if !store.data().granted("soil:webgpu") {
+                return Ok((Err(Error::Denied),));
+            }
+            Ok((draw_indexed
+                .draw_indexed(pass, indices, base_vertex, instances)
+                .map_err(map),))
+        },
+    )?;
+    let end = Arc::clone(host);
+    webgpu.func_wrap(
+        "end-pass",
+        move |store: StoreContextMut<'_, WebGpuCtx>, (pass,): (u32,)| {
+            if !store.data().granted("soil:webgpu") {
+                return Ok((Err(Error::Denied),));
+            }
+            Ok((end.end_pass(pass).map_err(map),))
+        },
+    )?;
+    let submit = Arc::clone(host);
+    webgpu.func_wrap(
+        "submit",
+        move |store: StoreContextMut<'_, WebGpuCtx>, (encoder,): (u32,)| {
+            if !store.data().granted("soil:webgpu") {
+                return Ok((Err(Error::Denied),));
+            }
+            Ok((submit.submit(encoder).map_err(map),))
         },
     )
 }
