@@ -29,7 +29,7 @@ default = []
 soil-ble = ["wasmtime/component-model"]
 # S1 WebGPU probe. Off by default; the WIT package is defined, and this module
 # proves the wgpu host path before any resource API is linked.
-soil-webgpu = []
+soil-webgpu = ["wasmtime/component-model"]
 
 [lib]
 name = "canvas_model_host"

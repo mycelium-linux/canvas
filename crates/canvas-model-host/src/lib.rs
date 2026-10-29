@@ -20,6 +20,8 @@ pub mod renderer;
 pub mod wasm;
 #[cfg(feature = "soil-webgpu")]
 pub mod webgpu;
+#[cfg(feature = "soil-webgpu")]
+pub mod webgpu_linker;
 
 pub const MODEL_SCENE_CONTRACT: &str = "canvas.model.scene.v1";
 

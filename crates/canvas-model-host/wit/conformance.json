@@ -204,6 +204,64 @@
           },
           "ok": "list<u8>",
           "err": "error"
+        },
+        "create-buffer": {
+          "params": {
+            "size": "u64",
+            "usages": "list<buffer-usage>"
+          },
+          "ok": "u32",
+          "err": "error"
+        },
+        "write-buffer": {
+          "params": {
+            "buffer": "u32",
+            "offset": "u64",
+            "data": "list<u8>"
+          },
+          "ok": null,
+          "err": "error"
+        },
+        "create-texture": {
+          "params": {
+            "width": "u32",
+            "height": "u32",
+            "format": "texture-format",
+            "render-attachment": "bool",
+            "copy-src": "bool"
+          },
+          "ok": "u32",
+          "err": "error"
+        },
+        "create-shader": {
+          "params": {
+            "wgsl": "string"
+          },
+          "ok": "u32",
+          "err": "error"
+        },
+        "create-pipeline": {
+          "params": {
+            "shader": "u32",
+            "format": "texture-format"
+          },
+          "ok": "u32",
+          "err": "error"
+        },
+        "draw-triangle": {
+          "params": {
+            "texture": "u32",
+            "pipeline": "u32"
+          },
+          "ok": null,
+          "err": "error"
+        },
+        "read-pixels": {
+          "params": {
+            "texture": "u32"
+          },
+          "ok": "list<u8>",
+          "err": "error"
         }
       },
       "required-records": [
