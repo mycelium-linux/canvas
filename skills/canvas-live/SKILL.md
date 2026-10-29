@@ -22,6 +22,24 @@ no screen was chosen, retain the scene without activation or ask once. Preserve
 unrelated workspaces and menus. Read [authoring.md](references/authoring.md) when
 creating/changing scenes, and [sync.md](references/sync.md) before copying them.
 
+## Fast path for a new dashboard
+
+Use the checked-in scaffolds instead of hand-writing the document envelope:
+
+```sh
+skills/canvas-live/scripts/new-dashboard.sh   --id my-dashboard --project my-project --title "My dashboard"   --template kpi --out /tmp/my-dashboard.json
+
+CANVAS_TVCTL=/path/to/canvas-tvctl   skills/canvas-live/scripts/import-tv-dashboard.sh 10.0.0.44:5555 /tmp/my-dashboard.json
+```
+
+Templates are `kpi`, `list`, `series`, and `kanban`; they start in `no_data`
+state rather than inventing values. The import script inspects the target and
+uses its revision, so it cannot overwrite a newer scene. See
+[dashboard-quickstart.md](references/dashboard-quickstart.md) for the schema,
+widget shapes, and the remaining data-binding steps. Once the scaffold is
+imported, replace the placeholder surface with a real widget specimen, declared
+input contract, and source. Scaffolding is not a live feed.
+
 ## Live, reusable scenes
 
 Reuse Canvas Lua composition primitives and widget specimens before writing
