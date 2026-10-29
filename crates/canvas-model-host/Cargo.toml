@@ -27,6 +27,9 @@ default = []
 # the fixture Spore path need; wasmtime enables it by default today, but the gate
 # is stated here so the dependency is explicit rather than incidental.
 soil-ble = ["wasmtime/component-model"]
+# S1 WebGPU probe. Off by default; the WIT package is defined, and this module
+# proves the wgpu host path before any resource API is linked.
+soil-webgpu = []
 
 [lib]
 name = "canvas_model_host"

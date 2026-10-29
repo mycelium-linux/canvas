@@ -18,6 +18,8 @@ pub mod lua;
 pub mod mesh;
 pub mod renderer;
 pub mod wasm;
+#[cfg(feature = "soil-webgpu")]
+pub mod webgpu;
 
 pub const MODEL_SCENE_CONTRACT: &str = "canvas.model.scene.v1";
 

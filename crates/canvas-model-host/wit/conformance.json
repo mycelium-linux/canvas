@@ -182,6 +182,47 @@
           "io"
         ]
       }
+    },
+    {
+      "id": "soil:webgpu@1.0.0",
+      "interfaces": [
+        "types",
+        "webgpu"
+      ],
+      "function-interface": "webgpu",
+      "record-interface": "types",
+      "functions": {
+        "adapter": {
+          "params": {},
+          "ok": "adapter-info",
+          "err": "error"
+        },
+        "render-probe": {
+          "params": {
+            "width": "u32",
+            "height": "u32"
+          },
+          "ok": "list<u8>",
+          "err": "error"
+        }
+      },
+      "required-records": [
+        "buffer-desc",
+        "texture-desc",
+        "color",
+        "adapter-info"
+      ],
+      "forbidden-symbols": [
+        "fs",
+        "file",
+        "path",
+        "net",
+        "http",
+        "dns",
+        "clock",
+        "env",
+        "random"
+      ]
     }
   ]
 }
