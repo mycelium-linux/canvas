@@ -1,0 +1,127 @@
+// soil:webgpu@1.0.0 — a WebGPU-shaped capability for Soil.
+//
+// DEFINED, not shipped. No import is linked until the app manifest requests
+// `soil:webgpu`, the principal grants it, and host policy allows the
+// intersection. The host owns the adapter, device, queue, and presentation
+// surface; a Spore sees handles and typed descriptors, never raw GPU objects,
+// driver pointers, or a swapchain.
+//
+// The first linked slice is deliberately a probe: it proves the WIT ->
+// wasmtime -> wgpu path with an offscreen render and readback. Resource
+// creation (buffers, textures, pipelines, command encoders) is the next slice;
+// the shapes live in `types` so that slice does not rename anything.
+//
+// Limits (Soil-enforced, not expressible as WIT types):
+// - one device and one queue per Spore, owned by the Soil host
+// - no cross-Spore handles; every handle is a host resource-table index
+// - shader bytes require a separate `soil:webgpu.shaders` authority
+// - probe output is bounded (<= 16 MiB) and every call has a deadline
+// - no filesystem, network, clock, environment, or JavaScript surface
+package soil:webgpu@1.0.0;
+
+interface types {
+  /// Opaque, Soil-issued handles. They are not addresses or GPU ids.
+  type device-handle = u32;
+  type buffer-handle = u32;
+  type texture-handle = u32;
+  type shader-handle = u32;
+  type pipeline-handle = u32;
+
+  enum texture-format {
+    rgba8-unorm,
+    rgba8-unorm-srgb,
+    bgra8-unorm,
+    bgra8-unorm-srgb,
+    depth32-float,
+  }
+
+  enum buffer-usage {
+    vertex,
+    index,
+    uniform,
+    storage,
+    copy-src,
+    copy-dst,
+  }
+
+  record buffer-desc {
+    size: u64,
+    usages: list<buffer-usage>,
+  }
+
+  record texture-desc {
+    width: u32,
+    height: u32,
+    format: texture-format,
+    /// Render targets are host-bound; a Spore cannot name a display.
+    render-attachment: bool,
+    copy-src: bool,
+  }
+
+  record color {
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+  }
+
+  record adapter-info {
+    name: string,
+    backend: string,
+    device-type: string,
+  }
+}
+
+interface webgpu {
+  use types.{adapter-info, buffer-usage, texture-format};
+
+  enum error {
+    /// `soil:webgpu` (or `soil:webgpu.shaders`) is not granted.
+    denied,
+    /// No adapter/device is available to this host.
+    not-ready,
+    /// A descriptor is malformed or outside host limits.
+    invalid,
+    /// A per-call or per-Spore budget was exceeded.
+    over-budget,
+    /// The host device was lost; the Spore must recreate resources.
+    device-lost,
+    /// Backend failure; details are logged Soil-side, not echoed raw.
+    io,
+  }
+
+  /// Adapter identity for diagnostics. Read-only; no device is created.
+  adapter: func() -> result<adapter-info, error>;
+
+  /// Allocate a host buffer and return a Soil-issued handle.
+  create-buffer: func(size: u64, usages: list<buffer-usage>) -> result<u32, error>;
+
+  /// Write bytes into a buffer at `offset`.
+  write-buffer: func(buffer: u32, offset: u64, data: list<u8>) -> result<_, error>;
+
+  /// Allocate a host texture and return a Soil-issued handle.
+  create-texture: func(
+    width: u32,
+    height: u32,
+    format: texture-format,
+    render-attachment: bool,
+    copy-src: bool,
+  ) -> result<u32, error>;
+
+  /// Compile WGSL into a host shader module. Requires
+  /// `soil:webgpu.shaders` in addition to `soil:webgpu`.
+  create-shader: func(wgsl: string) -> result<u32, error>;
+
+  /// Build a render pipeline for one shader and colour format.
+  create-pipeline: func(shader: u32, format: texture-format) -> result<u32, error>;
+
+  /// Draw a host-owned fullscreen triangle into a texture.
+  draw-triangle: func(texture: u32, pipeline: u32) -> result<_, error>;
+
+  /// Read a texture back as tightly packed RGBA8.
+  read-pixels: func(texture: u32) -> result<list<u8>, error>;
+
+  /// First-slice proof: render a fullscreen triangle through wgpu and return
+  /// tightly packed RGBA8 pixels. This is a probe, not the public drawing API.
+  render-probe: func(width: u32, height: u32) -> result<list<u8>, error>;
+}

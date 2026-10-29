@@ -1,0 +1,6 @@
+package canvas:webgpu-guest@0.1.0;
+
+world guest {
+  import soil:webgpu/webgpu@1.0.0;
+  export run: func() -> s64;
+}
