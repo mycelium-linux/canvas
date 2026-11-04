@@ -2221,6 +2221,12 @@ impl App {
                 }
                 let mut metrics_changed = false;
                 match event {
+                    // Closing the window is a real quit on macOS. Without this
+                    // the decorated titlebar's close button silently did nothing
+                    // and the app looked like it had force-reopened.
+                    iced::window::Event::CloseRequested if cfg!(target_os = "macos") => {
+                        return iced::exit();
+                    }
                     iced::window::Event::Unfocused => {
                         if self.window_cycle.active() {
                             self.window_cycle.cancel();
@@ -13135,9 +13141,15 @@ mod platform {
     }
 
     #[cfg(target_os = "macos")]
-    pub(super) fn canvas_collection_behavior() -> objc2_app_kit::NSWindowCollectionBehavior {
+    pub(super) fn canvas_collection_behavior(
+        kiosk: bool,
+    ) -> objc2_app_kit::NSWindowCollectionBehavior {
         use objc2_app_kit::NSWindowCollectionBehavior;
 
+        if !kiosk {
+            // A normal window belongs to the active Space and moves with it.
+            return NSWindowCollectionBehavior::Default;
+        }
         NSWindowCollectionBehavior::CanJoinAllSpaces
             | NSWindowCollectionBehavior::FullScreenAuxiliary
             | NSWindowCollectionBehavior::Stationary
@@ -13153,7 +13165,7 @@ mod platform {
         application.setPresentationOptions(canvas_presentation_options(kiosk));
         for window in application.windows().iter() {
             window.setSharingType(NSWindowSharingType::NSWindowSharingReadOnly);
-            unsafe { window.setCollectionBehavior(canvas_collection_behavior()) };
+            unsafe { window.setCollectionBehavior(canvas_collection_behavior(kiosk)) };
         }
         Ok(())
     }
@@ -17776,13 +17788,16 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn canvas_windows_join_every_macos_space() {
+    fn canvas_windows_stay_in_the_active_space_outside_kiosk() {
         use objc2_app_kit::NSWindowCollectionBehavior;
 
-        let behavior = platform::canvas_collection_behavior();
-        assert!(behavior.contains(NSWindowCollectionBehavior::CanJoinAllSpaces));
-        assert!(behavior.contains(NSWindowCollectionBehavior::FullScreenAuxiliary));
-        assert!(behavior.contains(NSWindowCollectionBehavior::Stationary));
+        let behavior = platform::canvas_collection_behavior(false);
+        assert!(!behavior.contains(NSWindowCollectionBehavior::CanJoinAllSpaces));
+        assert!(!behavior.contains(NSWindowCollectionBehavior::Stationary));
+
+        let kiosk = platform::canvas_collection_behavior(true);
+        assert!(kiosk.contains(NSWindowCollectionBehavior::CanJoinAllSpaces));
+        assert!(kiosk.contains(NSWindowCollectionBehavior::Stationary));
     }
 
     #[test]

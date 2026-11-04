@@ -105,12 +105,17 @@ def register_connector(config_path: pathlib.Path, desired: dict) -> bool:
 
 def launch_agent(canvas_app: pathlib.Path, home: pathlib.Path) -> bytes:
     logs = home / "Library/Logs"; logs.mkdir(parents=True, exist_ok=True)
+    # Run the bundle executable directly so launchd owns one process. KeepAlive
+    # restarts a crash but not a clean quit: closing the window must stay closed.
     return plistlib.dumps({"Label": LABEL,
-        "ProgramArguments": ["/usr/bin/open", "-n", "-a", str(canvas_app)],
+        "ProgramArguments": [str(canvas_app / "Contents/MacOS/dock-canvas")],
         "EnvironmentVariables": {"HOME": str(home),
             "CANVAS_CONFIG_DIR": str(home / "Library/Application Support/Dock/canvas"),
             "PATH": f"{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"},
-        "RunAtLoad": True, "KeepAlive": False, "ProcessType": "Interactive",
+        "RunAtLoad": True,
+        "KeepAlive": {"SuccessfulExit": False},
+        "ThrottleInterval": 10,
+        "ProcessType": "Interactive",
         "StandardOutPath": str(logs / "dock-canvas.log"),
         "StandardErrorPath": str(logs / "dock-canvas.err.log")}, sort_keys=True)
 
