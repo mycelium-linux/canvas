@@ -18,7 +18,7 @@ use std::{
     },
 };
 
-const DEFAULT_SOURCE_BYTES: usize = 64 * 1024;
+const DEFAULT_SOURCE_BYTES: usize = 256 * 1024;
 const DEFAULT_MEMORY_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_INTERRUPT_BUDGET: u64 = 100_000;
 // Small UIs used a few dozen nodes; charts compose a line or a field from

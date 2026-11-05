@@ -13781,7 +13781,10 @@ fn module_key(
 /// Generated modules carry a composed snapshot. Keep the source ceiling equal
 /// to the Lua scene ceiling rather than the smaller adapter ceiling.
 #[cfg(feature = "lua-scenes")]
-const MAX_MODULE_BYTES: usize = 64 * 1024;
+// The SDK and a chart snapshot are one artifact. A few hundred points still
+// fit comfortably; keep a hard 128 KiB ceiling instead of forcing every chart
+// Spore to truncate its data below the SDK's own size.
+const MAX_MODULE_BYTES: usize = 128 * 1024;
 
 /// Digest the two authored files that define a module. Missing/error states are
 /// hashed too, so installing or repairing a file changes the retained key and
