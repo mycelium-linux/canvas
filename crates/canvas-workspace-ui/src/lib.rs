@@ -330,6 +330,8 @@ pub struct Report {
     pub intents: Vec<Intent>,
 }
 
+pub const COMPACT_FONT_POINTS: f32 = 12.0;
+
 impl Inbox {
     fn visible<'a>(&mut self, snapshot: &'a Snapshot) -> Vec<&'a Item> {
         let key = (
@@ -461,6 +463,40 @@ impl Inbox {
         }
         if focused && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::K)) {
             self.focus_search = true;
+        }
+
+        // Native small surfaces retain owner filtering, selection and actions above,
+        // but show one selected item instead of shrinking the desktop table.
+        if ui.available_width() <= 160.0 {
+            let selected = items.iter().find(|i| Some(&i.id) == self.selected.as_ref());
+            let width = ui.available_width();
+            let text_color = ui.visuals().text_color();
+            let mut line = |ui: &mut egui::Ui, text: &str, rows: usize| {
+                let mut job = egui::text::LayoutJob::simple(
+                    text.to_owned(), egui::FontId::proportional(COMPACT_FONT_POINTS), text_color, width,
+                );
+                job.wrap.max_rows = rows;
+                job.wrap.break_anywhere = true;
+                let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+                let response = ui.label(galley);
+                report.row_rects.push(response.rect);
+            };
+            line(ui, "Work inbox", 1);
+            if let Some(item) = selected {
+                line(ui, &item.title, 2);
+                line(ui, item.status.label(), 1);
+                if self.details_open {
+                    line(ui, &item.owner, 1);
+                } else {
+                    let position = items.iter().position(|i| i.id == item.id).unwrap_or(0) + 1;
+                    line(ui, &format!("{position}/{}  Up/Down", items.len()), 1);
+                }
+                report.rows_drawn = 1;
+            } else {
+                line(ui, "No matching work", 2);
+            }
+            report.matched = items.len();
+            return report;
         }
 
         let compact = ui.available_width() < 760.0;
