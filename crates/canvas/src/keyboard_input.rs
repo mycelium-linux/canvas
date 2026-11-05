@@ -195,6 +195,26 @@ pub(crate) fn display_shortcut(event: &iced::keyboard::Event) -> Option<usize> {
     }
 }
 
+/// Ctrl+Alt+Space opens the application launcher.
+///
+/// The dock has a button for this, and the top bar opens the workspace switcher,
+/// but both are chrome: they can be closed, reloaded into a broken state, or fail
+/// to draw at all. A shell needs one way back that does not go through a surface --
+/// otherwise losing the launcher means losing the ability to start anything, which
+/// is not a recoverable state for a compositor to leave a person in.
+pub(crate) fn launcher_requested(event: &iced::keyboard::Event) -> bool {
+    use iced::keyboard::{Event, Key};
+    matches!(
+        event,
+        Event::KeyPressed {
+            key: Key::Named(iced::keyboard::key::Named::Space),
+            modifiers,
+            repeat: false,
+            ..
+        } if modifiers.control() && modifiers.alt() && !modifiers.logo()
+    )
+}
+
 pub(crate) fn snap_layout_requested(event: &iced::keyboard::Event) -> bool {
     use iced::keyboard::Event;
     matches!(

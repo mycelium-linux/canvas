@@ -2596,6 +2596,9 @@ impl App {
                         }
                     }
                 }
+                if launcher_requested(&kbd_event) {
+                    return self.toggle_shell_launcher(::canvas::shell_launcher::Scope::Canvas);
+                }
                 if snap_layout_requested(&kbd_event) {
                     self.toggle_snapped_layout();
                     return Task::none();
@@ -5006,6 +5009,35 @@ impl App {
                     },
                 );
                 Task::none()
+            }
+            Command::OpenLauncher { scope } => {
+                let scope = match scope {
+                    Some(::canvas::control::LauncherScope::Workspaces) => {
+                        ::canvas::shell_launcher::Scope::Workspaces
+                    }
+                    Some(::canvas::control::LauncherScope::Native) => {
+                        ::canvas::shell_launcher::Scope::Native
+                    }
+                    _ => ::canvas::shell_launcher::Scope::Canvas,
+                };
+                let task = self.toggle_shell_launcher(scope);
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::LauncherOpened {
+                            scope: match scope {
+                                ::canvas::shell_launcher::Scope::Workspaces => {
+                                    ::canvas::control::LauncherScope::Workspaces
+                                }
+                                ::canvas::shell_launcher::Scope::Native => {
+                                    ::canvas::control::LauncherScope::Native
+                                }
+                                _ => ::canvas::control::LauncherScope::Canvas,
+                            },
+                        },
+                    },
+                );
+                task
             }
             Command::Inspect => {
                 let snapshot = self.snapshot();
@@ -16991,6 +17023,14 @@ mod tests {
             repeat: false,
         };
 
+        assert!(launcher_requested(&pressed(
+            iced::keyboard::Key::Named(iced::keyboard::key::Named::Space),
+            Modifiers::CTRL | Modifiers::ALT
+        )));
+        assert!(!launcher_requested(&pressed(
+            iced::keyboard::Key::Named(iced::keyboard::key::Named::Space),
+            Modifiers::CTRL
+        )));
         assert!(snap_layout_requested(&pressed(
             Modifiers::CTRL | Modifiers::ALT
         )));

@@ -75,9 +75,26 @@ pub struct ActorContext {
     pub timestamp_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LauncherScope {
+    Canvas,
+    Workspaces,
+    Native,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
+    /// Open the application launcher, the way the dock's apps button would.
+    ///
+    /// A shell needs one way back that does not depend on the shell: chrome can
+    /// be closed, mis-drawn, or reloaded into a broken state, and the launcher is
+    /// how a person recovers from that without editing a workspace file.
+    OpenLauncher {
+        #[serde(default)]
+        scope: Option<LauncherScope>,
+    },
     ShellCatalog,
     ShellDockPins,
     ShellDockPin {
@@ -697,6 +714,9 @@ pub enum ErrorCode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Receipt {
+    LauncherOpened {
+        scope: LauncherScope,
+    },
     ShellCatalog {
         catalog: crate::shell_launcher::Catalog,
     },
@@ -1069,6 +1089,7 @@ impl ControlRequest {
             return Err("request_id must be 1–64 lowercase identifier characters".into());
         }
         match &self.command {
+            Command::OpenLauncher { .. } => {}
             Command::ShellActivate {
                 catalog_revision,
                 entry_id,
@@ -1908,6 +1929,7 @@ pub mod text {
         match &reply.outcome {
             Outcome::Ok { receipt } => {
                 let detail = match receipt {
+                    Receipt::LauncherOpened { scope } => format!("launcher={scope:?}"),
                     Receipt::Performance { metrics } => metrics.to_string(),
                     Receipt::DocumentSnapshot { snapshot, .. } => format!(
                         "project={} frame={},{},{},{} focus={} surfaces={} indicators={}",
