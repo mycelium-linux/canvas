@@ -344,8 +344,36 @@ pub enum ModuleEvent {
     Load,
     DataChanged { changed_inputs: Vec<String> },
     Activate { target_id: String },
+    /// A pointer gesture in module-local coordinates, normalized to the surface.
+    ///
+    /// Normalized rather than pixel: the same view has to answer the same
+    /// question at any window size, and a re-render on resize must not move what
+    /// the pointer is over.
+    Pointer { x: f32, y: f32, phase: PointerPhase },
     Pulse { sequence: u64, delta_ms: f64 },
     Reload,
+}
+
+/// The part of a pointer gesture a view can act on.
+///
+/// Moves are included because hover is how a person knows a thing is clickable,
+/// but the host throttles them: a view must not be re-rendered per frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PointerPhase {
+    Move,
+    Press,
+    Release,
+}
+
+impl PointerPhase {
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Move => "move",
+            Self::Press => "press",
+            Self::Release => "release",
+        }
+    }
 }
 
 /// Coherence values copied from `ProjectTheme` at the call boundary.
@@ -1240,6 +1268,12 @@ fn event_to_lua(lua: &Lua, event: &ModuleEvent) -> Result<Table> {
                 .set("target_id", target_id.as_str())
                 .map_err(lua_error)?;
         }
+        ModuleEvent::Pointer { x, y, phase } => {
+            table.set("kind", "pointer").map_err(lua_error)?;
+            table.set("phase", phase.wire_name()).map_err(lua_error)?;
+            table.set("x", *x).map_err(lua_error)?;
+            table.set("y", *y).map_err(lua_error)?;
+        }
         ModuleEvent::Pulse { sequence, delta_ms } => {
             table.set("kind", "pulse").map_err(lua_error)?;
             table.set("sequence", *sequence).map_err(lua_error)?;
@@ -1421,6 +1455,12 @@ fn validate_event(manifest: &ModuleManifest, event: &ModuleEvent) -> Result<()> 
             ensure(
                 identifier(target_id),
                 "Invalid Canvas Lua activation target",
+            )?;
+        }
+        ModuleEvent::Pointer { x, y, .. } => {
+            ensure(
+                x.is_finite() && y.is_finite() && (0.0..=1.0).contains(x) && (0.0..=1.0).contains(y),
+                "Canvas Lua pointer must be normalized to the surface",
             )?;
         }
         ModuleEvent::Pulse { delta_ms, .. } => {
@@ -2302,6 +2342,61 @@ canvas.text { id = "body-height", text = string.format("%.0f", laid.nodes[3].rec
             body_height.parse::<f32>().unwrap() > 20.0,
             "text should wrap to more than one line, got {body_height}"
         );
+    }
+
+    #[test]
+    fn a_pointer_event_is_normalized_to_the_surface() {
+        let manifest = ModuleManifest::parse(include_str!(
+            "../../../config/modules/calendar-v1.json"
+        ))
+        .expect("manifest");
+
+        // Normalized coordinates are the contract: a view is re-rendered when a
+        // window resizes, so a pointer in pixels would mean something different
+        // after the re-render.
+        for (x, y) in [(0.0, 0.0), (1.0, 1.0), (0.5, 0.25)] {
+            validate_event(
+                &manifest,
+                &ModuleEvent::Pointer {
+                    x,
+                    y,
+                    phase: PointerPhase::Press,
+                },
+            )
+            .expect("a point inside the surface is valid");
+        }
+        for (x, y) in [(-0.1, 0.5), (0.5, 1.1), (f32::NAN, 0.5)] {
+            assert!(
+                validate_event(
+                    &manifest,
+                    &ModuleEvent::Pointer {
+                        x,
+                        y,
+                        phase: PointerPhase::Move,
+                    },
+                )
+                .is_err(),
+                "({x}, {y}) is outside the surface and must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pointer_event_reaches_lua_as_a_table() {
+        let lua = mlua::Lua::new();
+        let table = event_to_lua(
+            &lua,
+            &ModuleEvent::Pointer {
+                x: 0.25,
+                y: 0.75,
+                phase: PointerPhase::Release,
+            },
+        )
+        .expect("event table");
+        assert_eq!(table.get::<String>("kind").unwrap(), "pointer");
+        assert_eq!(table.get::<String>("phase").unwrap(), "release");
+        assert!((table.get::<f32>("x").unwrap() - 0.25).abs() < f32::EPSILON);
+        assert!((table.get::<f32>("y").unwrap() - 0.75).abs() < f32::EPSILON);
     }
 
     #[test]

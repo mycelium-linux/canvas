@@ -7182,6 +7182,23 @@ impl App {
             return Task::none();
         }
 
+        // A click belongs to the module view under it before it means anything to
+        // the window manager: a view that wants a press has to get the press.
+        #[cfg(feature = "lua-scenes")]
+        match &event {
+            Event::ButtonPressed(Button::Left) => {
+                if let Some(position) = self.cursor {
+                    self.module_pointer(position, ::canvas::lua_module::PointerPhase::Press);
+                }
+            }
+            Event::ButtonReleased(Button::Left) => {
+                if let Some(position) = self.cursor {
+                    self.module_pointer(position, ::canvas::lua_module::PointerPhase::Release);
+                }
+            }
+            _ => {}
+        }
+
         let phase = match event {
             Event::CursorMoved { position } => {
                 self.cursor = Some(LogicalPoint {
@@ -9017,8 +9034,21 @@ impl App {
 
     #[cfg(feature = "lua-scenes")]
     fn activate_module(&mut self, surface_id: &str, target_id: &str) {
-        // Re-evaluate the current artifact and state: a stale button cannot
-        // replay the body retained before a reload or newer controller revision.
+        self.dispatch_module(
+            surface_id,
+            ::canvas::lua_module::ModuleEvent::Activate {
+                target_id: target_id.to_owned(),
+            },
+        );
+    }
+
+    /// Re-evaluate a module with one event and route whatever actions it emitted.
+    ///
+    /// Every input path — a named button, a click on the scene, later a key —
+    /// ends here, because the rule is the same for all of them: the view is a
+    /// function of state plus event, and anything it decides leaves as an intent.
+    #[cfg(feature = "lua-scenes")]
+    fn dispatch_module(&mut self, surface_id: &str, event: ::canvas::lua_module::ModuleEvent) {
         let Some(surface) = self.decoded.get(surface_id) else {
             return;
         };
@@ -9036,15 +9066,7 @@ impl App {
         if let Some(bounds) = self.snapshot().surface_bounds.get(surface_id) {
             theme.viewport = [bounds.width as f32, bounds.height as f32];
         }
-        let result = resolve_module_event(
-            module,
-            inputs,
-            theme,
-            now_unix_ms(),
-            Some(::canvas::lua_module::ModuleEvent::Activate {
-                target_id: target_id.to_owned(),
-            }),
-        );
+        let result = resolve_module_event(module, inputs, theme, now_unix_ms(), Some(event));
         match result {
             Ok(retained) => {
                 if let Some(ModuleSurface::Rendered { scene, buttons, last_error, .. }) =
@@ -9070,6 +9092,76 @@ impl App {
         }
     }
 
+    /// The topmost module surface under a point, with the pointer expressed in
+    /// that surface's own normalized space.
+    #[cfg(feature = "lua-scenes")]
+    fn module_under_pointer(
+        &self,
+        position: LogicalPoint,
+    ) -> Option<(String, ::canvas::lua_module::PointerPhase, f32, f32)> {
+        let Layout::Canvas { placements } = self.document.active_layout() else {
+            return None;
+        };
+        let mut order = placements.iter().collect::<Vec<_>>();
+        order.sort_by_key(|placement| {
+            std::cmp::Reverse((
+                self.maximized_surfaces.contains(&placement.surface_id),
+                placement.layer,
+            ))
+        });
+        for placement in order {
+            let Some(surface) = self.decoded.get(&placement.surface_id) else {
+                continue;
+            };
+            let ContentSource::Widget { spec } = &surface.source else {
+                continue;
+            };
+            if !matches!(spec.kind, canvas_widgets::WidgetKind::Module { .. }) {
+                continue;
+            }
+            let Some(bounds) = self.surface_screen_bounds(&placement.surface_id) else {
+                continue;
+            };
+            let (bx, by) = (f64::from(bounds.x), f64::from(bounds.y));
+            let (bw, bh) = (f64::from(bounds.width), f64::from(bounds.height));
+            if bw <= 0.0 || bh <= 0.0 {
+                continue;
+            }
+            if position.x < bx
+                || position.y < by
+                || position.x > bx + bw
+                || position.y > by + bh
+            {
+                continue;
+            }
+            let x = ((position.x - bx) / bw) as f32;
+            let y = ((position.y - by) / bh) as f32;
+            return Some((
+                placement.surface_id.clone(),
+                ::canvas::lua_module::PointerPhase::Press,
+                x,
+                y,
+            ));
+        }
+        None
+    }
+
+    /// Deliver a click to a module view.
+    ///
+    /// Press and release only: hover would mean re-rendering Lua on every mouse
+    /// move, and a view that re-renders per frame is exactly what the retained
+    /// scene model exists to avoid.
+    #[cfg(feature = "lua-scenes")]
+    fn module_pointer(&mut self, position: LogicalPoint, phase: ::canvas::lua_module::PointerPhase) {
+        let Some((surface_id, _, x, y)) = self.module_under_pointer(position) else {
+            return;
+        };
+        self.dispatch_module(
+            &surface_id,
+            ::canvas::lua_module::ModuleEvent::Pointer { x, y, phase },
+        );
+    }
+
     #[cfg(feature = "lua-scenes")]
     fn module_button_layer(
         &self,
@@ -9079,13 +9171,15 @@ impl App {
     ) -> Element<'static, Message> {
         let visual = self.presented_visual_theme();
         let children = self.native_module_buttons(buttons, viewport, |control| {
-            (control.enabled && (control.local || self.module_bus.connected())).then(|| Message::ModuleActivate {
+            // A local control is the application's own button: it does not need a
+            // controller on the other end of a bus to be worth clicking.
+            control.enabled.then(|| Message::ModuleActivate {
                 surface_id: surface_id.to_owned(),
                 target_id: control.id.clone(),
             })
         });
         let mut children = children;
-        if !buttons.is_empty() && !self.module_bus.connected() {
+        if buttons.iter().any(|button| !button.local) && !self.module_bus.connected() {
             children.push(
                 container(
                     text("CONTROLS OFFLINE · Unibus session unavailable")
@@ -14187,22 +14281,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             iced::time::every(cadence).map(|_| Message::Tick),
             iced::event::listen_with(|event, status, window| match event {
                 iced::Event::Window(event) => Some(Message::WindowEvent(window, event)),
-                // Every mouse event reaches the compositor, captured or not.
+                // A press a widget has captured stays with that widget.
                 //
-                // This used to drop presses that a widget reported as captured,
-                // on the theory that the widget had handled them. It had not: a
-                // widget that merely sits under the pointer captures the press,
-                // and then the window never sees a click. The dock and the top
-                // bar still worked because nothing is drawn over them, which made
-                // it look like input was fine everywhere except in windows.
-                //
-                // A compositor decides what a press means from geometry, so it
-                // must see the press; a widget that also handles it is a detail
-                // of that widget, not a reason to hide the event.
-                iced::Event::Mouse(event) => {
-                    let _ = status;
-                    Some(Message::MouseEvent(window, event))
-                }
+                // Forwarding it as well made every gesture do two things at once:
+                // a drag inside a window moved the window, because the compositor
+                // and the widget both acted on the same press. The compositor gets
+                // the presses nobody claimed, which is exactly the chrome it draws
+                // itself; anything a widget owns stays its own.
+                iced::Event::Mouse(
+                    iced::mouse::Event::ButtonPressed(_) | iced::mouse::Event::WheelScrolled { .. },
+                ) if status == iced::event::Status::Captured => None,
+                iced::Event::Mouse(event) => Some(Message::MouseEvent(window, event)),
                 iced::Event::Keyboard(event) => Some(Message::TerminalInput(event)),
                 _ => None,
             }),
