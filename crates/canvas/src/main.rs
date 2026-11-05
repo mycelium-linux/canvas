@@ -461,6 +461,34 @@ fn orbit_action(event: &iced::keyboard::Event) -> Option<canvas_model_viewer::Or
     canvas_model_viewer::action_for_key(name)
 }
 
+/// A key press a focused GPU-lease Spore may use for chart navigation.
+///
+/// Canvas still owns the key map: this is only reached after global shortcuts,
+/// pickers, prompt input and model orbit have had their chance. Named keys use
+/// lowercase names (`arrowleft`, `home`) so producers do not need iced types.
+fn spore_key_message(event: &iced::keyboard::Event) -> Option<serde_json::Value> {
+    use iced::keyboard::{Event, Key};
+    let Event::KeyPressed {
+        key, modifiers, ..
+    } = event
+    else {
+        return None;
+    };
+    let name = match key {
+        Key::Character(character) => character.to_string(),
+        Key::Named(named) => format!("{named:?}").to_lowercase(),
+        _ => return None,
+    };
+    Some(serde_json::json!({
+        "kind": "key",
+        "key": name,
+        "shift": modifiers.shift(),
+        "control": modifiers.control(),
+        "alt": modifiers.alt(),
+        "meta": modifiers.logo(),
+    }))
+}
+
 fn hid_escape_requested(event: &iced::keyboard::Event) -> bool {
     use iced::keyboard::{
         Event,
@@ -885,6 +913,7 @@ struct App {
     /// A pointer gesture currently belongs to a GPU-lease Spore producer, so
     /// the compositor must not also start a window drag or orbit.
     spore_pointer_down: bool,
+    keyboard_modifiers: iced::keyboard::Modifiers,
     hid_output: hid_output::HidOutput,
     update_timings: ::canvas::performance::UpdateTimings,
     #[cfg(feature = "lua-scenes")]
@@ -1340,6 +1369,7 @@ impl App {
             _external_surface_socket: external_surface_socket,
             external_surface_pointer: None,
             spore_pointer_down: false,
+            keyboard_modifiers: iced::keyboard::Modifiers::default(),
             hid_output: hid_output::HidOutput::default(),
             update_timings: ::canvas::performance::UpdateTimings::default(),
             #[cfg(feature = "lua-scenes")]
@@ -2554,6 +2584,9 @@ impl App {
                 Task::none()
             }
             Message::TerminalInput(kbd_event) => {
+                if let iced::keyboard::Event::ModifiersChanged(modifiers) = &kbd_event {
+                    self.keyboard_modifiers = *modifiers;
+                }
                 if self.handle_window_cycle(&kbd_event) {
                     return Task::none();
                 }
@@ -2737,6 +2770,20 @@ impl App {
                     }) {
                         return self.handle_prompt_key(&id, kbd_event);
                     }
+                }
+                if let Some(surface_id) = self.document.focused_surface_id.clone()
+                    && self
+                        .spores
+                        .get(&surface_id)
+                        .is_some_and(|presented| {
+                            matches!(presented.present, soil_scene::Present::GpuLease(_))
+                        })
+                    && let Some(message) = spore_key_message(&kbd_event)
+                {
+                    if let Err(error) = crate::spore_socket::send_input(&surface_id, message) {
+                        self.status = format!("Canvas spore key failed: {error}");
+                    }
+                    return Task::none();
                 }
                 if let Some(target_id) = self.focused_hid_target() {
                     if hid_escape_requested(&kbd_event) {
@@ -8060,6 +8107,11 @@ impl App {
                 "phase": phase,
                 "x": x,
                 "y": y,
+                "shift": self.keyboard_modifiers.shift(),
+                "control": self.keyboard_modifiers.control(),
+                "alt": self.keyboard_modifiers.alt(),
+                "meta": self.keyboard_modifiers.logo(),
+                "at_ms": now_unix_ms(),
             }),
         ) {
             self.status = format!("Canvas spore pointer failed: {error}");
@@ -8085,6 +8137,10 @@ impl App {
                 "y": y,
                 "dx": dx.clamp(-4096.0, 4096.0),
                 "dy": dy.clamp(-4096.0, 4096.0),
+                "shift": self.keyboard_modifiers.shift(),
+                "control": self.keyboard_modifiers.control(),
+                "alt": self.keyboard_modifiers.alt(),
+                "meta": self.keyboard_modifiers.logo(),
             }),
         ) {
             self.status = format!("Canvas spore scroll failed: {error}");
