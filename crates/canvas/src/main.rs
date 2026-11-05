@@ -14187,10 +14187,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             iced::time::every(cadence).map(|_| Message::Tick),
             iced::event::listen_with(|event, status, window| match event {
                 iced::Event::Window(event) => Some(Message::WindowEvent(window, event)),
-                iced::Event::Mouse(
-                    iced::mouse::Event::ButtonPressed(_) | iced::mouse::Event::WheelScrolled { .. },
-                ) if status == iced::event::Status::Captured => None,
-                iced::Event::Mouse(event) => Some(Message::MouseEvent(window, event)),
+                // Every mouse event reaches the compositor, captured or not.
+                //
+                // This used to drop presses that a widget reported as captured,
+                // on the theory that the widget had handled them. It had not: a
+                // widget that merely sits under the pointer captures the press,
+                // and then the window never sees a click. The dock and the top
+                // bar still worked because nothing is drawn over them, which made
+                // it look like input was fine everywhere except in windows.
+                //
+                // A compositor decides what a press means from geometry, so it
+                // must see the press; a widget that also handles it is a detail
+                // of that widget, not a reason to hide the event.
+                iced::Event::Mouse(event) => {
+                    let _ = status;
+                    Some(Message::MouseEvent(window, event))
+                }
                 iced::Event::Keyboard(event) => Some(Message::TerminalInput(event)),
                 _ => None,
             }),
