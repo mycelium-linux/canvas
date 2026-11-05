@@ -4454,11 +4454,11 @@ impl App {
             ),
             (
                 "padding".into(),
-                Value::Number(f64::from(fpl_gfx::chrome::BAR_PADDING)),
+                Value::Number(f64::from(::canvas::DESKTOP_BAR_PADDING)),
             ),
             (
                 "labelsize".into(),
-                Value::Number(f64::from(fpl_gfx::chrome::BAR_TEXT_SIZE)),
+                Value::Number(f64::from(::canvas::DESKTOP_BAR_TEXT_SIZE)),
             ),
             (
                 "workspace".into(),
@@ -4544,8 +4544,8 @@ impl App {
         // moment someone looked.
         let battery = String::from("—");
         let values = BTreeMap::from([
-            ("width".to_string(), Value::Number(360.0)),
-            ("height".to_string(), Value::Number(420.0)),
+            ("width".to_string(), Value::Number(380.0)),
+            ("height".to_string(), Value::Number(520.0)),
             (
                 "clock".to_string(),
                 Value::Text(format!("{:02}:{:02}", parts.hour, parts.minute)),
@@ -4569,7 +4569,29 @@ impl App {
             ),
             ("focused".to_string(), Value::Text(focused)),
             ("battery".to_string(), Value::Text(battery)),
+            (
+                "sources".to_string(),
+                Value::Number(
+                    self.decoded
+                        .values()
+                        .filter(|surface| matches!(surface.source, ContentSource::LiveVideo { .. }))
+                        .count() as f64,
+                ),
+            ),
         ]);
+        // The first few open windows, so the panel can list what is running
+        // instead of only counting it.
+        let mut values = values;
+        for (slot, surface) in self
+            .document
+            .surfaces
+            .iter()
+            .take(5)
+            .enumerate()
+        {
+            let title = surface.title.chars().take(32).collect::<String>();
+            values.insert(format!("window{slot}"), Value::Text(title));
+        }
         let visual = self.presented_visual_theme();
         let theme =
             ModuleThemeTokens::from_visual(&visual, self.effective_theme(&self.document).accent());
@@ -4594,7 +4616,10 @@ impl App {
                 self.bump();
             }
             Ok(false) => {}
-            Err(error) => self.status = format!("Control center Lua error: {error}"),
+            Err(error) => {
+                eprintln!("canvas: control center Lua error: {error}");
+                self.status = format!("Control center Lua error: {error}");
+            }
         }
     }
 
@@ -9945,7 +9970,7 @@ impl App {
                 } else if control.align == ::canvas::lua_module::ButtonAlign::Left {
                     container(
                         text(control.label.clone())
-                            .size(fpl_gfx::chrome::BAR_TEXT_SIZE),
+                            .size(::canvas::DESKTOP_BAR_TEXT_SIZE),
                     )
                     .width(width)
                     .padding(iced::Padding {
@@ -9956,7 +9981,7 @@ impl App {
                     .into()
                 } else {
                     text(control.label.clone())
-                        .size(fpl_gfx::chrome::BAR_TEXT_SIZE)
+                        .size(::canvas::DESKTOP_BAR_TEXT_SIZE)
                         .center()
                         .into()
                 };
@@ -12592,8 +12617,8 @@ impl App {
             #[cfg(feature = "lua-scenes")]
             if let Some(presentation) = self.control_center.retained() {
                 let size = LogicalSize {
-                    width: 360.0,
-                    height: 420.0,
+                    width: 380.0,
+                    height: 520.0,
                 };
                 // scene_layer, not shell_scene_layer: the latter re-draws an
                 // opaque ground and clips the rest of the sheet, which is how a
@@ -12608,13 +12633,14 @@ impl App {
                     size,
                     |control| match control.id.as_str() {
                         "apps" => Some(Message::ShellCanvasApps),
+                        "projects" => Some(Message::ShellProjects),
                         "dismiss" => Some(Message::ControlCenterDismiss),
                         _ => None,
                     },
                     |_| false,
                 ));
                 layers.push(
-                    container(container(stack(sheet)).width(Length::Fixed(360.0)).height(Length::Fixed(420.0)))
+                    container(container(stack(sheet)).width(Length::Fixed(380.0)).height(Length::Fixed(520.0)))
                         .width(Length::Fill)
                         .height(Length::Fill)
                         .padding(iced::Padding {
@@ -12744,9 +12770,9 @@ impl App {
                 .style(move |_, status| {
                     canvas_widgets::live::app_chrome::cube_button_style(visual_theme, false, status)
                 });
-            let project = button(text(project_label).size(fpl_gfx::chrome::BAR_TEXT_SIZE))
-                .height(Length::Fixed(fpl_gfx::chrome::BAR_CONTROL_HEIGHT as f32))
-                .padding([0, fpl_gfx::chrome::BAR_PADDING as u16])
+            let project = button(text(project_label).size(::canvas::DESKTOP_BAR_TEXT_SIZE))
+                .height(Length::Fixed(::canvas::DESKTOP_BAR_HEIGHT as f32))
+                .padding([0, ::canvas::DESKTOP_BAR_PADDING as u16])
                 .on_press(Message::ShellProjects)
                 .style(move |_, status| {
                     canvas_widgets::live::app_chrome::quiet_button_style(visual_theme, true, status)
@@ -12765,25 +12791,25 @@ impl App {
                 });
             let identity = row![
                 text("fungOS")
-                    .size(fpl_gfx::chrome::BAR_TEXT_SIZE)
+                    .size(::canvas::DESKTOP_BAR_TEXT_SIZE)
                     .color(primary),
                 back,
                 forward,
                 project,
                 text("/").size(11).color(Color { a: 0.40, ..muted }),
                 text(self.document.active_page_name().to_owned())
-                    .size(fpl_gfx::chrome::BAR_TEXT_SIZE)
+                    .size(::canvas::DESKTOP_BAR_TEXT_SIZE)
                     .color(Color { a: 0.72, ..muted }),
                 create,
             ]
-            .spacing(fpl_gfx::chrome::BAR_PADDING)
+            .spacing(::canvas::DESKTOP_BAR_PADDING)
             .align_y(iced::Alignment::Center);
             let health = row![
                 text(format!("{live_sources} SOURCES"))
                     .size(10)
                     .color(Color { a: 0.72, ..primary }),
                 text(clock.chars().take(5).collect::<String>())
-                    .size(fpl_gfx::chrome::BAR_TEXT_SIZE)
+                    .size(::canvas::DESKTOP_BAR_TEXT_SIZE)
                     .color(Color {
                         a: 0.94,
                         ..text_color
@@ -12795,7 +12821,7 @@ impl App {
             let signature = container(bar)
                 .width(Length::Fill)
                 .height(Length::Fixed(shell_bar_height as f32))
-                .padding([0, fpl_gfx::chrome::BAR_PADDING as u16])
+                .padding([0, ::canvas::DESKTOP_BAR_PADDING as u16])
                 .align_y(iced::alignment::Vertical::Center)
                 .style(move |_| container::Style {
                     background: Some(color(visual_theme.palette.surface).into()),

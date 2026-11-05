@@ -180,8 +180,11 @@ fn content(content: &soil_scene::Content) -> NodeContent {
         // it. This is what lets a Spore ship a shader without a compositor build.
         // Handled by `node` before it gets here: a polyline expands to several
         // dots, so it cannot come back as one node's content.
-        From::Polyline(_) => NodeContent::Group,
-        From::Area(_) => NodeContent::Group,
+        From::Polyline(_) | From::Area(_) => NodeContent::Group,
+        // Kinds this renderer has no pass for yet -- points, heatmaps, candles.
+        // The scene stays valid and the node draws nothing, which is better than
+        // a compositor that will not build the day the wire grows a kind.
+        _ => NodeContent::Group,
         From::Shader(shader) => NodeContent::Shader {
             wgsl: shader.wgsl.clone(),
             uniforms: shader.uniforms.clone(),

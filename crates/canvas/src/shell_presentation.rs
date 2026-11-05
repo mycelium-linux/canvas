@@ -306,11 +306,11 @@ mod tests {
                 ("height".into(), V::Number(44.0)),
                 (
                     "padding".into(),
-                    V::Number(f64::from(fpl_gfx::chrome::BAR_PADDING)),
+                    V::Number(f64::from(crate::DESKTOP_BAR_PADDING)),
                 ),
                 (
                     "labelsize".into(),
-                    V::Number(f64::from(fpl_gfx::chrome::BAR_TEXT_SIZE)),
+                    V::Number(f64::from(crate::DESKTOP_BAR_TEXT_SIZE)),
                 ),
                 ("workspace".into(), V::Text("HOME".into())),
                 ("page".into(), V::Text("DESKTOP".into())),
