@@ -7801,6 +7801,10 @@ impl App {
                 InteractionIntent::SetBounds { surface_id, bounds } => {
                     let frame = self.frame;
                     let chrome = self.document.chrome;
+                    let shell_height = self
+                        .overlay_on_viewport(self.overlays.fpl_mark, self.frame)
+                        .then_some(::canvas::DESKTOP_BAR_HEIGHT)
+                        .unwrap_or_default();
                     let Layout::Canvas { placements } = self.document.active_layout_mut() else {
                         continue;
                     };
@@ -7808,7 +7812,12 @@ impl App {
                         .iter_mut()
                         .find(|placement| placement.surface_id == surface_id)
                     {
-                        let normalized = normalize_visible_surface_bounds(bounds, frame, chrome);
+                        let normalized = normalize_visible_surface_bounds_with_shell(
+                            bounds,
+                            frame,
+                            chrome,
+                            shell_height,
+                        );
                         if placement.bounds != normalized {
                             placement.bounds = normalized;
                             changed = true;
@@ -10395,26 +10404,37 @@ impl App {
         } else {
             title.to_owned()
         };
-        let bar = if show_title {
-            row![
-                controls,
-                container(text(title).size(11).color(color(palette.text_muted)))
-                    .padding(iced::Padding {
-                        top: 0.0,
-                        right: 8.0,
-                        bottom: 0.0,
-                        left: 8.0
-                    })
+        // The title is centred on the *bar*, not in the space left over by the
+        // controls, so it sits in the same place on every window regardless of
+        // how many buttons that window has. The controls are laid over it.
+        let centered_title = container(
+            text(title)
+                .size(12)
+                .font(iced::Font {
+                    weight: iced::font::Weight::Semibold,
+                    ..iced::Font::DEFAULT
+                })
+                .color(color(if focused {
+                    palette.text
+                } else {
+                    palette.text_muted
+                })),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center(Length::Fill);
+        let bar: Element<'_, Message> = if show_title {
+            iced::widget::stack![
+                centered_title,
+                container(row![controls].align_y(iced::alignment::Vertical::Center))
                     .width(Length::Fill)
-                    .align_x(if chrome.title_alignment == "center" {
-                        iced::alignment::Horizontal::Center
-                    } else {
-                        iced::alignment::Horizontal::Left
-                    })
+                    .height(Length::Fill)
+                    .align_x(iced::alignment::Horizontal::Left)
+                    .align_y(iced::alignment::Vertical::Center)
             ]
-            .align_y(iced::alignment::Vertical::Center)
+            .into()
         } else {
-            row![controls].align_y(iced::alignment::Vertical::Center)
+            row![controls].align_y(iced::alignment::Vertical::Center).into()
         };
         container(bar)
             .padding(iced::Padding {
@@ -10427,25 +10447,50 @@ impl App {
             .height(Length::Fixed(bar_height))
             .align_x(iced::alignment::Horizontal::Left)
             .align_y(iced::alignment::Vertical::Top)
-            .style(move |_| container::Style {
-                background: Some(
-                    Color::from_rgba8(
-                        palette.surface[0],
-                        palette.surface[1],
-                        palette.surface[2],
-                        chrome.header_opacity,
+            .style(move |_| {
+                // Machined metal: a light top edge falling into the surface
+                // colour, with the same rim tone the window uses. One material,
+                // not a translucent slab over a different one.
+                let base = palette.surface;
+                let sheen = iced::gradient::Linear::new(std::f32::consts::FRAC_PI_2)
+                    .add_stop(
+                        0.0,
+                        Color::from_rgba8(
+                            base[0].saturating_add(26),
+                            base[1].saturating_add(26),
+                            base[2].saturating_add(28),
+                            chrome.header_opacity,
+                        ),
                     )
-                    .into(),
-                ),
-                border: iced::Border {
-                    // The outer surface is the sole owner of window shape.
-                    // Giving the header its own rounded border makes it read
-                    // as a detached card floating above the content.
-                    color: Color::TRANSPARENT,
-                    width: 0.0,
-                    radius: 0.0.into(),
-                },
-                ..Default::default()
+                    .add_stop(
+                        0.55,
+                        Color::from_rgba8(base[0], base[1], base[2], chrome.header_opacity),
+                    )
+                    .add_stop(
+                        1.0,
+                        Color::from_rgba8(
+                            base[0].saturating_sub(10),
+                            base[1].saturating_sub(10),
+                            base[2].saturating_sub(8),
+                            chrome.header_opacity,
+                        ),
+                    );
+                container::Style {
+                    background: Some(iced::Background::Gradient(sheen.into())),
+                    border: iced::Border {
+                        // The outer surface owns window shape, so the header
+                        // takes no radius — but it does take the rim colour, so
+                        // the top edge and the window edge read as one piece of
+                        // metal instead of two materials meeting.
+                        color: Color {
+                            a: if focused { 0.55 } else { 0.32 },
+                            ..color(palette.border_strong)
+                        },
+                        width: 1.0,
+                        radius: 0.0.into(),
+                    },
+                    ..Default::default()
+                }
             })
             .into()
     }
@@ -12610,6 +12655,26 @@ fn normalize_visible_surface_bounds(
     frame: Rect,
     chrome: SurfaceChrome,
 ) -> NormalizedRect {
+    normalize_visible_surface_bounds_with_shell(bounds, frame, chrome, 0)
+}
+
+/// The exact inverse of `presented_surface_geometry`.
+///
+/// A dragged rectangle arrives in the space surfaces are *drawn* in, which is
+/// the content frame moved down by the desktop bar. Storing it as a placement
+/// without undoing that offset adds the bar height on every single pointer
+/// move, which is why a window slid down the desk and away from the pointer
+/// that was holding it.
+fn normalize_visible_surface_bounds_with_shell(
+    bounds: LogicalRect,
+    frame: Rect,
+    chrome: SurfaceChrome,
+    shell_height: u32,
+) -> NormalizedRect {
+    let bounds = LogicalRect {
+        y: bounds.y - f64::from(shell_height),
+        ..bounds
+    };
     let (padding, inner_width, inner_height, gap_inset) = surface_layout_metrics(frame, chrome);
     // Horizontal positions may be negative when a surface is parked partly
     // offscreen. The interaction engine has already kept a usable section of
