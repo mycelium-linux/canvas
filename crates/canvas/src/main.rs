@@ -546,6 +546,7 @@ enum Message {
     ShellBack,
     ShellForward,
     ShellProjects,
+    ControlCenterDismiss,
     ShellCanvasApps,
     ShellLauncherScope {
         generation: u64,
@@ -800,6 +801,9 @@ struct App {
     /// Throttle for polling chrome artifacts, so a save is visible without a
     /// restart and an idle shell does no filesystem work per frame.
     chrome_poll_at: Instant,
+    /// The control center, drawn from the chrome Spore's region.
+    control_center: ::canvas::shell_presentation::Presentation,
+    control_center_open: bool,
     cursor_on: bool,
     document: WorkspaceDocument,
     runtime_revision: u64,
@@ -1369,6 +1373,8 @@ impl App {
             spores: BTreeMap::new(),
             spore_clock: None,
             chrome_poll_at: Instant::now(),
+            control_center: Default::default(),
+            control_center_open: false,
             cursor_on: true,
             visible_indicator_id: None,
             indicator_started: Instant::now(),
@@ -1968,6 +1974,11 @@ impl App {
                 Task::none()
             }
             Message::ShellProjects => self.toggle_project_switcher(),
+            Message::ControlCenterDismiss => {
+                self.control_center_open = false;
+                self.bump();
+                Task::none()
+            }
             Message::ShellCanvasApps => {
                 self.toggle_shell_launcher(::canvas::shell_launcher::Scope::Canvas)
             }
@@ -2657,6 +2668,25 @@ impl App {
                             return launcher_task(target, Command::ShellCatalog, generation, false);
                         }
                     }
+                }
+                if control_center_requested(&kbd_event) {
+                    self.refresh_control_center(true);
+                    return self.toggle_control_center();
+                }
+                if self.control_center_open
+                    && matches!(
+                        kbd_event,
+                        iced::keyboard::Event::KeyPressed {
+                            key: iced::keyboard::Key::Named(
+                                iced::keyboard::key::Named::Escape
+                            ),
+                            ..
+                        }
+                    )
+                {
+                    self.control_center_open = false;
+                    self.bump();
+                    return Task::none();
                 }
                 if launcher_requested(&kbd_event) {
                     return self.toggle_shell_launcher(::canvas::shell_launcher::Scope::Canvas);
@@ -4431,6 +4461,86 @@ impl App {
         self.refresh_desktop_dock(poll_files);
     }
 
+    /// Fill the control center from what the shell already knows.
+    ///
+    /// Nothing here is invented: the clock, the focused window and the surface
+    /// count come from the same places the bar and the dock read, so the panel
+    /// cannot disagree with them.
+    #[cfg(feature = "lua-scenes")]
+    fn refresh_control_center(&mut self, poll_files: bool) {
+        use ::canvas::lua_module::{
+            ModuleInputSnapshot, ModuleInputValue as Value, ModuleThemeTokens,
+        };
+        let now = now_unix_ms();
+        let parts = ::canvas::hud::local_parts(now);
+        let focused = self
+            .document
+            .focused_surface_id
+            .as_ref()
+            .and_then(|id| self.document.surfaces.iter().find(|s| &s.id == id))
+            .map(|surface| surface.title.clone())
+            .unwrap_or_else(|| "no window focused".into());
+        // Battery is the host's: a panel that guessed would be lying at exactly the
+        // moment someone looked.
+        let battery = String::from("—");
+        let values = BTreeMap::from([
+            ("width".to_string(), Value::Number(360.0)),
+            ("height".to_string(), Value::Number(420.0)),
+            (
+                "clock".to_string(),
+                Value::Text(format!("{:02}:{:02}", parts.hour, parts.minute)),
+            ),
+            (
+                "date".to_string(),
+                Value::Text(format!(
+                    "{:02}/{:02}/{:04}",
+                    parts.day, parts.month, parts.year
+                )),
+            ),
+            (
+                "workspace".to_string(),
+                Value::Text(
+                    workspace_identity_name(&self.catalog, &self.document.project_id).to_owned(),
+                ),
+            ),
+            (
+                "surfaces".to_string(),
+                Value::Number(self.document.surfaces.len() as f64),
+            ),
+            ("focused".to_string(), Value::Text(focused)),
+            ("battery".to_string(), Value::Text(battery)),
+        ]);
+        let visual = self.presented_visual_theme();
+        let theme =
+            ModuleThemeTokens::from_visual(&visual, self.effective_theme(&self.document).accent());
+        let snapshot = ModuleInputSnapshot {
+            revision: 1,
+            now_ms: (now / 1000 * 1000).max(1),
+            values,
+        };
+        let artifact = ::canvas::shell_presentation::CONTROL_CENTER;
+        let result = if poll_files {
+            self.control_center.refresh_files(artifact, snapshot, theme)
+        } else {
+            self.control_center.refresh_current(artifact, snapshot, theme)
+        };
+        match result {
+            Ok(true) => self.bump(),
+            Ok(false) => {}
+            Err(error) => self.status = format!("Control center Lua error: {error}"),
+        }
+    }
+
+    #[cfg(feature = "lua-scenes")]
+    fn toggle_control_center(&mut self) -> Task<Message> {
+        self.control_center_open = !self.control_center_open;
+        if self.control_center_open {
+            self.refresh_control_center(true);
+        }
+        self.bump();
+        Task::none()
+    }
+
     #[cfg(feature = "lua-scenes")]
     fn refresh_desktop_dock(&mut self, poll_files: bool) {
         use ::canvas::lua_module::{
@@ -5133,6 +5243,21 @@ impl App {
                         receipt: Receipt::DocumentSnapshot {
                             document: Box::new(self.document.clone()),
                             snapshot: self.snapshot(),
+                        },
+                    },
+                );
+                Task::none()
+            }
+            Command::ToggleControlCenter => {
+                #[cfg(feature = "lua-scenes")]
+                self.refresh_control_center(true);
+                self.control_center_open = !self.control_center_open;
+                self.bump();
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::ControlCenterToggled {
+                            open: self.control_center_open,
                         },
                     },
                 );
@@ -12205,6 +12330,42 @@ impl App {
                     .center(Length::Fill)
                     .into(),
             );
+        }
+        if self.control_center_open {
+            #[cfg(feature = "lua-scenes")]
+            if let Some(presentation) = self.control_center.retained() {
+                let size = LogicalSize {
+                    width: 360.0,
+                    height: 420.0,
+                };
+                // scene_layer, not shell_scene_layer: the latter re-draws an
+                // opaque ground and clips the rest of the sheet, which is how a
+                // launcher row lost its badge and how this panel lost its rows.
+                let mut sheet = vec![self.scene_layer(&presentation.scene, size)];
+                sheet.extend(self.native_module_buttons_selected(
+                    &presentation.buttons,
+                    size,
+                    |control| match control.id.as_str() {
+                        "apps" => Some(Message::ShellCanvasApps),
+                        "dismiss" => Some(Message::ControlCenterDismiss),
+                        _ => None,
+                    },
+                    |_| false,
+                ));
+                layers.push(
+                    container(container(stack(sheet)).width(Length::Fixed(360.0)).height(Length::Fixed(420.0)))
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .padding(iced::Padding {
+                            top: 56.0,
+                            right: 18.0,
+                            ..Default::default()
+                        })
+                        .align_x(iced::alignment::Horizontal::Right)
+                        .align_y(iced::alignment::Vertical::Top)
+                        .into(),
+                );
+            }
         }
         if let Some(picker) = self.project_picker.as_ref() {
             layers.push(picker.view(&self.catalog, &self.document.project_id));

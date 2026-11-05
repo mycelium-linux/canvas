@@ -43,6 +43,14 @@ pub const DESKTOP_DOCK: Artifact = Artifact {
     region: Some("dock"),
 };
 
+pub const CONTROL_CENTER: Artifact = Artifact {
+    manifest_path: "modules/control-center-v1.json",
+    manifest_fallback: include_str!("../../../config/modules/control-center-v1.json"),
+    source_path: "modules/control-center-v1.lua",
+    source_fallback: include_str!("../../../config/modules/control-center-v1.lua"),
+    region: Some("control-center"),
+};
+
 /// Frameless instruments are desktop content, not app-switching destinations.
 /// Use this same projection for presentation slots and their native actions.
 pub use crate::shell_launcher::dock_surfaces;

@@ -215,6 +215,23 @@ pub(crate) fn launcher_requested(event: &iced::keyboard::Event) -> bool {
     )
 }
 
+/// Ctrl+Alt+C opens the control center.
+pub(crate) fn control_center_requested(event: &iced::keyboard::Event) -> bool {
+    use iced::keyboard::{Event, Key};
+    matches!(
+        event,
+        Event::KeyPressed {
+            key: Key::Character(character),
+            modifiers,
+            repeat: false,
+            ..
+        } if character.as_str().eq_ignore_ascii_case("c")
+            && modifiers.control()
+            && modifiers.alt()
+            && !modifiers.logo()
+    )
+}
+
 pub(crate) fn snap_layout_requested(event: &iced::keyboard::Event) -> bool {
     use iced::keyboard::Event;
     matches!(
