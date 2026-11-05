@@ -686,6 +686,23 @@ fn menu_item_style(
     }
 }
 
+/// Where `soil-terminal` lives, for hosts that were started by a launcher with a
+/// minimal environment. An explicit `SOIL_TERMINAL` wins so a development build
+/// can stand in for the installed one.
+fn soil_terminal_binary() -> Option<std::path::PathBuf> {
+    if let Some(path) = std::env::var_os("SOIL_TERMINAL") {
+        return Some(path.into());
+    }
+    let mut candidates = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(std::path::PathBuf::from(home).join(".local/bin/soil-terminal"));
+    }
+    candidates.push("/usr/local/bin/soil-terminal".into());
+    candidates.push("/usr/bin/soil-terminal".into());
+    candidates.push("/opt/homebrew/bin/soil-terminal".into());
+    candidates.into_iter().find(|path| path.is_file())
+}
+
 fn window_action_label(action: WindowAction, maximized: bool) -> &'static str {
     match action {
         WindowAction::Close => "Close",
@@ -927,6 +944,9 @@ struct App {
     /// A menu opened by a right press. Host-owned so every surface and every
     /// Spore gets one without each of them drawing its own popup.
     context_menu: Option<ContextMenu>,
+    /// Failure keys whose diagnostic window is already open, so a module that
+    /// fails on every redraw does not open a window on every redraw.
+    reported_failures: BTreeSet<String>,
     cursor: Option<LogicalPoint>,
     /// Offset added to raw pointer positions, so a global cursor can be turned
     /// back into window-local coordinates for hit-testing.
@@ -1367,6 +1387,7 @@ impl App {
             interaction,
             snap_preview: None,
             context_menu: None,
+            reported_failures: BTreeSet::new(),
             cursor: None,
             cursor_offset: LogicalPoint { x: 0.0, y: 0.0 },
             cursor_window: None,
@@ -1485,12 +1506,16 @@ impl App {
     /// The normalized bounds the view should render for a surface: an
     /// interpolation from its previous bounds while a transition is in
     /// flight, otherwise the target.
-    fn presented_bounds(&self, surface_id: &str, bounds: NormalizedRect) -> [f32; 4] {
-        let target = [bounds.x, bounds.y, bounds.width, bounds.height];
-        self.transition
-            .as_ref()
-            .map(|t| t.placement(surface_id, target))
-            .unwrap_or(target)
+    /// Where a surface is drawn, in normalized coordinates.
+    ///
+    /// Deliberately *not* animated. Palette and opacity may ease; geometry may
+    /// not, because geometry is what the pointer is dragging. Interpolating it
+    /// means the window lags the hand by up to a transition's worth of frames,
+    /// and any surface that was not in the transition's starting set begins the
+    /// animation at the origin — which reads as a window jumping down the page
+    /// the moment you click it. A window is where the layout says it is.
+    fn presented_bounds(&self, _surface_id: &str, bounds: NormalizedRect) -> [f32; 4] {
+        [bounds.x, bounds.y, bounds.width, bounds.height]
     }
 
     fn tick_transition(&mut self) {
@@ -9421,6 +9446,7 @@ impl App {
                     // failure mode where a silent fallback would look like a
                     // working widget.
                     eprintln!("Canvas module {name} on surface {id}: {reason}");
+                    self.report_failure(&id, &name, &reason);
                     match self.modules.get(&id) {
                         Some(ModuleSurface::Rendered { scene, buttons, .. }) => {
                             ModuleSurface::Rendered {
@@ -9437,6 +9463,47 @@ impl App {
             self.modules.insert(id, resolved);
         }
         self.modules.retain(|id, _| live.contains(id));
+    }
+
+    /// Hand a module failure to `soil-terminal`, once per distinct failure.
+    ///
+    /// A rejected reload is terminal output: an error message and a Lua
+    /// traceback. Rather than invent another error panel, write it out and let
+    /// the terminal renderer show it, so a failure reads the same on the wall as
+    /// it does in a log. If no `soil-terminal` is installed this stays quiet and
+    /// the on-surface banner remains the only report.
+    fn report_failure(&mut self, surface_id: &str, module: &str, reason: &str) {
+        let key = format!("{surface_id}\u{0}{module}\u{0}{reason}");
+        if !self.reported_failures.insert(key) {
+            return;
+        }
+        let safe: String = surface_id
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let path = std::env::temp_dir().join(format!("canvas-module-error-{safe}.txt"));
+        let body = format!(
+            "\x1b[1;31mCanvas rejected a module\x1b[0m\r\n\r\n\
+             surface  {surface_id}\r\n\
+             module   {module}\r\n\r\n\
+             \x1b[1m{reason}\x1b[0m\r\n\r\n\
+             The surface is still showing its last good scene.\r\n\
+             Fix the module and it reloads on the next change; this window\r\n\
+             does not need to be open for that.\r\n",
+        );
+        if std::fs::write(&path, body).is_err() {
+            return;
+        }
+        let Some(binary) = soil_terminal_binary() else {
+            return;
+        };
+        let title = format!("Canvas · {surface_id}");
+        let _ = std::process::Command::new(binary)
+            .arg("--title")
+            .arg(title)
+            .arg("--text")
+            .arg(&path)
+            .spawn();
     }
 
     /// Draw a scene's text nodes in 2D, sized and coloured from the presented theme.
@@ -12675,7 +12742,15 @@ fn normalize_visible_surface_bounds_with_shell(
         y: bounds.y - f64::from(shell_height),
         ..bounds
     };
-    let (padding, inner_width, inner_height, gap_inset) = surface_layout_metrics(frame, chrome);
+    // Metrics come from the *content* frame, because that is the frame
+    // `presented_surface_geometry` projected through. Using the full frame here
+    // made a stored height shrink by the bar's share on every drag.
+    let content = Rect {
+        height: frame.height.saturating_sub(shell_height).max(1),
+        ..frame
+    };
+    let (padding, inner_width, inner_height, gap_inset) =
+        surface_layout_metrics(content, chrome);
     // Horizontal positions may be negative when a surface is parked partly
     // offscreen. The interaction engine has already kept a usable section of
     // its top bar reachable, so clamping the origin here would turn the move
@@ -17165,6 +17240,7 @@ mod tests {
             iced::mouse::Event::CursorMoved {
                 position: Point::new(180.0, 180.0),
             },
+            false
         );
         let _ = app.handle_mouse(
             window,
@@ -17219,10 +17295,12 @@ mod tests {
             iced::mouse::Event::CursorMoved {
                 position: Point::new(200.0, 240.0),
             },
+            false
         );
         let _ = app.handle_mouse(
             right,
             iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            false
         );
         assert_eq!(
             app.cursor,
@@ -17269,6 +17347,118 @@ mod tests {
         assert!(app.minimized_surfaces.is_empty());
         assert_eq!(app.document.focused_surface_id.as_deref(), Some("invoice"));
         assert!(app.runtime_revision > revision);
+    }
+
+    #[test]
+    fn pressing_a_window_moves_nothing_and_a_drag_tracks_the_pointer() {
+        use iced::mouse::{Button, Event};
+
+        let mut app = test_app();
+        let window = iced::window::Id::unique();
+        app.windows.insert(window, app.frame);
+        app.document.surfaces.push(Surface {
+            id: "sample".into(),
+            title: "Sample".into(),
+            content: SurfaceContent::Scene {
+                scene: Scene { nodes: Vec::new() },
+            },
+            inputs: Vec::new(),
+        });
+        app.document.layout = Layout::Canvas {
+            placements: vec![Placement {
+                surface_id: "sample".into(),
+                bounds: NormalizedRect {
+                    x: 0.1,
+                    y: 0.15,
+                    width: 0.4,
+                    height: 0.4,
+                },
+                layer: 0,
+            }],
+        };
+        let bounds = app
+            .interaction_surfaces()
+            .into_iter()
+            .find(|surface| surface.surface_id == "sample")
+            .expect("surface geometry")
+            .bounds;
+        // Inside the title bar but clear of the resize band and the traffic
+        // lights: this is where a person actually grabs a window.
+        let grab = LogicalPoint {
+            x: bounds.x + bounds.width / 2.0,
+            y: bounds.y + 20.0,
+        };
+        let before = app.document.layout.clone();
+        app.cursor = Some(grab);
+        app.handle_mouse(
+            window,
+            Event::ButtonPressed(Button::Left),
+            false,
+        );
+        assert_eq!(
+            app.document.layout, before,
+            "a press must not move the window at all"
+        );
+
+        // Now drag: the window must move by exactly the pointer's own movement,
+        // in both axes, with no accumulated offset.
+        let delta = LogicalPoint { x: 120.0, y: 90.0 };
+        app.cursor = Some(LogicalPoint {
+            x: grab.x + delta.x,
+            y: grab.y + delta.y,
+        });
+        app.handle_mouse(
+            window,
+            Event::CursorMoved {
+                position: iced::Point::new(app.cursor.unwrap().x as f32, app.cursor.unwrap().y as f32),
+            },
+            false,
+        );
+        let after = app
+            .interaction_surfaces()
+            .into_iter()
+            .find(|surface| surface.surface_id == "sample")
+            .expect("surface geometry")
+            .bounds;
+        let moved = LogicalPoint {
+            x: after.x - bounds.x,
+            y: after.y - bounds.y,
+        };
+        assert!(
+            (moved.x - delta.x).abs() < 1.0 && (moved.y - delta.y).abs() < 1.0,
+            "window moved {moved:?} for a pointer delta of {delta:?}"
+        );
+    }
+
+    #[test]
+    fn a_dragged_rectangle_survives_the_round_trip() {
+        // The drag path writes bounds back through `normalize_visible_surface_bounds`.
+        // If that is not the inverse of the space drags arrive in, every pointer
+        // move shifts the window by the desktop bar and it slides away from the
+        // hand holding it. This pins the two directions against each other.
+        let frame = INITIAL_FRAME;
+        let chrome = SurfaceChrome::default();
+        let shell = ::canvas::DESKTOP_BAR_HEIGHT;
+        let placement = NormalizedRect {
+            x: 0.12,
+            y: 0.2,
+            width: 0.5,
+            height: 0.45,
+        };
+        let content = Rect {
+            height: frame.height.saturating_sub(shell).max(1),
+            ..frame
+        };
+        let drawn = visible_surface_bounds(placement, content, chrome);
+        let drawn = LogicalRect {
+            y: drawn.y + f64::from(shell),
+            ..drawn
+        };
+        let stored = normalize_visible_surface_bounds_with_shell(drawn, frame, chrome, shell);
+        assert!((stored.x - placement.x).abs() < 1e-4, "{stored:?} vs {placement:?}");
+        assert!((stored.y - placement.y).abs() < 1e-4, "{stored:?} vs {placement:?}");
+        assert!((stored.width - placement.width).abs() < 1e-4);
+        assert!((stored.height - placement.height).abs() < 1e-4);
     }
 
     #[test]
@@ -18168,6 +18358,7 @@ mod tests {
             iced::mouse::Event::CursorMoved {
                 position: Point::new(200.0, 200.0),
             },
+            false
         );
 
         let _ = app.handle_mouse(
@@ -18198,6 +18389,7 @@ mod tests {
             iced::mouse::Event::CursorMoved {
                 position: Point::new(200.0, 200.0),
             },
+            false
         );
         for _ in 0..2 {
             let _ = app.handle_mouse(
