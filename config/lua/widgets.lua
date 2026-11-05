@@ -31,14 +31,24 @@ local function text_scale(px)
   return { px / unit, px / unit, 1 }
 end
 
+-- A rectangle. It speaks scene units unless given a `space`, in which case it
+-- speaks the logical pixels every author reasons in -- the same rule the higher
+-- components follow. Without this, passing a `space` was silently ignored and a
+-- panel authored in pixels landed a screen away.
 function widget.panel(spec)
+  local width, height = required(spec, "width"), required(spec, "height")
+  local x, y = spec.x or 0, spec.y or 0
+  if spec.space then
+    x, y = spec.space.x(x), spec.space.y(y)
+    width, height = spec.space.w(width), spec.space.h(height)
+  end
   canvas.rect {
     id = required(spec, "id"), parent = spec.parent, rgb = spec.rgb,
     transition_ms = spec.transition_ms,
     ink = spec.ink or "text", opacity = spec.opacity or 0.055,
     radius = spec.radius or module.theme.radius,
-    translation = { spec.x or 0, spec.y or 0, spec.z or 0.2 },
-    scale = { required(spec, "width"), required(spec, "height"), 1 },
+    translation = { x, y, spec.z or 0.2 },
+    scale = { width, height, 1 },
   }
 end
 

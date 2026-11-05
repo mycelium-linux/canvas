@@ -544,6 +544,8 @@ enum Message {
     NativeSwitcherTick,
     /// Advances the waiting mark while a surface has no first frame.
     SurfaceLoadingTick,
+    /// Pointer position over the switcher overlay, in logical pixels.
+    SwitcherHover { x: f64, y: f64 },
     #[cfg(feature = "lua-scenes")]
     ModuleActivate {
         surface_id: String,
@@ -836,6 +838,9 @@ struct App {
     /// it takes to see it. Holding it is the difference between "durable" and
     /// "flicker".
     loading_hold: BTreeMap<String, Instant>,
+    /// Which switcher tile the pointer is over, if any.
+    #[cfg(all(unix, feature = "lua-scenes"))]
+    switcher_hover: Option<usize>,
     document: WorkspaceDocument,
     runtime_revision: u64,
     /// Last list written, so an unchanged set costs nothing.
@@ -1411,6 +1416,8 @@ impl App {
             loading_phase: 0.0,
             loading_traced: false,
             loading_hold: BTreeMap::new(),
+            #[cfg(all(unix, feature = "lua-scenes"))]
+            switcher_hover: None,
             visible_indicator_id: None,
             indicator_started: Instant::now(),
             indicator_dismissing: None,
@@ -1904,6 +1911,34 @@ impl App {
                 self.cursor_on = !self.cursor_on;
                 if self.has_terminal() {
                     self.bump();
+                }
+                Task::none()
+            }
+            Message::SwitcherHover { x, y } => {
+                #[cfg(all(unix, feature = "lua-scenes"))]
+                {
+                    // The tile under the pointer, from the same geometry the scene
+                    // is composed with: inset 16, gap 12, tiles sharing the rest.
+                    let slot = self.native_switcher.as_ref().and_then(|host| {
+                        let snapshot = host.snapshot.as_ref()?;
+                        let count = snapshot.switcher.windows.len().min(6);
+                        if count == 0 || x < 0.0 {
+                            return None;
+                        }
+                        let w = f64::from(snapshot.switcher.frame.width);
+                        let inset = 16.0;
+                        let gap = 12.0;
+                        let tile = (w - 2.0 * inset - gap * (count as f64 - 1.0)) / count as f64;
+                        let slot = ((x - inset) / (tile + gap)).floor();
+                        (slot >= 0.0 && (slot as usize) < count).then_some(slot as usize)
+                    });
+                    if slot != self.switcher_hover {
+                        self.switcher_hover = slot;
+                        if let Some(host) = self.native_switcher.as_mut() {
+                            host.set_hover(slot);
+                        }
+                        self.bump();
+                    }
                 }
                 Task::none()
             }
@@ -12139,13 +12174,24 @@ impl App {
             if let (Some(snapshot), Some(retained)) = (&host.snapshot, host.presentation.retained())
             {
                 let frame = snapshot.switcher.frame;
-                return self.shell_scene_layer(
-                    &retained.scene,
-                    LogicalSize {
-                        width: f64::from(frame.width),
-                        height: f64::from(frame.height),
-                    },
-                );
+                let size = LogicalSize {
+                    width: f64::from(frame.width),
+                    height: f64::from(frame.height),
+                };
+                // scene_layer, not shell_scene_layer: the composition draws its own
+                // ground, and the shell layer would re-draw an opaque sheet over it
+                // and clip the tiles to the header.
+                let scene = self
+                    .scene_anim
+                    .frame("chrome:switcher", Instant::now())
+                    .unwrap_or_else(|| retained.scene.clone());
+                let scene = iced::widget::mouse_area(self.scene_layer(&scene, size))
+                    .on_move(|point| Message::SwitcherHover {
+                        x: f64::from(point.x),
+                        y: f64::from(point.y),
+                    })
+                    .on_exit(Message::SwitcherHover { x: -1.0, y: -1.0 });
+                return scene.into();
             }
             return container(space::horizontal()).into();
         }
