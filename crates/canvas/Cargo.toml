@@ -18,6 +18,7 @@ mcp = ["dep:rmcp", "dep:schemars", "dep:tokio", "dep:axum", "dep:reqwest", "canv
 # compositor; Canvas borrows it to draw a terminal surface. One emulator, two
 # hosts, one opinion about what an escape sequence means.
 soil-vt = { path = "../../../soil/crates/soil-vt" }
+portable-pty = "0.9"
 fpl-gfx.workspace = true
 canvas-workspace = { path = "../canvas-workspace" }
 base64 = "0.22"

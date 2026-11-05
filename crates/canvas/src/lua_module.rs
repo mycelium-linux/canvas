@@ -376,6 +376,11 @@ pub struct ModuleThemeTokens {
     pub title: f32,
     pub display: f32,
     pub hero: f32,
+    /// The presented surface rectangle in logical pixels, when known.
+    ///
+    /// Scene coordinates are centred and aspect-free; a module that wants a
+    /// circle, a square, or a viewport-relative gutter needs the actual shape.
+    pub viewport: [f32; 2],
 }
 
 impl ModuleThemeTokens {
@@ -411,6 +416,7 @@ impl ModuleThemeTokens {
             title: metrics.title,
             display: metrics.display,
             hero: metrics.hero,
+            viewport: [0.0, 0.0],
         }
     }
 }
@@ -439,6 +445,7 @@ impl From<ProjectTheme> for ModuleThemeTokens {
             title: metrics.title,
             display: metrics.display,
             hero: metrics.hero,
+            viewport: [0.0, 0.0],
         }
     }
 }
@@ -1002,6 +1009,14 @@ fn install_module_context(
             .set("theme", theme_to_lua(lua, theme)?)
             .map_err(lua_error)?;
     }
+    let viewport = lua.create_table().map_err(lua_error)?;
+    viewport
+        .set("width", theme.viewport[0])
+        .map_err(lua_error)?;
+    viewport
+        .set("height", theme.viewport[1])
+        .map_err(lua_error)?;
+    module.set("viewport", viewport).map_err(lua_error)?;
 
     let resource_table = lua.create_table().map_err(lua_error)?;
     for alias in &manifest.capabilities.present_resources {
@@ -1274,6 +1289,10 @@ fn theme_to_lua(lua: &Lua, theme: ModuleThemeTokens) -> Result<Table> {
     }
     table.set("space_2", theme.space_2).map_err(lua_error)?;
     table.set("radius", theme.radius).map_err(lua_error)?;
+    let viewport = lua.create_table().map_err(lua_error)?;
+    viewport.set("width", theme.viewport[0]).map_err(lua_error)?;
+    viewport.set("height", theme.viewport[1]).map_err(lua_error)?;
+    table.set("viewport", viewport).map_err(lua_error)?;
     for (name, size) in [
         ("micro", theme.micro),
         ("small", theme.small),

@@ -273,11 +273,8 @@ enum ContentSource {
         items: Vec<markdown::Item>,
     },
     Terminal {
-        #[allow(dead_code)]
-        master_fd: i32,
-        stdin_fd: i32,
-        #[allow(dead_code)]
-        pid: u32,
+        /// The real terminal: bytes, size, and the signal that goes with it.
+        pty: std::sync::Arc<terminal::Pty>,
         /// The emulator, on its own thread. A string buffer is not a terminal:
         /// it has no cells, no attributes, and no idea what a cursor is.
         host: soil_vt::Host,
@@ -2634,10 +2631,10 @@ impl App {
                     .clone()
                     .and_then(|id| self.decoded.get_mut(&id))
                 {
-                    if let ContentSource::Terminal { stdin_fd, .. } = &mut surface.source {
+                    if let ContentSource::Terminal { pty, .. } = &mut surface.source {
                         let bytes = key_to_bytes(&kbd_event);
                         if !bytes.is_empty() {
-                            let _ = terminal::write_fd(*stdin_fd, &bytes);
+                            pty.write(&bytes);
                         }
                     }
                 }
@@ -6711,31 +6708,6 @@ impl App {
         self.bump();
     }
 
-    fn refresh_terminal(&mut self) {
-        let mut changed = false;
-        for surface in self.decoded.values_mut() {
-            if let ContentSource::Terminal {
-                master_fd, host, ..
-            } = &mut surface.source
-            {
-                // Drain until the descriptor says "no more": a program printing a
-                // screenful produces it in several reads, and handling one read
-                // per tick is how a fast program renders in slow motion.
-                loop {
-                    let data = terminal::read_fd(*master_fd);
-                    if data.is_empty() {
-                        break;
-                    }
-                    host.write(&data);
-                    changed = true;
-                }
-            }
-        }
-        if changed {
-            self.bump();
-        }
-    }
-
     fn refresh_metrics(&mut self) {
         let elapsed = self.metrics_last.elapsed().as_secs_f64().max(1.0);
         self.system.refresh_cpu_usage();
@@ -9021,10 +8993,13 @@ impl App {
             return;
         };
         let visual = self.presented_visual_theme();
-        let theme = ::canvas::lua_module::ModuleThemeTokens::from_visual(
+        let mut theme = ::canvas::lua_module::ModuleThemeTokens::from_visual(
             &visual,
             self.effective_theme(&self.document).accent(),
         );
+        if let Some(bounds) = self.snapshot().surface_bounds.get(surface_id) {
+            theme.viewport = [bounds.width as f32, bounds.height as f32];
+        }
         let result = resolve_module_event(
             module,
             inputs,
@@ -9269,6 +9244,7 @@ impl App {
         let visual = self.presented_visual_theme();
         let accent = self.effective_theme(&self.document).accent();
         let theme = ::canvas::lua_module::ModuleThemeTokens::from_visual(&visual, accent);
+        let surface_bounds = self.snapshot().surface_bounds;
         let today = ::canvas::hud::local_parts(now_ms);
         let mut targets = Vec::new();
         for (id, surface) in &self.decoded {
@@ -9289,6 +9265,12 @@ impl App {
                 let key = spec
                     .refresh_ms
                     .map_or(key, |refresh| key ^ (now_ms / refresh.max(1_000)));
+                // A viewport change is a different layout input, not just a
+                // paint: circles and aspect-relative gutters must re-resolve.
+                let key = surface_bounds.get(id).map_or(key, |bounds| {
+                    key ^ u64::from(bounds.width).rotate_left(17)
+                        ^ u64::from(bounds.height).rotate_left(41)
+                });
                 targets.push((id.clone(), module.clone(), inputs.clone(), key));
             }
         }
@@ -9296,6 +9278,10 @@ impl App {
         for (id, name, inputs, key) in targets {
             if self.modules.get(&id).is_some_and(|done| done.key() == key) {
                 continue;
+            }
+            let mut theme = theme;
+            if let Some(bounds) = surface_bounds.get(&id) {
+                theme.viewport = [bounds.width as f32, bounds.height as f32];
             }
             let resolved = match resolve_module(&name, &inputs, theme, now_ms) {
                 Ok(scene) => ModuleSurface::Rendered {
@@ -9332,57 +9318,20 @@ impl App {
     /// happens to contain newlines.
     fn terminal_layer<'a>(
         &self,
-        snapshot: &soil_vt::Snapshot,
+        snapshot: std::sync::Arc<soil_vt::Snapshot>,
         width: Length,
         height: Length,
     ) -> Element<'a, Message> {
-        use iced::widget::text::{self, Span};
         let palette = self.presented_palette();
-        let default = color(palette.text);
-        let mut lines: Vec<Element<'a, Message>> = Vec::with_capacity(usize::from(snapshot.rows));
-        for y in 0..snapshot.rows {
-            // Owned spans: the text is copied out of the grid, so the element
-            // does not borrow the snapshot it was built from.
-            let mut spans: Vec<Span<'static, (), iced::Font>> = Vec::new();
-            let mut run = String::new();
-            let mut run_color = default;
-            for x in 0..snapshot.cols {
-                let Some(cell) = snapshot.cell(x, y) else { continue };
-                let ink = cell
-                    .fg
-                    .map(|rgb| Color::from_rgb8(rgb.r, rgb.g, rgb.b))
-                    .unwrap_or(default);
-                if ink != run_color && !run.is_empty() {
-                    spans.push(Span::new(run.clone()).color(run_color));
-                    run.clear();
-                }
-                run_color = ink;
-                if cell.text.is_empty() {
-                    run.push(' ');
-                } else {
-                    run.push_str(&cell.text);
-                }
-            }
-            if !run.is_empty() {
-                spans.push(Span::new(run).color(run_color));
-            }
-            lines.push(
-                iced::widget::rich_text(spans)
-                    .font(iced::Font::MONOSPACE)
-                    .size(TERMINAL_FONT_SIZE)
-                    .width(Length::Fill)
-                    .into(),
-            );
-        }
-        container(scrollable(column(lines)))
-            .width(width)
-            .height(height)
-            .padding(8)
-            .style(move |_| container::Style {
-                background: Some(Color::from_rgb8(0, 0, 0).into()),
-                ..Default::default()
-            })
-            .into()
+        iced::widget::canvas(TerminalGrid {
+            snapshot,
+            background: color(palette.background),
+            default_ink: color(palette.text),
+            cursor_ink: color(palette.background),
+        })
+        .width(width)
+        .height(height)
+        .into()
     }
 
     /// Draw a scene's text nodes in 2D, sized and coloured from the presented theme.
@@ -9576,7 +9525,7 @@ impl App {
             .width(width)
             .height(height)
             .into(),
-            ContentSource::Terminal { host, .. } => {
+            ContentSource::Terminal { host, pty, .. } => {
                 // The grid is a function of the window, not of a number chosen
                 // at spawn time. A 120-column grid drawn in a 60-column window
                 // wraps every line at the widget's width, which is what made the
@@ -9592,8 +9541,9 @@ impl App {
                     .floor()
                     .max(4.0) as u16;
                 host.resize(cols, rows);
+                pty.resize(cols, rows);
                 let snapshot = host.snapshot();
-                self.terminal_layer(&snapshot, width, height)
+                self.terminal_layer(snapshot, width, height)
             }
             ContentSource::Scene { scene } => container(self.scene_layer(scene, viewport))
                 .width(width)
@@ -12108,11 +12058,16 @@ fn load_terminal(
     shell: &str,
     title: Option<String>,
 ) -> Result<LoadedContent, Failure> {
-    let (master_fd, stdin_fd, pid) = terminal::spawn_terminal(shell).map_err(Failure::resource)?;
-    // The descriptor now belongs to a reader thread: it blocks, and the kernel
-    // wakes it the instant the program writes. No polling anywhere in the path.
-    if let Some(sender) = TERMINAL_SENDER.get() {
-        terminal::pump(master_fd, surface_id.clone(), sender.clone());
+    let pty = terminal::Pty::spawn(shell, 100, 32).map_err(Failure::resource)?;
+    // The reading end belongs to a thread that blocks: the kernel wakes it when
+    // the program writes, so no keystroke's echo waits for a poll.
+    match pty.reader() {
+        Ok(reader) => {
+            if let Some(sender) = TERMINAL_SENDER.get() {
+                terminal::pump(reader, surface_id.clone(), sender.clone());
+            }
+        }
+        Err(error) => return Err(Failure::resource(error)),
     }
     if let Some(surface_id_reader) = Some(surface_id.clone()) {
         let _ = surface_id_reader;
@@ -12135,9 +12090,7 @@ fn load_terminal(
     Ok(LoadedContent {
         snapshot,
         source: ContentSource::Terminal {
-            master_fd,
-            stdin_fd,
-            pid,
+            pty,
             host,
         },
         handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
@@ -13815,6 +13768,125 @@ fn terminal_chunks_stream() -> impl iced::futures::Stream<Item = Message> {
             .await
             .map(|(surface_id, bytes)| (Message::TerminalChunk(surface_id, bytes), Some(receiver)))
     })
+}
+
+/// A terminal grid drawn as one canvas.
+///
+/// The previous renderer was a column of `rich_text` widgets, one per row: iced
+/// laid out forty paragraphs per frame to draw one screen, and a row wider than
+/// the widget wrapped there instead of at the grid's edge. A canvas draws exactly
+/// the cells that fit, at the positions the emulator chose — and it can draw the
+/// cursor, which a text widget has no way to represent.
+struct TerminalGrid {
+    snapshot: std::sync::Arc<soil_vt::Snapshot>,
+    background: Color,
+    default_ink: Color,
+    cursor_ink: Color,
+}
+
+impl iced::widget::canvas::Program<Message> for TerminalGrid {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &iced::Renderer,
+        _theme: &iced::Theme,
+        bounds: iced::Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<iced::widget::canvas::Geometry> {
+        use iced::widget::canvas::{Frame, Text};
+
+        let mut frame = Frame::new(renderer, bounds.size());
+        frame.fill_rectangle(iced::Point::ORIGIN, bounds.size(), self.background);
+
+        let cell_w = TERMINAL_CELL_WIDTH;
+        let cell_h = TERMINAL_LINE_HEIGHT;
+        let rows = ((bounds.height / cell_h).floor() as u16).min(self.snapshot.rows);
+        let cols = ((bounds.width / cell_w).floor() as u16).min(self.snapshot.cols);
+        let ink_of = |rgb: Option<soil_vt::Rgb>, fallback: Color| {
+            rgb.map(|rgb| Color::from_rgb8(rgb.r, rgb.g, rgb.b))
+                .unwrap_or(fallback)
+        };
+
+        for y in 0..rows {
+            let mut x = 0;
+            while x < cols {
+                let Some(cell) = self.snapshot.cell(x, y) else { break };
+                let ink = ink_of(cell.bg, self.background);
+                let start = x;
+                while x < cols {
+                    match self.snapshot.cell(x, y) {
+                        Some(next) if ink_of(next.bg, self.background) == ink => x += 1,
+                        _ => break,
+                    }
+                }
+                if ink != self.background {
+                    frame.fill_rectangle(
+                        iced::Point::new(f32::from(start) * cell_w, f32::from(y) * cell_h),
+                        iced::Size::new(f32::from(x - start) * cell_w, cell_h),
+                        ink,
+                    );
+                }
+            }
+
+            let mut x = 0;
+            while x < cols {
+                let Some(cell) = self.snapshot.cell(x, y) else { break };
+                let ink = ink_of(cell.fg, self.default_ink);
+                let start = x;
+                let mut run = String::new();
+                while x < cols {
+                    let Some(next) = self.snapshot.cell(x, y) else { break };
+                    if ink_of(next.fg, self.default_ink) != ink {
+                        break;
+                    }
+                    if next.text.is_empty() {
+                        run.push(' ');
+                    } else {
+                        run.push_str(&next.text);
+                    }
+                    x += 1;
+                }
+                if run.trim_end().is_empty() {
+                    continue;
+                }
+                frame.fill_text(Text {
+                    content: run.trim_end().to_owned(),
+                    position: iced::Point::new(f32::from(start) * cell_w, f32::from(y) * cell_h),
+                    color: ink,
+                    size: iced::Pixels(TERMINAL_FONT_SIZE),
+                    font: iced::Font::MONOSPACE,
+                    ..Text::default()
+                });
+            }
+        }
+
+        // The cursor: a filled block with the glyph punched back out, which is
+        // how every terminal shows where typing goes. A text grid without one
+        // looks like output, not an editor.
+        if let Some((cx, cy)) = self.snapshot.cursor {
+            if cx < cols && cy < rows {
+                let position = iced::Point::new(f32::from(cx) * cell_w, f32::from(cy) * cell_h);
+                let size = iced::Size::new(cell_w, cell_h);
+                frame.fill_rectangle(position, size, self.default_ink);
+                if let Some(cell) = self.snapshot.cell(cx, cy)
+                    && !cell.text.trim().is_empty()
+                {
+                    frame.fill_text(Text {
+                        content: cell.text.clone(),
+                        position,
+                        color: self.cursor_ink,
+                        size: iced::Pixels(TERMINAL_FONT_SIZE),
+                        font: iced::Font::MONOSPACE,
+                        ..Text::default()
+                    });
+                }
+            }
+        }
+
+        vec![frame.into_geometry()]
+    }
 }
 
 fn render_cadence(
