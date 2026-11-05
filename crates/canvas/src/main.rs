@@ -5256,6 +5256,27 @@ impl App {
                         });
                     }
                     Choice::Spore { module } => {
+                        // A launcher entry asks to see the app, not to own a second
+                        // copy of it: a workspace that already has this module
+                        // mounted gets its surface raised instead of a twin window
+                        // drawn from the same Lua.
+                        if let Some(existing) = self.surface_running_module(&module) {
+                            self.minimized_surfaces.remove(&existing);
+                            self.document.focused_surface_id = Some(existing.clone());
+                            self.bump();
+                            let surface = self
+                                .decoded
+                                .get(&existing)
+                                .map(|runtime| runtime.snapshot.clone());
+                            if let Some(surface) = surface {
+                                self.answer(pending, Outcome::Ok {
+                                    receipt: Receipt::SurfaceOpened { surface },
+                                });
+                                return Task::none();
+                            }
+                            self.fail(pending, Failure::resource("the surface vanished"));
+                            return Task::none();
+                        }
                         let surface_id = format!("spore-{module}");
                         let spec_path = match write_spore_spec(&surface_id, &module) {
                             Ok(path) => path,
@@ -11454,7 +11475,11 @@ impl App {
                 title,
                 width,
                 height,
-            } => self.open_spore_surface(&surface_id, &title, width, height),
+            } => {
+                if !self.adopt_spore_surface(&surface_id, &title) {
+                    self.open_spore_surface(&surface_id, &title, width, height);
+                }
+            }
             SporeEvent::PresentAvailable { surface_id } => {
                 let Some((present, signature)) = crate::spore_socket::take(&surface_id) else {
                     return;
@@ -11509,8 +11534,12 @@ impl App {
                     },
                 );
                 // A Spore that presents before its surface is known still gets a
-                // window: the payload is the better evidence of intent.
-                if !self.decoded.contains_key(&surface_id) {
+                // window: the payload is the better evidence of intent. A producer
+                // that never says hello is the common case here, so the same
+                // adoption applies: the launcher's window is the app's window.
+                if !self.decoded.contains_key(&surface_id)
+                    && !self.adopt_spore_surface(&surface_id, &surface_id.clone())
+                {
                     self.open_spore_surface(&surface_id, &surface_id.clone(), 640, 420);
                 }
                 // Ask for the next frame as soon as this one is taken. One
@@ -11532,6 +11561,76 @@ impl App {
                 self.bump();
             }
         }
+    }
+
+    /// Take over the window the launcher opened for this app.
+    ///
+    /// The launcher creates a window before the app can speak -- it has to, or a
+    /// click would do nothing visible -- and it names it `spore-<producer>`. When
+    /// the producer then says hello under its own id, the honest move is to give
+    /// it that window rather than opening a second one on top: the placement, the
+    /// z-order and any drag the user did belong to the window that exists.
+    ///
+    /// Returns false when there is nothing to adopt, in which case the caller
+    /// opens a window as before.
+    /// The surface already rendering `module`, if any.
+    fn surface_running_module(&self, module: &str) -> Option<String> {
+        self.decoded.iter().find_map(|(id, runtime)| {
+            let ContentSource::Widget { spec } = &runtime.source else {
+                return None;
+            };
+            match &spec.kind {
+                canvas_widgets::WidgetKind::Module { module: running, .. } if running == module => {
+                    Some(id.clone())
+                }
+                _ => None,
+            }
+        })
+    }
+
+    fn adopt_spore_surface(&mut self, producer_id: &str, title: &str) -> bool {
+        let candidate = format!("spore-{producer_id}");
+        let Some(mut runtime) = self.decoded.remove(&candidate) else {
+            return false;
+        };
+        // The module's own surface was a widget; the frames that follow are the
+        // app's, and the renderer decides what to draw by this field.
+        runtime.source = ContentSource::Spore;
+        runtime.snapshot.id = producer_id.to_owned();
+        runtime.snapshot.title = title.to_owned();
+        self.decoded.insert(producer_id.to_owned(), runtime);
+
+        if let Some(surface) = self
+            .document
+            .surfaces
+            .iter_mut()
+            .find(|surface| surface.id == candidate)
+        {
+            surface.id = producer_id.to_owned();
+            surface.title = title.to_owned();
+        }
+        match &mut self.document.layout {
+            Layout::Canvas { placements } => {
+                for placement in placements.iter_mut() {
+                    if placement.surface_id == candidate {
+                        placement.surface_id = producer_id.to_owned();
+                    }
+                }
+            }
+            Layout::Surface { surface_id } if *surface_id == candidate => {
+                *surface_id = producer_id.to_owned();
+            }
+            _ => {}
+        }
+        // The window has been on screen since the click, so the wait it is showing
+        // starts now: this is the moment the app actually begins loading.
+        self.loading_hold.insert(
+            producer_id.to_owned(),
+            Instant::now() + Duration::from_millis(loading_min_ms()),
+        );
+        eprintln!("canvas: adopted {candidate} as {producer_id}");
+        self.bump();
+        true
     }
 
     fn open_spore_surface(&mut self, surface_id: &str, title: &str, width: u32, height: u32) {
