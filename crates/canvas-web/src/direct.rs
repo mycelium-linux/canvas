@@ -176,7 +176,6 @@ struct SceneNode {
     content: NodeContent,
 }
 #[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Transform {
     #[serde(default)]
     translation: [f32; 3],
@@ -270,26 +269,21 @@ fn start_surface_scene(
             js_sys::encode_uri_component(&fetch_surface),
             js_sys::Date::now()
         );
-        let Some(window) = web_sys::window() else { return };
-        let promise = window.fetch_with_str(&url);
-        let canvas = fetch_canvas.clone();
-        let context = fetch_context.clone();
-        let state = Rc::clone(&fetch_state);
-        let hits = Rc::clone(&fetch_hits);
-        wasm_bindgen_futures::spawn_local(async move {
-            let Ok(value) = wasm_bindgen_futures::JsFuture::from(promise).await else { return };
-            let Ok(response) = value.dyn_into::<web_sys::Response>() else { return };
-            if !response.ok() { return; }
-            let Ok(text) = response.text() else { return };
-            let Ok(text) = wasm_bindgen_futures::JsFuture::from(text).await else { return };
-            let body: String = js_sys::JsString::from(text).as_string().unwrap_or_default();
-            if body.is_empty() { return; }
-            let Ok(scene) = serde_json::from_str::<SurfaceScene>(&body) else { return };
-            *hits.borrow_mut() = scene.buttons.clone();
-            draw_surface_scene(&canvas, &context, &scene);
-            *state.borrow_mut() = Some(scene);
-        });
+        let Ok(request) = web_sys::XmlHttpRequest::new() else { return };
+        if request.open_with_async("GET", &url, false).is_err() {
+            return;
+        }
+        if request.send().is_err() {
+            return;
+        }
+        let Ok(Some(body)) = request.response_text() else { return };
+        let Ok(scene) = serde_json::from_str::<SurfaceScene>(&body) else { return };
+        *fetch_hits.borrow_mut() = scene.buttons.clone();
+        draw_surface_scene(&fetch_canvas, &fetch_context, &scene);
+        *fetch_state.borrow_mut() = Some(scene);
     });
+    let function: &js_sys::Function = tick.as_ref().unchecked_ref();
+    function.call0(&JsValue::NULL)?;
     web_sys::window()
         .ok_or("window unavailable")?
         .set_interval_with_callback_and_timeout_and_arguments_0(
@@ -411,6 +405,7 @@ fn draw_surface_scene(
         context.set_fill_style_str(&rgba(theme.primary, 0.18));
         context.fill_rect(x, y, w, h);
     }
+    set_status(&format!("{} · {} NODES", surface.title.to_uppercase(), surface.scene.nodes.len()), "ready");
     let label = format!("{} · LIVE SURFACE", surface.title.to_uppercase());
     let _ = &surface.surface_id;
     label_text(context, &hex(theme.muted), 10.0, width - 8.0, height - 8.0, &label);

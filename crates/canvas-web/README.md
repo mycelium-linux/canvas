@@ -1,20 +1,25 @@
 # Canvas Web
 
-View-only Canvas client for browser demos. Its default mode presents frames
-rendered offscreen by the running native Canvas, which makes the workspace,
-content, shader, chrome and selected theme pixel-identical to the TV. Press
-`F9` to toggle the independent Rust/WASM Canvas2D renderer for an intentionally
-lower-detail, low-bandwidth view.
+View-only Canvas client for browser demos. The whole-wall mirror presents
+frames rendered offscreen by the running native Canvas, so shaders, chrome and
+the selected theme are pixel-identical to the TV.
 
-The exact path is owner-local: `canvas-web-host` is hard-limited to loopback,
-talks to Canvas through its owner-only Unix control socket, and returns only
-rendered PNG bytes. Credentials and socket authority never enter the browser.
-A runtime badge reports bridge failures instead of presenting a silent black
-screen.
+A named surface is different: `?surface=contacts` fetches that surface's
+retained Canvas scene and draws it directly in the browser. It is the app
+window, not a screenshot, and local module controls are activated through the
+same host action path as a native click. There is no surface zoom step.
 
-This first slice deliberately owns no durable workspace state and performs no
-host actions. The JARVIS microphone and output controls emit typed intent only;
-they do not request browser permissions or open an audio device.
+The bridge is owner-local: `canvas-web-host` is hard-limited to loopback,
+talks to Canvas through its owner-only Unix control socket, and serves either
+rendered PNG frames for the whole-wall mirror or retained scene JSON for one
+surface. Credentials and socket authority never enter the browser. A runtime
+badge reports bridge failures instead of presenting a silent black screen.
+
+The browser never owns workspace state. Surface controls are requests routed
+back to the same Canvas host action path a native click uses; the redraw comes
+from the host's retained scene. The JARVIS microphone and output controls emit
+typed intent only; they do not request browser permissions or open an audio
+device.
 
 ## Run locally
 
@@ -44,8 +49,9 @@ cd crates/canvas-web
 env -u NO_COLOR trunk build --release
 ```
 
-The screenshot bridge establishes visual parity first. The direct-rendering
-successor is a retained snapshot plus ordered patch feed driving shared native
-widget/layout code. It must resume by sequence or receive a fresh snapshot; it
-must never pretend a fire-and-forget stream is current. Audio belongs behind a
-separately authenticated WebAudio/WebRTC host that accepts `AudioIntent`.
+The whole-wall screenshot path remains the parity baseline. Named surfaces use
+the retained scene so the browser renders the window itself instead of
+letterboxing a capture. A future patch feed can replace scene polling; it must
+resume by sequence or receive a fresh snapshot, never pretend a fire-and-forget
+stream is current. Audio belongs behind a separately authenticated
+WebAudio/WebRTC host that accepts `AudioIntent`.
