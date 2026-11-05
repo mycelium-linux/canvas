@@ -797,6 +797,9 @@ struct App {
     /// When the last frame callback went out, so `dt` is the host's answer to
     /// "how long since you last drew" rather than a producer's guess.
     spore_clock: Option<u64>,
+    /// Throttle for polling chrome artifacts, so a save is visible without a
+    /// restart and an idle shell does no filesystem work per frame.
+    chrome_poll_at: Instant,
     cursor_on: bool,
     document: WorkspaceDocument,
     runtime_revision: u64,
@@ -1365,6 +1368,7 @@ impl App {
             module_views: BTreeMap::new(),
             spores: BTreeMap::new(),
             spore_clock: None,
+            chrome_poll_at: Instant::now(),
             cursor_on: true,
             visible_indicator_id: None,
             indicator_started: Instant::now(),
@@ -2313,6 +2317,18 @@ impl App {
                 }
                 if jump_forward {
                     self.jump_forward();
+                }
+                // Editing a chrome Spore should land like an edit, not like a
+                // scheduled refresh: poll the artifacts often enough that a save
+                // is visible, and cheaply enough that an idle shell costs nothing
+                // (the refresh hashes and no-ops when nothing changed).
+                #[cfg(feature = "lua-scenes")]
+                if self.chrome_poll_at.elapsed() >= Duration::from_millis(200) {
+                    self.chrome_poll_at = Instant::now();
+                    self.refresh_desktop_bar(true);
+                    if self.project_switcher.is_some() {
+                        self.refresh_launcher_scene();
+                    }
                 }
                 // The frame callback: a Spore draws when the compositor can draw,
                 // and is told how long it has been since the last one.
@@ -4403,8 +4419,14 @@ impl App {
         } else {
             self.desktop_bar.refresh_current(artifact, snapshot, theme)
         };
-        if let Err(error) = result {
-            self.status = format!("Desktop bar Lua error (last good retained): {error}");
+        match result {
+            // A changed artifact is a new frame: hot reload is only hot if the
+            // compositor is told to draw the new one.
+            Ok(true) => self.bump(),
+            Ok(false) => {}
+            Err(error) => {
+                self.status = format!("Desktop bar Lua error (last good retained): {error}")
+            }
         }
         self.refresh_desktop_dock(poll_files);
     }
