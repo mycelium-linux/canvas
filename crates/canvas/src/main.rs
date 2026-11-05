@@ -374,6 +374,22 @@ const MAX_PROMPT_CHARS: usize = 400;
 /// How many sent lines a prompt surface remembers.
 const PROMPT_SENT_TAIL: usize = 3;
 
+/// How long the waiting mark stays up at minimum.
+///
+/// Below about a fifth of a second a state is a flicker: the eye registers that
+/// something changed but not what it was. Holding the mark costs a beat on a
+/// fast start and buys a legible one.
+const LOADING_MIN_MS: u64 = 240;
+
+/// `CANVAS_LOADING_MIN_MS` overrides the floor, so the mark can be looked at
+/// without a camera that is faster than an eye.
+fn loading_min_ms() -> u64 {
+    std::env::var("CANVAS_LOADING_MIN_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(LOADING_MIN_MS)
+}
+
 #[derive(Debug, Clone)]
 struct RuntimeSurface {
     snapshot: SurfaceSnapshot,
@@ -813,6 +829,13 @@ struct App {
     /// Radians for the waiting mark, advanced by the host's frame clock.
     loading_phase: f32,
     loading_traced: bool,
+    /// Surfaces whose waiting mark is being held for a minimum time.
+    ///
+    /// A producer that presents in 40 ms would otherwise flash a loader that the
+    /// eye reads as a glitch: the state is real, it is just shorter than the time
+    /// it takes to see it. Holding it is the difference between "durable" and
+    /// "flicker".
+    loading_hold: BTreeMap<String, Instant>,
     document: WorkspaceDocument,
     runtime_revision: u64,
     /// Last list written, so an unchanged set costs nothing.
@@ -1387,6 +1410,7 @@ impl App {
             cursor_on: true,
             loading_phase: 0.0,
             loading_traced: false,
+            loading_hold: BTreeMap::new(),
             visible_indicator_id: None,
             indicator_started: Instant::now(),
             indicator_dismissing: None,
@@ -1885,6 +1909,8 @@ impl App {
             }
             Message::SurfaceLoadingTick => {
                 self.loading_phase = (self.loading_phase + 0.16) % std::f32::consts::TAU;
+                let now = Instant::now();
+                self.loading_hold.retain(|_, until| *until > now);
                 // Traced because the wait is short: without a line in the log
                 // there is no way to tell "the mark never drew" from "the producer
                 // was faster than a screenshot".
@@ -10118,10 +10144,14 @@ impl App {
         .into()
     }
 
-    /// True while some Spore surface exists without a first frame.
+    /// True while some surface is waiting for a first frame, or is inside the
+    /// floor that keeps a quick start from flashing.
     fn awaiting_first_frame(&self) -> bool {
+        let now = Instant::now();
         self.decoded.iter().any(|(id, surface)| {
-            matches!(surface.source, ContentSource::Spore) && !self.spores.contains_key(id)
+            matches!(surface.source, ContentSource::Spore)
+                && (!self.spores.contains_key(id)
+                    || self.loading_hold.get(id).is_some_and(|until| now < *until))
         })
     }
 
@@ -10348,6 +10378,16 @@ impl App {
                 .height(height)
                 .into(),
             ContentSource::Spore => match self.spores.get(&surface.snapshot.id) {
+                // A frame that arrived faster than the eye can register waits its
+                // turn behind the mark: a flash of a finished window reads as a
+                // rendering fault, which is worse than arriving 200 ms late.
+                _ if self
+                    .loading_hold
+                    .get(&surface.snapshot.id)
+                    .is_some_and(|until| Instant::now() < *until) =>
+                {
+                    self.awaiting_surface(width, height)
+                }
                 Some(presented) => match &presented.present {
                     soil_scene::Present::Scene(scene) => {
                         let transparent = scene.transparent;
@@ -10633,6 +10673,15 @@ impl App {
                 // and input routing are still the host's.
                 if matches!(surface.source, ContentSource::Spore) {
                     return match self.spores.get(&surface.snapshot.id) {
+                        // Same floor as the other arm: a finished frame that beat
+                        // the eye waits its turn behind the mark.
+                        _ if self
+                            .loading_hold
+                            .get(&surface.snapshot.id)
+                            .is_some_and(|until| Instant::now() < *until) =>
+                        {
+                            self.awaiting_surface(width, height)
+                        }
                         Some(presented) => match &presented.present {
                             soil_scene::Present::Scene(scene) => {
                                 let transparent = scene.transparent;
@@ -11486,6 +11535,10 @@ impl App {
     }
 
     fn open_spore_surface(&mut self, surface_id: &str, title: &str, width: u32, height: u32) {
+        self.loading_hold.insert(
+            surface_id.to_owned(),
+            Instant::now() + Duration::from_millis(loading_min_ms()),
+        );
         if !self.document.surfaces.iter().any(|s| s.id == surface_id) {
             let bounds = NormalizedRect {
                 x: 0.12,

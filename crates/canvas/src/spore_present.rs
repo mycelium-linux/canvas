@@ -29,6 +29,11 @@ fn node(node: &soil_scene::Node) -> Vec<SceneNode> {
     if let soil_scene::Content::Polyline(polyline) = &node.content {
         return dotted(node, polyline);
     }
+    // A filled area has no polygon fill in this renderer either; columns from the
+    // curve down to the baseline keep the shape and cost one rect per column.
+    if let soil_scene::Content::Area(area) = &node.content {
+        return columns(node, area);
+    }
     vec![SceneNode {
         id: node.id.clone(),
         parent_id: node.parent.clone(),
@@ -43,6 +48,61 @@ fn node(node: &soil_scene::Node) -> Vec<SceneNode> {
         // A Spore may ask for its own easing; absent means the host default.
         transition_ms: node.transition_ms,
     }]
+}
+
+fn columns(node: &soil_scene::Node, area: &soil_scene::Area) -> Vec<SceneNode> {
+    const COLUMNS: usize = 48;
+    let points = &area.points;
+    if points.len() < 2 {
+        return Vec::new();
+    }
+    let (first, last) = (points[0][0], points[points.len() - 1][0]);
+    let span = (last - first).max(f32::EPSILON);
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    for column in 0..COLUMNS {
+        let x = first + span * (column as f32 + 0.5) / COLUMNS as f32;
+        while cursor + 1 < points.len() && points[cursor + 1][0] < x {
+            cursor += 1;
+        }
+        let [ax, ay] = points[cursor];
+        let [bx, by] = points[(cursor + 1).min(points.len() - 1)];
+        let t = if (bx - ax).abs() > f32::EPSILON {
+            ((x - ax) / (bx - ax)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let y = ay + (by - ay) * t;
+        let height = y - area.baseline;
+        if !height.is_finite() || height.abs() < 1e-4 {
+            continue;
+        }
+        out.push(SceneNode {
+            id: format!("{}.col{}", node.id, column),
+            parent_id: node.parent.clone(),
+            transform: Transform3 {
+                translation: [
+                    node.transform.translation[0] + x,
+                    node.transform.translation[1] + area.baseline,
+                    node.transform.translation[2],
+                ],
+                rotation: quaternion(node.transform.rotation),
+                scale: [
+                    node.transform.scale[0] * span / COLUMNS as f32,
+                    node.transform.scale[1] * height,
+                    1.0,
+                ],
+            },
+            content: NodeContent::Rect {
+                ink: area.ink.map(ink),
+                rgb: area.rgb,
+                opacity: area.opacity,
+                radius: 0.0,
+            },
+            transition_ms: node.transition_ms,
+        });
+    }
+    out
 }
 
 fn dotted(node: &soil_scene::Node, polyline: &soil_scene::Polyline) -> Vec<SceneNode> {
@@ -121,6 +181,7 @@ fn content(content: &soil_scene::Content) -> NodeContent {
         // Handled by `node` before it gets here: a polyline expands to several
         // dots, so it cannot come back as one node's content.
         From::Polyline(_) => NodeContent::Group,
+        From::Area(_) => NodeContent::Group,
         From::Shader(shader) => NodeContent::Shader {
             wgsl: shader.wgsl.clone(),
             uniforms: shader.uniforms.clone(),
