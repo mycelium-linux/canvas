@@ -495,6 +495,9 @@ type TimelineAction = canvas_model_viewer::view::TimelineAction;
 
 #[derive(Debug, Clone)]
 enum Message {
+    /// Bytes that arrived from a terminal's pty. Delivered by a subscription, so
+    /// the emulator sees output as it happens rather than on the next tick.
+    TerminalChunk(String, Vec<u8>),
     LauncherReply {
         generation: u64,
         target_id: String,
@@ -895,6 +898,10 @@ struct App {
     desktop_press: Option<(Instant, LogicalPoint)>,
     kiosk: bool,
     minimized_surfaces: BTreeSet<String>,
+    /// Reader threads hand terminal output here; a subscription turns it into
+    /// messages, so a program's output wakes the app instead of being polled for.
+    terminal_chunks: tokio::sync::mpsc::UnboundedSender<(String, Vec<u8>)>,
+
     maximized_surfaces: BTreeSet<String>,
     transition: Option<transition::Transition>,
     workspaces: WorkspaceStore,
@@ -1200,6 +1207,11 @@ impl App {
             .unwrap_or_default();
         let titlebar_height =
             theme_chrome_for(&theme_packs, &theme_pack_ids, &document.project_id).titlebar_height;
+        let (terminal_sender, terminal_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let _ = TERMINAL_SENDER.set(terminal_sender.clone());
+        if let Ok(mut slot) = TERMINAL_CHUNKS.lock() {
+            *slot = Some(terminal_receiver);
+        }
         let interaction = interaction_engine(desktop_frame, document.chrome, titlebar_height);
         let mut app = Self {
             catalog,
@@ -1331,6 +1343,7 @@ impl App {
             desktop_press: None,
             kiosk,
             minimized_surfaces: BTreeSet::new(),
+            terminal_chunks: terminal_sender,
             maximized_surfaces: BTreeSet::new(),
             transition: None,
             workspaces,
@@ -1747,6 +1760,15 @@ impl App {
 
     fn update_inner(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::TerminalChunk(surface_id, bytes) => {
+                if let Some(surface) = self.decoded.get_mut(&surface_id)
+                    && let ContentSource::Terminal { host, .. } = &mut surface.source
+                {
+                    host.write(&bytes);
+                    self.bump();
+                }
+                Task::none()
+            }
             #[cfg(all(unix, feature = "lua-scenes"))]
             Message::NativeSwitcherTick => {
                 let visual = self.presented_visual_theme();
@@ -2125,7 +2147,6 @@ impl App {
                     self.presence_preview = None;
                     self.bump();
                 }
-                self.refresh_terminal();
                 self.refresh_camera_detections();
                 self.reconcile_external_stream_visibility();
                 #[cfg(feature = "lua-scenes")]
@@ -12088,6 +12109,14 @@ fn load_terminal(
     title: Option<String>,
 ) -> Result<LoadedContent, Failure> {
     let (master_fd, stdin_fd, pid) = terminal::spawn_terminal(shell).map_err(Failure::resource)?;
+    // The descriptor now belongs to a reader thread: it blocks, and the kernel
+    // wakes it the instant the program writes. No polling anywhere in the path.
+    if let Some(sender) = TERMINAL_SENDER.get() {
+        terminal::pump(master_fd, surface_id.clone(), sender.clone());
+    }
+    if let Some(surface_id_reader) = Some(surface_id.clone()) {
+        let _ = surface_id_reader;
+    }
     let host = soil_vt::Host::spawn(120, 40, 2_000)
         .map_err(|error| Failure::resource(error.to_string()))?;
     let display_title = title.unwrap_or_else(|| format!("Terminal: {shell}"));
@@ -13765,6 +13794,29 @@ fn double_click(
     })
 }
 
+/// The receiving end of the terminal channel, taken by the subscription's builder.
+///
+/// `Subscription::run` takes a plain function pointer, so the receiver cannot be
+/// captured in a closure; a static is the idiomatic place for it in iced.
+static TERMINAL_SENDER: std::sync::OnceLock<
+    tokio::sync::mpsc::UnboundedSender<(String, Vec<u8>)>,
+> = std::sync::OnceLock::new();
+
+static TERMINAL_CHUNKS: std::sync::Mutex<
+    Option<tokio::sync::mpsc::UnboundedReceiver<(String, Vec<u8>)>>,
+> = std::sync::Mutex::new(None);
+
+fn terminal_chunks_stream() -> impl iced::futures::Stream<Item = Message> {
+    let receiver = TERMINAL_CHUNKS.lock().ok().and_then(|mut slot| slot.take());
+    iced::futures::stream::unfold(receiver, |state| async move {
+        let mut receiver = state?;
+        receiver
+            .recv()
+            .await
+            .map(|(surface_id, bytes)| (Message::TerminalChunk(surface_id, bytes), Some(receiver)))
+    })
+}
+
 fn render_cadence(
     screensaver_enabled: bool,
     background_animated: bool,
@@ -13867,6 +13919,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         daemon_view,
     )
     .subscription(|app| {
+        let terminal = iced::Subscription::run(terminal_chunks_stream);
+
         let animated = app.visible_indicator_id.is_some()
             || app.indicator_dismissing.is_some()
             || !app.notifications.is_empty()
@@ -13905,6 +13959,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             cadence
         };
         Subscription::batch([
+            // Terminal output is event-driven: the reader threads wake the app
+            // when a program writes, so no keystroke's echo waits for a tick.
+            terminal,
             #[cfg(all(unix, feature = "lua-scenes"))]
             if app.native_switcher.is_some() {
                 iced::time::every(Duration::from_millis(40)).map(|_| Message::NativeSwitcherTick)

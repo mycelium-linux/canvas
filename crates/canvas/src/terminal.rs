@@ -48,17 +48,54 @@ pub fn spawn_terminal(shell: &str) -> Result<(i32, i32, u32), String> {
     let stdout_fd = stdout.into_raw_fd();
     let stdin_fd = stdin.into_raw_fd();
 
-    unsafe {
-        let flags = libc::fcntl(stdout_fd, libc::F_GETFL);
-        if flags >= 0 {
-            libc::fcntl(stdout_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        }
-    }
-
+    // Deliberately left *blocking*: the read lives on its own thread and is
+    // woken by the kernel when the program writes. Non-blocking here would have
+    // meant a poll loop, which is latency added to every keystroke's echo.
     let pid = child.id();
     std::mem::forget(child);
 
     Ok((stdout_fd, stdin_fd, pid))
+}
+
+/// Read a terminal's output forever, handing each chunk to `sink`.
+///
+/// Blocking, on its own thread: a poll loop adds its interval to every keystroke's
+/// echo, and there is no reason for a terminal to be polled when the kernel will
+/// wake a thread the moment bytes exist.
+pub fn pump(
+    fd: RawFd,
+    surface_id: String,
+    sink: tokio::sync::mpsc::UnboundedSender<(String, Vec<u8>)>,
+) {
+    std::thread::Builder::new()
+        .name(format!("terminal-{surface_id}"))
+        .spawn(move || {
+            let mut buffer = [0u8; 8192];
+            loop {
+                let read = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+                if read > 0 {
+                    let bytes = buffer[..read as usize].to_vec();
+                    if sink.send((surface_id.clone(), bytes)).is_err() {
+                        return;
+                    }
+                } else if read == 0 {
+                    return;
+                } else {
+                    let error = std::io::Error::last_os_error();
+                    match error.kind() {
+                        std::io::ErrorKind::Interrupted => continue,
+                        std::io::ErrorKind::WouldBlock => {
+                            // Still non-blocking from an earlier life: wait a
+                            // millisecond rather than spin, and let the reader
+                            // settle into blocking mode on the next round.
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                        _ => return,
+                    }
+                }
+            }
+        })
+        .ok();
 }
 
 pub fn read_fd(fd: RawFd) -> Vec<u8> {
