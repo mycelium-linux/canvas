@@ -95,9 +95,18 @@ fn scan_root(root: &Path, apps: &mut Vec<SporeApp>) {
         {
             continue;
         }
+        let display_name = match manifest.spore.name.as_str() {
+            "unibus" => "Inbox",
+            "contacts" => "Contacts",
+            "launcher" => "Launcher",
+            "terminal" => "Terminal",
+            "markdown" => "Markdown",
+            _ => manifest.spore.name.as_str(),
+        }
+        .to_string();
         apps.push(SporeApp {
             id: manifest.spore.id,
-            name: manifest.spore.name.clone(),
+            name: display_name,
             version: manifest.spore.version,
             summary: manifest.spore.summary,
             workspace: workspace_for(&manifest.spore.name),
