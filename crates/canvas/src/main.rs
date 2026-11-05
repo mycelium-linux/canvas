@@ -7125,11 +7125,7 @@ impl App {
         {
             return Task::none();
         }
-        // A widget claimed this press. Chrome has already had its chance above,
-        // and content must not also act on it.
-        if captured && matches!(event, Event::ButtonPressed(_)) {
-            return Task::none();
-        }
+
 
         if matches!(event, Event::ButtonPressed(Button::Left)) && self.context_menu.take().is_some() {
             self.bump();
@@ -7192,6 +7188,23 @@ impl App {
             _ => None,
         };
         let surfaces = self.interaction_surfaces();
+        if std::env::var_os("CANVAS_INPUT_TRACE").is_some()
+            && let Some(position) = self.cursor
+        {
+            eprintln!(
+                "input {event:?} at ({:.1},{:.1}) captured={captured} hit={:?}",
+                position.x,
+                position.y,
+                hit_test(
+                    &surfaces,
+                    position,
+                    SURFACE_RESIZE_HANDLE_SIZE,
+                    f64::from(self.window_chrome().titlebar_height),
+                )
+                .ok()
+                .flatten()
+            );
+        }
         if let Some(position) = self.cursor
             && self.handle_hid_pointer(&hid_event, position, &surfaces)
         {
@@ -7231,6 +7244,22 @@ impl App {
             return Task::none();
         };
         if self.handle_external_surface_pointer(phase, position, &surfaces) {
+            return Task::none();
+        }
+        // A widget claimed this press. It may keep its click, but the surface
+        // gesture must still start when the press is on the title bar or a
+        // resize edge: those are drawn by widgets too, and refusing them is how
+        // window dragging stopped working entirely.
+        if captured
+            && phase == PointerPhase::Press
+            && let Ok(Some(target)) = hit_test(
+                &surfaces,
+                position,
+                SURFACE_RESIZE_HANDLE_SIZE,
+                f64::from(self.window_chrome().titlebar_height),
+            )
+            && target.region == HitRegion::Body
+        {
             return Task::none();
         }
         if phase == PointerPhase::Press
@@ -12756,7 +12785,8 @@ fn normalize_visible_surface_bounds_with_shell(
     // its top bar reachable, so clamping the origin here would turn the move
     // into a resize by shortening the stored width to the workspace edge.
     let x = (bounds.x - gap_inset - padding) / inner_width;
-    let y = ((bounds.y - gap_inset - padding) / inner_height).max(0.0);
+    // No floor at zero: a window is allowed to sit partly off the top or left.
+    let y = (bounds.y - gap_inset - padding) / inner_height;
     let width = ((bounds.width + gap_inset * 2.0) / inner_width).clamp(f64::EPSILON, 1.0);
     let height = ((bounds.height + gap_inset * 2.0) / inner_height).clamp(f64::EPSILON, 1.0);
     NormalizedRect {

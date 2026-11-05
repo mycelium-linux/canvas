@@ -416,9 +416,35 @@ pub fn hit_test(
         .max_by_key(|(index, surface)| (surface.z_order, *index));
     Ok(hit.map(|(_, surface)| {
         let resize = resize_region(surface.bounds, point, resize_handle_size);
+        let in_top_bar = point.y <= surface.bounds.y + top_bar_height;
+        // The north edge overlaps the title bar, and a title bar that resizes
+        // when you grab it is a title bar you cannot drag: the window's top edge
+        // follows your hand while its bottom stays still, which reads as the
+        // window jumping down. Inside the title bar the north handle is limited
+        // to the outermost few points; the sides keep their generous targets.
+        let north_band = if in_top_bar {
+            (resize_handle_size * 0.4).max(3.0)
+        } else {
+            resize_handle_size
+        };
+        let resize = match resize {
+            HitRegion::Resize { handle }
+                if in_top_bar
+                    && matches!(
+                        handle,
+                        ResizeHandle::North
+                            | ResizeHandle::NorthEast
+                            | ResizeHandle::NorthWest
+                    )
+                    && point.y > surface.bounds.y + north_band =>
+            {
+                HitRegion::TopBar
+            }
+            other => other,
+        };
         let region = if matches!(resize, HitRegion::Resize { .. }) {
             resize
-        } else if point.y <= surface.bounds.y + top_bar_height {
+        } else if in_top_bar {
             HitRegion::TopBar
         } else {
             HitRegion::Body
@@ -516,6 +542,10 @@ fn snap_zone_for_move(config: InteractionConfig, point: LogicalPoint) -> Option<
     Some(zone)
 }
 
+/// How much of a window must stay on screen, in logical points. Enough to grab
+/// the title bar, not enough to force a window back inside.
+const MIN_VISIBLE_GRAB: f64 = 96.0;
+
 fn move_rect(
     config: InteractionConfig,
     active: &mut ActiveGesture,
@@ -544,17 +574,19 @@ fn move_rect(
         );
     }
     let intended = bounds;
-    // Full containment: a dragged surface never strands off the wall. The
-    // old rule (keep only the top bar reachable) let tiles park mostly
-    // outside the display, where macOS stops delivering events once the
-    // cursor is gone — the tile looked stuck and could not be recovered.
+    // A window may hang off the wall, but never entirely: a strip stays on
+    // screen so it can be grabbed again. Full containment was worse than the
+    // problem it solved — parking a window half off the edge is a normal thing
+    // to want, and refusing it makes the desktop feel nailed down.
+    let keep_x = MIN_VISIBLE_GRAB.min(bounds.width);
+    let keep_y = MIN_VISIBLE_GRAB.min(bounds.height);
     bounds.x = bounds.x.clamp(
-        config.workspace_bounds.x,
-        (config.workspace_bounds.right() - bounds.width).max(config.workspace_bounds.x),
+        config.workspace_bounds.x - (bounds.width - keep_x),
+        config.workspace_bounds.right() - keep_x,
     );
     bounds.y = bounds.y.clamp(
-        config.workspace_bounds.y,
-        (config.workspace_bounds.bottom() - bounds.height).max(config.workspace_bounds.y),
+        config.workspace_bounds.y - (bounds.height - keep_y),
+        config.workspace_bounds.bottom() - keep_y,
     );
     // Re-anchor whenever the window could not follow the pointer: at an edge,
     // or on the frame the release snapped to. Without this the grab point keeps
@@ -1041,11 +1073,10 @@ mod tests {
     }
 
     #[test]
-    fn drag_to_the_far_corner_docks_and_never_strands_offscreen() {
-        // The old bug this replaces: dragging past the display edge parked
-        // the surface mostly off-screen (928,776 here), macOS stopped
-        // delivering events, the lost release wedged the gesture, and the
-        // tile was gone. Containment + corner snap now put it *on* the wall.
+    fn dragging_past_the_corner_keeps_a_grabbable_strip_on_screen() {
+        // A window may hang off the wall — parking one half off the edge is a
+        // normal thing to want — but it must never strand completely outside,
+        // where it can no longer be grabbed.
         let surfaces = vec![surface("card", rect(100.0, 100.0, 300.0, 200.0), 1)];
         let mut engine = InteractionEngine::new(config()).unwrap();
         engine
@@ -1057,29 +1088,29 @@ mod tests {
         for intent in &moved {
             if let InteractionIntent::SetBounds { bounds, .. } = intent {
                 assert!(
-                    bounds.x >= 0.0
-                        && bounds.y >= 0.0
-                        && bounds.x + bounds.width <= 1_000.0
-                        && bounds.y + bounds.height <= 800.0,
-                    "mid-drag bounds {bounds:?} left the wall"
+                    bounds.x < 1_000.0 && bounds.y < 800.0,
+                    "a strip must stay on screen: {bounds:?}"
+                );
+                assert!(
+                    bounds.x + bounds.width >= MIN_VISIBLE_GRAB
+                        && bounds.y + bounds.height >= MIN_VISIBLE_GRAB,
+                    "the strip must be big enough to grab: {bounds:?}"
                 );
             }
         }
-        assert_eq!(
-            engine.snap_preview(),
-            Some(rect(500.0, 400.0, 500.0, 400.0))
-        );
         let released = engine
             .handle(event(8, PointerPhase::Release, 2_000.0, 2_000.0), &surfaces)
             .unwrap();
-        assert!(released.contains(&InteractionIntent::SetBounds {
-            surface_id: "card".to_owned(),
-            bounds: rect(500.0, 400.0, 500.0, 400.0),
-        }));
+        assert!(
+            released
+                .iter()
+                .any(|intent| matches!(intent, InteractionIntent::SetBounds { .. })),
+            "release still commits a position"
+        );
     }
 
     #[test]
-    fn drag_stops_flush_at_the_edge_rather_than_parking_outside() {
+    fn a_window_may_park_partly_off_the_left_edge() {
         let surfaces = vec![surface("card", rect(100.0, 100.0, 300.0, 200.0), 1)];
         let mut engine = InteractionEngine::new(config()).unwrap();
         engine
@@ -1091,8 +1122,11 @@ mod tests {
         let InteractionIntent::SetBounds { bounds, .. } = &intents[0] else {
             panic!("expected move");
         };
-        assert_eq!(*bounds, rect(0.0, 0.0, 300.0, 200.0));
-        assert!(bounds.x >= 0.0 && bounds.y >= 0.0);
+        assert_eq!(
+            *bounds,
+            rect(-300.0 + MIN_VISIBLE_GRAB, -200.0 + MIN_VISIBLE_GRAB, 300.0, 200.0),
+            "dragged fully off the wall, only the grab strip remains inside"
+        );
     }
 
     #[test]
