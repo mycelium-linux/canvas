@@ -84,9 +84,18 @@ impl Presentation {
                 .transpose()
                 .map(|value| value.unwrap_or_else(|| fallback.into()))
         };
+        // The widget library is executed inside the module's context, not
+        // prepended, so its identity is carried as a marker comment: the cache key
+        // hashes the source text, and an edited button must invalidate the scene
+        // it drew.
+        let source = format!(
+            "{}\n-- canvas-widgets {}",
+            read(artifact.source_path, artifact.source_fallback)?,
+            crate::lua_module::widget_fingerprint()
+        );
         self.refresh(
             &read(artifact.manifest_path, artifact.manifest_fallback)?,
-            &read(artifact.source_path, artifact.source_fallback)?,
+            &source,
             snapshot,
             theme,
         )

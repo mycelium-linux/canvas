@@ -31,99 +31,39 @@ const MAX_RESOURCE_SURFACES: usize = 64;
 /// Modules compose these primitives; the host owns their theme and geometry
 /// conventions. Keeping this prelude in one place prevents every widget from
 /// inventing another label scale, badge opacity, or metric hierarchy.
-const WIDGET_PRIMITIVES_V1: &str = r#"
--- Logical pixels are the layout vocabulary; scene coordinates stay internal.
-function widget.pixel_space(width, height)
-  if width <= 0 or height <= 0 then error("pixel space needs positive dimensions") end
-  return {
-    x = function(px) return -4 + 8 * px / width end,
-    y = function(px) return 4 - 8 * px / height end,
-    w = function(px) return 8 * px / width end,
-    h = function(px) return 8 * px / height end,
-  }
-end
+/// The widget vocabulary, as an artifact rather than as a Rust string.
+///
+/// Rust keeps the draw ABI -- `canvas.rect`, `canvas.text`, buttons as hit
+/// regions -- and nothing else. Everything above it (a panel, a button, a row) is
+/// Lua that the host reads from the runtime directory, so a component can be
+/// changed while the shell is running instead of after a rebuild.
+const WIDGETS_FALLBACK: &str = include_str!("../../../config/lua/widgets.lua");
 
-function widget.icon_button(spec)
-  spec.icon = spec.icon or "window"
-  spec.icon_size = spec.icon_size or 28
-  spec.appearance = spec.appearance or "quiet"
-  widget.button(spec)
-end
+/// The live widget library: disk first, embedded copy second.
+///
+/// Composed into every module's source, which is also how an edit invalidates the
+/// retained scene -- the cache key covers the bytes that actually ran.
+pub fn widget_library() -> String {
+    crate::runtime_config::read(std::path::Path::new("lua/widgets.lua"), 128 * 1024)
+        .ok()
+        .flatten()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_else(|| WIDGETS_FALLBACK.to_owned())
+}
 
-local function required(spec, key)
-  local value = spec[key]
-  if value == nil then error("widget primitive requires " .. key, 3) end
-  return value
-end
-
-local function point(spec)
-  return { spec.x or 0, spec.y or 0, spec.z or 0.2 }
-end
-
-local function text_scale(px)
-  local unit = module.theme.body * 1.25
-  return { px / unit, px / unit, 1 }
-end
-
-function widget.panel(spec)
-  canvas.rect {
-    id = required(spec, "id"), parent = spec.parent, rgb = spec.rgb,
-    ink = spec.ink or "text", opacity = spec.opacity or 0.055,
-    radius = spec.radius or module.theme.radius,
-    translation = { spec.x or 0, spec.y or 0, spec.z or 0.2 },
-    scale = { required(spec, "width"), required(spec, "height"), 1 },
-  }
-end
-
-function widget.label(spec)
-  canvas.text {
-    id = required(spec, "id"), parent = spec.parent,
-    text = tostring(spec.text or "—"), ink = spec.ink or "text",
-    translation = point(spec),
-    scale = text_scale(spec.size or module.theme.body),
-  }
-end
-
-function widget.badge(spec)
-  local id = required(spec, "id")
-  widget.panel {
-    id = id .. "-bg", parent = spec.parent,
-    x = spec.x, y = spec.y, z = spec.z or 0.1,
-    width = required(spec, "width"), height = required(spec, "height"),
-    ink = spec.ink or "primary", opacity = spec.opacity or 0.18,
-    radius = spec.radius or module.theme.radius,
-  }
-  widget.label {
-    id = id, parent = spec.parent, text = required(spec, "text"),
-    x = spec.text_x or spec.x, y = spec.text_y or spec.y,
-    z = (spec.z or 0.1) + 0.1, ink = spec.text_ink or spec.ink or "primary",
-    size = spec.size or module.theme.small,
-  }
-end
-
-function widget.metric(spec)
-  local id = required(spec, "id")
-  widget.label {
-    id = id .. "-caption", parent = spec.parent,
-    text = required(spec, "label"), x = spec.x, y = spec.y,
-    ink = "muted", size = module.theme.micro,
-  }
-  widget.label {
-    id = id .. "-value", parent = spec.parent,
-    text = required(spec, "value"), x = spec.x,
-    y = (spec.y or 0) - (spec.value_offset or 0.46),
-    ink = spec.ink or "text", size = spec.size or module.theme.hero,
-  }
-  if spec.detail ~= nil and spec.detail ~= "" then
-    widget.label {
-      id = id .. "-detail", parent = spec.parent,
-      text = spec.detail, x = spec.x,
-      y = (spec.y or 0) - (spec.detail_offset or 0.92),
-      ink = "muted", size = module.theme.small,
-    }
-  end
-end
-"#;
+/// A short digest of the live widget library.
+///
+/// Folded into the retained-scene cache key so that editing a component
+/// invalidates the scene it drew, instead of waiting for some unrelated input to
+/// move.
+pub fn widget_fingerprint() -> String {
+    use sha2::{Digest, Sha256};
+    let digest: [u8; 32] = Sha256::digest(widget_library().as_bytes()).into();
+    digest[..8].iter().fold(String::new(), |mut out, byte| {
+        out.push_str(&format!("{byte:02x}"));
+        out
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1248,12 +1188,18 @@ fn install_widget_api(lua: &Lua, read_theme: bool, theme: ModuleThemeTokens) -> 
 
     lua.globals().set("widget", widget).map_err(lua_error)?;
 
+    // The widget vocabulary is an artifact, loaded into the host's writable
+    // globals: a component that lives in the runtime directory can be changed
+    // while the shell runs, which is the difference between iterating on a button
+    // and rebuilding a compositor to try one.
     if read_theme {
-        lua.load(WIDGET_PRIMITIVES_V1)
-            .set_name("canvas-widget-primitives-v1")
+        lua.load(widget_library())
+            .set_name("canvas-widgets")
             .exec()
             .map_err(lua_error)?;
     }
+
+
 
     let canvas: Table = lua.globals().get("canvas").map_err(lua_error)?;
     canvas
@@ -2642,5 +2588,29 @@ canvas.text { id = "body-height", text = string.format("%.0f", laid.nodes[3].rec
             "{} nodes",
             scene.nodes.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod widget_artifact_tests {
+    use super::{widget_fingerprint, widget_library};
+
+    #[test]
+    fn the_widget_library_is_an_artifact() {
+        let library = widget_library();
+        // Composition helpers live here, not in Rust: a panel, a label, a badge.
+        // `widget.button` stays native because a button is a hit region the host
+        // has to know about; everything above the hit region is composition.
+        for helper in [
+            "function widget.panel",
+            "function widget.label",
+            "function widget.badge",
+            "function widget.pixel_space",
+        ] {
+            assert!(library.contains(helper), "missing {helper}");
+        }
+        let fingerprint = widget_fingerprint();
+        assert_eq!(fingerprint.len(), 16, "a short digest, not a whole file");
+        assert!(fingerprint.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }
