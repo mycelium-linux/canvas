@@ -1,0 +1,10 @@
+{"schema_version":1,"id":"desktop-window-v1","title":"Canvas window chrome","inputs":[
+{"id":"width","kind":"number","required":true},
+{"id":"height","kind":"number","required":true},
+{"id":"title","kind":"text","required":true},
+{"id":"focused","kind":"boolean","required":true},
+{"id":"maximized","kind":"boolean","required":false},
+{"id":"close","kind":"boolean","required":false},
+{"id":"minimize","kind":"boolean","required":false},
+{"id":"maximize","kind":"boolean","required":false}
+],"capabilities":{"write_scene":true,"read_inputs":["width","height","title","focused","maximized","close","minimize","maximize"],"read_theme":true},"actions":[]}

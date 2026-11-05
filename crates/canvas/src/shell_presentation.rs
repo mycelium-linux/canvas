@@ -31,6 +31,12 @@ pub const DESKTOP_LAUNCHER: Artifact = Artifact {
     source_path: "modules/desktop-launcher-v1.lua",
     source_fallback: include_str!("../../../config/modules/desktop-launcher-v1.lua"),
 };
+pub const DESKTOP_WINDOW: Artifact = Artifact {
+    manifest_path: "modules/desktop-window-v1.json",
+    manifest_fallback: include_str!("../../../config/modules/desktop-window-v1.json"),
+    source_path: "modules/desktop-window-v1.lua",
+    source_fallback: include_str!("../../../config/modules/desktop-window-v1.lua"),
+};
 pub const DESKTOP_DOCK: Artifact = Artifact {
     manifest_path: "modules/desktop-dock-v1.json",
     manifest_fallback: include_str!("../../../config/modules/desktop-dock-v1.json"),

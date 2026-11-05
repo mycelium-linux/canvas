@@ -869,6 +869,10 @@ struct App {
     native_switcher: Option<::canvas::native_switcher::Host>,
     #[cfg(feature = "lua-scenes")]
     desktop_dock: ::canvas::shell_presentation::Presentation,
+    /// One retained Lua titlebar per window. The scene is presentation; close,
+    /// minimize, maximize and drag remain host actions.
+    #[cfg(feature = "lua-scenes")]
+    window_chrome: BTreeMap<String, ::canvas::shell_presentation::Presentation>,
     jarvis_visible: bool,
     hud_visible: bool,
     scale_factor: f64,
@@ -1322,6 +1326,8 @@ impl App {
             native_switcher: ::canvas::native_switcher::Host::from_environment(),
             #[cfg(feature = "lua-scenes")]
             desktop_dock: Default::default(),
+            #[cfg(feature = "lua-scenes")]
+            window_chrome: BTreeMap::new(),
             jarvis_visible: true,
             hud_visible: false,
             scale_factor: 1.0,
@@ -4471,6 +4477,68 @@ impl App {
         if let Err(error) = result {
             self.status = format!("Desktop dock Lua error (last good retained): {error}");
         }
+    }
+
+    #[cfg(feature = "lua-scenes")]
+    fn refresh_window_chrome(&mut self, poll_files: bool) {
+        use ::canvas::lua_module::{
+            ModuleInputSnapshot, ModuleInputValue as Value, ModuleThemeTokens,
+        };
+        let height = f64::from(self.window_chrome().titlebar_height).max(1.0);
+        let mut windows = Vec::new();
+        for surface in &self.document.surfaces {
+            let width = match self.document.active_layout() {
+                Layout::Canvas { placements } => placements
+                    .iter()
+                    .find(|placement| placement.surface_id == surface.id)
+                    .map(|placement| placement.bounds.width as f64 * self.frame.width as f64)
+                    .unwrap_or_else(|| self.frame.width as f64),
+                Layout::Surface { surface_id } if surface_id == &surface.id => {
+                    self.frame.width as f64
+                }
+                _ => self.frame.width as f64,
+            }
+            .max(160.0);
+            windows.push((
+                surface.id.clone(),
+                surface.title.clone(),
+                width,
+                self.document.focused_surface_id.as_deref() == Some(surface.id.as_str()),
+                self.maximized_surfaces.contains(&surface.id),
+            ));
+        }
+        let visual = self.presented_visual_theme();
+        let theme =
+            ModuleThemeTokens::from_visual(&visual, self.effective_theme(&self.document).accent());
+        let live: BTreeSet<String> = windows.iter().map(|(id, ..)| id.clone()).collect();
+        for (id, title, width, focused, maximized) in windows {
+            let values = BTreeMap::from([
+                ("width".into(), Value::Number(width)),
+                ("height".into(), Value::Number(height)),
+                ("title".into(), Value::Text(title)),
+                ("focused".into(), Value::Boolean(focused)),
+                ("maximized".into(), Value::Boolean(maximized)),
+                ("close".into(), Value::Boolean(true)),
+                ("minimize".into(), Value::Boolean(true)),
+                ("maximize".into(), Value::Boolean(true)),
+            ]);
+            let snapshot = ModuleInputSnapshot {
+                revision: 1,
+                now_ms: 1,
+                values,
+            };
+            let presentation = self.window_chrome.entry(id).or_default();
+            let artifact = ::canvas::shell_presentation::DESKTOP_WINDOW;
+            let result = if poll_files {
+                presentation.refresh_files(artifact, snapshot, theme)
+            } else {
+                presentation.refresh_current(artifact, snapshot, theme)
+            };
+            if let Err(error) = result {
+                self.status = format!("Window chrome Lua error (last good retained): {error}");
+            }
+        }
+        self.window_chrome.retain(|id, _| live.contains(id));
     }
 
     fn cache_dock_icons(&mut self) {
@@ -8163,6 +8231,8 @@ impl App {
         }
         #[cfg(feature = "lua-scenes")]
         self.refresh_desktop_bar(false);
+        #[cfg(feature = "lua-scenes")]
+        self.refresh_window_chrome(false);
         self.runtime_revision = self.runtime_revision.saturating_add(1);
         // Every document change lands here, which is the only place that sees
         // all of them: applying a board, switching project and paging all
@@ -10103,7 +10173,7 @@ impl App {
                     }
                     soil_scene::Present::Rgba(_) => match &presented.handle {
                         Some(handle) => image_widget(handle.clone())
-                            .content_fit(ContentFit::Contain)
+                            .content_fit(ContentFit::Fill)
                             .width(width)
                             .height(height)
                             .into(),
@@ -10379,7 +10449,7 @@ impl App {
                             soil_scene::Present::Rgba(_) => {
                                 match &presented.handle {
                                     Some(handle) => image_widget(handle.clone())
-                                        .content_fit(ContentFit::Contain)
+                                        .content_fit(ContentFit::Fill)
                                         .width(width)
                                         .height(height)
                                         .into(),
@@ -10796,6 +10866,7 @@ impl App {
         focused: bool,
         maximized: bool,
         widget_chrome: Option<canvas_widgets::WidgetChrome>,
+        width: f32,
     ) -> Element<'a, Message> {
         if self.document.chrome.title == SurfaceTitleMode::Hidden
             || matches!(
@@ -10809,6 +10880,43 @@ impl App {
             return container(space::horizontal())
                 .width(Length::Fill)
                 .height(Length::Fixed(0.0))
+                .into();
+        }
+        #[cfg(feature = "lua-scenes")]
+        if let Some(retained) = self
+            .window_chrome
+            .get(surface_id)
+            .and_then(|presentation| presentation.retained())
+        {
+            let bar_height = f64::from(self.window_chrome().titlebar_height).max(1.0);
+            let viewport = LogicalSize {
+                width: f64::from(width.max(1.0)),
+                height: bar_height,
+            };
+            let scene = self.scene_layer(&retained.scene, viewport);
+            let controls = self.native_module_buttons_selected(
+                &retained.buttons,
+                viewport,
+                |control| {
+                    if !control.enabled {
+                        return None;
+                    }
+                    let action = match control.id.as_str() {
+                        "close" => WindowAction::Close,
+                        "minimize" => WindowAction::Minimize,
+                        "maximize" => WindowAction::Maximize,
+                        _ => return None,
+                    };
+                    Some(Message::ChromeAction {
+                        surface_id: surface_id.to_owned(),
+                        action,
+                    })
+                },
+                |_| false,
+            );
+            return container(iced::widget::stack![scene, iced::widget::stack(controls)])
+                .width(Length::Fixed(width.max(1.0)))
+                .height(Length::Fixed(bar_height as f32))
                 .into();
         }
         let visual_theme = self.presented_visual_theme();
@@ -11110,7 +11218,10 @@ impl App {
     ) -> Element<'a, Message> {
         if let Some(frame) = self.gpu_frames.get(&lease.source_id) {
             return image_widget(frame.handle.clone())
-                .content_fit(ContentFit::Contain)
+                // A GPU lease renders into the extent the host granted. Filling
+                // that extent keeps the frame welded to the window; Containing
+                // it produced letterbox gutters that made resize look detached.
+                .content_fit(ContentFit::Fill)
                 .width(width)
                 .height(height)
                 .into();
@@ -11861,6 +11972,7 @@ impl App {
                                 focused,
                                 maximized,
                                 widget_chrome,
+                                bounds.width as f32,
                             ),
                             content,
                         ])
@@ -12054,6 +12166,7 @@ impl App {
                                 true,
                                 true,
                                 widget_chrome,
+                                viewport.width as f32,
                             ),
                             content,
                         ])
