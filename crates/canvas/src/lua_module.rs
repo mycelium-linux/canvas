@@ -487,6 +487,18 @@ pub struct HostResourceSurface {
     pub resource: HostResourceRef,
 }
 
+/// What a view has chosen for itself, as opposed to what the application knows.
+///
+/// A calendar highlighting Tuesday is not application state: nothing outside the
+/// view can observe it, and it must survive the re-render that follows it. It is
+/// also not durable -- reopen the window and today is unmarked again -- which is
+/// exactly the difference between a view's choice and a Spore's data.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ModuleView {
+    /// The id the view last nominated with `module.select`, if any.
+    pub selected: Option<String>,
+}
+
 /// Last known-good renderer-neutral output retained by the Rust host.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RetainedModuleScene {
@@ -496,6 +508,8 @@ pub struct RetainedModuleScene {
     pub scene: Scene,
     pub host_resources: Vec<HostResourceSurface>,
     pub buttons: Vec<ModuleButton>,
+    /// The view's own choice after this render, for the host to hand to the next.
+    pub view: ModuleView,
     /// Intents from one validated activation; never emitted on load/reload.
     pub actions: Vec<ModuleAction>,
 }
@@ -609,6 +623,30 @@ impl LuaModule {
         scene_capabilities: LuaSceneCapabilities,
         limits: LuaSceneLimits,
     ) -> Result<Self> {
+        Self::load_with_view(
+            manifest,
+            source,
+            snapshot,
+            theme,
+            ModuleView::default(),
+            resources,
+            scene_capabilities,
+            limits,
+        )
+    }
+
+    /// Load carrying a view's remembered choice, so a re-render does not erase it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_with_view(
+        manifest: ModuleManifest,
+        source: impl Into<String>,
+        snapshot: ModuleInputSnapshot,
+        theme: ModuleThemeTokens,
+        view: ModuleView,
+        resources: BTreeMap<String, HostResourceRef>,
+        scene_capabilities: LuaSceneCapabilities,
+        limits: LuaSceneLimits,
+    ) -> Result<Self> {
         manifest.validate()?;
         validate_snapshot(&manifest, &snapshot)?;
         validate_resources(&manifest, &resources)?;
@@ -621,6 +659,7 @@ impl LuaModule {
             snapshot: &snapshot,
             theme,
             event: &ModuleEvent::Load,
+            view,
             resources: &resources,
             scene_capabilities: &scene_capabilities,
             limits,
@@ -667,11 +706,41 @@ impl LuaModule {
             snapshot: &snapshot,
             theme,
             event: &event,
+            view: self.retained.view.clone(),
             resources: &self.resources,
             scene_capabilities: &self.scene_capabilities,
             limits: self.limits,
         })?;
         self.snapshot = snapshot;
+        self.theme = theme;
+        self.retained = retained;
+        Ok(&self.retained)
+    }
+
+    /// Re-render for an event that did not change any input.
+    ///
+    /// A click is not new data: the revision cannot advance, because the inputs
+    /// are byte for byte the ones the view already saw. What changed is what the
+    /// person just did, and the view's own memory of it comes along.
+    pub fn update_event(
+        &mut self,
+        theme: ModuleThemeTokens,
+        event: ModuleEvent,
+    ) -> Result<&RetainedModuleScene> {
+        validate_event(&self.manifest, &event)?;
+        let retained = render_module(RenderRequest {
+            manifest: &self.manifest,
+            source: &self.source,
+            generation: self.generation,
+            output_revision: self.retained.output_revision + 1,
+            snapshot: &self.snapshot,
+            theme,
+            event: &event,
+            view: self.retained.view.clone(),
+            resources: &self.resources,
+            scene_capabilities: &self.scene_capabilities,
+            limits: self.limits,
+        })?;
         self.theme = theme;
         self.retained = retained;
         Ok(&self.retained)
@@ -696,6 +765,7 @@ impl LuaModule {
             snapshot: &self.snapshot,
             theme: self.theme,
             event: &ModuleEvent::Reload,
+            view: self.retained.view.clone(),
             resources: &self.resources,
             scene_capabilities: &self.scene_capabilities,
             limits: self.limits,
@@ -716,6 +786,7 @@ struct RenderRequest<'a> {
     snapshot: &'a ModuleInputSnapshot,
     theme: ModuleThemeTokens,
     event: &'a ModuleEvent,
+    view: ModuleView,
     resources: &'a BTreeMap<String, HostResourceRef>,
     scene_capabilities: &'a LuaSceneCapabilities,
     limits: LuaSceneLimits,
@@ -731,6 +802,8 @@ fn render_module(request: RenderRequest<'_>) -> Result<RetainedModuleScene> {
     let resources = request.resources.clone();
     let buttons = Rc::new(RefCell::new(Vec::new()));
     let actions = Rc::new(RefCell::new(Vec::new()));
+    let selection = Rc::new(RefCell::new(request.view.selected.clone()));
+    let setup_selection = Rc::clone(&selection);
     let setup_buttons = buttons.clone();
     let setup_actions = actions.clone();
     let scene = generate_scene_with_setup(
@@ -738,7 +811,16 @@ fn render_module(request: RenderRequest<'_>) -> Result<RetainedModuleScene> {
         request.scene_capabilities,
         request.limits,
         move |lua| {
-            install_module_context(lua, &manifest, &snapshot, request.theme, &event, &resources)?;
+            install_module_context(
+                lua,
+                &manifest,
+                &snapshot,
+                request.theme,
+                &event,
+                &request.view,
+                setup_selection,
+                &resources,
+            )?;
             install_layout_api(lua, request.limits.max_nodes)?;
             install_button_api(lua, &manifest, &event, setup_buttons, setup_actions)?;
             install_host_resource_api(lua, &manifest, &resources, setup_placements)
@@ -768,6 +850,9 @@ fn render_module(request: RenderRequest<'_>) -> Result<RetainedModuleScene> {
         scene,
         host_resources,
         buttons,
+        view: ModuleView {
+            selected: selection.borrow().clone(),
+        },
         actions,
     })
 }
@@ -1012,6 +1097,8 @@ fn install_module_context(
     snapshot: &ModuleInputSnapshot,
     theme: ModuleThemeTokens,
     event: &ModuleEvent,
+    view: &ModuleView,
+    selection: Rc<RefCell<Option<String>>>,
     resources: &BTreeMap<String, HostResourceRef>,
 ) -> Result<()> {
     let module = lua.create_table().map_err(lua_error)?;
@@ -1031,6 +1118,41 @@ fn install_module_context(
         .map_err(lua_error)?;
     module
         .set("event", event_to_lua(lua, event)?)
+        .map_err(lua_error)?;
+    let view_table = lua.create_table().map_err(lua_error)?;
+    if let Some(selected) = &view.selected {
+        view_table
+            .set("selected", selected.as_str())
+            .map_err(lua_error)?;
+    }
+    module.set("view", view_table).map_err(lua_error)?;
+    // A view nominates what the pointer landed on. It is not an action: nothing
+    // leaves the process, and the Spore is never told. It is how a view remembers
+    // its own highlight across the re-render that the click itself caused.
+    module
+        .set(
+            "select",
+            lua.create_function(move |_, id: mlua::Value| {
+                match id {
+                    mlua::Value::Nil => *selection.borrow_mut() = None,
+                    mlua::Value::String(id) => {
+                        let id = id.to_str()?.to_owned();
+                        // A selection is an opaque key the view invented — a date,
+                        // a row id — not a name the host resolves. Bounded and
+                        // printable is the whole contract.
+                        if id.is_empty() || id.len() > 128 || id.chars().any(char::is_control) {
+                            return Err(mlua::Error::external(
+                                "Invalid Canvas Lua view selection",
+                            ));
+                        }
+                        *selection.borrow_mut() = Some(id);
+                    }
+                    _ => return Err(mlua::Error::external("Canvas Lua selection must be a string")),
+                }
+                Ok(())
+            })
+            .map_err(lua_error)?,
+        )
         .map_err(lua_error)?;
     if manifest.capabilities.read_theme {
         module
@@ -2116,6 +2238,84 @@ mod calendar_module_tests {
         )
         .expect("the authored calendar must render");
         module.retained().scene.clone()
+    }
+
+    fn calendar_with(x: f32, y: f32, view: ModuleView) -> RetainedModuleScene {
+        let manifest =
+            ModuleManifest::parse(include_str!("../../../config/modules/calendar-v1.json"))
+                .expect("calendar manifest");
+        let mut module = LuaModule::load_with_view(
+            manifest,
+            include_str!("../../../config/modules/calendar-v1.lua"),
+            ModuleInputSnapshot {
+                revision: 1,
+                now_ms: SEPT_2026,
+                values: BTreeMap::new(),
+            },
+            theme(),
+            view,
+            BTreeMap::new(),
+            LuaSceneCapabilities::default(),
+            LuaSceneLimits::default(),
+        )
+        .expect("the calendar must render");
+        module
+            .update_event(
+                theme(),
+                ModuleEvent::Pointer {
+                    x,
+                    y,
+                    phase: PointerPhase::Press,
+                },
+            )
+            .expect("a click must re-render the view");
+        module.retained().clone()
+    }
+
+    #[test]
+    fn a_click_chooses_a_day_and_marks_it() {
+        // The first cell of a month grid. Exact to the pixel would make this test
+        // a copy of the layout; what matters is that a press lands on *a* day and
+        // that the choice is visible afterwards.
+        let rendered = calendar_with(0.095, 0.2675, ModuleView::default());
+        let selected = rendered
+            .view
+            .selected
+            .clone()
+            .expect("clicking a day must choose it");
+        assert!(
+            rendered.scene.nodes.iter().any(|node| node.id == format!("d{selected}")),
+            "the chosen day must be on the grid"
+        );
+        assert!(
+            rendered
+                .scene
+                .nodes
+                .iter()
+                .any(|node| node.id == format!("s{selected}")
+                    && matches!(node.content, NodeContent::Rect { .. })),
+            "the chosen day must be marked"
+        );
+    }
+
+    #[test]
+    fn a_chosen_day_survives_the_redraw_that_follows() {
+        let first = calendar_with(0.095, 0.2675, ModuleView::default());
+        let selected = first.view.selected.clone().expect("a choice");
+        // A view-local choice is deliberately not an intent: nothing leaves the
+        // process, so the Spore is never told which day is merely highlighted.
+        // A plain redraw, no pointer at all: the memory is the host's to carry,
+        // which is the whole reason it is passed in.
+        let second = calendar_with(0.0, 0.0, first.view.clone());
+        assert_eq!(second.view.selected.as_deref(), Some(selected.as_str()));
+        assert!(
+            second
+                .scene
+                .nodes
+                .iter()
+                .any(|node| node.id == format!("s{selected}")),
+            "the mark must still be there without a new click"
+        );
     }
 
     fn text_node<'a>(scene: &'a Scene, id: &str) -> Option<(&'a str, Option<SemanticInk>)> {

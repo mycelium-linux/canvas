@@ -755,6 +755,9 @@ struct App {
     terminal_config: TerminalConfig,
     /// Bells already acted on per surface, so a redraw is not a second ring.
     terminal_bells: BTreeMap<String, u64>,
+    /// What each module view has chosen for itself. Not application state: it
+    /// is the view's own memory of a click, and it dies with the window.
+    module_views: BTreeMap<String, ::canvas::lua_module::ModuleView>,
     cursor_on: bool,
     document: WorkspaceDocument,
     runtime_revision: u64,
@@ -1311,6 +1314,7 @@ impl App {
             presence_preview: None,
             terminal_config: TerminalConfig::load(),
             terminal_bells: BTreeMap::new(),
+            module_views: BTreeMap::new(),
             cursor_on: true,
             visible_indicator_id: None,
             indicator_started: Instant::now(),
@@ -9066,9 +9070,16 @@ impl App {
         if let Some(bounds) = self.snapshot().surface_bounds.get(surface_id) {
             theme.viewport = [bounds.width as f32, bounds.height as f32];
         }
-        let result = resolve_module_event(module, inputs, theme, now_unix_ms(), Some(event));
+        let view = self.module_views.get(surface_id).cloned().unwrap_or_default();
+        let result = resolve_module_event(module, inputs, theme, now_unix_ms(), Some(event), view);
         match result {
             Ok(retained) => {
+                if let Some(next) = self.module_views.get_mut(surface_id) {
+                    *next = retained.view.clone();
+                } else {
+                    self.module_views
+                        .insert(surface_id.to_owned(), retained.view.clone());
+                }
                 if let Some(ModuleSurface::Rendered { scene, buttons, last_error, .. }) =
                     self.modules.get_mut(surface_id)
                 {
@@ -12725,7 +12736,14 @@ fn resolve_module(
     theme: ::canvas::lua_module::ModuleThemeTokens,
     now_ms: u64,
 ) -> std::result::Result<::canvas::lua_module::RetainedModuleScene, String> {
-    resolve_module_event(name, inputs, theme, now_ms, None)
+    resolve_module_event(
+        name,
+        inputs,
+        theme,
+        now_ms,
+        None,
+        ::canvas::lua_module::ModuleView::default(),
+    )
 }
 
 fn launcher_task(
@@ -12761,6 +12779,7 @@ fn resolve_module_event(
     theme: ::canvas::lua_module::ModuleThemeTokens,
     now_ms: u64,
     event: Option<::canvas::lua_module::ModuleEvent>,
+    view: ::canvas::lua_module::ModuleView,
 ) -> std::result::Result<::canvas::lua_module::RetainedModuleScene, String> {
     use ::canvas::lua_module::{LuaModule, ModuleInputSnapshot, ModuleManifest};
     use ::canvas::lua_scene::{LuaSceneCapabilities, LuaSceneLimits};
@@ -12796,23 +12815,22 @@ fn resolve_module_event(
     // a surface reference has to come from a trusted caller, and a spec written
     // by an agent is not one. A module that asks for one fails loudly here
     // rather than drawing a blank where a video should be.
-    let mut module = LuaModule::load(
+    let mut module = LuaModule::load_with_view(
         manifest,
         source,
         snapshot.clone(),
         theme,
+        view,
         BTreeMap::new(),
         LuaSceneCapabilities::default(),
         LuaSceneLimits::default(),
     )
     .map_err(|error| error.to_string())?;
     if let Some(event) = event {
-        let snapshot = ModuleInputSnapshot {
-            revision: 2,
-            ..snapshot
-        };
+        // No input changed: a click is not new data, so the revision stays where
+        // it is and only the event and the view's memory move.
         module
-            .update(snapshot, theme, event)
+            .update_event(theme, event)
             .map_err(|error| error.to_string())?;
     }
     Ok(module.retained().clone())
