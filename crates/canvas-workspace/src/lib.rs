@@ -917,6 +917,17 @@ pub enum NodeContent {
     Image {
         asset: AssetRef,
     },
+    /// A GPU component the Spore wrote: WGSL plus the floats it reads.
+    ///
+    /// The source is data and the host caches the pipeline by digest, so a new
+    /// visual component is a document edit rather than a compositor rebuild. The
+    /// producer writes a fragment stage against one uniform block; the host
+    /// supplies the vertex stage and the extent.
+    Shader {
+        wgsl: String,
+        #[serde(default)]
+        uniforms: Vec<f32>,
+    },
     Mesh {
         asset: AssetRef,
     },
@@ -1102,6 +1113,16 @@ impl Scene {
                 }
                 NodeContent::Image { asset } | NodeContent::Mesh { asset } => {
                     asset.validate()?;
+                }
+                NodeContent::Shader { wgsl, uniforms } => {
+                    check(
+                        !wgsl.trim().is_empty() && wgsl.len() <= 64 * 1024,
+                        "Scene shader source must be 1-64 KiB of WGSL",
+                    )?;
+                    check(
+                        uniforms.len() <= 20 && uniforms.iter().all(|value| value.is_finite()),
+                        "Scene shader uniforms are at most 20 finite floats",
+                    )?;
                 }
                 NodeContent::Camera { projection } => projection.validate()?,
                 NodeContent::Light { light } => light.validate()?,

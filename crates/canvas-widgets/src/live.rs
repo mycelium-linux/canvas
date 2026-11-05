@@ -38,6 +38,7 @@ mod map_raster;
 mod primitives;
 mod quality;
 mod quant;
+pub mod data_shader;
 pub mod retained_gradient;
 mod signal_scene;
 mod spectral_waterfall;

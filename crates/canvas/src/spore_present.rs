@@ -60,10 +60,12 @@ fn content(content: &soil_scene::Content) -> NodeContent {
                 byte_length: 0,
             },
         },
-        // Shaders are accepted by the schema and not drawn by this build: the
-        // node survives a round trip so a newer host can render it, and the older
-        // one draws its children instead of failing the whole scene.
-        From::Shader(_) => NodeContent::Group,
+        // A GPU component: the source is data, and the host compiles and caches
+        // it. This is what lets a Spore ship a shader without a compositor build.
+        From::Shader(shader) => NodeContent::Shader {
+            wgsl: shader.wgsl.clone(),
+            uniforms: shader.uniforms.clone(),
+        },
     }
 }
 

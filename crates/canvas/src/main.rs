@@ -9949,7 +9949,9 @@ impl App {
                 (!shell_ground || node.id != "ground")
                     && matches!(
                         node.content,
-                        NodeContent::Text { .. } | NodeContent::Rect { .. }
+                        NodeContent::Text { .. }
+                            | NodeContent::Rect { .. }
+                            | NodeContent::Shader { .. }
                     )
             })
             .map(|(index, _)| index)
@@ -10004,6 +10006,17 @@ impl App {
                                 ..Default::default()
                             })
                             .into()
+                    }
+                    NodeContent::Shader { wgsl, uniforms } => {
+                        let width = (scale[0].abs() * viewport.width as f32 / 8.0).max(1.0);
+                        let height = (scale[1].abs() * viewport.height as f32 / 8.0).max(1.0);
+                        container(canvas_widgets::live::data_shader::view(
+                            wgsl.clone(),
+                            uniforms.clone(),
+                        ))
+                        .width(width)
+                        .height(height)
+                        .into()
                     }
                     _ => container(text("")).into(),
                 };
