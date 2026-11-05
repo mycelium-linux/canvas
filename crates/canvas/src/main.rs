@@ -794,6 +794,9 @@ struct App {
     /// The last payload each Spore presented, and the decoded frame when it gave
     /// pixels rather than a scene.
     spores: BTreeMap<String, PresentedSurface>,
+    /// When the last frame callback went out, so `dt` is the host's answer to
+    /// "how long since you last drew" rather than a producer's guess.
+    spore_clock: Option<u64>,
     cursor_on: bool,
     document: WorkspaceDocument,
     runtime_revision: u64,
@@ -1361,6 +1364,7 @@ impl App {
             terminal_bells: BTreeMap::new(),
             module_views: BTreeMap::new(),
             spores: BTreeMap::new(),
+            spore_clock: None,
             cursor_on: true,
             visible_indicator_id: None,
             indicator_started: Instant::now(),
@@ -2310,6 +2314,9 @@ impl App {
                 if jump_forward {
                     self.jump_forward();
                 }
+                // The frame callback: a Spore draws when the compositor can draw,
+                // and is told how long it has been since the last one.
+                self.tick_spore_frames();
                 Task::batch(tasks)
             }
             Message::WindowReady(window) => {
@@ -5154,6 +5161,7 @@ impl App {
                 // A producer asking "is it lagging" deserves numbers, not an
                 // opinion: frames handled, the interval they arrived at, and what
                 // the host spent on each.
+                metrics["spore_dropped"] = serde_json::json!(crate::spore_socket::dropped_frames());
                 metrics["spore_pacing"] = serde_json::json!(self
                     .spore_pacing()
                     .into_iter()
@@ -11138,11 +11146,10 @@ impl App {
                 width,
                 height,
             } => self.open_spore_surface(&surface_id, &title, width, height),
-            SporeEvent::Present {
-                surface_id,
-                present,
-                signature,
-            } => {
+            SporeEvent::PresentAvailable { surface_id } => {
+                let Some((present, signature)) = crate::spore_socket::take(&surface_id) else {
+                    return;
+                };
                 let now = std::time::Instant::now();
                 let previous = self.spores.get(&surface_id);
                 // Same frame twice is not a repaint: nothing has changed, and a
@@ -11192,6 +11199,17 @@ impl App {
                 if !self.decoded.contains_key(&surface_id) {
                     self.open_spore_surface(&surface_id, &surface_id.clone(), 640, 420);
                 }
+                // Ask for the next frame as soon as this one is taken. One
+                // outstanding request is the flow control, so this cannot race
+                // ahead of the compositor -- it just removes a whole tick of
+                // latency from the loop.
+                let now = now_unix_ms();
+                let dt = self
+                    .spore_clock
+                    .replace(now)
+                    .map(|previous| now.saturating_sub(previous))
+                    .unwrap_or(16);
+                crate::spore_socket::request_frame(&surface_id, now, dt);
                 self.bump();
             }
             SporeEvent::Gone { surface_id } => {
@@ -11319,6 +11337,26 @@ impl App {
                 )
             })
             .collect()
+    }
+
+    /// Hand each Spore surface a frame callback, with the host's clock.
+    ///
+    /// The producer draws when it is asked, not on a timer of its own, so the
+    /// two cannot drift into a queue of frames nobody will ever draw.
+    fn tick_spore_frames(&mut self) -> Task<Message> {
+        let now = now_unix_ms();
+        let dt = self
+            .spore_clock
+            .replace(now)
+            .map(|previous| now.saturating_sub(previous))
+            .unwrap_or(0);
+        // Every registered producer is clocked, including one that has not
+        // drawn yet: otherwise the first frame could never be asked for, and a
+        // Spore would sit waiting for a callback that only comes after it draws.
+        for surface_id in crate::spore_socket::surfaces() {
+            crate::spore_socket::request_frame(&surface_id, now, dt);
+        }
+        Task::none()
     }
 
     fn has_live_spore(&self) -> bool {
