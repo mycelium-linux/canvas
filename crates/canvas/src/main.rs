@@ -260,6 +260,13 @@ impl ModuleSurface {
 }
 
 #[derive(Debug, Clone)]
+/// One GPU lease frame after the host copied it into a Canvas-owned image.
+struct GpuFrame {
+    revision: u64,
+    handle: iced::widget::image::Handle,
+}
+
+#[derive(Debug, Clone)]
 /// What a Spore last presented, plus the decoded image when it gave pixels.
 struct PresentedSurface {
     present: soil_scene::Present,
@@ -794,6 +801,9 @@ struct App {
     /// The last payload each Spore presented, and the decoded frame when it gave
     /// pixels rather than a scene.
     spores: BTreeMap<String, PresentedSurface>,
+    /// GPU lease frames by `source_id`. A lease is metadata; the pixels arrive
+    /// separately and are retained here so a repaint does not need the producer.
+    gpu_frames: BTreeMap<String, GpuFrame>,
     cursor_on: bool,
     document: WorkspaceDocument,
     runtime_revision: u64,
@@ -1361,6 +1371,7 @@ impl App {
             terminal_bells: BTreeMap::new(),
             module_views: BTreeMap::new(),
             spores: BTreeMap::new(),
+            gpu_frames: BTreeMap::new(),
             cursor_on: true,
             visible_indicator_id: None,
             indicator_started: Instant::now(),
@@ -10098,12 +10109,9 @@ impl App {
                             .into(),
                         None => space::horizontal().into(),
                     },
-                    soil_scene::Present::GpuLease(lease) => container(text(format!(
-                        "GPU lease {} · {}x{} · revision {}",
-                        lease.source_id, lease.width, lease.height, lease.revision
-                    )))
-                    .center(width)
-                    .into(),
+                    soil_scene::Present::GpuLease(lease) => {
+                        self.gpu_lease_layer(lease, width, height)
+                    }
                 },
                 None => container(text("Spore surface has not presented yet"))
                     .center(width)
@@ -10378,15 +10386,9 @@ impl App {
                                     None => space::horizontal().into(),
                                 }
                             }
-                            soil_scene::Present::GpuLease(lease) => container(
-                                text(format!(
-                                    "GPU lease {} · {}x{} · revision {}",
-                                    lease.source_id, lease.width, lease.height, lease.revision
-                                ))
-                                .size(self.presented_visual_theme().metrics.small),
-                            )
-                            .center(width)
-                            .into(),
+                            soil_scene::Present::GpuLease(lease) => {
+                                self.gpu_lease_layer(lease, width, height)
+                            }
                         },
                         None => container(
                             text("Spore surface has not presented yet")
@@ -11097,6 +11099,38 @@ impl App {
     /// latency is felt directly: every millisecond of poll interval is a
     /// millisecond between a key and its echo.
     /// A Spore opened, presented, or closed a surface.
+    /// A GPU lease, composited as an image layer once its pixels have arrived.
+    /// The lease itself only names a source and revision; Canvas never reads a
+    /// producer path or a native handle.
+    fn gpu_lease_layer<'a>(
+        &self,
+        lease: &soil_scene::GpuLease,
+        width: Length,
+        height: Length,
+    ) -> Element<'a, Message> {
+        if let Some(frame) = self.gpu_frames.get(&lease.source_id) {
+            return image_widget(frame.handle.clone())
+                .content_fit(ContentFit::Contain)
+                .width(width)
+                .height(height)
+                .into();
+        }
+        let visual = self.presented_visual_theme();
+        container(
+            text(format!(
+                "Waiting for GPU lease {} · {}x{} · revision {}",
+                lease.source_id, lease.width, lease.height, lease.revision
+            ))
+            .size(visual.metrics.small)
+            .color(color(visual.palette.text_muted)),
+        )
+        .width(width)
+        .height(height)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .into()
+    }
+
     /// A Spore scene, on a host ground unless it asked to composite.
     ///
     /// Without a ground a window has nothing to show when a frame is late, and a
@@ -11192,6 +11226,31 @@ impl App {
                 if !self.decoded.contains_key(&surface_id) {
                     self.open_spore_surface(&surface_id, &surface_id.clone(), 640, 420);
                 }
+                self.bump();
+            }
+            SporeEvent::GpuFrame {
+                source_id,
+                width,
+                height,
+                revision,
+                rgba,
+            } => {
+                // A late frame must never replace a newer one. This is the same
+                // monotonic-revision rule the lease carries, enforced host-side.
+                if self
+                    .gpu_frames
+                    .get(&source_id)
+                    .is_some_and(|frame| frame.revision >= revision)
+                {
+                    return;
+                }
+                self.gpu_frames.insert(
+                    source_id,
+                    GpuFrame {
+                        revision,
+                        handle: iced::widget::image::Handle::from_rgba(width, height, rgba),
+                    },
+                );
                 self.bump();
             }
             SporeEvent::Gone { surface_id } => {

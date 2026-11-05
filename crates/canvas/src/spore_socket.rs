@@ -13,7 +13,14 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
+use base64::Engine as _;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+
+/// One decoded GPU frame. The socket carries bytes as base64 because the
+/// protocol is line-delimited JSON; the host still owns validation and never
+/// writes a producer-chosen path.
+const MAX_GPU_FRAME_BYTES: usize = 64 * 1024 * 1024;
+const MAX_GPU_FRAME_DIMENSION: u32 = 4096;
 
 /// Something a producer told the host.
 #[derive(Debug, Clone)]
@@ -30,6 +37,14 @@ pub enum SporeEvent {
         /// Digest of the message bytes, taken here so the host never re-encodes
         /// a payload it has already parsed.
         signature: u64,
+    },
+    GpuFrame {
+        /// The lease named by a later or earlier `Present::GpuLease`.
+        source_id: String,
+        width: u32,
+        height: u32,
+        revision: u64,
+        rgba: Vec<u8>,
     },
     Gone {
         surface_id: String,
@@ -168,6 +183,102 @@ fn serve(stream: UnixStream, sender: UnboundedSender<SporeEvent>) {
                         let _ = reply(&mut writer, "error", &error, generation);
                     }
                 }
+            }
+            Some("gpu_frame") => {
+                let source_id = message
+                    .get("source_id")
+                    .and_then(|value| value.as_str())
+                    .filter(|id| safe_id(id));
+                let Some(source_id) = source_id else {
+                    let _ = reply(
+                        &mut writer,
+                        "error",
+                        "gpu_frame source_id must be a safe id",
+                        generation,
+                    );
+                    continue;
+                };
+                let width = message
+                    .get("width")
+                    .and_then(|value| value.as_u64())
+                    .and_then(|value| u32::try_from(value).ok());
+                let height = message
+                    .get("height")
+                    .and_then(|value| value.as_u64())
+                    .and_then(|value| u32::try_from(value).ok());
+                let (Some(width), Some(height)) = (width, height) else {
+                    let _ = reply(
+                        &mut writer,
+                        "error",
+                        "gpu_frame needs integer width and height",
+                        generation,
+                    );
+                    continue;
+                };
+                if width == 0
+                    || height == 0
+                    || width > MAX_GPU_FRAME_DIMENSION
+                    || height > MAX_GPU_FRAME_DIMENSION
+                {
+                    let _ = reply(
+                        &mut writer,
+                        "error",
+                        "gpu_frame extent is outside 1..=4096",
+                        generation,
+                    );
+                    continue;
+                }
+                let Some(encoded) = message.get("rgba").and_then(|value| value.as_str()) else {
+                    let _ = reply(&mut writer, "error", "gpu_frame needs rgba", generation);
+                    continue;
+                };
+                let Some(expected) = (width as usize)
+                    .checked_mul(height as usize)
+                    .and_then(|pixels| pixels.checked_mul(4))
+                else {
+                    let _ = reply(&mut writer, "error", "gpu_frame extent overflows", generation);
+                    continue;
+                };
+                if expected > MAX_GPU_FRAME_BYTES {
+                    let _ = reply(
+                        &mut writer,
+                        "error",
+                        "gpu_frame is over the byte ceiling",
+                        generation,
+                    );
+                    continue;
+                }
+                let Ok(rgba) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+                    let _ = reply(&mut writer, "error", "gpu_frame rgba is not base64", generation);
+                    continue;
+                };
+                if rgba.len() != expected {
+                    let _ = reply(
+                        &mut writer,
+                        "error",
+                        "gpu_frame rgba length does not match its extent",
+                        generation,
+                    );
+                    continue;
+                }
+                let revision = message
+                    .get("revision")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0);
+                if sender
+                    .send(SporeEvent::GpuFrame {
+                        source_id: source_id.to_owned(),
+                        width,
+                        height,
+                        revision,
+                        rgba,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                generation = generation.saturating_add(1);
+                let _ = reply(&mut writer, "state", "ok", generation);
             }
             Some("close") => {
                 if let Some(id) = surface.take() {
