@@ -4,27 +4,72 @@ pub(crate) const FOCUS_EMPHASIS_DURATION: Duration = Duration::from_millis(1_400
 
 pub(crate) fn key_to_bytes(event: &iced::keyboard::Event) -> Vec<u8> {
     use iced::keyboard::Event;
-    match event {
-        Event::KeyPressed { text, key, .. } => {
-            if let Some(text) = text {
-                return text.to_string().into_bytes();
-            }
-            use iced::keyboard::key::Named;
-            match key {
-                iced::keyboard::Key::Named(Named::Enter) => b"\r".to_vec(),
-                iced::keyboard::Key::Named(Named::Backspace) => b"\x7f".to_vec(),
-                iced::keyboard::Key::Named(Named::Tab) => b"\t".to_vec(),
-                iced::keyboard::Key::Named(Named::ArrowUp) => b"\x1b[A".to_vec(),
-                iced::keyboard::Key::Named(Named::ArrowDown) => b"\x1b[B".to_vec(),
-                iced::keyboard::Key::Named(Named::ArrowRight) => b"\x1b[C".to_vec(),
-                iced::keyboard::Key::Named(Named::ArrowLeft) => b"\x1b[D".to_vec(),
-                iced::keyboard::Key::Named(Named::Escape) => b"\x1b".to_vec(),
-                iced::keyboard::Key::Named(Named::Delete) => b"\x1b[3~".to_vec(),
-                _ => Vec::new(),
+    let Event::KeyPressed {
+        text,
+        key,
+        modifiers,
+        ..
+    } = event
+    else {
+        return Vec::new();
+    };
+
+    // Control chords first. They are not text: iced reports `text: None` for
+    // Ctrl-L, so a mapper that only looks at text silently drops every one of
+    // them — which is why clear-screen and Ctrl-C did nothing.
+    if modifiers.control() {
+        if let iced::keyboard::Key::Character(character) = key {
+            if let Some(byte) = control_byte(character.as_str()) {
+                return vec![byte];
             }
         }
-        _ => Vec::new(),
     }
+
+    let mut bytes = if let Some(text) = text
+        && !text.is_empty()
+    {
+        text.as_bytes().to_vec()
+    } else {
+        use iced::keyboard::key::Named;
+        match key {
+            iced::keyboard::Key::Named(Named::Enter) => b"\r".to_vec(),
+            iced::keyboard::Key::Named(Named::Backspace) => b"\x7f".to_vec(),
+            iced::keyboard::Key::Named(Named::Tab) => b"\t".to_vec(),
+            iced::keyboard::Key::Named(Named::ArrowUp) => b"\x1b[A".to_vec(),
+            iced::keyboard::Key::Named(Named::ArrowDown) => b"\x1b[B".to_vec(),
+            iced::keyboard::Key::Named(Named::ArrowRight) => b"\x1b[C".to_vec(),
+            iced::keyboard::Key::Named(Named::ArrowLeft) => b"\x1b[D".to_vec(),
+            iced::keyboard::Key::Named(Named::Home) => b"\x1b[H".to_vec(),
+            iced::keyboard::Key::Named(Named::End) => b"\x1b[F".to_vec(),
+            iced::keyboard::Key::Named(Named::PageUp) => b"\x1b[5~".to_vec(),
+            iced::keyboard::Key::Named(Named::PageDown) => b"\x1b[6~".to_vec(),
+            iced::keyboard::Key::Named(Named::Escape) => b"\x1b".to_vec(),
+            iced::keyboard::Key::Named(Named::Delete) => b"\x1b[3~".to_vec(),
+            _ => Vec::new(),
+        }
+    };
+    // Alt is the escape prefix; without this every meta-binding is dead.
+    if modifiers.alt() && !bytes.is_empty() && !bytes.starts_with(b"\x1b") {
+        bytes.insert(0, 0x1b);
+    }
+    bytes
+}
+
+/// Ctrl-A..Ctrl-Z are 1..26, and the punctuation chords follow the same table
+/// the terminal has used since the 1970s.
+fn control_byte(character: &str) -> Option<u8> {
+    let character = character.chars().next()?;
+    let byte = match character.to_ascii_lowercase() {
+        'a'..='z' => (character.to_ascii_lowercase() as u8) - b'a' + 1,
+        '@' => 0,
+        '[' => 27,
+        '\\' => 28,
+        ']' => 29,
+        '^' => 30,
+        '_' | '?' => 31,
+        _ => return None,
+    };
+    Some(byte)
 }
 
 pub(crate) fn browser_key_event(

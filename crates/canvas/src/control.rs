@@ -285,6 +285,10 @@ pub enum Command {
         surface_id: String,
         target_id: String,
     },
+    /// Re-resolve one authored module without reloading its workspace.
+    ReloadModule {
+        surface_id: String,
+    },
 }
 
 /// Public project metadata resolved by an authenticated catalog owner.
@@ -844,6 +848,9 @@ pub enum Receipt {
         surface_id: String,
         target_id: String,
     },
+    ModuleReloaded {
+        surface_id: String,
+    },
 }
 
 /// What a person is actually looking at once a mutation has landed.
@@ -1097,6 +1104,7 @@ impl ControlRequest {
             }
             Command::CloseSurface { surface_id }
             | Command::SurfaceScene { surface_id }
+            | Command::ReloadModule { surface_id }
             | Command::Navigate { surface_id, .. }
             | Command::PatchView { surface_id, .. } => {
                 if !identifier(surface_id) {
@@ -2080,6 +2088,9 @@ pub mod text {
                         surface_id,
                         target_id,
                     } => format!("surface={surface_id} activated={target_id}"),
+                    Receipt::ModuleReloaded { surface_id } => {
+                        format!("module reloaded={surface_id}")
+                    }
                 };
                 format!("OK rev={} {}", reply.revision, detail)
             }

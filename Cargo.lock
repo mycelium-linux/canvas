@@ -785,7 +785,6 @@ dependencies = [
  "tokio",
  "toml",
  "wasm-bindgen",
- "wasm-bindgen-futures",
  "web-sys",
 ]
 

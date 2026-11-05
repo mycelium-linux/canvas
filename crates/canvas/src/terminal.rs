@@ -7,11 +7,28 @@ pub fn spawn_terminal(shell: &str) -> Result<(i32, i32, u32), String> {
     // interactive program and one that thinks it is talking to a file: a shell on
     // pipes gets no prompt, no echo, and no job control. This is the smallest way
     // to get a real terminal without a pty abstraction in this crate.
-    let mut child = Command::new("/usr/bin/script")
+    let mut child = Command::new("/usr/bin/script");
+    // A GUI app inherits no terminal environment. Without TERM every curses
+    // program refuses to start, and the shell's own line editor degrades; the
+    // surface looks broken for a reason that has nothing to do with the surface.
+    let mut child = child
+        .env("TERM", "xterm-256color")
+        .env("COLORTERM", "truecolor")
+        .env("TERM_PROGRAM", "canvas")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .args(["-q", "/dev/null", shell])
+        // Wide on purpose: the pty's size is fixed for the life of the process
+        // (there is no descriptor here to ioctl), and a shell that thinks it has
+        // 80 columns wraps its prompt at 80 even when the surface is wider. A
+        // generous width lets the *emulator's* grid decide where lines break.
+        .args([
+            "-q",
+            "/dev/null",
+            "/bin/sh",
+            "-c",
+            &format!("stty cols 200 rows 50 2>/dev/null; exec {shell}"),
+        ])
         .spawn()
         .map_err(|e| format!("spawn {shell} failed: {e}"))?;
 

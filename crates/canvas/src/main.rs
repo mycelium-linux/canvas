@@ -103,6 +103,14 @@ const SURFACE_CONTROL_INSET: f64 = 4.0;
 // Generous on purpose: an edge you have to hit exactly is an edge people give
 // up on. The visual border stays thin; only the target grew.
 const SURFACE_RESIZE_HANDLE_SIZE: f64 = 14.0;
+
+/// Terminal cell metrics. These are the numbers the grid is *sized* by, so they
+/// have to agree with what the renderer draws with — a mismatch shows up as
+/// wrapped lines and an empty half-screen.
+const TERMINAL_FONT_SIZE: f32 = 13.0;
+const TERMINAL_CELL_WIDTH: f32 = 7.8;
+const TERMINAL_LINE_HEIGHT: f32 = 15.6;
+const TERMINAL_PADDING: f32 = 8.0;
 const CANVAS_TOGGLE_KEYS: &str = "Ctrl-Option-C";
 const SNAP_LAYOUT_KEYS: &str = "Ctrl-Option-L";
 const FIT_LAYOUT_KEYS: &str = "Ctrl-Option-F";
@@ -6603,6 +6611,21 @@ impl App {
                 );
                 Task::none()
             }
+            Command::ReloadModule { surface_id } => {
+                #[cfg(feature = "lua-scenes")]
+                {
+                    self.modules.remove(&surface_id);
+                    self.refresh_modules();
+                    self.bump();
+                }
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::ModuleReloaded { surface_id },
+                    },
+                );
+                Task::none()
+            }
             Command::SurfaceActivate {
                 surface_id,
                 target_id,
@@ -6631,7 +6654,15 @@ impl App {
                 };
                 let resolved_region = surface_id
                     .as_ref()
-                    .and_then(|id| self.snapshot().surface_bounds.get(id).copied());
+                    .and_then(|id| self.snapshot().surface_bounds.get(id).copied())
+                    // Surface bounds are desktop coordinates; the window
+                    // screenshot is window-local. Crop the same rectangle the
+                    // user sees, not a rectangle shifted by the Canvas origin.
+                    .map(|mut region| {
+                        region.x -= self.frame.x;
+                        region.y -= self.frame.y;
+                        region
+                    });
                 let capture_region = region.or(resolved_region);
                 let mut pending = Some(pending);
                 iced::window::screenshot(window_id).map(move |screenshot| {
@@ -9311,7 +9342,7 @@ impl App {
             lines.push(
                 iced::widget::rich_text(spans)
                     .font(iced::Font::MONOSPACE)
-                    .size(13)
+                    .size(TERMINAL_FONT_SIZE)
                     .width(Length::Fill)
                     .into(),
             );
@@ -9519,6 +9550,21 @@ impl App {
             .height(height)
             .into(),
             ContentSource::Terminal { host, .. } => {
+                // The grid is a function of the window, not of a number chosen
+                // at spawn time. A 120-column grid drawn in a 60-column window
+                // wraps every line at the widget's width, which is what made the
+                // surface look like it had the wrong dimensions: it did.
+                let cell_w = TERMINAL_CELL_WIDTH;
+                let cell_h = TERMINAL_LINE_HEIGHT;
+                let cols = ((viewport.width as f32 - TERMINAL_PADDING * 2.0)
+                    / cell_w)
+                    .floor()
+                    .max(20.0) as u16;
+                let rows = ((viewport.height as f32 - TERMINAL_PADDING * 2.0)
+                    / cell_h)
+                    .floor()
+                    .max(4.0) as u16;
+                host.resize(cols, rows);
                 let snapshot = host.snapshot();
                 self.terminal_layer(&snapshot, width, height)
             }
