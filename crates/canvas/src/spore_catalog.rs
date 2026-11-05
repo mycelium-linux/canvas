@@ -42,10 +42,20 @@ pub fn roots() -> Vec<PathBuf> {
     if let Some(root) = std::env::var_os("CANVAS_SPORE_ROOT") {
         roots.push(PathBuf::from(root));
     }
+    if let Some(data) = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from) {
+        roots.push(data.join("spores"));
+    }
     if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home);
+        // Where spores are installed, in the order a person would look: the
+        // runtime directory a package manager writes, then the XDG data dir, then
+        // the source trees a developer runs from. A launcher that only knows about
+        // installed packages cannot show the one being worked on, and one that
+        // only knows about source trees hides everything installed.
+        roots.push(home.join("Library/Application Support/Dock/canvas/spores"));
+        roots.push(home.join(".local/share/spores"));
+        roots.push(home.join("src/fungOS/spores/spores"));
         roots.push(home.join("src/fungOS/spores-unibus/spores"));
-        roots.push(home.join(".local/share/canvas/spores"));
     }
     roots.push(PathBuf::from("spores"));
     roots

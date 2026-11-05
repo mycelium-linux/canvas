@@ -4971,6 +4971,34 @@ impl App {
                         self.focus_shell_surface(&id);
                         Task::none()
                     }
+                    Choice::Spore { module } => {
+                        let surface_id = format!("spore-{module}");
+                        let spec_path = match write_spore_spec(&surface_id, &module) {
+                            Ok(path) => path,
+                            Err(message) => {
+                                self.fail(pending, Failure::invalid(message));
+                                return Task::none();
+                            }
+                        };
+                        // Re-enter the widget path instead of copying it: a
+                        // launcher launch and an explicit open_widget must produce
+                        // the same surface, or the launcher becomes a second
+                        // renderer with its own half of the rules.
+                        let request = ControlRequest {
+                            schema_version: pending.request.schema_version,
+                            request_id: pending.request.request_id.clone(),
+                            expected_revision: pending.request.expected_revision,
+                            actor: pending.request.actor.clone(),
+                            command: ::canvas::control::Command::OpenWidget {
+                                surface_id,
+                                spec_path: spec_path.into(),
+                            },
+                        };
+                        return self.execute(Pending {
+                            request,
+                            reply: pending.reply,
+                        });
+                    }
                     Choice::Application { path } => {
                         let (send, receive) = iced::futures::channel::oneshot::channel();
                         std::thread::spawn(move || {
@@ -6952,6 +6980,27 @@ impl App {
                 },
                 available,
                 choice: ::canvas::shell_launcher::Choice::Workspace { id: app.workspace },
+            });
+        }
+        // A composed Lua UI is an app: the Spore's own entry in the launcher,
+        // without a workspace to install first. These live in the runtime
+        // modules directory, which is where composition writes them.
+        for (module, title) in composed_modules() {
+            if catalog
+                .entries
+                .iter()
+                .any(|entry| entry.id == format!("spore:{module}"))
+            {
+                continue;
+            }
+            catalog.entries.push(::canvas::shell_launcher::Entry {
+                id: format!("spore:{module}"),
+                title,
+                detail: "SPORE · Lua UI".into(),
+                available: true,
+                choice: ::canvas::shell_launcher::Choice::Spore {
+                    module: module.clone(),
+                },
             });
         }
         catalog.entries.sort_by(|a, b| {
@@ -12868,6 +12917,65 @@ fn resolve_module(
         None,
         ::canvas::lua_module::ModuleView::default(),
     )
+}
+
+/// Every composed Lua UI in the runtime modules directory.
+///
+/// Title from the manifest, because the file name is an implementation detail
+/// and the launcher is the one place a person reads names.
+fn composed_modules() -> Vec<(String, String)> {
+    let Some(root) = ::canvas::runtime_config::root() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(root.join("modules")) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(source) = std::fs::read_to_string(&path).ok() else {
+            continue;
+        };
+        let Ok(manifest) = ::canvas::lua_module::ModuleManifest::parse(&source) else {
+            continue;
+        };
+        // A module with required inputs is not launchable by a person: there is
+        // nothing to type into it from the launcher, and a surface that can never
+        // resolve is worse than an entry that is honest about it.
+        if manifest.inputs.iter().any(|input| input.required) {
+            continue;
+        }
+        if !manifest.capabilities.write_scene {
+            continue;
+        }
+        found.push((manifest.id.clone(), manifest.title.clone()));
+    }
+    found.sort();
+    found
+}
+
+/// Write the launch spec for a composed UI, returning its path.
+///
+/// The spec goes through the same sanctioned directory as any other widget, so a
+/// launcher entry cannot name a path of its own choosing.
+fn write_spore_spec(surface_id: &str, module: &str) -> Result<String, String> {
+    let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
+    let dir = PathBuf::from(home).join(".canvas/widgets");
+    std::fs::create_dir_all(&dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
+    let path = dir.join(format!("{surface_id}.json"));
+    let spec = serde_json::json!({
+        "schema_version": 2,
+        "id": surface_id,
+        "kind": "module",
+        "module": module,
+        "inputs": {},
+    });
+    std::fs::write(&path, serde_json::to_vec_pretty(&spec).map_err(|error| error.to_string())?)
+        .map_err(|error| format!("write {}: {error}", path.display()))?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 fn launcher_task(

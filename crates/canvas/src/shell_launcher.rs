@@ -22,6 +22,15 @@ fn generation() -> u64 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Choice {
+    /// A composed Lua UI that can be opened as a surface in this workspace.
+    ///
+    /// This is how a Spore's UI is launched before the spore host exists: the
+    /// package's Lua is already composed for Canvas, so launching it needs no
+    /// interpreter of its own. The module name is the whole reference -- a path
+    /// would let a launcher entry steer the host at arbitrary files.
+    Spore {
+        module: String,
+    },
     Workspace { id: String },
     Surface { id: String },
     Application { path: PathBuf },
@@ -50,7 +59,7 @@ impl Scope {
             || matches!(
                 (self, choice),
                 (Self::Workspaces, Choice::Workspace { .. })
-                    | (Self::Canvas, Choice::Surface { .. })
+                    | (Self::Canvas, Choice::Surface { .. } | Choice::Spore { .. })
                     | (Self::Native, Choice::Application { .. })
             )
     }
