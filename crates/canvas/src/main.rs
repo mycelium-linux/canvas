@@ -495,6 +495,7 @@ enum Message {
     /// Bytes that arrived from a terminal's pty. Delivered by a subscription, so
     /// the emulator sees output as it happens rather than on the next tick.
     TerminalChunk(String, Vec<u8>),
+    TerminalBlink,
     LauncherReply {
         generation: u64,
         target_id: String,
@@ -748,6 +749,13 @@ fn surface_title_visible(mode: SurfaceTitleMode, focused: bool) -> bool {
 
 struct App {
     catalog: Catalog,
+    /// How a terminal behaves in this Spore: cursor blink, and what a bell does.
+    /// Read from Lua, because how loud a bell is, or whether it exists at all, is
+    /// a property of the application rather than of the compositor.
+    terminal_config: TerminalConfig,
+    /// Bells already acted on per surface, so a redraw is not a second ring.
+    terminal_bells: BTreeMap<String, u64>,
+    cursor_on: bool,
     document: WorkspaceDocument,
     runtime_revision: u64,
     /// Last list written, so an unchanged set costs nothing.
@@ -1301,6 +1309,9 @@ impl App {
             presence: None,
             presence_received: None,
             presence_preview: None,
+            terminal_config: TerminalConfig::load(),
+            terminal_bells: BTreeMap::new(),
+            cursor_on: true,
             visible_indicator_id: None,
             indicator_started: Instant::now(),
             indicator_dismissing: None,
@@ -1758,10 +1769,35 @@ impl App {
     fn update_inner(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::TerminalChunk(surface_id, bytes) => {
+                let mut ring = false;
                 if let Some(surface) = self.decoded.get_mut(&surface_id)
-                    && let ContentSource::Terminal { host, .. } = &mut surface.source
+                    && let ContentSource::Terminal { host, pty, .. } = &mut surface.source
                 {
                     host.write(&bytes);
+                    // Some of what the program sends is a question — a device
+                    // status report, a mode query. libghostty-vt answers it, and
+                    // the answer has to go back down the pty or the program waits
+                    // for a reply that never comes.
+                    let answers = host.drain_responses();
+                    if !answers.is_empty() {
+                        pty.write(&answers);
+                    }
+                    let bells = host.snapshot().bells;
+                    let seen = self.terminal_bells.entry(surface_id.clone()).or_insert(0);
+                    if bells > *seen {
+                        *seen = bells;
+                        ring = true;
+                    }
+                    self.bump();
+                }
+                if ring {
+                    self.terminal_config.bell.ring();
+                }
+                Task::none()
+            }
+            Message::TerminalBlink => {
+                self.cursor_on = !self.cursor_on;
+                if self.has_terminal() {
                     self.bump();
                 }
                 Task::none()
@@ -9328,6 +9364,7 @@ impl App {
             background: color(palette.background),
             default_ink: color(palette.text),
             cursor_ink: color(palette.background),
+            cursor_on: self.cursor_on,
         })
         .width(width)
         .height(height)
@@ -13777,11 +13814,108 @@ fn terminal_chunks_stream() -> impl iced::futures::Stream<Item = Message> {
 /// the widget wrapped there instead of at the grid's edge. A canvas draws exactly
 /// the cells that fit, at the positions the emulator chose — and it can draw the
 /// cursor, which a text widget has no way to represent.
+/// Cursor and bell behaviour, read from the terminal Spore's Lua config.
+#[derive(Debug, Clone)]
+struct TerminalConfig {
+    cursor: CursorConfig,
+    bell: BellConfig,
+}
+
+#[derive(Debug, Clone)]
+struct CursorConfig {
+    blink: bool,
+    period_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct BellConfig {
+    enabled: bool,
+    sound: String,
+    volume: f32,
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            cursor: CursorConfig {
+                blink: true,
+                period_ms: 530,
+            },
+            bell: BellConfig {
+                enabled: true,
+                sound: "/System/Library/Sounds/Glass.aiff".to_owned(),
+                volume: 0.35,
+            },
+        }
+    }
+}
+
+impl TerminalConfig {
+    /// A missing or broken config is not an error: a terminal with the default
+    /// cursor and a quiet bell is still a terminal.
+    fn load() -> Self {
+        let mut config = Self::default();
+        let candidate = std::env::var_os("HOME").map(|home| {
+            std::path::PathBuf::from(home)
+                .join("Library/Application Support/Dock/canvas/modules/terminal-v1.lua")
+        });
+        let source = candidate
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .unwrap_or_else(|| {
+                include_str!("../../../config/modules/terminal-v1.lua").to_owned()
+            });
+        let lua = mlua::Lua::new();
+        let table: mlua::Table = match lua.load(&source).eval() {
+            Ok(table) => table,
+            Err(error) => {
+                eprintln!("terminal config: {error}");
+                return config;
+            }
+        };
+        if let Ok(cursor) = table.get::<mlua::Table>("cursor") {
+            config.cursor.blink = cursor.get("blink").unwrap_or(config.cursor.blink);
+            config.cursor.period_ms = cursor
+                .get::<u64>("period_ms")
+                .ok()
+                .filter(|ms| *ms >= 100)
+                .unwrap_or(config.cursor.period_ms);
+        }
+        if let Ok(bell) = table.get::<mlua::Table>("bell") {
+            config.bell.enabled = bell.get("enabled").unwrap_or(config.bell.enabled);
+            config.bell.sound = bell.get("sound").unwrap_or(config.bell.sound);
+            config.bell.volume = bell.get::<f32>("volume").unwrap_or(config.bell.volume);
+        }
+        config
+    }
+}
+
+impl BellConfig {
+    /// Ring the bell through the platform's own sound player.
+    ///
+    /// Not a crate: a bell is one short file and the system already knows how to
+    /// play it, and a detach-and-forget process cannot stall a frame.
+    fn ring(&self) {
+        if !self.enabled || self.sound.is_empty() {
+            return;
+        }
+        let mut command = std::process::Command::new("afplay");
+        command
+            .arg("-v")
+            .arg(format!("{:.2}", self.volume.clamp(0.0, 1.0)))
+            .arg(&self.sound)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let _ = command.spawn();
+    }
+}
+
 struct TerminalGrid {
     snapshot: std::sync::Arc<soil_vt::Snapshot>,
     background: Color,
     default_ink: Color,
     cursor_ink: Color,
+    cursor_on: bool,
 }
 
 impl iced::widget::canvas::Program<Message> for TerminalGrid {
@@ -13865,7 +13999,7 @@ impl iced::widget::canvas::Program<Message> for TerminalGrid {
         // The cursor: a filled block with the glyph punched back out, which is
         // how every terminal shows where typing goes. A text grid without one
         // looks like output, not an editor.
-        if let Some((cx, cy)) = self.snapshot.cursor {
+        if self.cursor_on && let Some((cx, cy)) = self.snapshot.cursor {
             if cx < cols && cy < rows {
                 let position = iced::Point::new(f32::from(cx) * cell_w, f32::from(cy) * cell_h);
                 let size = iced::Size::new(cell_w, cell_h);
@@ -13992,6 +14126,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .subscription(|app| {
         let terminal = iced::Subscription::run(terminal_chunks_stream);
+        // One timer, only while a terminal is on screen, and it does nothing
+        // except flip a bool: a blink is not worth a redraw when nothing blinks.
+        let blink = if app.has_terminal() && app.terminal_config.cursor.blink {
+            iced::time::every(std::time::Duration::from_millis(
+                app.terminal_config.cursor.period_ms,
+            ))
+            .map(|_| Message::TerminalBlink)
+        } else {
+            iced::Subscription::none()
+        };
 
         let animated = app.visible_indicator_id.is_some()
             || app.indicator_dismissing.is_some()
