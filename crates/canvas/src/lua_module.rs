@@ -12,7 +12,9 @@ use super::{
     visible,
 };
 use canvas_core::{Accent, ProjectTheme, ThemeMode, VisualTheme};
-use mlua::{Lua, LuaSerdeExt, Table};
+use iced::advanced::graphics::text::{self as iced_text, cosmic_text};
+use mlua::{Lua, LuaSerdeExt, Table, Value};
+use soil_layout::{Node as LayoutNode, TextMeasurer, TextStyle};
 use serde::{Deserialize, Serialize};
 use std::{
     cell::RefCell,
@@ -157,6 +159,9 @@ pub struct ModuleButton {
     pub height: f32,
     pub enabled: bool,
     pub appearance: ModuleButtonAppearance,
+    /// Local controls re-render this module with an activation event without
+    /// publishing an Unibus command. Use them for selection and view state.
+    pub local: bool,
     pub icon: Option<canvas_widgets::ShellIcon>,
     pub icon_size: f32,
     pub icon_caption: bool,
@@ -169,6 +174,8 @@ pub enum ModuleButtonAppearance {
     #[default]
     Standard,
     Quiet,
+    /// An invisible local hit target over retained scene content.
+    Hit,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -697,6 +704,7 @@ fn render_module(request: RenderRequest<'_>) -> Result<RetainedModuleScene> {
         request.limits,
         move |lua| {
             install_module_context(lua, &manifest, &snapshot, request.theme, &event, &resources)?;
+            install_layout_api(lua, request.limits.max_nodes)?;
             install_button_api(lua, &manifest, &event, setup_buttons, setup_actions)?;
             install_host_resource_api(lua, &manifest, &resources, setup_placements)
         },
@@ -729,6 +737,92 @@ fn render_module(request: RenderRequest<'_>) -> Result<RetainedModuleScene> {
     })
 }
 
+struct CanvasTextMeasurer;
+
+impl TextMeasurer for CanvasTextMeasurer {
+    fn measure(
+        &mut self,
+        text: &str,
+        style: &TextStyle,
+        max_width: Option<f32>,
+    ) -> soil_layout::Size {
+        let mut font_system = iced_text::font_system()
+            .write()
+            .expect("Canvas text font system lock");
+        let mut buffer = cosmic_text::Buffer::new(
+            font_system.raw(),
+            cosmic_text::Metrics::new(style.size, style.line_height),
+        );
+        let width = max_width.unwrap_or(1_000_000.0).max(0.0);
+        buffer.set_size(font_system.raw(), Some(width), Some(1_000_000.0));
+        buffer.set_wrap(
+            font_system.raw(),
+            if style.wrap && max_width.is_some() {
+                cosmic_text::Wrap::WordOrGlyph
+            } else {
+                cosmic_text::Wrap::None
+            },
+        );
+        buffer.set_text(
+            font_system.raw(),
+            text,
+            &iced_text::to_attributes(iced::Font::default()),
+            cosmic_text::Shaping::Advanced,
+            None,
+        );
+        let (size, _) = iced_text::measure(&buffer);
+        soil_layout::Size::new(size.width, size.height)
+    }
+}
+
+fn layout_node_count(node: &LayoutNode) -> usize {
+    1 + node.children.iter().map(layout_node_count).sum::<usize>()
+}
+
+fn install_layout_api(lua: &Lua, max_nodes: usize) -> Result<()> {
+    let canvas: Table = lua.globals().get("canvas").map_err(lua_error)?;
+    canvas
+        .set(
+            "measure_text",
+            lua.create_function(move |lua, (text, style): (String, Option<Table>)| {
+                if text.len() > 16_384 {
+                    return Err(mlua::Error::external("Canvas text exceeds 16 KiB"));
+                }
+                let style: TextStyle = match style {
+                    Some(style) => lua.from_value(Value::Table(style))?,
+                    None => TextStyle::default(),
+                };
+                let size = CanvasTextMeasurer.measure(&text, &style, None);
+                lua.to_value(&size)
+            })
+            .map_err(lua_error)?,
+        )
+        .map_err(lua_error)?;
+
+    canvas
+        .set(
+            "layout",
+            lua.create_function(move |lua, (tree, width, height): (Table, f32, f32)| {
+                let node: LayoutNode = lua.from_value(Value::Table(tree))?;
+                let count = layout_node_count(&node);
+                if count > max_nodes.max(1) {
+                    return Err(mlua::Error::external(format!(
+                        "Canvas layout tree exceeds {max_nodes} nodes"
+                    )));
+                }
+                let result = soil_layout::solve(
+                    &node,
+                    soil_layout::Size::new(width, height),
+                    &mut CanvasTextMeasurer,
+                )
+                .map_err(mlua::Error::external)?;
+                lua.to_value(&result)
+            })
+            .map_err(lua_error)?,
+        )
+        .map_err(lua_error)
+}
+
 fn install_button_api(
     lua: &Lua,
     manifest: &ModuleManifest,
@@ -759,6 +853,7 @@ fn install_button_api(
                         "height",
                         "enabled",
                         "appearance",
+                        "local",
                         "icon",
                         "icon_size",
                         "icon_caption",
@@ -766,11 +861,18 @@ fn install_button_api(
                 )?;
                 let id = required_string(&spec, "id")?;
                 let label = required_string(&spec, "label")?;
-                let action_id = required_string(&spec, "action")?;
-                let grant = grants
-                    .iter()
-                    .find(|grant| grant.id == action_id)
-                    .ok_or_else(|| mlua::Error::external("undeclared module action"))?;
+                let local = spec.get::<Option<bool>>("local")?.unwrap_or(false);
+                let action_id = spec.get::<Option<String>>("action")?;
+                let grant = match action_id.as_deref() {
+                    Some(action_id) => Some(
+                        grants
+                            .iter()
+                            .find(|grant| grant.id == action_id)
+                            .ok_or_else(|| mlua::Error::external("undeclared module action"))?,
+                    ),
+                    None if local => None,
+                    None => return Err(mlua::Error::external("module button needs an action")),
+                };
                 let button = ModuleButton {
                     icon: spec
                         .get::<Option<String>>("icon")?
@@ -791,8 +893,10 @@ fn install_button_api(
                     appearance: match spec.get::<Option<String>>("appearance")?.as_deref() {
                         None | Some("standard") => ModuleButtonAppearance::Standard,
                         Some("quiet") => ModuleButtonAppearance::Quiet,
+                        Some("hit") => ModuleButtonAppearance::Hit,
                         _ => return Err(mlua::Error::external("unknown module button appearance")),
                     },
+                    local,
                 };
                 if !identifier(&button.id)
                     || !visible(&button.label)
@@ -809,9 +913,10 @@ fn install_button_api(
                     || !(-4.0..=4.0).contains(&button.x)
                     || !(-4.0..=4.0).contains(&button.y)
                 {
-                    return Err(mlua::Error::external(
-                        "invalid module button geometry or label",
-                    ));
+                    return Err(mlua::Error::external(format!(
+                        "invalid module button geometry or label: id={:?} label={:?} x={} y={} w={} h={}",
+                        button.id, button.label, button.x, button.y, button.width, button.height
+                    )));
                 }
                 let body: serde_json::Value = lua.from_value(spec.get("body")?)?;
                 if !body.is_object()
@@ -826,13 +931,16 @@ fn install_button_api(
                     ));
                 }
                 let mut retained = buttons.borrow_mut();
-                if retained.len() >= 16 || retained.iter().any(|existing| existing.id == button.id)
+                if retained.len() >= 64 || retained.iter().any(|existing| existing.id == button.id)
                 {
                     return Err(mlua::Error::external(
                         "duplicate or excessive module buttons",
                     ));
                 }
-                if button.enabled && target.as_deref() == Some(button.id.as_str()) {
+                if let Some(grant) = grant
+                    && button.enabled
+                    && target.as_deref() == Some(button.id.as_str())
+                {
                     actions.borrow_mut().push(ModuleAction {
                         destination: grant.destination.clone(),
                         kind: grant.kind.clone(),
@@ -844,7 +952,23 @@ fn install_button_api(
             })
             .map_err(lua_error)?,
         )
-        .map_err(lua_error)
+        .map_err(lua_error)?;
+
+    lua.load(
+        r#"
+widget.hit = function(spec)
+  spec["local"] = true
+  spec.appearance = "hit"
+  spec.label = spec.label or " "
+  spec.enabled = spec.enabled ~= false
+  spec.body = spec.body or { ["local"] = true }
+  return widget.button(spec)
+end
+"#,
+    )
+    .set_name("canvas-widget-hit")
+    .exec()
+    .map_err(lua_error)
 }
 
 fn install_module_context(
@@ -2106,6 +2230,58 @@ mod calendar_module_tests {
         assert!(
             scene.nodes.iter().all(|node| !node.id.starts_with("e")),
             "no event line may be drawn that the payload did not send"
+        );
+    }
+
+    #[test]
+    fn host_layout_measures_text_and_fills_the_viewport() {
+        let manifest = ModuleManifest::parse(
+            r#"{
+              "schema_version":1,
+              "id":"layout-test",
+              "title":"Layout test",
+              "capabilities":{"write_scene":true,"read_inputs":[],"read_theme":true}
+            }"#,
+        )
+        .unwrap();
+        let source = r#"
+local laid = canvas.layout({
+  id = "root",
+  kind = "container",
+  layout = {
+    padding = { top = 10, right = 10, bottom = 10, left = 10 },
+    gap = 8,
+    direction = "column",
+  },
+  children = {
+    { id = "title", kind = "text", layout = {}, text = "Hello layout", style = { size = 16, line_height = 22, wrap = true } },
+    { id = "body", kind = "text", layout = {}, text = "one two three four five six seven eight nine ten", style = { size = 14, line_height = 20, wrap = true } },
+  },
+}, 240, 320)
+canvas.text { id = "root-width", text = string.format("%.0f", laid.root.width), translation = { 0, 0, 0.2 }, scale = { 1, 1, 1 } }
+canvas.text { id = "body-height", text = string.format("%.0f", laid.nodes[3].rect.height), translation = { 0, 0, 0.2 }, scale = { 1, 1, 1 } }
+"#;
+        let module = LuaModule::load(
+            manifest,
+            source,
+            ModuleInputSnapshot {
+                revision: 1,
+                now_ms: SEPT_2026,
+                values: BTreeMap::new(),
+            },
+            theme(),
+            BTreeMap::new(),
+            LuaSceneCapabilities::default(),
+            LuaSceneLimits::default(),
+        )
+        .expect("the host layout API must render");
+        let scene = &module.retained().scene;
+        let root_width = text_node(scene, "root-width").expect("root width").0;
+        let body_height = text_node(scene, "body-height").expect("body height").0;
+        assert_eq!(root_width, "240");
+        assert!(
+            body_height.parse::<f32>().unwrap() > 20.0,
+            "text should wrap to more than one line, got {body_height}"
         );
     }
 

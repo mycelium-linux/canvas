@@ -39,6 +39,7 @@ sha2 = "0.10"
 schemars = { version = "1", optional = true }
 sysinfo = "0.36"
 unibus.workspace = true
+soil-layout.workspace = true
 unibus-device = { path = "../../../unibus/crates/unibus-device" }
 unibus-sdk = { path = "../../../unibus/crates/unibus-sdk", optional = true }
 stream-descriptors.workspace = true

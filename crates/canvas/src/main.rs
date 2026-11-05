@@ -8868,6 +8868,14 @@ impl App {
         );
         match result {
             Ok(retained) => {
+                if let Some(ModuleSurface::Rendered { scene, buttons, last_error, .. }) =
+                    self.modules.get_mut(surface_id)
+                {
+                    *scene = retained.scene.clone();
+                    *buttons = retained.buttons.clone();
+                    *last_error = None;
+                    self.bump();
+                }
                 for action in retained.actions {
                     match self.module_bus.publish(action) {
                         Ok(request_id) => {
@@ -8892,7 +8900,7 @@ impl App {
     ) -> Element<'static, Message> {
         let visual = self.presented_visual_theme();
         let children = self.native_module_buttons(buttons, viewport, |control| {
-            (control.enabled && self.module_bus.connected()).then(|| Message::ModuleActivate {
+            (control.enabled && (control.local || self.module_bus.connected())).then(|| Message::ModuleActivate {
                 surface_id: surface_id.to_owned(),
                 target_id: control.id.clone(),
             })
@@ -8945,7 +8953,11 @@ impl App {
                 let selected = selected(control);
                 let appearance = control.appearance;
                 let message = action(control);
-                let content: Element<'static, Message> = if let Some(icon) = control.icon {
+                let content: Element<'static, Message> = if appearance
+                    == ::canvas::lua_module::ModuleButtonAppearance::Hit
+                {
+                    space::horizontal().into()
+                } else if let Some(icon) = control.icon {
                     let id = match &message {
                         Some(Message::ShellFocusSurface(id)) => Some(id.as_str()),
                         Some(Message::ShellLauncherPick { entry_id, .. }) => {
@@ -9035,6 +9047,9 @@ impl App {
                             canvas_widgets::live::app_chrome::quiet_button_style(
                                 visual, selected, status,
                             )
+                        }
+                        ::canvas::lua_module::ModuleButtonAppearance::Hit => {
+                            button::Style::default()
                         }
                     });
                 let pin_id = match &message {
@@ -12302,6 +12317,11 @@ fn module_key(
     hasher.finish()
 }
 
+/// Generated modules carry a composed snapshot. Keep the source ceiling equal
+/// to the Lua scene ceiling rather than the smaller adapter ceiling.
+#[cfg(feature = "lua-scenes")]
+const MAX_MODULE_BYTES: usize = 64 * 1024;
+
 /// Digest the two authored files that define a module. Missing/error states are
 /// hashed too, so installing or repairing a file changes the retained key and
 /// triggers a fresh candidate render on the next one-second poll.
@@ -12313,7 +12333,7 @@ fn module_artifact_revision(name: &str) -> u64 {
         let relative = PathBuf::from("modules").join(format!("{name}.{extension}"));
         match ::canvas::runtime_config::read(
             &relative,
-            ::canvas::stream_binding::MAX_ADAPTER_BYTES as u64,
+            MAX_MODULE_BYTES as u64,
         ) {
             Ok(Some(bytes)) => bytes.hash(&mut hasher),
             Ok(None) => "missing".hash(&mut hasher),
@@ -12377,7 +12397,7 @@ fn resolve_module_event(
     use ::canvas::lua_module::{LuaModule, ModuleInputSnapshot, ModuleManifest};
     use ::canvas::lua_scene::{LuaSceneCapabilities, LuaSceneLimits};
 
-    let limit = ::canvas::stream_binding::MAX_ADAPTER_BYTES as u64;
+    let limit = MAX_MODULE_BYTES as u64;
     let read = |file: &str| -> std::result::Result<Option<String>, String> {
         let relative = PathBuf::from("modules").join(file);
         ::canvas::runtime_config::read(&relative, limit)

@@ -473,6 +473,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "soil-layout",
  "stream-descriptors",
  "subtle",
  "svgtypes",
@@ -4932,6 +4933,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "soil-layout"
+version = "0.1.0"
+source = "git+ssh://git@github.com/fungOS-linux/soil.git?rev=9717d3c7594818b7bb293bc3806ef6b2197a092e#9717d3c7594818b7bb293bc3806ef6b2197a092e"
+dependencies = [
+ "serde",
+ "taffy",
+]
+
+[[package]]
 name = "spin"
 version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5121,6 +5131,17 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-io-kit",
  "windows 0.61.3",
+]
+
+[[package]]
+name = "taffy"
+version = "0.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31f7bd2d97198df05186f93a3a3c306845f40e8b3c22bf9279cdd7e5cf5fea7d"
+dependencies = [
+ "serde",
+ "slotmap",
+ "smallvec",
 ]
 
 [[package]]
