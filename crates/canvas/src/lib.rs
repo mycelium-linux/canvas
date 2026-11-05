@@ -14,6 +14,7 @@ pub mod external_surface_binding;
 pub mod hud;
 pub mod interaction;
 pub mod layout_tree;
+pub mod loading_mark;
 #[cfg(unix)]
 pub mod loopback;
 #[cfg(feature = "lua-scenes")]

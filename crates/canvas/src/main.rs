@@ -526,6 +526,8 @@ enum Message {
     Tick,
     #[cfg(all(unix, feature = "lua-scenes"))]
     NativeSwitcherTick,
+    /// Advances the waiting mark while a surface has no first frame.
+    SurfaceLoadingTick,
     #[cfg(feature = "lua-scenes")]
     ModuleActivate {
         surface_id: String,
@@ -808,6 +810,9 @@ struct App {
     /// Interpolation between retained scenes, keyed by region or surface.
     scene_anim: crate::scene_anim::Animator,
     cursor_on: bool,
+    /// Radians for the waiting mark, advanced by the host's frame clock.
+    loading_phase: f32,
+    loading_traced: bool,
     document: WorkspaceDocument,
     runtime_revision: u64,
     /// Last list written, so an unchanged set costs nothing.
@@ -1380,6 +1385,8 @@ impl App {
             control_center_open: false,
             scene_anim: crate::scene_anim::Animator::default(),
             cursor_on: true,
+            loading_phase: 0.0,
+            loading_traced: false,
             visible_indicator_id: None,
             indicator_started: Instant::now(),
             indicator_dismissing: None,
@@ -1873,6 +1880,23 @@ impl App {
                 self.cursor_on = !self.cursor_on;
                 if self.has_terminal() {
                     self.bump();
+                }
+                Task::none()
+            }
+            Message::SurfaceLoadingTick => {
+                self.loading_phase = (self.loading_phase + 0.16) % std::f32::consts::TAU;
+                // Traced because the wait is short: without a line in the log
+                // there is no way to tell "the mark never drew" from "the producer
+                // was faster than a screenshot".
+                if self.awaiting_first_frame() {
+                    if !self.loading_traced {
+                        self.loading_traced = true;
+                        eprintln!("canvas: waiting for a surface's first frame");
+                    }
+                    self.bump();
+                } else if self.loading_traced {
+                    self.loading_traced = false;
+                    eprintln!("canvas: first frame arrived");
                 }
                 Task::none()
             }
@@ -10058,6 +10082,49 @@ impl App {
 
     /// Lua owns the shell panel geometry; native chrome adds the shared border
     /// and shadow without drawing its opaque ground a second time.
+    /// What a surface shows while it waits for its producer's first frame.
+    ///
+    /// Deliberately not chrome: this is the window's own body, and a window that
+    /// says nothing while it starts looks broken. The caption states the wait
+    /// rather than claiming progress the host cannot know.
+    fn awaiting_surface(
+        &self,
+        width: iced::Length,
+        height: iced::Length,
+    ) -> Element<'static, Message> {
+        let visual = self.presented_visual_theme();
+        let phase = self.loading_phase;
+        let mark = Canvas::new(::canvas::loading_mark::LoadingMark {
+            phase,
+            ink: color(visual.palette.primary),
+            muted: color(visual.palette.text_muted),
+        })
+        .width(Length::Fixed(170.0))
+        .height(Length::Fixed(130.0));
+        container(
+            column![
+                mark,
+                text("Starting")
+                    .size(visual.metrics.small)
+                    .color(color(visual.palette.text_muted)),
+            ]
+            .spacing(6)
+            .align_x(iced::alignment::Horizontal::Center),
+        )
+        .width(width)
+        .height(height)
+        .align_x(iced::alignment::Horizontal::Center)
+        .align_y(iced::alignment::Vertical::Center)
+        .into()
+    }
+
+    /// True while some Spore surface exists without a first frame.
+    fn awaiting_first_frame(&self) -> bool {
+        self.decoded.iter().any(|(id, surface)| {
+            matches!(surface.source, ContentSource::Spore) && !self.spores.contains_key(id)
+        })
+    }
+
     fn shell_scene_layer(&self, scene: &Scene, viewport: LogicalSize) -> Element<'static, Message> {
         let Some(node) = scene.nodes.iter().find(|node| node.id == "ground") else {
             return self.scene_layer(scene, viewport);
@@ -10308,9 +10375,10 @@ impl App {
                     .center(width)
                     .into(),
                 },
-                None => container(text("Spore surface has not presented yet"))
-                    .center(width)
-                    .into(),
+                // A surface that exists and has not spoken yet: show that it is
+                // working, not that it failed. This is the window's own frame, so
+                // the host may draw it; chrome stays the Spore's.
+                None => self.awaiting_surface(width, height),
             },
             ContentSource::DataViz { chart } => {
                 let visual = self.presented_visual_theme();
@@ -10578,7 +10646,9 @@ impl App {
                                         .width(width)
                                         .height(height)
                                         .into(),
-                                    None => space::horizontal().into(),
+                                    // Pixels promised but not decoded yet is the
+                                    // same wait, so it gets the same mark.
+                                    None => self.awaiting_surface(width, height),
                                 }
                             }
                             soil_scene::Present::GpuLease(lease) => container(
@@ -10591,12 +10661,7 @@ impl App {
                             .center(width)
                             .into(),
                         },
-                        None => container(
-                            text("Spore surface has not presented yet")
-                                .size(self.presented_visual_theme().metrics.small),
-                        )
-                        .center(width)
-                        .into(),
+                        None => self.awaiting_surface(width, height),
                     };
                 }
 
@@ -15385,6 +15450,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // when a program writes, so no keystroke's echo waits for a tick.
             terminal,
             spores,
+            #[cfg(all(unix, feature = "lua-scenes"))]
+            // A window that is waiting for its producer animates at the frame
+            // rate; one that is not costs nothing.
+            if app.awaiting_first_frame() {
+                iced::time::every(Duration::from_millis(16)).map(|_| Message::SurfaceLoadingTick)
+            } else {
+                Subscription::none()
+            },
             #[cfg(all(unix, feature = "lua-scenes"))]
             if app.native_switcher.is_some() {
                 // The switcher exists only during Alt-Tab, so a frame clock while
