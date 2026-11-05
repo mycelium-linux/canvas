@@ -52,8 +52,14 @@ async fn health() -> impl IntoResponse {
     with_cors(Response::new(Body::from("ok")))
 }
 
-async fn frame() -> Response {
-    match tokio::task::spawn_blocking(capture).await {
+#[derive(Deserialize)]
+struct FrameQuery {
+    #[serde(default)]
+    surface: Option<String>,
+}
+
+async fn frame(Query(input): Query<FrameQuery>) -> Response {
+    match tokio::task::spawn_blocking(move || capture(input.surface)).await {
         Ok(Ok(bytes)) => {
             let mut response = Response::new(Body::from(bytes));
             response
@@ -155,14 +161,14 @@ async fn pointer(Query(input): Query<BrowserPointer>) -> Response {
     }
 }
 
-fn capture() -> Result<Vec<u8>> {
+fn capture(surface_id: Option<String>) -> Result<Vec<u8>> {
     let request = ControlRequest {
         schema_version: control::CONTROL_VERSION,
         request_id: format!("canvas-web-{}", REQUEST_ID.fetch_add(1, Ordering::Relaxed)),
         expected_revision: None,
         actor: None,
         command: Command::Screenshot {
-            surface_id: None,
+            surface_id,
             region: None,
         },
     };

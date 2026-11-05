@@ -60,8 +60,13 @@ pub fn run() -> Result<(), JsValue> {
         .dyn_into::<CanvasRenderingContext2d>()?;
     let app = Rc::new(RefCell::new(App::default()));
     let lod = Rc::new(Cell::new(false));
+    let surface = web_sys::window()
+        .and_then(|window| window.location().search().ok())
+        .and_then(|search| web_sys::UrlSearchParams::new_with_str(&search).ok())
+        .and_then(|params| params.get("surface"))
+        .filter(|surface| !surface.is_empty());
     resize(&canvas)?;
-    start_native_mirror(&canvas, &context, Rc::clone(&lod))?;
+    start_native_mirror(&canvas, &context, Rc::clone(&lod), surface.clone())?;
     set_status("EXACT NATIVE MIRROR · L TOGGLE LOD", "ready");
 
     let click_canvas = canvas.clone();
@@ -170,12 +175,14 @@ fn start_native_mirror(
     canvas: &HtmlCanvasElement,
     context: &CanvasRenderingContext2d,
     lod: Rc<Cell<bool>>,
+    surface: Option<String>,
 ) -> Result<(), JsValue> {
     let image = HtmlImageElement::new()?;
     let draw_canvas = canvas.clone();
     let draw_context = context.clone();
     let draw_lod = Rc::clone(&lod);
     let draw_image = image.clone();
+    let fit_surface = surface.clone();
     let loaded = Closure::<dyn FnMut()>::new(move || {
         if draw_lod.get() {
             return;
@@ -184,9 +191,10 @@ fn start_native_mirror(
         let height = f64::from(draw_canvas.height());
         let source_width = f64::from(draw_image.natural_width().max(1));
         let source_height = f64::from(draw_image.natural_height().max(1));
-        // Fill the viewport like the native wall. A differently-shaped browser
-        // trims symmetric outer edges instead of surrounding Canvas with bars.
-        let scale = (width / source_width).max(height / source_height);
+        // A named surface is a window: preserve its aspect ratio and letterbox
+        // it. The whole-canvas mirror keeps cover-filling the wall.
+        let fit = if fit_surface.is_some() { f64::min } else { f64::max };
+        let scale = fit(width / source_width, height / source_height);
         let drawn_width = source_width * scale;
         let drawn_height = source_height * scale;
         let x = (width - drawn_width) * 0.5;
@@ -218,9 +226,14 @@ fn start_native_mirror(
     failed.forget();
 
     let next_image = image.clone();
+    let next_surface = surface.clone();
     let tick = Closure::<dyn FnMut()>::new(move || {
+        let surface = next_surface
+            .as_deref()
+            .map(|surface| format!("&surface={}", js_sys::encode_uri_component(surface)))
+            .unwrap_or_default();
         next_image.set_src(&format!(
-            "http://127.0.0.1:8090/v1/frame?t={}",
+            "http://127.0.0.1:8090/v1/frame?t={}{surface}",
             js_sys::Date::now()
         ));
     });
@@ -231,7 +244,11 @@ fn start_native_mirror(
             125,
         )?;
     tick.forget();
-    image.set_src("http://127.0.0.1:8090/v1/frame?t=0");
+    let initial = surface
+        .as_deref()
+        .map(|surface| format!("&surface={}", js_sys::encode_uri_component(surface)))
+        .unwrap_or_default();
+    image.set_src(&format!("http://127.0.0.1:8090/v1/frame?t=0{initial}"));
     install_native_pointer(canvas, &image, lod)?;
     Ok(())
 }
