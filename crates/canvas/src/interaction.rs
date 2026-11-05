@@ -332,7 +332,10 @@ impl InteractionEngine {
             active.dragging = true;
         }
 
-        let next = manipulate(self.config, active, event.position);
+        // Snapping belongs to the moment a gesture settles. Applying it on the
+        // way makes the window hop between grid cells while the pointer moves
+        // smoothly between them, which reads as the window lagging the hand.
+        let next = manipulate(self.config, active, event.position, release);
         active.last_position = event.position;
         active.snap_zone = match active.region {
             HitRegion::TopBar | HitRegion::Body => snap_zone_for_move(self.config, event.position),
@@ -429,11 +432,12 @@ pub fn hit_test(
 
 fn manipulate(
     config: InteractionConfig,
-    active: &ActiveGesture,
+    active: &mut ActiveGesture,
     point: LogicalPoint,
+    settle: bool,
 ) -> LogicalRect {
     match active.region {
-        HitRegion::TopBar | HitRegion::Body => move_rect(config, active, point),
+        HitRegion::TopBar | HitRegion::Body => move_rect(config, active, point, settle),
         HitRegion::Resize { handle } => resize_rect(config, active, point, handle),
     }
 }
@@ -514,28 +518,32 @@ fn snap_zone_for_move(config: InteractionConfig, point: LogicalPoint) -> Option<
 
 fn move_rect(
     config: InteractionConfig,
-    active: &ActiveGesture,
+    active: &mut ActiveGesture,
     point: LogicalPoint,
+    settle: bool,
 ) -> LogicalRect {
     let mut bounds = active.original_bounds;
     bounds.x += point.x - active.origin.x;
     bounds.y += point.y - active.origin.y;
-    bounds.x = snap_translation(
-        bounds.x,
-        bounds.width,
-        config.workspace_bounds.x,
-        config.workspace_bounds.right(),
-        config.grid_size,
-        config.snap_distance,
-    );
-    bounds.y = snap_translation(
-        bounds.y,
-        bounds.height,
-        config.workspace_bounds.y,
-        config.workspace_bounds.bottom(),
-        config.grid_size,
-        config.snap_distance,
-    );
+    if settle {
+        bounds.x = snap_translation(
+            bounds.x,
+            bounds.width,
+            config.workspace_bounds.x,
+            config.workspace_bounds.right(),
+            config.grid_size,
+            config.snap_distance,
+        );
+        bounds.y = snap_translation(
+            bounds.y,
+            bounds.height,
+            config.workspace_bounds.y,
+            config.workspace_bounds.bottom(),
+            config.grid_size,
+            config.snap_distance,
+        );
+    }
+    let intended = bounds;
     // Full containment: a dragged surface never strands off the wall. The
     // old rule (keep only the top bar reachable) let tiles park mostly
     // outside the display, where macOS stops delivering events once the
@@ -548,6 +556,13 @@ fn move_rect(
         config.workspace_bounds.y,
         (config.workspace_bounds.bottom() - bounds.height).max(config.workspace_bounds.y),
     );
+    // Re-anchor whenever the window could not follow the pointer: at an edge,
+    // or on the frame the release snapped to. Without this the grab point keeps
+    // travelling with the hand, so dragging back produces no movement at all
+    // until the pointer has retraced the distance the window was held back —
+    // the rubber band that makes a drag feel like it is fighting you.
+    active.origin.x += bounds.x - intended.x;
+    active.origin.y += bounds.y - intended.y;
     bounds
 }
 

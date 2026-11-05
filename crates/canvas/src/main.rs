@@ -549,7 +549,11 @@ enum Message {
     },
     WindowReady(iced::window::Id),
     WindowEvent(iced::window::Id, iced::window::Event),
-    MouseEvent(iced::window::Id, iced::mouse::Event),
+    /// `captured` means a widget under the pointer already claimed the event.
+    /// Window chrome is not a widget, so a press over a traffic light still has
+    /// to reach the app even when the surface's own controls capture it — that
+    /// filtering is why minimize and maximize did nothing on a live surface.
+    MouseEvent(iced::window::Id, iced::mouse::Event, bool),
     RestoreSurface(String),
     BackgroundTileClicked(usize),
     LiveFrameLoaded {
@@ -2274,11 +2278,11 @@ impl App {
                 }
                 Task::none()
             }
-            Message::MouseEvent(window, event) => {
+            Message::MouseEvent(window, event, captured) => {
                 if self.project_switcher.is_some() {
                     return Task::none();
                 }
-                self.handle_mouse(window, event)
+                self.handle_mouse(window, event, captured)
             }
             Message::RestoreSurface(surface_id) => {
                 if self.minimized_surfaces.remove(&surface_id) {
@@ -6957,6 +6961,7 @@ impl App {
         &mut self,
         window: iced::window::Id,
         event: iced::mouse::Event,
+        captured: bool,
     ) -> Task<Message> {
         use iced::mouse::{Button, Event};
 
@@ -6982,8 +6987,16 @@ impl App {
 
         if let Event::ButtonPressed(Button::Left) = &event
             && let Some(position) = self.cursor
-            && self.activate_chrome_control(position)
+            && self.activate_chrome_control(LogicalPoint {
+                x: position.x - offset.x,
+                y: position.y - offset.y,
+            })
         {
+            return Task::none();
+        }
+        // A widget claimed this press. Chrome has already had its chance above,
+        // and content must not also act on it.
+        if captured && matches!(event, Event::ButtonPressed(_)) {
             return Task::none();
         }
 
@@ -7527,11 +7540,11 @@ impl App {
         if self.document.chrome.title == SurfaceTitleMode::Hidden {
             return None;
         }
-        let raw = self.cursor?;
-        let position = LogicalPoint {
-            x: raw.x - self.cursor_offset.x,
-            y: raw.y - self.cursor_offset.y,
-        };
+        // Frame-local, like every bound this function compares against. The
+        // callers convert from a window/global point; subtracting a second time
+        // here shifted every hit by the window offset, which is why a click on a
+        // traffic light landed on nothing.
+        let position = self.cursor?;
         // Surfaces are laid out in the *content* frame; the desktop bar is not
         // part of it. Measuring controls against the full frame offsets every
         // hit by the bar's height, which is why the traffic lights did nothing.
@@ -7555,12 +7568,15 @@ impl App {
             ))
         });
         for placement in placements {
+            // A surface that draws a title bar owns clickable controls. Only the
+            // two chromes that draw *no* title bar opt out; `Integrated` used to
+            // be skipped here while still drawing traffic lights, which is a
+            // control that looks pressable and is not.
             if matches!(
                 self.widget_chrome(&placement.surface_id),
                 Some(
                     canvas_widgets::WidgetChrome::DragOnly
                         | canvas_widgets::WidgetChrome::Frameless
-                        | canvas_widgets::WidgetChrome::Integrated
                 )
             ) {
                 continue;
@@ -7579,7 +7595,10 @@ impl App {
                 frame,
                 self.document.chrome,
             );
-            let top = bounds.y;
+            // Drawing places every surface below the desktop bar; hit-testing
+            // has to add the same offset or the traffic lights are 44px above
+            // where they appear.
+            let top = bounds.y + f64::from(shell_height);
             let bottom = top + titlebar_height;
             let left = bounds.x;
             let right_edge = bounds.x + bounds.width;
@@ -8177,10 +8196,15 @@ impl App {
 
     fn refresh_interaction_geometry(&mut self) {
         if self.interaction.captured_pointer().is_none() {
-            self.interaction = interaction_engine(
+            let shell_height = self
+                .overlay_on_viewport(self.overlays.fpl_mark, self.frame)
+                .then_some(::canvas::DESKTOP_BAR_HEIGHT)
+                .unwrap_or_default();
+            self.interaction = interaction_engine_with_shell(
                 self.frame,
                 self.document.chrome,
                 self.window_chrome().titlebar_height,
+                shell_height,
             );
         }
     }
@@ -8937,6 +8961,8 @@ impl App {
                             .unwrap_or("true")
                             .to_owned();
                         updates.push((action.kind, value));
+                    } else if action.destination == "canvas.shell" {
+                        self.apply_shell_action(&action);
                     } else {
                         match self.module_bus.publish(action) {
                             Ok(request_id) => {
@@ -8954,6 +8980,31 @@ impl App {
                 }
             }
             Err(error) => self.status = format!("Module activation rejected: {error}"),
+        }
+    }
+
+    /// Shell intents: the dock and bar ask the compositor for things it already
+    /// owns. Publishing these to the module bus would require a controller to
+    /// echo them back, which is why a dock press did nothing.
+    fn apply_shell_action(&mut self, action: &::canvas::lua_module::ModuleAction) {
+        let Some(target) = action.body.get("surface_id").and_then(|id| id.as_str()) else {
+            return;
+        };
+        match action.kind.as_str() {
+            "focus" | "select" => {
+                if self.minimized_surfaces.remove(target) {
+                    self.bump();
+                } else if self.document.focused_surface_id.as_deref() == Some(target) {
+                    // Pressing the tile of the window you are already looking at
+                    // collapses it, which is what a dock icon does on every
+                    // desktop people already know.
+                    self.minimized_surfaces.insert(target.to_owned());
+                    self.bump();
+                }
+                self.document.focused_surface_id = Some(target.to_owned());
+                self.bump();
+            }
+            _ => {}
         }
     }
 
@@ -9051,7 +9102,13 @@ impl App {
                 let selected = selected(control);
                 let appearance = control.appearance;
                 let message = action(control);
-                let content: Element<'static, Message> = if let Some(icon) = control.icon {
+                let content: Element<'static, Message> = if appearance
+                    == ::canvas::lua_module::ModuleButtonAppearance::Invisible
+                {
+                    // The scene already draws this control; the host contributes
+                    // the press and nothing else.
+                    iced::widget::space::horizontal().into()
+                } else if let Some(icon) = control.icon {
                     let id = match &message {
                         Some(Message::ShellFocusSurface(id)) => Some(id.as_str()),
                         Some(Message::ShellLauncherPick { entry_id, .. }) => {
@@ -9141,6 +9198,12 @@ impl App {
                             canvas_widgets::live::app_chrome::quiet_button_style(
                                 visual, selected, status,
                             )
+                        }
+                        ::canvas::lua_module::ModuleButtonAppearance::Invisible => {
+                            iced::widget::button::Style {
+                                background: None,
+                                ..Default::default()
+                            }
                         }
                     });
                 let pin_id = match &message {
@@ -12158,7 +12221,16 @@ fn interaction_engine(
     chrome: SurfaceChrome,
     titlebar_height: f32,
 ) -> InteractionEngine {
-    let workspace = interaction_workspace_bounds(frame, chrome);
+    interaction_engine_with_shell(frame, chrome, titlebar_height, 0)
+}
+
+fn interaction_engine_with_shell(
+    frame: Rect,
+    chrome: SurfaceChrome,
+    titlebar_height: f32,
+    shell_height: u32,
+) -> InteractionEngine {
+    let workspace = interaction_workspace_bounds_with_shell(frame, chrome, shell_height);
     InteractionEngine::new(InteractionConfig {
         workspace_bounds: workspace,
         minimum_surface_size: LogicalPoint { x: 160.0, y: 120.0 },
@@ -12173,16 +12245,34 @@ fn interaction_engine(
 }
 
 fn interaction_workspace_bounds(frame: Rect, chrome: SurfaceChrome) -> LogicalRect {
-    visible_surface_bounds(
+    interaction_workspace_bounds_with_shell(frame, chrome, 0)
+}
+
+/// The rectangle a surface may occupy: the content frame (the display minus the
+/// desktop bar) projected the same way drawing projects it, then moved down by
+/// the bar. Drag clamping and pointer positions have to agree with that, or the
+/// window snaps away from the point it was grabbed by.
+fn interaction_workspace_bounds_with_shell(
+    frame: Rect,
+    chrome: SurfaceChrome,
+    shell_height: u32,
+) -> LogicalRect {
+    let content = Rect {
+        height: frame.height.saturating_sub(shell_height).max(1),
+        ..frame
+    };
+    let mut bounds = visible_surface_bounds(
         NormalizedRect {
             x: 0.0,
             y: 0.0,
             width: 1.0,
             height: 1.0,
         },
-        frame,
+        content,
         chrome,
-    )
+    );
+    bounds.y += f64::from(shell_height);
+    bounds
 }
 
 fn resize_cursor(handle: ResizeHandle) -> mouse::Interaction {
@@ -13753,9 +13843,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             iced::event::listen_with(|event, status, window| match event {
                 iced::Event::Window(event) => Some(Message::WindowEvent(window, event)),
                 iced::Event::Mouse(
-                    iced::mouse::Event::ButtonPressed(_) | iced::mouse::Event::WheelScrolled { .. },
-                ) if status == iced::event::Status::Captured => None,
-                iced::Event::Mouse(event) => Some(Message::MouseEvent(window, event)),
+                    event @ (iced::mouse::Event::ButtonPressed(_)
+                    | iced::mouse::Event::WheelScrolled { .. }),
+                ) => Some(Message::MouseEvent(
+                    window,
+                    event,
+                    matches!(status, iced::event::Status::Captured),
+                )),
+                iced::Event::Mouse(event) => Some(Message::MouseEvent(window, event, false)),
                 iced::Event::Keyboard(event) => Some(Message::TerminalInput(event)),
                 _ => None,
             }),
@@ -16826,6 +16921,7 @@ mod tests {
         let _ = app.handle_mouse(
             window,
             iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            false
         );
         assert_eq!(app.document.focused_surface_id.as_deref(), Some("lower"));
         let Layout::Canvas { placements } = &app.document.layout else {
@@ -16988,6 +17084,7 @@ mod tests {
         let _ = app.handle_mouse(
             window,
             iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            false
         );
         assert!(app.maximized_surfaces.contains("sample"));
         app.cursor = Some(LogicalPoint { x: 44.0, y: 10.0 });
@@ -16998,6 +17095,7 @@ mod tests {
         let _ = app.handle_mouse(
             window,
             iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            false
         );
         assert!(!app.maximized_surfaces.contains("sample"));
         assert_eq!(app.document.layout, original_layout);
@@ -17827,6 +17925,7 @@ mod tests {
         let _ = app.handle_mouse(
             window,
             iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            false
         );
         assert!(app.desktop_press.is_some());
         assert_ne!(app.status, "Zoomed the Canvas window.");
@@ -17834,6 +17933,7 @@ mod tests {
         let _ = app.handle_mouse(
             window,
             iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            false
         );
         assert_eq!(app.status, "Zoomed the Canvas window.");
         assert!(app.desktop_press.is_none());
@@ -17855,6 +17955,7 @@ mod tests {
             let _ = app.handle_mouse(
                 window,
                 iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            false
             );
         }
         assert_ne!(app.status, "Zoomed the Canvas window.");
