@@ -12410,10 +12410,19 @@ fn interaction_engine_with_shell(
         minimum_surface_size: LogicalPoint { x: 160.0, y: 120.0 },
         resize_handle_size: SURFACE_RESIZE_HANDLE_SIZE,
         top_bar_height: f64::from(titlebar_height),
-        snap_distance: 12.0,
+        // Grid and edge snapping are off for now: an 8px grid made resizing
+        // jump under the hand, and a window that lands where the pointer left it
+        // is more important than one that lands on a lattice. Zone tiling (drag
+        // a window to an edge to fill half the desk) stays, because it is
+        // previewed before it commits.
+        snap_distance: 0.0,
         press_deadzone: 4.0,
-        snap_zone_trigger: 44.0,
-        grid_size: Some(8.0),
+        // Edge docking is off too. A window arrived at half the desk because the
+        // pointer crossed a band, which is the same complaint as the grid: the
+        // window should go exactly where it is let go. Re-enabling is one
+        // number here, and when it comes back it should commit on release only.
+        snap_zone_trigger: 0.0,
+        grid_size: None,
     })
     .expect("Canvas interaction defaults must remain valid")
 }
