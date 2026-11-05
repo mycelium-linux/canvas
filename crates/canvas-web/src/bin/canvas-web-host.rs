@@ -36,6 +36,8 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/v1/frame", get(frame))
+        .route("/v1/scene", get(scene))
+        .route("/v1/activate", get(activate))
         .route("/v1/key", get(key))
         .route("/v1/pointer", get(pointer));
     let listener = tokio::net::TcpListener::bind(listen).await?;
@@ -73,6 +75,100 @@ async fn frame(Query(input): Query<FrameQuery>) -> Response {
         }
         Ok(Err(error)) => error_response(error),
         Err(error) => error_response(anyhow::anyhow!("capture worker failed: {error}")),
+    }
+}
+
+#[derive(Deserialize)]
+struct SurfaceQuery {
+    surface: String,
+}
+
+async fn scene(Query(input): Query<SurfaceQuery>) -> Response {
+    let request = ControlRequest {
+        schema_version: control::CONTROL_VERSION,
+        request_id: format!(
+            "canvas-web-scene-{}",
+            REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+        ),
+        expected_revision: None,
+        actor: None,
+        command: Command::SurfaceScene {
+            surface_id: input.surface,
+        },
+    };
+    match tokio::task::spawn_blocking(move || control::send(&request)).await {
+        Ok(Ok(reply)) => match reply.outcome {
+            Outcome::Ok {
+                receipt:
+                    Receipt::SurfaceScene {
+                        surface_id,
+                        title,
+                        scene,
+                        buttons,
+                        theme,
+                        viewport,
+                    },
+            } => {
+                let body = serde_json::json!({
+                    "surface_id": surface_id,
+                    "title": title,
+                    "scene": scene,
+                    "buttons": buttons,
+                    "theme": theme,
+                    "viewport": viewport,
+                });
+                let mut response = Response::new(Body::from(body.to_string()));
+                response
+                    .headers_mut()
+                    .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+                response.headers_mut().insert(
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static("no-store, max-age=0"),
+                );
+                with_cors(response)
+            }
+            Outcome::Error { code, message } => {
+                error_response(anyhow::anyhow!("Canvas scene {code:?}: {message}"))
+            }
+            _ => error_response(anyhow::anyhow!("Canvas returned a non-scene receipt")),
+        },
+        Ok(Err(error)) => error_response(anyhow::Error::msg(error)),
+        Err(error) => error_response(anyhow::anyhow!("scene worker failed: {error}")),
+    }
+}
+
+#[derive(Deserialize)]
+struct ActivateQuery {
+    surface: String,
+    target: String,
+}
+
+async fn activate(Query(input): Query<ActivateQuery>) -> Response {
+    let request = ControlRequest {
+        schema_version: control::CONTROL_VERSION,
+        request_id: format!(
+            "canvas-web-activate-{}",
+            REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+        ),
+        expected_revision: None,
+        actor: None,
+        command: Command::SurfaceActivate {
+            surface_id: input.surface,
+            target_id: input.target,
+        },
+    };
+    match tokio::task::spawn_blocking(move || control::send(&request)).await {
+        Ok(Ok(reply)) => match reply.outcome {
+            Outcome::Ok {
+                receipt: Receipt::SurfaceActivated { .. },
+            } => with_cors(StatusCode::NO_CONTENT.into_response()),
+            Outcome::Error { code, message } => {
+                error_response(anyhow::anyhow!("Canvas activate {code:?}: {message}"))
+            }
+            _ => error_response(anyhow::anyhow!("Canvas returned a non-activation receipt")),
+        },
+        Ok(Err(error)) => error_response(anyhow::Error::msg(error)),
+        Err(error) => error_response(anyhow::anyhow!("activate worker failed: {error}")),
     }
 }
 

@@ -100,7 +100,9 @@ struct TransientNotification {
 }
 const SURFACE_CONTROL_HIT_SIZE: f64 = 18.0;
 const SURFACE_CONTROL_INSET: f64 = 4.0;
-const SURFACE_RESIZE_HANDLE_SIZE: f64 = 10.0;
+// Generous on purpose: an edge you have to hit exactly is an edge people give
+// up on. The visual border stays thin; only the target grew.
+const SURFACE_RESIZE_HANDLE_SIZE: f64 = 14.0;
 const CANVAS_TOGGLE_KEYS: &str = "Ctrl-Option-C";
 const SNAP_LAYOUT_KEYS: &str = "Ctrl-Option-L";
 const FIT_LAYOUT_KEYS: &str = "Ctrl-Option-F";
@@ -1427,12 +1429,16 @@ impl App {
     /// The normalized bounds the view should render for a surface: an
     /// interpolation from its previous bounds while a transition is in
     /// flight, otherwise the target.
-    fn presented_bounds(&self, surface_id: &str, bounds: NormalizedRect) -> [f32; 4] {
-        let target = [bounds.x, bounds.y, bounds.width, bounds.height];
-        self.transition
-            .as_ref()
-            .map(|t| t.placement(surface_id, target))
-            .unwrap_or(target)
+    /// Where a surface is drawn, in normalized coordinates.
+    ///
+    /// Deliberately *not* animated. Palette and opacity may ease; geometry may
+    /// not, because geometry is what the pointer is dragging. Interpolating it
+    /// means the window lags the hand by up to a transition's worth of frames,
+    /// and any surface that was not in the transition's starting set begins the
+    /// animation at the origin — which reads as a window jumping down the page
+    /// the moment you click it. A window is where the layout says it is.
+    fn presented_bounds(&self, _surface_id: &str, bounds: NormalizedRect) -> [f32; 4] {
+        [bounds.x, bounds.y, bounds.width, bounds.height]
     }
 
     fn tick_transition(&mut self) {
@@ -6536,6 +6542,82 @@ impl App {
                 }
                 Task::none()
             }
+            Command::SurfaceScene { surface_id } => {
+                let Some(surface) = self.decoded.get(&surface_id) else {
+                    self.fail(
+                        pending,
+                        Failure {
+                            code: ErrorCode::NotFound,
+                            message: format!("unknown Canvas surface: {surface_id}"),
+                        },
+                    );
+                    return Task::none();
+                };
+                let mut scene = Scene { nodes: Vec::new() };
+                let mut buttons = Vec::new();
+                #[cfg(feature = "lua-scenes")]
+                if let Some(ModuleSurface::Rendered {
+                    scene: retained,
+                    buttons: retained_buttons,
+                    ..
+                }) = self.modules.get(&surface_id)
+                {
+                    scene = retained.clone();
+                    buttons = retained_buttons.clone();
+                }
+                if scene.nodes.is_empty()
+                    && let ContentSource::Scene { scene: retained } = &surface.source
+                {
+                    scene = retained.clone();
+                }
+                let visual = self.presented_visual_theme();
+                let theme = ::canvas::lua_module::ModuleThemeTokens::from_visual(
+                    &visual,
+                    self.effective_theme(&self.document).accent(),
+                );
+                let viewport = surface
+                    .snapshot
+                    .display_logical
+                    .map(|[width, height]| [width, height])
+                    .or_else(|| {
+                        surface
+                            .snapshot
+                            .source_pixels
+                            .map(|[width, height]| [f64::from(width), f64::from(height)])
+                    })
+                    .unwrap_or([1200.0, 1800.0]);
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::SurfaceScene {
+                            surface_id,
+                            title: surface.snapshot.title.clone(),
+                            scene: serde_json::to_value(scene).unwrap_or_default(),
+                            buttons: serde_json::to_value(buttons).unwrap_or_default(),
+                            theme: serde_json::to_value(theme).unwrap_or_default(),
+                            viewport,
+                        },
+                    },
+                );
+                Task::none()
+            }
+            Command::SurfaceActivate {
+                surface_id,
+                target_id,
+            } => {
+                #[cfg(feature = "lua-scenes")]
+                self.activate_module(&surface_id, &target_id);
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::SurfaceActivated {
+                            surface_id,
+                            target_id,
+                        },
+                    },
+                );
+                Task::none()
+            }
             Command::Screenshot { surface_id, region } => {
                 let window_id = self.windows.keys().next().copied();
                 let Some(window_id) = window_id else {
@@ -7641,6 +7723,10 @@ impl App {
                 InteractionIntent::SetBounds { surface_id, bounds } => {
                     let frame = self.frame;
                     let chrome = self.document.chrome;
+                    let shell_height = self
+                        .overlay_on_viewport(self.overlays.fpl_mark, self.frame)
+                        .then_some(::canvas::DESKTOP_BAR_HEIGHT)
+                        .unwrap_or_default();
                     let Layout::Canvas { placements } = self.document.active_layout_mut() else {
                         continue;
                     };
@@ -7648,7 +7734,12 @@ impl App {
                         .iter_mut()
                         .find(|placement| placement.surface_id == surface_id)
                     {
-                        let normalized = normalize_visible_surface_bounds(bounds, frame, chrome);
+                        let normalized = normalize_visible_surface_bounds_with_shell(
+                            bounds,
+                            frame,
+                            chrome,
+                            shell_height,
+                        );
                         if placement.bounds != normalized {
                             placement.bounds = normalized;
                             changed = true;
@@ -12086,9 +12177,12 @@ fn interaction_engine(
         minimum_surface_size: LogicalPoint { x: 160.0, y: 120.0 },
         resize_handle_size: SURFACE_RESIZE_HANDLE_SIZE,
         top_bar_height: f64::from(titlebar_height),
-        snap_distance: 12.0,
-        snap_zone_trigger: 44.0,
-        grid_size: Some(8.0),
+        // Grid and edge snapping are off: a window should land where it is let
+        // go. Zone tiling is previewed before it commits, and it is off too
+        // until it commits on release only.
+        snap_distance: 0.0,
+        snap_zone_trigger: 0.0,
+        grid_size: None,
     })
     .expect("Canvas interaction defaults must remain valid")
 }
@@ -12258,13 +12352,37 @@ fn normalize_visible_surface_bounds(
     frame: Rect,
     chrome: SurfaceChrome,
 ) -> NormalizedRect {
-    let (padding, inner_width, inner_height, gap_inset) = surface_layout_metrics(frame, chrome);
+    normalize_visible_surface_bounds_with_shell(bounds, frame, chrome, 0)
+}
+
+/// The exact inverse of `presented_surface_geometry`.
+///
+/// A dragged rectangle arrives in the space surfaces are *drawn* in, which is
+/// the content frame moved down by the desktop bar. Storing it as a placement
+/// without undoing that offset adds the bar height on every pointer move.
+fn normalize_visible_surface_bounds_with_shell(
+    bounds: LogicalRect,
+    frame: Rect,
+    chrome: SurfaceChrome,
+    shell_height: u32,
+) -> NormalizedRect {
+    let bounds = LogicalRect {
+        y: bounds.y - f64::from(shell_height),
+        ..bounds
+    };
+    let content = Rect {
+        height: frame.height.saturating_sub(shell_height).max(1),
+        ..frame
+    };
+    let (padding, inner_width, inner_height, gap_inset) =
+        surface_layout_metrics(content, chrome);
     // Horizontal positions may be negative when a surface is parked partly
     // offscreen. The interaction engine has already kept a usable section of
     // its top bar reachable, so clamping the origin here would turn the move
     // into a resize by shortening the stored width to the workspace edge.
     let x = (bounds.x - gap_inset - padding) / inner_width;
-    let y = ((bounds.y - gap_inset - padding) / inner_height).max(0.0);
+    // No floor at zero: a window is allowed to sit partly off the top.
+    let y = (bounds.y - gap_inset - padding) / inner_height;
     let width = ((bounds.width + gap_inset * 2.0) / inner_width).clamp(f64::EPSILON, 1.0);
     let height = ((bounds.height + gap_inset * 2.0) / inner_height).clamp(f64::EPSILON, 1.0);
     NormalizedRect {

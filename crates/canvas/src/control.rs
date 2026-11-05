@@ -275,6 +275,16 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         region: Option<Rect>,
     },
+    /// Return the retained, renderer-neutral scene for one surface so a
+    /// browser can draw the same window instead of polling pixels.
+    SurfaceScene {
+        surface_id: String,
+    },
+    /// Activate a retained module control from a browser-scene renderer.
+    SurfaceActivate {
+        surface_id: String,
+        target_id: String,
+    },
 }
 
 /// Public project metadata resolved by an authenticated catalog owner.
@@ -822,6 +832,18 @@ pub enum Receipt {
         width: u32,
         height: u32,
     },
+    SurfaceScene {
+        surface_id: String,
+        title: String,
+        scene: serde_json::Value,
+        buttons: serde_json::Value,
+        theme: serde_json::Value,
+        viewport: [f64; 2],
+    },
+    SurfaceActivated {
+        surface_id: String,
+        target_id: String,
+    },
 }
 
 /// What a person is actually looking at once a mutation has landed.
@@ -1074,6 +1096,7 @@ impl ControlRequest {
                 }
             }
             Command::CloseSurface { surface_id }
+            | Command::SurfaceScene { surface_id }
             | Command::Navigate { surface_id, .. }
             | Command::PatchView { surface_id, .. } => {
                 if !identifier(surface_id) {
@@ -1263,6 +1286,18 @@ impl ControlRequest {
                     || !canvas_core::external_surface::valid_source_id(source_id)
                 {
                     return Err("invalid external surface or source id".into());
+                }
+            }
+            Command::SurfaceActivate {
+                surface_id,
+                target_id,
+            } => {
+                if !identifier(surface_id)
+                    || target_id.is_empty()
+                    || target_id.len() > 128
+                    || target_id.chars().any(char::is_control)
+                {
+                    return Err("invalid surface activation".into());
                 }
             }
             Command::ApplyDocument { .. }
@@ -2038,6 +2073,13 @@ pub mod text {
                             height
                         )
                     }
+                    Receipt::SurfaceScene { surface_id, .. } => {
+                        format!("surface scene={surface_id}")
+                    }
+                    Receipt::SurfaceActivated {
+                        surface_id,
+                        target_id,
+                    } => format!("surface={surface_id} activated={target_id}"),
                 };
                 format!("OK rev={} {}", reply.revision, detail)
             }

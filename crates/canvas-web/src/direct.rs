@@ -66,8 +66,13 @@ pub fn run() -> Result<(), JsValue> {
         .and_then(|params| params.get("surface"))
         .filter(|surface| !surface.is_empty());
     resize(&canvas)?;
-    start_native_mirror(&canvas, &context, Rc::clone(&lod), surface.clone())?;
-    set_status("EXACT NATIVE MIRROR · L TOGGLE LOD", "ready");
+    if let Some(surface) = surface.clone() {
+        start_surface_scene(&canvas, &context, surface)?;
+        set_status("SURFACE · LIVE SCENE", "ready");
+    } else {
+        start_native_mirror(&canvas, &context, Rc::clone(&lod), None)?;
+        set_status("EXACT NATIVE MIRROR · L TOGGLE LOD", "ready");
+    }
 
     let click_canvas = canvas.clone();
     let click_context = context.clone();
@@ -161,6 +166,270 @@ pub fn run() -> Result<(), JsValue> {
     window.add_event_listener_with_callback("keydown", key.as_ref().unchecked_ref())?;
     key.forget();
     Ok(())
+}
+
+
+#[derive(Debug, Clone, Deserialize)]
+struct SceneNode {
+    #[serde(default)]
+    transform: Transform,
+    content: NodeContent,
+}
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Transform {
+    #[serde(default)]
+    translation: [f32; 3],
+    #[serde(default)]
+    scale: [f32; 3],
+}
+impl Default for Transform {
+    fn default() -> Self {
+        Self {
+            translation: [0.0; 3],
+            scale: [1.0; 3],
+        }
+    }
+}
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum NodeContent {
+    Group,
+    Rect {
+        #[serde(default)]
+        ink: Option<String>,
+        #[serde(default = "one")]
+        opacity: f32,
+        #[serde(default)]
+        radius: f32,
+    },
+    Text {
+        text: String,
+        #[serde(default)]
+        ink: Option<String>,
+    },
+    #[serde(other)]
+    Other,
+}
+fn one() -> f32 {
+    1.0
+}
+#[derive(Debug, Clone, Deserialize)]
+struct Scene {
+    nodes: Vec<SceneNode>,
+}
+#[derive(Debug, Clone, Deserialize)]
+struct SceneButton {
+    id: String,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    #[serde(default)]
+    label: String,
+}
+#[derive(Debug, Clone, Deserialize)]
+struct SceneTheme {
+    background: [u8; 3],
+    surface: [u8; 3],
+    text: [u8; 3],
+    muted: [u8; 3],
+    primary: [u8; 3],
+    success: [u8; 3],
+    warning: [u8; 3],
+    danger: [u8; 3],
+    body: f32,
+    micro: f32,
+}
+#[derive(Debug, Clone, Deserialize)]
+struct SurfaceScene {
+    surface_id: String,
+    title: String,
+    scene: Scene,
+    buttons: Vec<SceneButton>,
+    theme: SceneTheme,
+    viewport: [f64; 2],
+}
+
+fn start_surface_scene(
+    canvas: &HtmlCanvasElement,
+    context: &CanvasRenderingContext2d,
+    surface: String,
+) -> Result<(), JsValue> {
+    let state: Rc<RefCell<Option<SurfaceScene>>> = Rc::new(RefCell::new(None));
+    let hits: Rc<RefCell<Vec<SceneButton>>> = Rc::new(RefCell::new(Vec::new()));
+
+    let fetch_canvas = canvas.clone();
+    let fetch_context = context.clone();
+    let fetch_state = Rc::clone(&state);
+    let fetch_hits = Rc::clone(&hits);
+    let fetch_surface = surface.clone();
+    let tick = Closure::<dyn FnMut()>::new(move || {
+        let url = format!(
+            "http://127.0.0.1:8090/v1/scene?surface={}&t={}",
+            js_sys::encode_uri_component(&fetch_surface),
+            js_sys::Date::now()
+        );
+        let Some(window) = web_sys::window() else { return };
+        let promise = window.fetch_with_str(&url);
+        let canvas = fetch_canvas.clone();
+        let context = fetch_context.clone();
+        let state = Rc::clone(&fetch_state);
+        let hits = Rc::clone(&fetch_hits);
+        wasm_bindgen_futures::spawn_local(async move {
+            let Ok(value) = wasm_bindgen_futures::JsFuture::from(promise).await else { return };
+            let Ok(response) = value.dyn_into::<web_sys::Response>() else { return };
+            if !response.ok() { return; }
+            let Ok(text) = response.text() else { return };
+            let Ok(text) = wasm_bindgen_futures::JsFuture::from(text).await else { return };
+            let body: String = js_sys::JsString::from(text).as_string().unwrap_or_default();
+            if body.is_empty() { return; }
+            let Ok(scene) = serde_json::from_str::<SurfaceScene>(&body) else { return };
+            *hits.borrow_mut() = scene.buttons.clone();
+            draw_surface_scene(&canvas, &context, &scene);
+            *state.borrow_mut() = Some(scene);
+        });
+    });
+    web_sys::window()
+        .ok_or("window unavailable")?
+        .set_interval_with_callback_and_timeout_and_arguments_0(
+            tick.as_ref().unchecked_ref(),
+            250,
+        )?;
+    tick.forget();
+
+    let click_canvas = canvas.clone();
+    let click_hits = Rc::clone(&hits);
+    let click_surface = surface;
+    let click = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+        let rect = click_canvas.get_bounding_client_rect();
+        let width = rect.width().max(1.0);
+        let height = rect.height().max(1.0);
+        let nx = ((f64::from(event.client_x()) - rect.left()) / width * 8.0 - 4.0) as f32;
+        let ny = (4.0 - (f64::from(event.client_y()) - rect.top()) / height * 8.0) as f32;
+        let hit = click_hits
+            .borrow()
+            .iter()
+            .rev()
+            .find(|button| {
+                nx >= button.x
+                    && nx <= button.x + button.width
+                    && ny <= button.y
+                    && ny >= button.y - button.height
+            })
+            .cloned();
+        if let Some(button) = hit {
+            let url = format!(
+                "http://127.0.0.1:8090/v1/activate?surface={}&target={}",
+                js_sys::encode_uri_component(&click_surface),
+                js_sys::encode_uri_component(&button.id)
+            );
+            let _ = web_sys::window().map(|window| window.fetch_with_str(&url));
+            event.prevent_default();
+        }
+    });
+    canvas.add_event_listener_with_callback("click", click.as_ref().unchecked_ref())?;
+    click.forget();
+    tick_surface_scene(canvas, context, &state);
+    Ok(())
+}
+
+fn tick_surface_scene(
+    canvas: &HtmlCanvasElement,
+    context: &CanvasRenderingContext2d,
+    state: &Rc<RefCell<Option<SurfaceScene>>>,
+) {
+    if let Some(scene) = state.borrow().as_ref() {
+        draw_surface_scene(canvas, context, scene);
+    }
+}
+
+fn scene_ink<'a>(ink: Option<&str>, theme: &'a SceneTheme) -> [u8; 3] {
+    match ink.unwrap_or("text") {
+        "surface" => theme.surface,
+        "background" => theme.background,
+        "muted" => theme.muted,
+        "primary" => theme.primary,
+        "success" => theme.success,
+        "warning" => theme.warning,
+        "danger" => theme.danger,
+        _ => theme.text,
+    }
+}
+
+fn draw_surface_scene(
+    canvas: &HtmlCanvasElement,
+    context: &CanvasRenderingContext2d,
+    surface: &SurfaceScene,
+) {
+    let width = f64::from(canvas.width());
+    let height = f64::from(canvas.height());
+    let theme = &surface.theme;
+    context.set_fill_style_str(&hex(theme.background));
+    context.fill_rect(0.0, 0.0, width, height);
+    let mut nodes = surface.scene.nodes.iter().collect::<Vec<_>>();
+    nodes.sort_by(|left, right| {
+        left.transform.translation[2].total_cmp(&right.transform.translation[2])
+    });
+    for node in nodes {
+        let t = node.transform;
+        let x = (f64::from(t.translation[0]) + 4.0) / 8.0 * width;
+        let y = (1.0 - (f64::from(t.translation[1]) + 4.0) / 8.0) * height;
+        let z = 0.5 + ((t.translation[2].clamp(-4.0, 4.0) + 4.0) / 8.0) * 1.5;
+        match &node.content {
+            NodeContent::Rect { ink, opacity, .. } => {
+                let rw = (f64::from(t.scale[0].abs()) * width / 8.0).max(1.0);
+                let rh = (f64::from(t.scale[1].abs()) * height / 8.0).max(1.0);
+                let color = scene_ink(ink.as_deref(), theme);
+                context.set_fill_style_str(&format!(
+                    "rgba({},{},{},{})",
+                    color[0],
+                    color[1],
+                    color[2],
+                    opacity.clamp(0.0, 1.0)
+                ));
+                context.fill_rect(x, y, rw, rh);
+            }
+            NodeContent::Text { text, ink } => {
+                let size = (t.scale[1].abs() * theme.body * z).max(theme.micro);
+                context.set_fill_style_str(&hex(scene_ink(ink.as_deref(), theme)));
+                context.set_font(&format!("{size}px ui-monospace, monospace"));
+                context.set_text_baseline("top");
+                let _ = context.fill_text(text, x, y);
+            }
+            NodeContent::Group | NodeContent::Other => {}
+        }
+    }
+    for button in &surface.buttons {
+        if button.label.is_empty() {
+            continue;
+        }
+        let x = (f64::from(button.x) + 4.0) / 8.0 * width;
+        let y = (1.0 - (f64::from(button.y) + 4.0) / 8.0) * height;
+        let w = f64::from(button.width.abs()) * width / 8.0;
+        let h = f64::from(button.height.abs()) * height / 8.0;
+        context.set_fill_style_str(&rgba(theme.primary, 0.18));
+        context.fill_rect(x, y, w, h);
+    }
+    let label = format!("{} · LIVE SURFACE", surface.title.to_uppercase());
+    let _ = &surface.surface_id;
+    label_text(context, &hex(theme.muted), 10.0, width - 8.0, height - 8.0, &label);
+}
+
+fn label_text(
+    context: &CanvasRenderingContext2d,
+    color: &str,
+    size: f64,
+    x: f64,
+    y: f64,
+    value: &str,
+) {
+    context.set_fill_style_str(color);
+    context.set_font(&format!("{size}px ui-monospace, monospace"));
+    context.set_text_baseline("bottom");
+    context.set_text_align("right");
+    let _ = context.fill_text(value, x, y);
+    context.set_text_align("start");
 }
 
 fn resize(canvas: &HtmlCanvasElement) -> Result<(), JsValue> {
