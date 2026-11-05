@@ -280,6 +280,51 @@ fn serve(stream: UnixStream, sender: UnboundedSender<SporeEvent>) {
                 generation = generation.saturating_add(1);
                 let _ = reply(&mut writer, "state", "ok", generation);
             }
+            Some("gpu_frame_shm") => {
+                let source_id = message
+                    .get("source_id")
+                    .and_then(|value| value.as_str())
+                    .filter(|id| safe_id(id));
+                let Some(source_id) = source_id else {
+                    let _ = reply(
+                        &mut writer,
+                        "error",
+                        "gpu_frame_shm source_id must be a safe id",
+                        generation,
+                    );
+                    continue;
+                };
+                let Some(path) = message.get("path").and_then(|value| value.as_str()) else {
+                    let _ = reply(&mut writer, "error", "gpu_frame_shm needs path", generation);
+                    continue;
+                };
+                match soil_scene::shm::read(path) {
+                    Ok(frame) => {
+                        if sender
+                            .send(SporeEvent::GpuFrame {
+                                source_id: source_id.to_owned(),
+                                width: frame.width,
+                                height: frame.height,
+                                revision: frame.revision,
+                                rgba: frame.rgba,
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                        generation = generation.saturating_add(1);
+                        let _ = reply(&mut writer, "state", "ok", generation);
+                    }
+                    Err(error) => {
+                        let _ = reply(
+                            &mut writer,
+                            "error",
+                            &format!("gpu_frame_shm refused: {error}"),
+                            generation,
+                        );
+                    }
+                }
+            }
             Some("close") => {
                 if let Some(id) = surface.take() {
                     let _ = sender.send(SporeEvent::Gone { surface_id: id });

@@ -34,6 +34,7 @@ fn soil_node(node: &SceneNode) -> soil_scene::Node {
     soil_scene::Node {
         id: node.id.clone(),
         parent: node.parent_id.clone(),
+        transition_ms: None,
         transform: soil_scene::Transform {
             translation: node.transform.translation,
             rotation: euler(node.transform.rotation),
