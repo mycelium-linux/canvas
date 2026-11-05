@@ -21,7 +21,11 @@ use std::{
 const DEFAULT_SOURCE_BYTES: usize = 64 * 1024;
 const DEFAULT_MEMORY_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_INTERRUPT_BUDGET: u64 = 100_000;
-const DEFAULT_MAX_NODES: usize = 256;
+// Small UIs used a few dozen nodes; charts compose a line or a field from
+// many rects on the Canvas fallback. Keep the same hard ceiling, but give an
+// authored module enough room to draw one chart without teaching the host a
+// second primitive just for the fallback.
+const DEFAULT_MAX_NODES: usize = 1_024;
 const HARD_MAX_SOURCE_BYTES: usize = 1024 * 1024;
 const HARD_MAX_MEMORY_BYTES: usize = 64 * 1024 * 1024;
 const HARD_MAX_INTERRUPTS: u64 = 10_000_000;
