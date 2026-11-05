@@ -111,6 +111,14 @@ pub struct InteractionConfig {
     /// the embedded surface after it has been focused and promoted.
     pub top_bar_height: f64,
     pub snap_distance: f64,
+    /// Travel, in logical points, before a press becomes a drag.
+    ///
+    /// A click on a high-DPI display reports a point or two of movement, and a
+    /// surface that follows it is a window that jumps under a finger. Below this
+    /// distance the gesture stays a press so the content receives a click; the
+    /// threshold is logical, not physical, so the same finger travels the same
+    /// visual distance on every display.
+    pub press_deadzone: f64,
     /// Distance from a workspace edge at which a move gesture offers a
     /// half-screen or quarter-screen dock zone, like a desktop window manager.
     pub snap_zone_trigger: f64,
@@ -165,6 +173,9 @@ struct ActiveGesture {
     last_position: LogicalPoint,
     /// Half- or quarter-screen zone offered by the current move gesture.
     snap_zone: Option<LogicalRect>,
+    /// True once the pointer has travelled past `press_deadzone`. Until then the
+    /// gesture is a press, and a release is a click.
+    dragging: bool,
 }
 
 /// Stateful pointer capture with no renderer or document ownership.
@@ -254,6 +265,7 @@ impl InteractionEngine {
             current_bounds: surface.bounds,
             last_position: event.position,
             snap_zone: None,
+            dragging: false,
         });
         intents.push(InteractionIntent::CapturePointer {
             pointer_id: event.pointer_id,
@@ -299,6 +311,25 @@ impl InteractionEngine {
         };
         if active.pointer_id != event.pointer_id {
             return Ok(Vec::new());
+        }
+
+        // A press is not a drag until the pointer earns it. Without this a
+        // high-DPI click reports a point of movement and the surface lurches.
+        if !active.dragging {
+            let dx = event.position.x - active.origin.x;
+            let dy = event.position.y - active.origin.y;
+            active.last_position = event.position;
+            if dx.mul_add(dx, dy * dy) < self.config.press_deadzone * self.config.press_deadzone {
+                if release {
+                    // A click: focus already landed on press; nothing to move.
+                    self.active = None;
+                    return Ok(vec![InteractionIntent::ReleasePointer {
+                        pointer_id: event.pointer_id,
+                    }]);
+                }
+                return Ok(Vec::new());
+            }
+            active.dragging = true;
         }
 
         let next = manipulate(self.config, active, event.position);
@@ -728,6 +759,11 @@ fn validate_config(config: InteractionConfig) -> Result<(), InteractionError> {
             "top bar height must be finite and fit within workspace bounds",
         ));
     }
+    if !config.press_deadzone.is_finite() || config.press_deadzone < 0.0 {
+        return Err(InteractionError(
+            "press deadzone must be finite and non-negative",
+        ));
+    }
     if !config.snap_distance.is_finite() || config.snap_distance < 0.0 {
         return Err(InteractionError(
             "snap distance must be finite and non-negative",
@@ -827,6 +863,7 @@ mod tests {
             resize_handle_size: 10.0,
             top_bar_height: 24.0,
             snap_distance: 8.0,
+            press_deadzone: 4.0,
             snap_zone_trigger: 40.0,
             grid_size: Some(50.0),
         }
@@ -927,6 +964,63 @@ mod tests {
             vec![InteractionIntent::SetBounds {
                 surface_id: "card".to_owned(),
                 bounds: rect(150.0, 150.0, 300.0, 200.0),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_click_never_becomes_a_drag() {
+        // A high-DPI click reports a point or two of movement. Below the
+        // deadzone the gesture stays a press: no bounds, and the release is a
+        // click rather than the end of a drag.
+        let surfaces = vec![surface("card", rect(100.0, 100.0, 300.0, 200.0), 1)];
+        let mut engine = InteractionEngine::new(config()).unwrap();
+        engine
+            .handle(event(7, PointerPhase::Press, 200.0, 115.0), &surfaces)
+            .unwrap();
+
+        for (x, y) in [(200.8, 115.4), (201.9, 114.2), (202.2, 115.9)] {
+            assert!(
+                engine
+                    .handle(event(7, PointerPhase::Move, x, y), &surfaces)
+                    .unwrap()
+                    .is_empty(),
+                "a wobble below the deadzone must not move the surface"
+            );
+        }
+
+        let released = engine
+            .handle(event(7, PointerPhase::Release, 202.2, 115.9), &surfaces)
+            .unwrap();
+        assert_eq!(
+            released,
+            vec![InteractionIntent::ReleasePointer { pointer_id: 7 }],
+            "a click releases without a bounds change"
+        );
+        assert_eq!(engine.captured_pointer(), None);
+    }
+
+    #[test]
+    fn a_drag_past_the_deadzone_moves_from_the_origin() {
+        let surfaces = vec![surface("card", rect(100.0, 100.0, 300.0, 200.0), 1)];
+        let mut engine = InteractionEngine::new(config()).unwrap();
+        engine
+            .handle(event(8, PointerPhase::Press, 200.0, 115.0), &surfaces)
+            .unwrap();
+        assert!(
+            engine
+                .handle(event(8, PointerPhase::Move, 203.0, 115.0), &surfaces)
+                .unwrap()
+                .is_empty(),
+            "3 points is still a press with a 4 point deadzone"
+        );
+        assert_eq!(
+            engine
+                .handle(event(8, PointerPhase::Move, 210.0, 125.0), &surfaces)
+                .unwrap(),
+            vec![InteractionIntent::SetBounds {
+                surface_id: "card".to_owned(),
+                bounds: rect(110.0, 110.0, 300.0, 200.0),
             }]
         );
     }

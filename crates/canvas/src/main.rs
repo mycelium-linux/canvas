@@ -12061,6 +12061,7 @@ fn interaction_engine(
         resize_handle_size: SURFACE_RESIZE_HANDLE_SIZE,
         top_bar_height: f64::from(titlebar_height),
         snap_distance: 12.0,
+        press_deadzone: 4.0,
         snap_zone_trigger: 44.0,
         grid_size: Some(8.0),
     })
