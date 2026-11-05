@@ -226,6 +226,13 @@ struct SceneButton {
     height: f32,
     #[serde(default)]
     label: String,
+    #[serde(default)]
+    appearance: String,
+    #[serde(default = "one_bool")]
+    enabled: bool,
+}
+fn one_bool() -> bool {
+    true
 }
 #[derive(Debug, Clone, Deserialize)]
 struct SceneTheme {
@@ -257,11 +264,13 @@ fn start_surface_scene(
 ) -> Result<(), JsValue> {
     let state: Rc<RefCell<Option<SurfaceScene>>> = Rc::new(RefCell::new(None));
     let hits: Rc<RefCell<Vec<SceneButton>>> = Rc::new(RefCell::new(Vec::new()));
+    let hover: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
     let fetch_canvas = canvas.clone();
     let fetch_context = context.clone();
     let fetch_state = Rc::clone(&state);
     let fetch_hits = Rc::clone(&hits);
+    let fetch_hover = Rc::clone(&hover);
     let fetch_surface = surface.clone();
     let tick = Closure::<dyn FnMut()>::new(move || {
         let url = format!(
@@ -279,7 +288,12 @@ fn start_surface_scene(
         let Ok(Some(body)) = request.response_text() else { return };
         let Ok(scene) = serde_json::from_str::<SurfaceScene>(&body) else { return };
         *fetch_hits.borrow_mut() = scene.buttons.clone();
-        draw_surface_scene(&fetch_canvas, &fetch_context, &scene);
+        draw_surface_scene(
+            &fetch_canvas,
+            &fetch_context,
+            &scene,
+            fetch_hover.borrow().as_deref(),
+        );
         *fetch_state.borrow_mut() = Some(scene);
     });
     let function: &js_sys::Function = tick.as_ref().unchecked_ref();
@@ -292,27 +306,49 @@ fn start_surface_scene(
         )?;
     tick.forget();
 
+    let move_canvas = canvas.clone();
+    let move_context = context.clone();
+    let move_hits = Rc::clone(&hits);
+    let move_hover = Rc::clone(&hover);
+    let move_state = Rc::clone(&state);
+    let moved = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+        let hit = button_at(&move_canvas, &move_hits.borrow(), &event);
+        let next = hit.map(|button| button.id);
+        if *move_hover.borrow() == next {
+            return;
+        }
+        let _ = move_canvas.style().set_property(
+            "cursor",
+            if next.is_some() { "pointer" } else { "default" },
+        );
+        *move_hover.borrow_mut() = next;
+        if let Some(scene) = move_state.borrow().as_ref() {
+            draw_surface_scene(&move_canvas, &move_context, scene, move_hover.borrow().as_deref());
+        }
+    });
+    canvas.add_event_listener_with_callback("mousemove", moved.as_ref().unchecked_ref())?;
+    moved.forget();
+
+    let leave_canvas = canvas.clone();
+    let leave_hover = Rc::clone(&hover);
+    let leave_state = Rc::clone(&state);
+    let leave_context = context.clone();
+    let leave = Closure::<dyn FnMut(MouseEvent)>::new(move |_event: MouseEvent| {
+        if leave_hover.borrow_mut().take().is_some() {
+            let _ = leave_canvas.style().set_property("cursor", "default");
+            if let Some(scene) = leave_state.borrow().as_ref() {
+                draw_surface_scene(&leave_canvas, &leave_context, scene, None);
+            }
+        }
+    });
+    canvas.add_event_listener_with_callback("mouseleave", leave.as_ref().unchecked_ref())?;
+    leave.forget();
+
     let click_canvas = canvas.clone();
     let click_hits = Rc::clone(&hits);
     let click_surface = surface;
     let click = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
-        let rect = click_canvas.get_bounding_client_rect();
-        let width = rect.width().max(1.0);
-        let height = rect.height().max(1.0);
-        let nx = ((f64::from(event.client_x()) - rect.left()) / width * 8.0 - 4.0) as f32;
-        let ny = (4.0 - (f64::from(event.client_y()) - rect.top()) / height * 8.0) as f32;
-        let hit = click_hits
-            .borrow()
-            .iter()
-            .rev()
-            .find(|button| {
-                nx >= button.x
-                    && nx <= button.x + button.width
-                    && ny <= button.y
-                    && ny >= button.y - button.height
-            })
-            .cloned();
-        if let Some(button) = hit {
+        if let Some(button) = button_at(&click_canvas, &click_hits.borrow(), &event) {
             let url = format!(
                 "http://127.0.0.1:8090/v1/activate?surface={}&target={}",
                 js_sys::encode_uri_component(&click_surface),
@@ -324,7 +360,7 @@ fn start_surface_scene(
     });
     canvas.add_event_listener_with_callback("click", click.as_ref().unchecked_ref())?;
     click.forget();
-    tick_surface_scene(canvas, context, &state);
+    tick_surface_scene(canvas, context, &state, &hover);
     Ok(())
 }
 
@@ -332,10 +368,34 @@ fn tick_surface_scene(
     canvas: &HtmlCanvasElement,
     context: &CanvasRenderingContext2d,
     state: &Rc<RefCell<Option<SurfaceScene>>>,
+    hover: &Rc<RefCell<Option<String>>>,
 ) {
     if let Some(scene) = state.borrow().as_ref() {
-        draw_surface_scene(canvas, context, scene);
+        draw_surface_scene(canvas, context, scene, hover.borrow().as_deref());
     }
+}
+
+fn button_at(
+    canvas: &HtmlCanvasElement,
+    buttons: &[SceneButton],
+    event: &MouseEvent,
+) -> Option<SceneButton> {
+    let rect = canvas.get_bounding_client_rect();
+    let width = rect.width().max(1.0);
+    let height = rect.height().max(1.0);
+    let nx = ((f64::from(event.client_x()) - rect.left()) / width * 8.0 - 4.0) as f32;
+    let ny = (4.0 - (f64::from(event.client_y()) - rect.top()) / height * 8.0) as f32;
+    buttons
+        .iter()
+        .rev()
+        .find(|button| {
+            button.enabled
+                && nx >= button.x
+                && nx <= button.x + button.width
+                && ny <= button.y
+                && ny >= button.y - button.height
+        })
+        .cloned()
 }
 
 fn scene_ink<'a>(ink: Option<&str>, theme: &'a SceneTheme) -> [u8; 3] {
@@ -355,6 +415,7 @@ fn draw_surface_scene(
     canvas: &HtmlCanvasElement,
     context: &CanvasRenderingContext2d,
     surface: &SurfaceScene,
+    hover: Option<&str>,
 ) {
     let width = f64::from(canvas.width());
     let height = f64::from(canvas.height());
@@ -395,15 +456,24 @@ fn draw_surface_scene(
         }
     }
     for button in &surface.buttons {
-        if button.label.is_empty() {
-            continue;
-        }
         let x = (f64::from(button.x) + 4.0) / 8.0 * width;
         let y = (1.0 - (f64::from(button.y) + 4.0) / 8.0) * height;
         let w = f64::from(button.width.abs()) * width / 8.0;
         let h = f64::from(button.height.abs()) * height / 8.0;
-        context.set_fill_style_str(&rgba(theme.primary, 0.18));
-        context.fill_rect(x, y, w, h);
+        let is_hovered = hover == Some(button.id.as_str());
+        // `hit` controls are invisible local targets over retained content.
+        // They earn a surface only while the pointer is on them.
+        if button.appearance != "hit" && !button.label.is_empty() {
+            context.set_fill_style_str(&rgba(theme.primary, 0.18));
+            context.fill_rect(x, y, w, h);
+        }
+        if is_hovered {
+            context.set_fill_style_str(&rgba(theme.primary, 0.20));
+            context.fill_rect(x, y, w, h);
+            context.set_stroke_style_str(&rgba(theme.primary, 0.75));
+            context.set_line_width(1.0);
+            context.stroke_rect(x + 0.5, y + 0.5, (w - 1.0).max(1.0), (h - 1.0).max(1.0));
+        }
     }
     set_status(&format!("{} · {} NODES", surface.title.to_uppercase(), surface.scene.nodes.len()), "ready");
     let label = format!("{} · LIVE SURFACE", surface.title.to_uppercase());
