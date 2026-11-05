@@ -510,6 +510,19 @@ enum Message {
         surface_id: String,
         target_id: String,
     },
+    /// A press or release inside a module view, delivered by the view's own
+    /// mouse area rather than guessed at by the compositor.
+    #[cfg(feature = "lua-scenes")]
+    ModulePointer {
+        surface_id: String,
+        phase: ::canvas::lua_module::PointerPhase,
+    },
+    /// A window control was clicked. The chrome draws these itself, so the
+    /// widget has to name the action it drew.
+    ChromeAction {
+        surface_id: String,
+        action: WindowAction,
+    },
     ShellBack,
     ShellForward,
     ShellProjects,
@@ -1880,6 +1893,23 @@ impl App {
                 target_id,
             } => {
                 self.activate_module(&surface_id, &target_id);
+                Task::none()
+            }
+            #[cfg(feature = "lua-scenes")]
+            Message::ModulePointer {
+                surface_id,
+                phase,
+            } => {
+                if let Some(position) = self.cursor {
+                    self.module_pointer_in(&surface_id, position, phase);
+                }
+                Task::none()
+            }
+            Message::ChromeAction {
+                surface_id,
+                action,
+            } => {
+                self.apply_window_action(&surface_id, action);
                 Task::none()
             }
             Message::ShellBack => {
@@ -7143,46 +7173,7 @@ impl App {
         if let Event::ButtonPressed(Button::Left) = &event
             && let Some((surface_id, action)) = self.hit_test_surface_control()
         {
-            self.desktop_press = None;
-            self.desktop_focused = false;
-            match action {
-                WindowAction::Close => {
-                    if self.document.surfaces.iter().any(|s| s.id == surface_id) {
-                        self.document.surfaces.retain(|s| s.id != surface_id);
-                        self.document
-                            .bindings
-                            .retain(|b| b.target.surface_id != surface_id);
-                        self.decoded.remove(&surface_id);
-                        self.shared_views.remove(&surface_id);
-                        self.minimized_surfaces.remove(&surface_id);
-                        self.maximized_surfaces.remove(&surface_id);
-                        self.rebuild_stack();
-                        if self.document.focused_surface_id.as_ref() == Some(&surface_id) {
-                            self.document.focused_surface_id =
-                                self.document.surfaces.last().map(|s| s.id.clone());
-                        }
-                        self.bump();
-                        self.status = format!("Closed {surface_id}.");
-                    }
-                }
-                WindowAction::Minimize => {
-                    if self.minimized_surfaces.insert(surface_id.clone()) {
-                        self.bump();
-                        self.status = format!("Minimized {surface_id}.");
-                    }
-                }
-                WindowAction::Maximize => {
-                    self.start_transition();
-                    self.status = if self.maximized_surfaces.remove(&surface_id) {
-                        format!("Restored {surface_id}.")
-                    } else {
-                        self.maximized_surfaces.clear();
-                        self.maximized_surfaces.insert(surface_id.clone());
-                        format!("Maximized {surface_id}.")
-                    };
-                    self.bump();
-                }
-            }
+            self.apply_window_action(&surface_id, action);
             return Task::none();
         }
 
@@ -7681,6 +7672,54 @@ impl App {
                 Some(canvas_widgets::WidgetChrome::Frameless)
             }
             _ => None,
+        }
+    }
+
+    /// Close, minimize or maximize one surface.
+    ///
+    /// Shared by the chrome's own buttons and by the compositor's hit test: two
+    /// ways to ask for the same thing must not drift into two behaviours.
+    fn apply_window_action(&mut self, surface_id: &str, action: WindowAction) {
+        self.desktop_press = None;
+        self.desktop_focused = false;
+        let surface_id = surface_id.to_owned();
+        match action {
+                WindowAction::Close => {
+                    if self.document.surfaces.iter().any(|s| s.id == surface_id) {
+                        self.document.surfaces.retain(|s| s.id != surface_id);
+                        self.document
+                            .bindings
+                            .retain(|b| b.target.surface_id != surface_id);
+                        self.decoded.remove(&surface_id);
+                        self.shared_views.remove(&surface_id);
+                        self.minimized_surfaces.remove(&surface_id);
+                        self.maximized_surfaces.remove(&surface_id);
+                        self.rebuild_stack();
+                        if self.document.focused_surface_id.as_ref() == Some(&surface_id) {
+                            self.document.focused_surface_id =
+                                self.document.surfaces.last().map(|s| s.id.clone());
+                        }
+                        self.bump();
+                        self.status = format!("Closed {surface_id}.");
+                    }
+                }
+                WindowAction::Minimize => {
+                    if self.minimized_surfaces.insert(surface_id.clone()) {
+                        self.bump();
+                        self.status = format!("Minimized {surface_id}.");
+                    }
+                }
+                WindowAction::Maximize => {
+                    self.start_transition();
+                    self.status = if self.maximized_surfaces.remove(&surface_id) {
+                        format!("Restored {surface_id}.")
+                    } else {
+                        self.maximized_surfaces.clear();
+                        self.maximized_surfaces.insert(surface_id.clone());
+                        format!("Maximized {surface_id}.")
+                    };
+                    self.bump();
+                }
         }
     }
 
@@ -9173,6 +9212,30 @@ impl App {
         );
     }
 
+    /// The same, for a press the view itself reported, so no hit test is needed.
+    #[cfg(feature = "lua-scenes")]
+    fn module_pointer_in(
+        &mut self,
+        surface_id: &str,
+        position: LogicalPoint,
+        phase: ::canvas::lua_module::PointerPhase,
+    ) {
+        let Some(bounds) = self.surface_screen_bounds(surface_id) else {
+            return;
+        };
+        let (bx, by) = (f64::from(bounds.x), f64::from(bounds.y));
+        let (bw, bh) = (f64::from(bounds.width), f64::from(bounds.height));
+        if bw <= 0.0 || bh <= 0.0 {
+            return;
+        }
+        let x = (((position.x - bx) / bw) as f32).clamp(0.0, 1.0);
+        let y = (((position.y - by) / bh) as f32).clamp(0.0, 1.0);
+        self.dispatch_module(
+            surface_id,
+            ::canvas::lua_module::ModuleEvent::Pointer { x, y, phase },
+        );
+    }
+
     #[cfg(feature = "lua-scenes")]
     fn module_button_layer(
         &self,
@@ -9954,6 +10017,20 @@ impl App {
                             ])
                             .width(Length::Fill)
                             .height(Length::Fill);
+                            // The view's own surface reports presses, instead of
+                            // relying on the compositor to win them back from a
+                            // widget that captured them. `self.cursor` carries the
+                            // position, because a click is preceded by a move.
+                            let surface_id = surface.snapshot.id.clone();
+                            let scene = iced::widget::mouse_area(scene)
+                                .on_press(Message::ModulePointer {
+                                    surface_id: surface_id.clone(),
+                                    phase: ::canvas::lua_module::PointerPhase::Press,
+                                })
+                                .on_release(Message::ModulePointer {
+                                    surface_id,
+                                    phase: ::canvas::lua_module::PointerPhase::Release,
+                                });
                             if let Some(error) = last_error {
                                 let visual = self.presented_visual_theme();
                                 let palette = visual.palette;
@@ -9970,7 +10047,7 @@ impl App {
                                 .height(height)
                                 .into()
                             } else {
-                                scene.width(width).height(height).into()
+                                container(scene).width(width).height(height).into()
                             }
                         }
                         Some(ModuleSurface::Failed { reason, .. }) => {
@@ -10317,6 +10394,7 @@ impl App {
 
     fn surface_controls<'a>(
         &self,
+        surface_id: &str,
         title: &'a str,
         focused: bool,
         maximized: bool,
@@ -10378,16 +10456,25 @@ impl App {
                     .into(),
             }
         };
-        let control = |rgb, symbol: &'static str, label: &'static str| {
+        let control = |rgb, symbol: &'static str, label: &'static str, action: WindowAction| {
+            let surface_id = surface_id.to_owned();
+            let tooltip_ready = mouse_area(
+                container(mark(rgb, symbol))
+                    .width(Length::Fixed(SURFACE_CONTROL_HIT_SIZE as f32))
+                    .height(Length::Fixed(bar_height))
+                    .align_x(iced::alignment::Horizontal::Center)
+                    .align_y(iced::alignment::Vertical::Center),
+            )
+            .interaction(mouse::Interaction::Pointer);
+            // Without this the control was decoration that ate the click: it
+            // took the press and told nobody, and the compositor's own hit test
+            // never ran because the widget had captured it.
+            let tooltip_ready = tooltip_ready.on_press(Message::ChromeAction {
+                surface_id: surface_id.clone(),
+                action,
+            });
             tooltip(
-                mouse_area(
-                    container(mark(rgb, symbol))
-                        .width(Length::Fixed(SURFACE_CONTROL_HIT_SIZE as f32))
-                        .height(Length::Fixed(bar_height))
-                        .align_x(iced::alignment::Horizontal::Center)
-                        .align_y(iced::alignment::Vertical::Center),
-                )
-                .interaction(mouse::Interaction::Pointer),
+                tooltip_ready,
                 container(text(label).size(11)).padding(6),
                 tooltip::Position::Bottom,
             )
@@ -10427,17 +10514,20 @@ impl App {
                     control(
                         palette.danger,
                         "×",
-                        window_action_label(WindowAction::Close, maximized)
+                        window_action_label(WindowAction::Close, maximized),
+                        WindowAction::Close
                     ),
                     control(
                         palette.warning,
                         "−",
-                        window_action_label(WindowAction::Minimize, maximized)
+                        window_action_label(WindowAction::Minimize, maximized),
+                        WindowAction::Minimize
                     ),
                     control(
                         palette.success,
                         if maximized { "◇" } else { "□" },
-                        window_action_label(WindowAction::Maximize, maximized)
+                        window_action_label(WindowAction::Maximize, maximized),
+                        WindowAction::Maximize
                     ),
                 ]
                 .spacing(0)
@@ -11079,6 +11169,7 @@ impl App {
                         let chrome_style = window_chrome.clone();
                         let plane = container(column![
                             self.surface_controls(
+                                &surface.snapshot.id,
                                 &surface.snapshot.title,
                                 focused,
                                 maximized,
@@ -11271,6 +11362,7 @@ impl App {
                             self.surface_widget(surface, Length::Fill, Length::Fill, viewport);
                         container(column![
                             self.surface_controls(
+                                &surface.snapshot.id,
                                 &surface.snapshot.title,
                                 true,
                                 true,
