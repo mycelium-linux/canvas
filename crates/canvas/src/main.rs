@@ -2338,7 +2338,13 @@ impl App {
                 // is visible, and cheaply enough that an idle shell costs nothing
                 // (the refresh hashes and no-ops when nothing changed).
                 #[cfg(feature = "lua-scenes")]
-                if self.chrome_poll_at.elapsed() >= Duration::from_millis(200) {
+                // A region that called `module.animate()` gets a frame clock; an
+                // idle shell keeps the cheap poll and pays nothing for it.
+                let chrome_animating = self.desktop_bar.animated()
+                    || self.desktop_dock.animated()
+                    || self.control_center.animated();
+                let chrome_interval = if chrome_animating { 16 } else { 200 };
+                if self.chrome_poll_at.elapsed() >= Duration::from_millis(chrome_interval) {
                     self.chrome_poll_at = Instant::now();
                     self.refresh_desktop_bar(true);
                     if self.project_switcher.is_some() {
@@ -15381,7 +15387,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             spores,
             #[cfg(all(unix, feature = "lua-scenes"))]
             if app.native_switcher.is_some() {
-                iced::time::every(Duration::from_millis(40)).map(|_| Message::NativeSwitcherTick)
+                // The switcher exists only during Alt-Tab, so a frame clock while
+                // it is up costs nothing the rest of the time.
+                iced::time::every(Duration::from_millis(16)).map(|_| Message::NativeSwitcherTick)
             } else {
                 Subscription::none()
             },

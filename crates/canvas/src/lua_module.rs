@@ -466,6 +466,9 @@ pub struct RetainedModuleScene {
     pub view: ModuleView,
     /// Intents from one validated activation; never emitted on load/reload.
     pub actions: Vec<ModuleAction>,
+    /// True when the view called `module.animate()`: it has something that moves,
+    /// and the host should hand it a frame clock instead of a refresh poll.
+    pub animated: bool,
 }
 
 pub struct LuaModule {
@@ -758,6 +761,8 @@ fn render_module(request: RenderRequest<'_>) -> Result<RetainedModuleScene> {
     let actions = Rc::new(RefCell::new(Vec::new()));
     let selection = Rc::new(RefCell::new(request.view.selected.clone()));
     let setup_selection = Rc::clone(&selection);
+    let animated = Rc::new(std::cell::Cell::new(false));
+    let setup_animated = Rc::clone(&animated);
     let setup_buttons = buttons.clone();
     let setup_actions = actions.clone();
     let scene = generate_scene_with_setup(
@@ -774,6 +779,7 @@ fn render_module(request: RenderRequest<'_>) -> Result<RetainedModuleScene> {
                 &request.view,
                 setup_selection,
                 &resources,
+                setup_animated,
             )?;
             install_layout_api(lua, request.limits.max_nodes)?;
             install_button_api(lua, &manifest, &event, setup_buttons, setup_actions)?;
@@ -808,6 +814,7 @@ fn render_module(request: RenderRequest<'_>) -> Result<RetainedModuleScene> {
             selected: selection.borrow().clone(),
         },
         actions,
+        animated: animated.get(),
     })
 }
 
@@ -1064,6 +1071,7 @@ fn install_module_context(
     view: &ModuleView,
     selection: Rc<RefCell<Option<String>>>,
     resources: &BTreeMap<String, HostResourceRef>,
+    animated: Rc<std::cell::Cell<bool>>,
 ) -> Result<()> {
     let module = lua.create_table().map_err(lua_error)?;
     module.set("id", manifest.id.as_str()).map_err(lua_error)?;
@@ -1079,6 +1087,19 @@ fn install_module_context(
     module.set("inputs", inputs).map_err(lua_error)?;
     module
         .set("now", now_to_lua(lua, snapshot.now_ms)?)
+        .map_err(lua_error)?;
+    module.set("now_ms", snapshot.now_ms).map_err(lua_error)?;
+    // Motion is a request for frames, not a fact the host can infer: a scene of
+    // rectangles looks identical animated and still, so the view has to say.
+    module
+        .set(
+            "animate",
+            lua.create_function(move |_, (): ()| {
+                animated.set(true);
+                Ok(())
+            })
+            .map_err(lua_error)?,
+        )
         .map_err(lua_error)?;
     module
         .set("event", event_to_lua(lua, event)?)

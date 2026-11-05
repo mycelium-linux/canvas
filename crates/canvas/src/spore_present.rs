@@ -17,12 +17,19 @@ use canvas_workspace::{
 /// as a drawing that is subtly wrong.
 pub fn scene(scene: &soil_scene::Scene) -> Scene {
     Scene {
-        nodes: scene.nodes.iter().map(node).collect(),
+        nodes: scene.nodes.iter().flat_map(node).collect(),
     }
 }
 
-fn node(node: &soil_scene::Node) -> SceneNode {
-    SceneNode {
+fn node(node: &soil_scene::Node) -> Vec<SceneNode> {
+    // A polyline has no stroke pass in this renderer yet, so it arrives as a
+    // dotted path -- the shape is preserved, and a Spore that draws a spinner or
+    // a sparkline still reads correctly at shell distances. When the compositor
+    // grows a stroke, this arm goes away.
+    if let soil_scene::Content::Polyline(polyline) = &node.content {
+        return dotted(node, polyline);
+    }
+    vec![SceneNode {
         id: node.id.clone(),
         parent_id: node.parent.clone(),
         transform: Transform3 {
@@ -35,7 +42,53 @@ fn node(node: &soil_scene::Node) -> SceneNode {
         content: content(&node.content),
         // A Spore may ask for its own easing; absent means the host default.
         transition_ms: node.transition_ms,
+    }]
+}
+
+fn dotted(node: &soil_scene::Node, polyline: &soil_scene::Polyline) -> Vec<SceneNode> {
+    let width = polyline.width.max(0.01);
+    // One dot per half-width along the path, capped so a long polyline cannot
+    // turn into thousands of draw calls.
+    let step = (width * 0.5).max(0.05);
+    let mut out = Vec::new();
+    let mut carry = 0.0f32;
+    for pair in polyline.points.windows(2) {
+        let [ax, ay] = pair[0];
+        let [bx, by] = pair[1];
+        let (dx, dy) = (bx - ax, by - ay);
+        let length = (dx * dx + dy * dy).sqrt();
+        if !length.is_finite() || length <= f32::EPSILON {
+            continue;
+        }
+        let mut travelled = carry;
+        while travelled < length && out.len() < 256 {
+            let t = travelled / length;
+            let [x, y] = [ax + dx * t, ay + dy * t];
+            out.push(SceneNode {
+                id: format!("{}.dot{}", node.id, out.len()),
+                parent_id: node.parent.clone(),
+                transform: Transform3 {
+                    translation: [
+                        node.transform.translation[0] + x,
+                        node.transform.translation[1] + y,
+                        node.transform.translation[2],
+                    ],
+                    rotation: quaternion(node.transform.rotation),
+                    scale: [node.transform.scale[0] * width, node.transform.scale[1] * width, 1.0],
+                },
+                content: NodeContent::Rect {
+                    ink: polyline.ink.map(ink),
+                    rgb: polyline.rgb,
+                    opacity: polyline.opacity,
+                    radius: 0.5,
+                },
+                transition_ms: node.transition_ms,
+            });
+            travelled += step;
+        }
+        carry = (travelled - length).max(0.0);
     }
+    out
 }
 
 fn content(content: &soil_scene::Content) -> NodeContent {
@@ -65,6 +118,9 @@ fn content(content: &soil_scene::Content) -> NodeContent {
         },
         // A GPU component: the source is data, and the host compiles and caches
         // it. This is what lets a Spore ship a shader without a compositor build.
+        // Handled by `node` before it gets here: a polyline expands to several
+        // dots, so it cannot come back as one node's content.
+        From::Polyline(_) => NodeContent::Group,
         From::Shader(shader) => NodeContent::Shader {
             wgsl: shader.wgsl.clone(),
             uniforms: shader.uniforms.clone(),

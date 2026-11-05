@@ -109,7 +109,7 @@ function widget.tokens()
     elevation = { flat = 0, raised = 1.5, floating = 3 },
     glass = { tint = 0.72, border = 0.18 },
     density = { row = 38, control = 34, header = 30 },
-    motion = { fast = 120, base = 180, slow = 260 },
+    motion = { fast = 120, base = 180, slow = 260, spin = 2600 },
     type = {
       display = t.title,
       title = t.title * 0.86,
@@ -287,4 +287,44 @@ function widget.section(spec)
     ink = "muted", opacity = 0.14, radius = 0,
   }
   return k.type.micro + k.space.md
+end
+
+-- An indeterminate loading mark: a dotted Lissajous ring, because a rotating arc
+-- says "a spinner" and a Lissajous says "this machine knows how to take a
+-- breath". No progress is claimed, so no fraction is drawn.
+--
+-- It is built from round rects rather than a path: the scene has no line
+-- primitive, and dots have the useful property that they read as motion even
+-- when a frame is dropped.
+function widget.spinner(spec)
+  local sp = space_of(spec)
+  local k = widget.tokens()
+  local id = required(spec, "id")
+  local x, y = num(spec.x, 0), num(spec.y, 0)
+  local radius = num(spec.radius, 13)
+  local dots = math.max(6, math.min(num(spec.dots, 24), 64))
+  local period = math.max(400, num(spec.period_ms, k.motion.spin or 2600))
+  local phase = (module.now_ms or 0) / period
+  -- Three and two: the curve only closes after a full turn, so the eye keeps
+  -- finding new segments instead of a shape it has already learned.
+  local a = num(spec.a, 3)
+  local b = num(spec.b, 2)
+  local spin = phase * math.pi * 2
+  module.animate()
+  for i = 1, dots do
+    local u = (i - 1) / dots
+    local angle = u * math.pi * 2 + spin
+    local px = x + radius + radius * 0.92 * math.sin(a * angle)
+    local py = y + radius + radius * 0.92 * math.sin(b * angle + math.pi / 2)
+    local head = 0.35 + 0.65 * u
+    local dot = math.max(1.2, radius * 0.16 * (0.5 + u))
+    widget.panel {
+      id = id .. "-dot" .. i, parent = spec.parent,
+      x = sp.x(px - dot * 0.5), y = sp.y(py + dot * 0.5), z = spec.z,
+      width = sp.w(dot), height = sp.h(dot),
+      ink = spec.ink or "primary", rgb = spec.rgb,
+      opacity = head * num(spec.opacity, 1), radius = dot * 0.5,
+    }
+  end
+  return radius * 2
 end

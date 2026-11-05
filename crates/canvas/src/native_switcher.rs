@@ -103,6 +103,10 @@ impl Host {
             observed_ms: 0,
         }
     }
+    /// Whether the switcher's last accepted scene asked for frames.
+    pub fn animated(&self) -> bool {
+        self.presentation.animated()
+    }
     pub fn refresh(&mut self, theme: ModuleThemeTokens) -> Result<bool, String> {
         let update = self.latest.lock().map_err(|e| e.to_string())?.take();
         if let Some(result) = update {
@@ -129,6 +133,12 @@ impl Host {
         let Some(snapshot) = &self.snapshot else {
             return Ok(false);
         };
+        // Stamped per refresh, not per change: a view that says `module.animate()`
+        // reads the clock, and a frozen clock is a frozen animation.
+        self.observed_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or(self.observed_ms);
         let inputs = snapshot.inputs(self.last_error.as_deref(), self.revision, self.observed_ms);
         let reload = self.last_reload.elapsed() >= Duration::from_secs(1);
         let result = if reload {

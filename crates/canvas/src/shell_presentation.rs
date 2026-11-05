@@ -70,6 +70,11 @@ impl Presentation {
         self.retained.as_ref()
     }
 
+    /// Whether this region's current scene asked for a frame clock.
+    pub fn animated(&self) -> bool {
+        self.retained.as_ref().is_some_and(|retained| retained.animated)
+    }
+
     /// Update native state immediately using the last accepted artifact, with
     /// no filesystem access. The caller polls edited artifacts separately.
     pub fn refresh_current(
