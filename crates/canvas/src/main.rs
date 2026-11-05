@@ -9293,7 +9293,16 @@ impl App {
                     .into()
             })
             .collect();
-        container(stack(children)).into()
+        // A `Stack` takes its intrinsic size from its *first* child, so shrink
+        // nodes would be laid out inside node #1's box and clipped. The scene
+        // owns the whole surface; fill it and let each node pad to its own
+        // position.
+        container(
+            stack(children)
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .into()
     }
 
     fn surface_widget<'a>(
