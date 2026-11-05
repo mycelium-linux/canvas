@@ -6697,8 +6697,14 @@ impl App {
                 master_fd, host, ..
             } = &mut surface.source
             {
-                let data = terminal::read_fd(*master_fd);
-                if !data.is_empty() {
+                // Drain until the descriptor says "no more": a program printing a
+                // screenful produces it in several reads, and handling one read
+                // per tick is how a fast program renders in slow motion.
+                loop {
+                    let data = terminal::read_fd(*master_fd);
+                    if data.is_empty() {
+                        break;
+                    }
                     host.write(&data);
                     changed = true;
                 }
@@ -10489,6 +10495,15 @@ impl App {
         }
     }
 
+    /// Whether a terminal is on screen. A terminal is the one surface whose
+    /// latency is felt directly: every millisecond of poll interval is a
+    /// millisecond between a key and its echo.
+    fn has_terminal(&self) -> bool {
+        self.decoded
+            .values()
+            .any(|surface| matches!(surface.source, ContentSource::Terminal { .. }))
+    }
+
     fn has_live_frames(&self) -> bool {
         self.decoded.values().any(|surface| {
             matches!(
@@ -13875,7 +13890,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         // Live camera frames deserve sub-second pickup without becoming a
         // steady redraw: the reload itself only fires when bytes change.
-        let cadence = if app.has_live_frames() {
+        let cadence = if app.has_terminal() {
+            // Typing latency is dominated by this number: a keystroke's echo
+            // waits for the next poll, so 33ms average became 16ms worst case.
+            cadence.min(Duration::from_millis(16))
+        } else if app.has_live_frames() {
             cadence.min(Duration::from_millis(40))
         } else {
             cadence
