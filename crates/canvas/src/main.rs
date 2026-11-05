@@ -875,6 +875,9 @@ struct App {
     interaction: InteractionEngine,
     snap_preview: Option<LogicalRect>,
     cursor: Option<LogicalPoint>,
+    /// Offset added to raw pointer positions, so a global cursor can be turned
+    /// back into window-local coordinates for hit-testing.
+    cursor_offset: LogicalPoint,
     cursor_window: Option<iced::window::Id>,
     desktop_focused: bool,
     hovered_surface_id: Option<String>,
@@ -1311,6 +1314,7 @@ impl App {
             interaction,
             snap_preview: None,
             cursor: None,
+            cursor_offset: LogicalPoint { x: 0.0, y: 0.0 },
             cursor_window: None,
             desktop_focused: false,
             hovered_surface_id: None,
@@ -6962,6 +6966,7 @@ impl App {
             x: f64::from(viewport.x - self.frame.x),
             y: f64::from(viewport.y - self.frame.y),
         };
+        self.cursor_offset = offset;
 
         match event {
             Event::ButtonPressed(Button::Back) if self.focused_hid_target().is_none() => {
@@ -6976,48 +6981,9 @@ impl App {
         }
 
         if let Event::ButtonPressed(Button::Left) = &event
-            && let Some((surface_id, action)) = self.hit_test_surface_control()
+            && let Some(position) = self.cursor
+            && self.activate_chrome_control(position)
         {
-            self.desktop_press = None;
-            self.desktop_focused = false;
-            match action {
-                WindowAction::Close => {
-                    if self.document.surfaces.iter().any(|s| s.id == surface_id) {
-                        self.document.surfaces.retain(|s| s.id != surface_id);
-                        self.document
-                            .bindings
-                            .retain(|b| b.target.surface_id != surface_id);
-                        self.decoded.remove(&surface_id);
-                        self.shared_views.remove(&surface_id);
-                        self.minimized_surfaces.remove(&surface_id);
-                        self.maximized_surfaces.remove(&surface_id);
-                        self.rebuild_stack();
-                        if self.document.focused_surface_id.as_ref() == Some(&surface_id) {
-                            self.document.focused_surface_id =
-                                self.document.surfaces.last().map(|s| s.id.clone());
-                        }
-                        self.bump();
-                        self.status = format!("Closed {surface_id}.");
-                    }
-                }
-                WindowAction::Minimize => {
-                    if self.minimized_surfaces.insert(surface_id.clone()) {
-                        self.bump();
-                        self.status = format!("Minimized {surface_id}.");
-                    }
-                }
-                WindowAction::Maximize => {
-                    self.start_transition();
-                    self.status = if self.maximized_surfaces.remove(&surface_id) {
-                        format!("Restored {surface_id}.")
-                    } else {
-                        self.maximized_surfaces.clear();
-                        self.maximized_surfaces.insert(surface_id.clone());
-                        format!("Maximized {surface_id}.")
-                    };
-                    self.bump();
-                }
-            }
             return Task::none();
         }
 
@@ -7502,12 +7468,81 @@ impl App {
         }
     }
 
+    /// Act on a click on a window control at `position`.
+    ///
+    /// Shared by the native pointer path and the browser/control path so a
+    /// click means the same thing whichever host delivered it.
+    fn activate_chrome_control(&mut self, position: LogicalPoint) -> bool {
+        let previous = self.cursor;
+        self.cursor = Some(position);
+        let hit = self.hit_test_surface_control();
+        self.cursor = previous;
+        let Some((surface_id, action)) = hit else {
+            return false;
+        };
+        self.desktop_press = None;
+        self.desktop_focused = false;
+        match action {
+            WindowAction::Close => {
+                if self.document.surfaces.iter().any(|s| s.id == surface_id) {
+                    self.document.surfaces.retain(|s| s.id != surface_id);
+                    self.document
+                        .bindings
+                        .retain(|b| b.target.surface_id != surface_id);
+                    self.decoded.remove(&surface_id);
+                    self.shared_views.remove(&surface_id);
+                    self.minimized_surfaces.remove(&surface_id);
+                    self.maximized_surfaces.remove(&surface_id);
+                    self.rebuild_stack();
+                    if self.document.focused_surface_id.as_ref() == Some(&surface_id) {
+                        self.document.focused_surface_id =
+                            self.document.surfaces.last().map(|s| s.id.clone());
+                    }
+                    self.bump();
+                    self.status = format!("Closed {surface_id}.");
+                }
+            }
+            WindowAction::Minimize => {
+                if self.minimized_surfaces.insert(surface_id.clone()) {
+                    self.bump();
+                    self.status = format!("Minimized {surface_id}.");
+                }
+            }
+            WindowAction::Maximize => {
+                self.start_transition();
+                self.status = if self.maximized_surfaces.remove(&surface_id) {
+                    format!("Restored {surface_id}.")
+                } else {
+                    self.maximized_surfaces.clear();
+                    self.maximized_surfaces.insert(surface_id.clone());
+                    format!("Maximized {surface_id}.")
+                };
+                self.bump();
+            }
+        }
+        true
+    }
+
     fn hit_test_surface_control(&self) -> Option<(String, WindowAction)> {
         if self.document.chrome.title == SurfaceTitleMode::Hidden {
             return None;
         }
-        let position = self.cursor?;
-        let frame = self.frame;
+        let raw = self.cursor?;
+        let position = LogicalPoint {
+            x: raw.x - self.cursor_offset.x,
+            y: raw.y - self.cursor_offset.y,
+        };
+        // Surfaces are laid out in the *content* frame; the desktop bar is not
+        // part of it. Measuring controls against the full frame offsets every
+        // hit by the bar's height, which is why the traffic lights did nothing.
+        let shell_height = self
+            .overlay_on_viewport(self.overlays.fpl_mark, self.frame)
+            .then_some(::canvas::DESKTOP_BAR_HEIGHT)
+            .unwrap_or_default();
+        let frame = Rect {
+            height: self.frame.height.saturating_sub(shell_height).max(1),
+            ..self.frame
+        };
         let titlebar_height = f64::from(self.window_chrome().titlebar_height);
         let Layout::Canvas { placements } = self.document.active_layout() else {
             return None;
@@ -8320,6 +8355,19 @@ impl App {
                     .is_grabbed(source_id)
                     .then(|| (source_id.clone(), *bounds))
             });
+        // Window controls are chrome, not content: a click on a traffic light
+        // must act before any surface sees it.
+        if phase == "press"
+            && self.activate_chrome_control(LogicalPoint {
+                // `x`/`y` are normalized to the window, and chrome hit-testing
+                // works in window-local space.
+                x: f64::from(x) * f64::from(self.frame.width),
+                y: f64::from(y) * f64::from(self.frame.height),
+            })
+        {
+            return;
+        }
+
         let hit = snapshot
             .surface_bounds
             .iter()
@@ -9297,12 +9345,7 @@ impl App {
         // nodes would be laid out inside node #1's box and clipped. The scene
         // owns the whole surface; fill it and let each node pad to its own
         // position.
-        container(
-            stack(children)
-                .width(Length::Fill)
-                .height(Length::Fill),
-        )
-        .into()
+        container(stack(children).width(Length::Fill).height(Length::Fill)).into()
     }
 
     fn surface_widget<'a>(
