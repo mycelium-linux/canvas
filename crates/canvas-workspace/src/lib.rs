@@ -10,12 +10,12 @@ use std::{
     fmt,
 };
 
-pub mod chart;
 pub mod audio;
-pub mod observer;
 pub mod background_shaders;
-pub mod session;
+pub mod chart;
 pub mod endpoint;
+pub mod observer;
+pub mod session;
 pub mod view;
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -508,6 +508,18 @@ pub enum SurfaceContent {
         #[serde(default, skip_serializing_if = "is_false")]
         timeline: bool,
     },
+    /// A Spore or host producer presenting frames through the Soil WebGPU
+    /// bridge (`soil:canvas-gpu`). `source_id` names a host-held lease, never a
+    /// path, device handle, or swapchain. The host owns extent and composition.
+    Gpu {
+        source_id: String,
+        width: u32,
+        height: u32,
+        #[serde(default = "default_gpu_format")]
+        format: String,
+        #[serde(default)]
+        revision: u64,
+    },
     /// Producer-owned pixels registered over Canvas's owner-local external
     /// surface socket. Dimensions, format, synchronization, and native handles
     /// belong to the volatile registration; the document persists only this
@@ -559,7 +571,7 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// The `kind` tags this build can render. Anything else is a newer Canvas.
-const KNOWN_SURFACE_KINDS: [&str; 11] = [
+const KNOWN_SURFACE_KINDS: [&str; 12] = [
     "project_resource",
     "asset",
     "chart",
@@ -571,6 +583,7 @@ const KNOWN_SURFACE_KINDS: [&str; 11] = [
     "live_video",
     "external_surface",
     "prompt",
+    "gpu",
 ];
 
 impl SurfaceContent {
@@ -586,6 +599,7 @@ impl SurfaceContent {
             Self::Stream { .. } => "stream",
             Self::LiveImage { .. } => "live_image",
             Self::LiveVideo { .. } => "live_video",
+            Self::Gpu { .. } => "gpu",
             Self::ExternalSurface { .. } => "external_surface",
             Self::Prompt { .. } => "prompt",
             Self::Unsupported(raw) => raw
@@ -684,6 +698,18 @@ enum Known {
         #[serde(default)]
         timeline: bool,
     },
+    /// A Spore or host producer presenting frames through the Soil WebGPU
+    /// bridge (`soil:canvas-gpu`). `source_id` names a host-held lease, never a
+    /// path, device handle, or swapchain. The host owns extent and composition.
+    Gpu {
+        source_id: String,
+        width: u32,
+        height: u32,
+        #[serde(default = "default_gpu_format")]
+        format: String,
+        #[serde(default)]
+        revision: u64,
+    },
     ExternalSurface {
         source_id: String,
     },
@@ -725,6 +751,19 @@ impl Known {
                 height,
                 orbitable,
                 timeline,
+            },
+            Self::Gpu {
+                source_id,
+                width,
+                height,
+                format,
+                revision,
+            } => SurfaceContent::Gpu {
+                source_id,
+                width,
+                height,
+                format,
+                revision,
             },
             Self::ExternalSurface { source_id } => SurfaceContent::ExternalSurface { source_id },
             Self::Prompt {
@@ -920,6 +959,10 @@ pub enum NodeContent {
 
 fn default_scene_opacity() -> f32 {
     1.0
+}
+
+fn default_gpu_format() -> String {
+    "rgba8".to_owned()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -1285,7 +1328,9 @@ impl WorkspaceDocument {
                 SurfaceContent::Scene { scene } => scene.validate()?,
                 SurfaceContent::Stream { url, matte } => {
                     check(!url.is_empty(), "Stream URL must not be empty")?;
-                    if let Some(matte) = matte { matte.validate().map_err(|e| Error(e.into()))?; }
+                    if let Some(matte) = matte {
+                        matte.validate().map_err(|e| Error(e.into()))?;
+                    }
                 }
                 SurfaceContent::LiveImage { source_id } => {
                     check(
@@ -1352,6 +1397,33 @@ impl WorkspaceDocument {
                     check(
                         frame_bytes.is_some_and(|bytes| bytes <= 64 * 1024 * 1024),
                         format!("Live video frame is too large: {width}x{height}"),
+                    )?;
+                }
+                SurfaceContent::Gpu {
+                    source_id,
+                    width,
+                    height,
+                    format,
+                    ..
+                } => {
+                    check(
+                        identifier(source_id),
+                        format!("Invalid GPU source id: {source_id}"),
+                    )?;
+                    check(
+                        (16..=4096).contains(width) && (16..=4096).contains(height),
+                        format!("Invalid GPU surface dimensions: {width}x{height}"),
+                    )?;
+                    check(
+                        matches!(format.as_str(), "rgba8" | "bgra8"),
+                        format!("Unsupported GPU frame format: {format}"),
+                    )?;
+                    let frame_bytes = u64::from(*width)
+                        .checked_mul(u64::from(*height))
+                        .and_then(|pixels| pixels.checked_mul(4));
+                    check(
+                        frame_bytes.is_some_and(|bytes| bytes <= 64 * 1024 * 1024),
+                        format!("GPU frame is too large: {width}x{height}"),
                     )?;
                 }
                 SurfaceContent::ExternalSurface { source_id } => {
@@ -2471,6 +2543,36 @@ mod surface_kind_parity_tests {
         );
     }
 
+    /// A Spore lease round-trips, and a frame format this build cannot import
+    /// is refused by name rather than drawn wrong.
+    #[test]
+    fn a_gpu_lease_roundtrips_and_defaults_its_format() {
+        let raw = serde_json::json!({
+            "kind": "gpu",
+            "source_id": "markdown",
+            "width": 1280,
+            "height": 720,
+            "revision": 7
+        });
+        let parsed: SurfaceContent = serde_json::from_value(raw).expect("parses");
+        assert_eq!(parsed.kind_tag(), "gpu");
+        assert!(matches!(
+            parsed,
+            SurfaceContent::Gpu {
+                width: 1280,
+                height: 720,
+                revision: 7,
+                ..
+            }
+        ));
+
+        let value = serde_json::to_value(&parsed).expect("serializes");
+        assert_eq!(value["kind"], "gpu");
+        assert_eq!(value["format"], "rgba8");
+        assert_eq!(value["source_id"], "markdown");
+        assert_eq!(value["revision"], 7);
+    }
+
     /// A kind from a newer build still degrades to one placeholder tile rather
     /// than taking the document down — the behaviour `prompt` briefly broke.
     #[test]
@@ -2490,9 +2592,15 @@ mod video_matte_tests {
             "source_size":[1280,960],"regions":[{"bounds":[0,0,0.625,1],"color":[0,0,0],"cutoff":0.01,"feather":0.02}]
         }});
         let content: SurfaceContent = serde_json::from_value(value.clone()).unwrap();
-        let reparsed: SurfaceContent = serde_json::from_value(serde_json::to_value(&content).unwrap()).unwrap();
+        let reparsed: SurfaceContent =
+            serde_json::from_value(serde_json::to_value(&content).unwrap()).unwrap();
         assert_eq!(content, reparsed);
-        let SurfaceContent::Stream { matte: Some(matte), .. } = content else { panic!("matte dropped") };
+        let SurfaceContent::Stream {
+            matte: Some(matte), ..
+        } = content
+        else {
+            panic!("matte dropped")
+        };
         matte.validate().unwrap();
         let mut invalid = matte;
         invalid.regions[0].bounds[2] = 2.0;
