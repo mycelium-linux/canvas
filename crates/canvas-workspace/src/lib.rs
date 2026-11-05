@@ -839,6 +839,10 @@ pub struct SceneNode {
     #[serde(default)]
     pub transform: Transform3,
     pub content: NodeContent,
+    /// How long this node takes to ease from its previous state, in
+    /// milliseconds. Absent means the host's default; zero means snap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -913,6 +917,10 @@ pub enum NodeContent {
         ink: Option<SemanticInk>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rgb: Option<[u8; 3]>,
+        /// Text fades like anything else: a label that pops while its panel eases
+        /// reads as two different animations.
+        #[serde(default = "scene_opaque")]
+        opacity: f32,
     },
     Image {
         asset: AssetRef,
@@ -940,6 +948,10 @@ pub enum NodeContent {
 }
 
 fn default_scene_opacity() -> f32 {
+    1.0
+}
+
+const fn scene_opaque() -> f32 {
     1.0
 }
 
@@ -1108,8 +1120,12 @@ impl Scene {
                         "Scene rectangle radius must be finite and nonnegative",
                     )?;
                 }
-                NodeContent::Text { text, .. } => {
+                NodeContent::Text { text, opacity, .. } => {
                     check(visible(text), "Scene text must be printable")?;
+                    check(
+                        opacity.is_finite() && (0.0..=1.0).contains(opacity),
+                        "Scene text opacity must be between zero and one",
+                    )?;
                 }
                 NodeContent::Image { asset } | NodeContent::Mesh { asset } => {
                     asset.validate()?;

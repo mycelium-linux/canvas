@@ -201,6 +201,7 @@ fn install_canvas_api(
                 let text = required_string(&spec, "text")?;
                 let ink = optional_ink(&spec)?;
                 let rgb = optional_rgb(&spec)?;
+                let opacity = spec.get::<Option<f32>>("opacity")?.unwrap_or(1.0);
                 let node = parse_node(
                     &spec,
                     &[
@@ -209,11 +210,18 @@ fn install_canvas_api(
                         "text",
                         "ink",
                         "rgb",
+                        "opacity",
                         "translation",
                         "rotation",
                         "scale",
+                        "transition_ms",
                     ],
-                    NodeContent::Text { text, ink, rgb },
+                    NodeContent::Text {
+                        text,
+                        ink,
+                        rgb,
+                        opacity,
+                    },
                 )?;
                 append_node(&text_nodes, max_nodes, node)
             })
@@ -242,6 +250,7 @@ fn install_canvas_api(
                         "translation",
                         "rotation",
                         "scale",
+                        "transition_ms",
                     ],
                     NodeContent::Rect {
                         ink,
@@ -331,6 +340,9 @@ fn parse_node(spec: &Table, allowed: &[&str], content: NodeContent) -> mlua::Res
         parent_id: spec.get("parent")?,
         transform: parse_transform(spec)?,
         content,
+        // Lua may claim a duration for its own node; the host decides what it
+        // means and when it starts.
+        transition_ms: spec.get::<Option<u64>>("transition_ms")?,
     })
 }
 

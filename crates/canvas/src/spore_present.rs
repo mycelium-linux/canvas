@@ -33,6 +33,8 @@ fn node(node: &soil_scene::Node) -> SceneNode {
             scale: node.transform.scale,
         },
         content: content(&node.content),
+        // A Spore may ask for its own easing; absent means the host default.
+        transition_ms: node.transition_ms,
     }
 }
 
@@ -50,6 +52,7 @@ fn content(content: &soil_scene::Content) -> NodeContent {
             text: text.text.clone(),
             ink: text.ink.map(ink),
             rgb: text.rgb,
+            opacity: text.opacity,
         },
         From::Image(image) => NodeContent::Image {
             // A Spore's image is an asset it declared; the host resolves the id.
@@ -111,6 +114,7 @@ mod tests {
                 id: "ground".into(),
                 parent: None,
                 transform: soil_scene::Transform::default(),
+                transition_ms: None,
                 content: soil_scene::Content::Rect(soil_scene::Rect {
                     ink: Some(soil_scene::Ink::Surface),
                     rgb: Some([1, 2, 3]),
@@ -125,6 +129,7 @@ mod tests {
                     translation: [0.0, 1.0, 0.2],
                     ..Default::default()
                 },
+                transition_ms: None,
                 content: soil_scene::Content::Text(soil_scene::Text {
                     text: "Hello".into(),
                     ink: Some(soil_scene::Ink::Primary),

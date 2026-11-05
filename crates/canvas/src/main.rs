@@ -71,6 +71,7 @@ mod presence;
 use ::canvas::screensaver;
 use ::canvas::stream_contract::{STREAM_FIRST_EVENT_TIMEOUT, STREAM_STALE_AFTER};
 use keyboard_input::*;
+mod scene_anim;
 mod spore_present;
 mod spore_socket;
 mod terminal;
@@ -804,6 +805,8 @@ struct App {
     /// The control center, drawn from the chrome Spore's region.
     control_center: ::canvas::shell_presentation::Presentation,
     control_center_open: bool,
+    /// Interpolation between retained scenes, keyed by region or surface.
+    scene_anim: crate::scene_anim::Animator,
     cursor_on: bool,
     document: WorkspaceDocument,
     runtime_revision: u64,
@@ -1375,6 +1378,7 @@ impl App {
             chrome_poll_at: Instant::now(),
             control_center: Default::default(),
             control_center_open: false,
+            scene_anim: crate::scene_anim::Animator::default(),
             cursor_on: true,
             visible_indicator_id: None,
             indicator_started: Instant::now(),
@@ -4525,7 +4529,14 @@ impl App {
             self.control_center.refresh_current(artifact, snapshot, theme)
         };
         match result {
-            Ok(true) => self.bump(),
+            Ok(true) => {
+                if let Some(scene) = self.control_center.retained() {
+                    let scene = scene.scene.clone();
+                    self.scene_anim
+                        .present("chrome:control-center", &scene, Instant::now());
+                }
+                self.bump();
+            }
             Ok(false) => {}
             Err(error) => self.status = format!("Control center Lua error: {error}"),
         }
@@ -4535,6 +4546,13 @@ impl App {
     fn toggle_control_center(&mut self) -> Task<Message> {
         self.control_center_open = !self.control_center_open;
         if self.control_center_open {
+            // Ease in from a collapsed copy: opening is a change of presence, and
+            // the scene behind it is identical to the one it opens with.
+            if let Some(scene) = self.control_center.retained() {
+                let scene = scene.scene.clone();
+                self.scene_anim
+                    .begin("chrome:control-center", &scene, Instant::now());
+            }
             self.refresh_control_center(true);
         }
         self.bump();
@@ -5249,10 +5267,10 @@ impl App {
                 Task::none()
             }
             Command::ToggleControlCenter => {
+                // One toggle path, so the seeded transition happens however the
+                // panel was opened -- key, command or a future bar control.
                 #[cfg(feature = "lua-scenes")]
-                self.refresh_control_center(true);
-                self.control_center_open = !self.control_center_open;
-                self.bump();
+                let task = self.toggle_control_center();
                 self.answer(
                     pending,
                     Outcome::Ok {
@@ -5261,6 +5279,9 @@ impl App {
                         },
                     },
                 );
+                #[cfg(feature = "lua-scenes")]
+                return task;
+                #[cfg(not(feature = "lua-scenes"))]
                 Task::none()
             }
             Command::OpenLauncher { scope } => {
@@ -10118,17 +10139,19 @@ impl App {
                 let [pos_x, pos_y] = scene_node_position(translation, viewport);
                 let z_scale = scene_node_scale(translation[2]);
                 let content: Element<'static, Message> = match &node.content {
-                    NodeContent::Text { text: label, ink, rgb } => {
+                    NodeContent::Text {
+                        text: label,
+                        ink,
+                        rgb,
+                        opacity,
+                    } => {
                         // Font size is a length, not an area: multiplying X
                         // and Y made a 2x Lua label grow 4x and clip its frame.
                         let font_size =
                             scene_text_size(scale[1], metrics.body, z_scale, metrics.micro);
-                        container(
-                            text(label.clone())
-                                .size(font_size)
-                                .color(color(rgb.unwrap_or_else(|| scene_ink(*ink, &palette)))),
-                        )
-                        .into()
+                        let mut ink_color = color(rgb.unwrap_or_else(|| scene_ink(*ink, &palette)));
+                        ink_color.a *= opacity.clamp(0.0, 1.0);
+                        container(text(label.clone()).size(font_size).color(ink_color)).into()
                     }
                     NodeContent::Rect {
                         ink,
@@ -10255,7 +10278,13 @@ impl App {
                 Some(presented) => match &presented.present {
                     soil_scene::Present::Scene(scene) => {
                         let transparent = scene.transparent;
-                        let scene = crate::spore_present::scene(scene);
+                        let scene = self
+                            .scene_anim
+                            .frame(
+                                &format!("spore:{}", surface.snapshot.id),
+                                std::time::Instant::now(),
+                            )
+                            .unwrap_or_else(|| crate::spore_present::scene(scene));
                         self.spore_ground(transparent, width, height, &scene, viewport)
                     }
                     soil_scene::Present::Rgba(_) => match &presented.handle {
@@ -11341,6 +11370,11 @@ impl App {
                     .map(|last| now.duration_since(last).as_micros() as u64)
                     .unwrap_or(0);
                 handler_us += started.elapsed().as_micros() as u64;
+                if let soil_scene::Present::Scene(scene) = &present {
+                    let host = crate::spore_present::scene(scene);
+                    self.scene_anim
+                        .present(&format!("spore:{surface_id}"), &host, now);
+                }
                 self.spores.insert(
                     surface_id.clone(),
                     PresentedSurface {
@@ -12341,7 +12375,11 @@ impl App {
                 // scene_layer, not shell_scene_layer: the latter re-draws an
                 // opaque ground and clips the rest of the sheet, which is how a
                 // launcher row lost its badge and how this panel lost its rows.
-                let mut sheet = vec![self.scene_layer(&presentation.scene, size)];
+                let scene = self
+                    .scene_anim
+                    .frame("chrome:control-center", Instant::now())
+                    .unwrap_or_else(|| presentation.scene.clone());
+                let mut sheet = vec![self.scene_layer(&scene, size)];
                 sheet.extend(self.native_module_buttons_selected(
                     &presentation.buttons,
                     size,
@@ -15315,7 +15353,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         // Live camera frames deserve sub-second pickup without becoming a
         // steady redraw: the reload itself only fires when bytes change.
-        let cadence = if app.has_live_spore() {
+        let cadence = if app.scene_anim.animating(Instant::now()) {
+            // An easing panel is an animation: 33 Hz would show it as a stutter.
+            cadence.min(Duration::from_millis(16))
+        } else if app.has_live_spore() {
             // A Spore presenting frames is an animation: the idle tick would
             // quantise it to 30 Hz with uneven spacing, which reads as lag.
             cadence.min(Duration::from_millis(16))
@@ -15917,24 +15958,29 @@ mod tests {
         // node_a (root) -> node_b -> node_c
         let nodes = vec![
             SceneNode {
+                transition_ms: None,
                 id: "a".into(),
                 parent_id: None,
                 transform: ::canvas::Transform3::default(),
                 content: NodeContent::Group,
             },
             SceneNode {
+                transition_ms: None,
                 id: "b".into(),
                 parent_id: Some("a".into()),
                 transform: ::canvas::Transform3::default(),
                 content: NodeContent::Group,
             },
             SceneNode {
+                transition_ms: None,
                 id: "c".into(),
                 parent_id: Some("b".into()),
                 transform: ::canvas::Transform3::default(),
                 content: NodeContent::Text {
                     text: "hi".into(),
                     ink: None,
+                    rgb: None,
+                    opacity: 1.0,
                 },
             },
         ];
@@ -17947,14 +17993,29 @@ mod tests {
             repeat: false,
         };
 
-        assert!(launcher_requested(&pressed(
-            iced::keyboard::Key::Named(iced::keyboard::key::Named::Space),
-            Modifiers::CTRL | Modifiers::ALT
-        )));
-        assert!(!launcher_requested(&pressed(
-            iced::keyboard::Key::Named(iced::keyboard::key::Named::Space),
-            Modifiers::CTRL
-        )));
+        // Ctrl+Alt+Space is the launcher; Ctrl+Alt+L is the snap layout, so the
+        // two must not answer to the same chord.
+        let space = |modifiers| Event::KeyPressed {
+            key: Key::Named(key::Named::Space),
+            modified_key: Key::Named(key::Named::Space),
+            physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+            location: Location::Standard,
+            modifiers,
+            text: Some(" ".into()),
+            repeat: false,
+        };
+        assert!(launcher_requested(&space(Modifiers::CTRL | Modifiers::ALT)));
+        assert!(!launcher_requested(&space(Modifiers::CTRL)));
+        assert!(!launcher_requested(&pressed(Modifiers::CTRL | Modifiers::ALT)));
+        assert!(control_center_requested(&Event::KeyPressed {
+            key: Key::Character("c".into()),
+            modified_key: Key::Character("c".into()),
+            physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+            location: Location::Standard,
+            modifiers: Modifiers::CTRL | Modifiers::ALT,
+            text: Some("c".into()),
+            repeat: false,
+        }));
         assert!(snap_layout_requested(&pressed(
             Modifiers::CTRL | Modifiers::ALT
         )));
