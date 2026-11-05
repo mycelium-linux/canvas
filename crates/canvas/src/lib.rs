@@ -38,6 +38,7 @@ pub mod screensaver;
 pub mod shell_dock;
 pub mod shell_geometry;
 pub mod shell_launcher;
+pub mod spore_catalog;
 #[cfg(feature = "lua-scenes")]
 pub mod shell_presentation;
 #[cfg(feature = "lua-scenes")]

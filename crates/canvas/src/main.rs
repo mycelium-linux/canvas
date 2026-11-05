@@ -6721,6 +6721,23 @@ impl App {
                 catalog.entries.push(::canvas::shell_launcher::Entry{id:format!("workspace:{}",project.id),title:project.name.clone(),detail:"WORKSPACE · available".into(),available:true,choice: ::canvas::shell_launcher::Choice::Workspace{id:project.id.clone()}});
             }
         }
+        for app in ::canvas::spore_catalog::scan() {
+            let available = self.snapshot().workspaces.iter().any(|workspace| workspace == &app.workspace);
+            if catalog.entries.iter().any(|entry| entry.id == format!("spore:{}", app.id)) {
+                continue;
+            }
+            catalog.entries.push(::canvas::shell_launcher::Entry {
+                id: format!("spore:{}", app.id),
+                title: app.name,
+                detail: if available {
+                    format!("SPORE · {} · {}", app.version, app.default_surface)
+                } else {
+                    "SPORE · workspace not installed".into()
+                },
+                available,
+                choice: ::canvas::shell_launcher::Choice::Workspace { id: app.workspace },
+            });
+        }
         catalog.entries.sort_by(|a, b| {
             a.title
                 .to_lowercase()
