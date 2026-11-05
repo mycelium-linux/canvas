@@ -8922,19 +8922,67 @@ impl App {
         );
         match result {
             Ok(retained) => {
+                // Two destinations. `canvas.state` is the surface's own small
+                // memory: a stateless view runs in a fresh VM on every render, so
+                // a toggle has to live somewhere the host owns until the Spore
+                // does. Anything else is an intent for a controller and travels
+                // on the bus.
+                let mut updates: Vec<(String, String)> = Vec::new();
                 for action in retained.actions {
-                    match self.module_bus.publish(action) {
-                        Ok(request_id) => {
-                            self.status = format!(
-                                "Module command queued · {request_id} (awaiting controller)"
-                            )
+                    if action.destination == "canvas.state" {
+                        let value = action
+                            .body
+                            .get("value")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("true")
+                            .to_owned();
+                        updates.push((action.kind, value));
+                    } else {
+                        match self.module_bus.publish(action) {
+                            Ok(request_id) => {
+                                self.status = format!(
+                                    "Module command queued · {request_id} (awaiting controller)"
+                                )
+                            }
+                            Err(error) => self.status = format!("Module command failed: {error}"),
                         }
-                        Err(error) => self.status = format!("Module command failed: {error}"),
                     }
+                }
+                let changed = self.remember_module_state(surface_id, updates);
+                if changed {
+                    self.refresh_modules();
                 }
             }
             Err(error) => self.status = format!("Module activation rejected: {error}"),
         }
+    }
+
+    /// Write an action's payload into the surface's own inputs, which is the
+    /// state a stateless view is handed back on its next render. Returns whether
+    /// anything actually changed, so a repeated press does not re-run Lua.
+    #[cfg(feature = "lua-scenes")]
+    fn remember_module_state(&mut self, surface_id: &str, updates: Vec<(String, String)>) -> bool {
+        if updates.is_empty() {
+            return false;
+        }
+        let Some(surface) = self.decoded.get_mut(surface_id) else {
+            return false;
+        };
+        let ContentSource::Widget { spec } = &mut surface.source else {
+            return false;
+        };
+        let canvas_widgets::WidgetKind::Module { inputs, .. } = &mut spec.kind else {
+            return false;
+        };
+        let mut changed = false;
+        for (key, value) in updates {
+            let next = canvas_widgets::WidgetInput::Text { value };
+            if inputs.get(&key) != Some(&next) {
+                inputs.insert(key, next);
+                changed = true;
+            }
+        }
+        changed
     }
 
     #[cfg(feature = "lua-scenes")]
@@ -8945,8 +8993,12 @@ impl App {
         viewport: LogicalSize,
     ) -> Element<'static, Message> {
         let visual = self.presented_visual_theme();
+        // A control is pressable whenever it is enabled. The bus is how an
+        // action reaches a *controller*; an action addressed to the surface's own
+        // state needs no transport, and gating both on the bus is what made every
+        // authored interface a picture of an interface.
         let children = self.native_module_buttons(buttons, viewport, |control| {
-            (control.enabled && self.module_bus.connected()).then(|| Message::ModuleActivate {
+            control.enabled.then(|| Message::ModuleActivate {
                 surface_id: surface_id.to_owned(),
                 target_id: control.id.clone(),
             })
