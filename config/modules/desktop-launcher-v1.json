@@ -3,9 +3,21 @@
   "id": "desktop-launcher-v1",
   "title": "Canvas launcher",
   "inputs": [
-    {"id":"width","kind":"number","required":false},
-    {"id":"height","kind":"number","required":false},
-    {"id":"scope","kind":"text","required":false},
+    {
+      "id": "width",
+      "kind": "number",
+      "required": false
+    },
+    {
+      "id": "height",
+      "kind": "number",
+      "required": false
+    },
+    {
+      "id": "scope",
+      "kind": "text",
+      "required": false
+    },
     {
       "id": "window-cycle",
       "kind": "boolean",
@@ -155,12 +167,74 @@
       "id": "row5-available",
       "kind": "boolean",
       "required": false
+    },
+    {
+      "id": "row0-badge",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "row0-tint",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "row1-badge",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "row1-tint",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "row2-badge",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "row2-tint",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "row3-badge",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "row3-tint",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "row4-badge",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "row4-tint",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "row5-badge",
+      "kind": "text",
+      "required": false
+    },
+    {
+      "id": "row5-tint",
+      "kind": "text",
+      "required": false
     }
   ],
   "capabilities": {
     "write_scene": true,
     "read_inputs": [
-      "width", "height", "scope",
+      "width",
+      "height",
+      "scope",
       "window-cycle",
       "target",
       "query",
@@ -190,9 +264,27 @@
       "row5-title",
       "row5-detail",
       "row5-selected",
-      "row5-available"
+      "row5-available",
+      "row0-badge",
+      "row0-tint",
+      "row1-badge",
+      "row1-tint",
+      "row2-badge",
+      "row2-tint",
+      "row3-badge",
+      "row3-tint",
+      "row4-badge",
+      "row4-tint",
+      "row5-badge",
+      "row5-tint"
     ],
     "read_theme": true
   },
-  "actions": [{"id":"select","destination":"canvas.shell","kind":"select"}]
+  "actions": [
+    {
+      "id": "select",
+      "destination": "canvas.shell",
+      "kind": "select"
+    }
+  ]
 }

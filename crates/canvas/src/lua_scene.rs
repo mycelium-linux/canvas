@@ -200,6 +200,7 @@ fn install_canvas_api(
             lua.create_function(move |_, spec: Table| {
                 let text = required_string(&spec, "text")?;
                 let ink = optional_ink(&spec)?;
+                let rgb = optional_rgb(&spec)?;
                 let node = parse_node(
                     &spec,
                     &[
@@ -207,11 +208,12 @@ fn install_canvas_api(
                         "parent",
                         "text",
                         "ink",
+                        "rgb",
                         "translation",
                         "rotation",
                         "scale",
                     ],
-                    NodeContent::Text { text, ink },
+                    NodeContent::Text { text, ink, rgb },
                 )?;
                 append_node(&text_nodes, max_nodes, node)
             })
@@ -225,6 +227,7 @@ fn install_canvas_api(
             "rect",
             lua.create_function(move |_, spec: Table| {
                 let ink = optional_ink(&spec)?;
+                let rgb = optional_rgb(&spec)?;
                 let opacity = spec.get::<Option<f32>>("opacity")?.unwrap_or(1.0);
                 let radius = spec.get::<Option<f32>>("radius")?.unwrap_or(0.0);
                 let node = parse_node(
@@ -235,12 +238,14 @@ fn install_canvas_api(
                         "ink",
                         "opacity",
                         "radius",
+                        "rgb",
                         "translation",
                         "rotation",
                         "scale",
                     ],
                     NodeContent::Rect {
                         ink,
+                        rgb,
                         opacity,
                         radius,
                     },
@@ -348,6 +353,50 @@ pub(crate) fn required_string(table: &Table, key: &str) -> mlua::Result<String> 
 /// An unknown role is an error rather than a silent fall back to `text`: a scene
 /// that meant to shout "today" and quietly drew body-grey is the kind of wrong
 /// that is only noticed by someone who already distrusts the wall.
+/// A literal colour as `{r, g, b}` in 0..=1, or `#rrggbb`.
+///
+/// Kept separate from `ink` on purpose: a semantic ink means "the theme decides",
+/// which is what composition should normally say. A literal colour means "this
+/// thing has its own identity" -- an app icon, a brand mark -- and it should be
+/// visible that the author reached for that.
+fn optional_rgb(table: &Table) -> mlua::Result<Option<[u8; 3]>> {
+    let value: mlua::Value = table.get("rgb")?;
+    match value {
+        mlua::Value::Nil => Ok(None),
+        mlua::Value::String(text) => {
+            let text = text.to_str()?.to_string();
+            let hex = text.strip_prefix('#').unwrap_or(&text);
+            if hex.len() != 6 {
+                return Err(mlua::Error::RuntimeError(
+                    "Canvas Lua rgb must be #rrggbb".into(),
+                ));
+            }
+            let channel = |range: std::ops::Range<usize>| {
+                u8::from_str_radix(&hex[range], 16).map_err(|_| {
+                    mlua::Error::RuntimeError("Canvas Lua rgb must be #rrggbb".into())
+                })
+            };
+            Ok(Some([channel(0..2)?, channel(2..4)?, channel(4..6)?]))
+        }
+        mlua::Value::Table(channels) => {
+            let mut rgb = [0u8; 3];
+            for (index, slot) in rgb.iter_mut().enumerate() {
+                let value = channels.get::<f32>(index + 1)?;
+                if !value.is_finite() {
+                    return Err(mlua::Error::RuntimeError(
+                        "Canvas Lua rgb channels must be finite".into(),
+                    ));
+                }
+                *slot = (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+            }
+            Ok(Some(rgb))
+        }
+        _ => Err(mlua::Error::RuntimeError(
+            "Canvas Lua rgb must be #rrggbb or { r, g, b }".into(),
+        )),
+    }
+}
+
 fn optional_ink(table: &Table) -> mlua::Result<Option<SemanticInk>> {
     let Some(name) = table.get::<Option<String>>("ink")? else {
         return Ok(None);
@@ -473,6 +522,7 @@ mod tests {
                 ink: Some(SemanticInk::Primary),
                 opacity,
                 radius,
+                ..
             } if opacity == 0.25 && radius == 12.0
         ));
 

@@ -893,6 +893,14 @@ pub enum NodeContent {
     Rect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ink: Option<SemanticInk>,
+        /// A literal colour, when the thing being drawn has one of its own.
+        ///
+        /// An application's icon is the application's colour; a launcher that
+        /// recolours it into a palette makes two builds of one app look like
+        /// different apps. Semantic inks stay the default so a theme still owns
+        /// everything a theme should own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rgb: Option<[u8; 3]>,
         #[serde(default = "default_scene_opacity")]
         opacity: f32,
         #[serde(default)]
@@ -903,6 +911,8 @@ pub enum NodeContent {
         /// Absent in scenes written before ink existed, which draw as `Text`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ink: Option<SemanticInk>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rgb: Option<[u8; 3]>,
     },
     Image {
         asset: AssetRef,

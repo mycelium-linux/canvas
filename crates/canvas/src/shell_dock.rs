@@ -114,15 +114,15 @@ pub fn icon(entry: &Entry) -> Result<Option<iced::widget::image::Handle>, String
 mod tests {
     use super::*;
     fn app(id: &str) -> Entry {
-        Entry {
-            id: id.into(),
-            title: "App".into(),
-            detail: "Native".into(),
-            available: true,
-            choice: Choice::Application {
+        Entry::new(
+            id,
+            "App",
+            "Native",
+            true,
+            Choice::Application {
                 path: id[4..].into(),
             },
-        }
+        )
     }
     #[test]
     fn pins_are_ordered_idempotent_and_removable_after_uninstall() {

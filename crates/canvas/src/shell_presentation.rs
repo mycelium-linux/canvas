@@ -151,6 +151,46 @@ mod tests {
     }
 
     #[test]
+    fn launcher_rows_draw_a_tinted_monogram() {
+        use crate::lua_module::ModuleInputValue as V;
+        let mut p = Presentation::default();
+        let mut s = snapshot();
+        s.values = std::collections::BTreeMap::from([
+            ("width".into(), V::Number(600.0)),
+            ("height".into(), V::Number(440.0)),
+            ("live".into(), V::Boolean(true)),
+            ("count".into(), V::Number(1.0)),
+            ("row0-title".into(), V::Text("Inbox".into())),
+            ("row0-detail".into(), V::Text("APP · 0.1.0".into())),
+            ("row0-available".into(), V::Boolean(true)),
+            ("row0-selected".into(), V::Boolean(true)),
+            ("row0-badge".into(), V::Text("I".into())),
+            ("row0-tint".into(), V::Text("#6ea8fe".into())),
+        ]);
+        p.refresh(
+            DESKTOP_LAUNCHER.manifest_fallback,
+            DESKTOP_LAUNCHER.source_fallback,
+            s,
+            theme(),
+        )
+        .expect("the launcher must render a row with a mark");
+        let scene = &p.retained().expect("scene").scene;
+        let mark = scene
+            .nodes
+            .iter()
+            .find(|node| node.id == "row0-mark")
+            .unwrap_or_else(|| panic!("a row with a tint has a mark; got {:?}", scene.nodes.iter().map(|n| n.id.clone()).collect::<Vec<_>>()));
+        let canvas_workspace::NodeContent::Rect { rgb, .. } = &mark.content else {
+            panic!("the mark is a rectangle");
+        };
+        assert_eq!(*rgb, Some([0x6e, 0xa8, 0xfe]));
+        assert!(
+            scene.nodes.iter().any(|node| node.id == "row0-glyph"),
+            "the monogram is drawn"
+        );
+    }
+
+    #[test]
     fn unchanged_input_reuses_output_and_clone_retains_it() {
         let mut p = Presentation::default();
         assert!(p.refresh(MANIFEST, SOURCE, snapshot(), theme()).unwrap());

@@ -914,6 +914,10 @@ struct App {
     cursor_window: Option<iced::window::Id>,
     desktop_focused: bool,
     hovered_surface_id: Option<String>,
+    /// Last module hit target the pointer entered. Hover moves are dispatched
+    /// only when this changes, never per mouse event.
+    #[cfg(feature = "lua-scenes")]
+    hovered_module_target: Option<(String, Option<String>)>,
     focus_emphasis_started: Option<Instant>,
     primary_pointer_down: bool,
     desktop_press: Option<(Instant, LogicalPoint)>,
@@ -1363,6 +1367,8 @@ impl App {
             cursor_window: None,
             desktop_focused: false,
             hovered_surface_id: None,
+            #[cfg(feature = "lua-scenes")]
+            hovered_module_target: None,
             focus_emphasis_started: None,
             primary_pointer_down: false,
             desktop_press: None,
@@ -4227,6 +4233,17 @@ impl App {
         let action = picker.action(now_unix_ms());
         let generation = picker.generation;
         picker.busy = action.is_some();
+        // Choosing is the end of the launcher, not the middle of it: Spotlight
+        // closes on Enter, and a launcher still on screen after it launched
+        // something reads as if the launch failed.
+        if action.is_some() {
+            self.project_switcher = None;
+            self.desktop_focused = false;
+            self.bump();
+            return action
+                .map(|(target, command)| launcher_task(target, command, generation, true))
+                .unwrap_or_else(Task::none);
+        }
         picker.status = if action.is_some() {
             "Opening on selected screen…"
         } else {
@@ -4257,6 +4274,7 @@ impl App {
                     [self.frame.width as f32, self.frame.height as f32],
                 );
                 if let Err(error) = launcher.render(theme, now_unix_ms()) {
+                    eprintln!("Canvas launcher presentation: {error}");
                     launcher.status = format!("Launcher Lua error: {error}");
                     self.status = launcher.status.clone();
                 }
@@ -4507,12 +4525,14 @@ impl App {
         // Native pins remain saved and available in the explicit native launcher.
         // The Canvas dock represents Canvas windows, not host applications.
         ::canvas::shell_launcher::dock_surfaces(&self.document)
-            .map(|s| Entry {
-                id: format!("surface:{}", s.id),
-                title: s.title.clone(),
-                detail: "WINDOW".into(),
-                available: self.decoded.contains_key(&s.id),
-                choice: Choice::Surface { id: s.id.clone() },
+            .map(|s| {
+                Entry::new(
+                    format!("surface:{}", s.id),
+                    s.title.clone(),
+                    "WINDOW",
+                    self.decoded.contains_key(&s.id),
+                    Choice::Surface { id: s.id.clone() },
+                )
             })
             .collect()
     }
@@ -4600,13 +4620,13 @@ impl App {
                             .surfaces
                             .iter()
                             .find(|surface| &surface.id == id)?;
-                        Some(::canvas::shell_launcher::Entry {
-                            id: format!("surface:{id}"),
-                            title: surface.title.clone(),
-                            detail: "WINDOW · recent".into(),
-                            available: true,
-                            choice: ::canvas::shell_launcher::Choice::Surface { id: id.clone() },
-                        })
+                        Some(::canvas::shell_launcher::Entry::new(
+                            format!("surface:{id}"),
+                            surface.title.clone(),
+                            "WINDOW · recent",
+                            true,
+                            ::canvas::shell_launcher::Choice::Surface { id: id.clone() },
+                        ))
                     })
                     .collect();
                 launcher.window_cycle = true;
@@ -4970,6 +4990,24 @@ impl App {
                     Choice::Surface { id } => {
                         self.focus_shell_surface(&id);
                         Task::none()
+                    }
+                    Choice::Terminal { shell } => {
+                        let surface_id = self.free_surface_id("term");
+                        let request = ControlRequest {
+                            schema_version: pending.request.schema_version,
+                            request_id: pending.request.request_id.clone(),
+                            expected_revision: pending.request.expected_revision,
+                            actor: pending.request.actor.clone(),
+                            command: ::canvas::control::Command::OpenFile {
+                                surface_id,
+                                path: format!("tty://{shell}"),
+                                title: Some("Terminal".into()),
+                            },
+                        };
+                        return self.execute(Pending {
+                            request,
+                            reply: pending.reply,
+                        });
                     }
                     Choice::Spore { module } => {
                         let surface_id = format!("spore-{module}");
@@ -6962,51 +7000,100 @@ impl App {
         let mut catalog = ::canvas::shell_launcher::Catalog::collect(&self.snapshot());
         for project in &self.catalog.projects {
             if !catalog.entries.iter().any(|e|matches!(&e.choice,::canvas::shell_launcher::Choice::Workspace{id} if id==&project.id)) {
-                catalog.entries.push(::canvas::shell_launcher::Entry{id:format!("workspace:{}",project.id),title:project.name.clone(),detail:"WORKSPACE · available".into(),available:true,choice: ::canvas::shell_launcher::Choice::Workspace{id:project.id.clone()}});
+                catalog.entries.push(::canvas::shell_launcher::Entry::new(
+                    format!("workspace:{}", project.id),
+                    project.name.clone(),
+                    "WORKSPACE · available",
+                    true,
+                    ::canvas::shell_launcher::Choice::Workspace { id: project.id.clone() },
+                ));
             }
         }
+        let composed = composed_modules();
+        let mut claimed = std::collections::BTreeSet::new();
         for app in ::canvas::spore_catalog::scan() {
-            let available = self.snapshot().workspaces.iter().any(|workspace| workspace == &app.workspace);
-            if catalog.entries.iter().any(|entry| entry.id == format!("spore:{}", app.id)) {
+            if catalog
+                .entries
+                .iter()
+                .any(|entry| entry.id == format!("app:{}", app.id))
+            {
                 continue;
             }
-            catalog.entries.push(::canvas::shell_launcher::Entry {
-                id: format!("spore:{}", app.id),
-                title: app.name,
-                detail: if available {
-                    format!("SPORE · {} · {}", app.version, app.default_surface)
-                } else {
-                    "SPORE · workspace not installed".into()
-                },
+            // An app is an app: the Spore's name, not the title of whichever
+            // module happened to render one of its panels. A list of panel titles
+            // reads as a list of internals, which is what it is.
+            let module = app
+                .canvas_module
+                .clone()
+                .filter(|module| composed.iter().any(|(id, _)| id == module));
+            // The Terminal app is a terminal: a pty and a shell, which the host
+            // can do today. Pointing it at a workspace that does not exist would
+            // make the most basic app the least launchable one.
+            let terminal = app.name.eq_ignore_ascii_case("terminal");
+            if let Some(module) = &module {
+                claimed.insert(module.clone());
+            }
+            let available = terminal
+                || module.is_some()
+                || self
+                    .snapshot()
+                    .workspaces
+                    .iter()
+                    .any(|workspace| workspace == &app.workspace);
+            let badge = app.badge.clone().unwrap_or_else(|| {
+                app.name
+                    .chars()
+                    .next()
+                    .map(|first| first.to_uppercase().to_string())
+                    .unwrap_or_default()
+            });
+            let detail = match (&module, app.canvas_module.is_some()) {
+                (Some(_), _) => format!("APP · {} · {}", app.version, app.summary),
+                (None, true) => format!("APP · {} · UI not composed", app.version),
+                (None, false) => format!("APP · {} · needs its workspace", app.version),
+            };
+            let choice = if terminal {
+                ::canvas::shell_launcher::Choice::Terminal {
+                    shell: std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into()),
+                }
+            } else if let Some(module) = module {
+                ::canvas::shell_launcher::Choice::Spore { module }
+            } else {
+                ::canvas::shell_launcher::Choice::Workspace { id: app.workspace }
+            };
+            let entry = ::canvas::shell_launcher::Entry::new(
+                format!("app:{}", app.id),
+                app.name,
+                detail,
                 available,
-                choice: ::canvas::shell_launcher::Choice::Workspace { id: app.workspace },
+                choice,
+            );
+            catalog.entries.push(match app.tint {
+                Some(tint) => entry.badged(badge, tint),
+                None => entry,
             });
         }
         // A composed Lua UI is an app: the Spore's own entry in the launcher,
         // without a workspace to install first. These live in the runtime
         // modules directory, which is where composition writes them.
-        for (module, title) in composed_modules() {
-            if catalog
-                .entries
-                .iter()
-                .any(|entry| entry.id == format!("spore:{module}"))
-            {
-                continue;
-            }
-            catalog.entries.push(::canvas::shell_launcher::Entry {
-                id: format!("spore:{module}"),
-                title,
-                detail: "SPORE · Lua UI".into(),
-                available: true,
-                choice: ::canvas::shell_launcher::Choice::Spore {
-                    module: module.clone(),
-                },
-            });
-        }
+        // Unclaimed UIs are panels, not apps, and a launcher that lists them is a
+        // launcher that offers "Approve reply" as if it were a product. They stay
+        // reachable by name through open_widget.
+        let _ = &claimed;
+        // Apps first, then windows, then workspaces, then native applications.
+        // Spotlight's promise is that typing an app's name opens the app, which
+        // cannot hold if nineteen native binaries sort above it alphabetically.
+        let rank = |entry: &::canvas::shell_launcher::Entry| match &entry.choice {
+            ::canvas::shell_launcher::Choice::Spore { .. }
+            | ::canvas::shell_launcher::Choice::Terminal { .. } => 0,
+            ::canvas::shell_launcher::Choice::Surface { .. } => 1,
+            ::canvas::shell_launcher::Choice::Workspace { .. } => 2,
+            ::canvas::shell_launcher::Choice::Application { .. } => 3,
+        };
         catalog.entries.sort_by(|a, b| {
-            a.title
-                .to_lowercase()
-                .cmp(&b.title.to_lowercase())
+            rank(a)
+                .cmp(&rank(b))
+                .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
                 .then_with(|| a.id.cmp(&b.id))
         });
         catalog
@@ -7282,6 +7369,12 @@ impl App {
                     y: f64::from(position.y) + offset.y,
                 });
                 self.cursor_window = Some(window);
+                #[cfg(feature = "lua-scenes")]
+                if !self.primary_pointer_down
+                    && let Some(cursor) = self.cursor
+                {
+                    self.module_hover(cursor);
+                }
                 self.primary_pointer_down.then_some(PointerPhase::Move)
             }
             Event::ButtonPressed(Button::Left) => {
@@ -7293,6 +7386,8 @@ impl App {
                 Some(PointerPhase::Release)
             }
             Event::CursorLeft => {
+                #[cfg(feature = "lua-scenes")]
+                self.clear_module_hover();
                 if self.cursor_window != Some(window) {
                     None
                 } else if self.primary_pointer_down {
@@ -7802,6 +7897,21 @@ impl App {
                     self.bump();
                 }
         }
+    }
+
+    /// The first of `base`, `base2`, `base3`… that no surface is using.
+    fn free_surface_id(&self, base: &str) -> String {
+        let taken = |id: &str| {
+            self.document.surfaces.iter().any(|surface| surface.id == id)
+                || self.decoded.contains_key(id)
+        };
+        if !taken(base) {
+            return base.to_owned();
+        }
+        (2..)
+            .map(|n| format!("{base}{n}"))
+            .find(|id| !taken(id))
+            .expect("an unused surface id exists")
     }
 
     fn hit_test_surface_control(&self) -> Option<(String, WindowAction)> {
@@ -9277,6 +9387,84 @@ impl App {
         None
     }
 
+    /// Find the retained module hit target under the pointer, if any.
+    ///
+    /// This deliberately uses the module's own hit targets, not a Lua re-render,
+    /// so a mouse move costs a linear scan over at most 64 buttons. A Move event
+    /// is sent only when this target changes.
+    #[cfg(feature = "lua-scenes")]
+    fn module_hover_target(
+        &self,
+        position: LogicalPoint,
+    ) -> Option<(String, Option<String>, f32, f32)> {
+        let (surface_id, _, x, y) = self.module_under_pointer(position)?;
+        let target = match self.modules.get(&surface_id) {
+            Some(ModuleSurface::Rendered { buttons, .. }) => buttons
+                .iter()
+                .rev()
+                .find(|button| button.enabled && module_button_contains(button, x, y))
+                .map(|button| button.id.clone()),
+            _ => None,
+        };
+        Some((surface_id, target, x, y))
+    }
+
+    /// Dispatch a hover update only when the target changes.
+    #[cfg(feature = "lua-scenes")]
+    fn module_hover(&mut self, position: LogicalPoint) {
+        let target = self.module_hover_target(position);
+        let key = target
+            .as_ref()
+            .map(|(surface, id, _, _)| (surface.clone(), id.clone()));
+        if key == self.hovered_module_target {
+            return;
+        }
+
+        let previous = self.hovered_module_target.take();
+        self.hovered_module_target = key;
+        if let Some((surface_id, _)) = previous {
+            let same_surface = target
+                .as_ref()
+                .is_some_and(|(surface, _, _, _)| surface == &surface_id);
+            if !same_surface {
+                self.dispatch_module(
+                    &surface_id,
+                    ::canvas::lua_module::ModuleEvent::Pointer {
+                        x: 0.0,
+                        y: 0.0,
+                        phase: ::canvas::lua_module::PointerPhase::Leave,
+                    },
+                );
+            }
+        }
+        if let Some((surface_id, _, x, y)) = target {
+            self.dispatch_module(
+                &surface_id,
+                ::canvas::lua_module::ModuleEvent::Pointer {
+                    x,
+                    y,
+                    phase: ::canvas::lua_module::PointerPhase::Move,
+                },
+            );
+        }
+    }
+
+    /// Clear hover when the pointer leaves the window or module surface.
+    #[cfg(feature = "lua-scenes")]
+    fn clear_module_hover(&mut self) {
+        let Some((surface_id, _)) = self.hovered_module_target.take() else {
+            return;
+        };
+        self.dispatch_module(
+            &surface_id,
+            ::canvas::lua_module::ModuleEvent::Pointer {
+                x: 0.0,
+                y: 0.0,
+                phase: ::canvas::lua_module::PointerPhase::Leave,
+            },
+        );
+    }
+
     /// Deliver a click to a module view.
     ///
     /// Press and release only: hover would mean re-rendering Lua on every mouse
@@ -9455,6 +9643,18 @@ impl App {
                         picture
                     };
                     container(content).center(Length::Fill).into()
+                } else if control.align == ::canvas::lua_module::ButtonAlign::Left {
+                    container(
+                        text(control.label.clone())
+                            .size(fpl_gfx::chrome::BAR_TEXT_SIZE),
+                    )
+                    .width(width)
+                    .padding(iced::Padding {
+                        left: 12.0,
+                        ..Default::default()
+                    })
+                    .align_x(iced::alignment::Horizontal::Left)
+                    .into()
                 } else {
                     text(control.label.clone())
                         .size(fpl_gfx::chrome::BAR_TEXT_SIZE)
@@ -9636,6 +9836,7 @@ impl App {
         };
         let NodeContent::Rect {
             ink,
+            rgb,
             opacity,
             radius,
         } = node.content
@@ -9644,7 +9845,7 @@ impl App {
         };
         let [x, y] = scene_node_position(node.transform.translation, viewport);
         let palette = self.presented_palette();
-        let mut fill = color(scene_ink(ink, &palette));
+        let mut fill = color(rgb.unwrap_or_else(|| scene_ink(ink, &palette)));
         fill.a = opacity;
         let border = color(palette.border);
         let panel = container(space::horizontal())
@@ -9714,7 +9915,7 @@ impl App {
                 let [pos_x, pos_y] = scene_node_position(translation, viewport);
                 let z_scale = scene_node_scale(translation[2]);
                 let content: Element<'static, Message> = match &node.content {
-                    NodeContent::Text { text: label, ink } => {
+                    NodeContent::Text { text: label, ink, rgb } => {
                         // Font size is a length, not an area: multiplying X
                         // and Y made a 2x Lua label grow 4x and clip its frame.
                         let font_size =
@@ -9722,18 +9923,19 @@ impl App {
                         container(
                             text(label.clone())
                                 .size(font_size)
-                                .color(color(scene_ink(*ink, &palette))),
+                                .color(color(rgb.unwrap_or_else(|| scene_ink(*ink, &palette)))),
                         )
                         .into()
                     }
                     NodeContent::Rect {
                         ink,
+                        rgb,
                         opacity,
                         radius,
                     } => {
                         let width = (scale[0].abs() * viewport.width as f32 / 8.0).max(1.0);
                         let height = (scale[1].abs() * viewport.height as f32 / 8.0).max(1.0);
-                        let mut fill = color(scene_ink(*ink, &palette));
+                        let mut fill = color(rgb.unwrap_or_else(|| scene_ink(*ink, &palette)));
                         fill.a = *opacity;
                         let radius = *radius;
                         container(space::horizontal())
@@ -11523,7 +11725,11 @@ impl App {
                     width: width as f64,
                     height: height as f64,
                 };
-                let mut sheet_layers = vec![self.shell_scene_layer(scene, size)];
+                // `shell_scene_layer` re-draws an opaque ground and drops the rest
+                // of the scene on the floor: every rect and glyph in the sheet
+                // vanished, which is why a launcher row could have a badge in its
+                // scene and nothing on screen. The overlay draws its own ground.
+                let mut sheet_layers = vec![self.scene_layer(scene, size)];
                 let rows = picker.matches();
                 let start = picker.row_start();
                 sheet_layers.extend(self.native_module_buttons_selected(
@@ -13109,6 +13315,18 @@ fn scene_ink(ink: Option<SemanticInk>, palette: &ThemePalette) -> [u8; 3] {
         SemanticInk::Danger => palette.danger,
         SemanticInk::Info => palette.info,
     }
+}
+
+fn module_button_contains(
+    button: &::canvas::lua_module::ModuleButton,
+    x: f32,
+    y: f32,
+) -> bool {
+    let left = (button.x + 4.0) / 8.0;
+    let top = 1.0 - (button.y + 4.0) / 8.0;
+    let width = button.width / 8.0;
+    let height = button.height / 8.0;
+    x >= left && x <= left + width && y >= top && y <= top + height
 }
 
 fn scene_node_position(translation: [f32; 3], viewport: LogicalSize) -> [f32; 2] {

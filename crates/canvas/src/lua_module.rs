@@ -67,10 +67,10 @@ end
 
 function widget.panel(spec)
   canvas.rect {
-    id = required(spec, "id"), parent = spec.parent,
+    id = required(spec, "id"), parent = spec.parent, rgb = spec.rgb,
     ink = spec.ink or "text", opacity = spec.opacity or 0.055,
     radius = spec.radius or module.theme.radius,
-    translation = point(spec),
+    translation = { spec.x or 0, spec.y or 0, spec.z or 0.2 },
     scale = { required(spec, "width"), required(spec, "height"), 1 },
   }
 end
@@ -165,6 +165,17 @@ pub struct ModuleButton {
     pub icon: Option<canvas_widgets::ShellIcon>,
     pub icon_size: f32,
     pub icon_caption: bool,
+    /// Which edge the label hugs. A launcher row reads left-to-right, a toolbar
+    /// button reads centred; both are buttons, and neither is wrong.
+    pub align: ButtonAlign,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ButtonAlign {
+    #[default]
+    Center,
+    Left,
 }
 
 /// Semantic control treatment; Lua never supplies native colors or callbacks.
@@ -364,6 +375,8 @@ pub enum PointerPhase {
     Move,
     Press,
     Release,
+    /// The pointer left the module surface; clear view-local hover.
+    Leave,
 }
 
 impl PointerPhase {
@@ -372,6 +385,7 @@ impl PointerPhase {
             Self::Move => "move",
             Self::Press => "press",
             Self::Release => "release",
+            Self::Leave => "leave",
         }
     }
 }
@@ -977,6 +991,7 @@ fn install_button_api(
                         "icon",
                         "icon_size",
                         "icon_caption",
+                        "align",
                     ],
                 )?;
                 let id = required_string(&spec, "id")?;
@@ -1003,6 +1018,15 @@ fn install_button_api(
                         .transpose()?,
                     icon_size: spec.get::<Option<f32>>("icon_size")?.unwrap_or(28.0),
                     icon_caption: spec.get::<Option<bool>>("icon_caption")?.unwrap_or(false),
+                    align: match spec.get::<Option<String>>("align")?.as_deref() {
+                        Some("left") => ButtonAlign::Left,
+                        Some("center") | None => ButtonAlign::Center,
+                        Some(other) => {
+                            return Err(mlua::Error::RuntimeError(format!(
+                                "Canvas Lua button align must be left or center; got {other}"
+                            )));
+                        }
+                    },
                     id,
                     label,
                     x: spec.get("x")?,
@@ -2324,7 +2348,7 @@ mod calendar_module_tests {
             .iter()
             .find(|node| node.id == id)
             .map(|node| match &node.content {
-                NodeContent::Text { text, ink } => (text.as_str(), *ink),
+                NodeContent::Text { text, ink, .. } => (text.as_str(), *ink),
                 other => panic!("node {id} is not text: {other:?}"),
             })
     }

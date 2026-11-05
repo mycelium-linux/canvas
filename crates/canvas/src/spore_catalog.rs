@@ -16,12 +16,20 @@ pub struct SporeApp {
     pub summary: String,
     pub workspace: String,
     pub default_surface: String,
+    /// The composed Lua UI that launches this app on Canvas, when the package
+    /// ships one. Without it the app needs its workspace installed first.
+    pub canvas_module: Option<String>,
+    /// Two characters for the launcher row, and the app's own colour.
+    pub badge: Option<String>,
+    pub tint: Option<[u8; 3]>,
 }
 
 #[derive(Deserialize)]
 struct Manifest {
     spore: Meta,
     launch: Launch,
+    #[serde(default)]
+    presentation: Presentation,
 }
 
 #[derive(Deserialize)]
@@ -35,6 +43,16 @@ struct Meta {
 #[derive(Deserialize)]
 struct Launch {
     default: String,
+    #[serde(default)]
+    canvas_module: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct Presentation {
+    #[serde(default)]
+    badge: Option<String>,
+    #[serde(default)]
+    color: Option<String>,
 }
 
 pub fn roots() -> Vec<PathBuf> {
@@ -54,8 +72,11 @@ pub fn roots() -> Vec<PathBuf> {
         // only knows about source trees hides everything installed.
         roots.push(home.join("Library/Application Support/Dock/canvas/spores"));
         roots.push(home.join(".local/share/spores"));
-        roots.push(home.join("src/fungOS/spores/spores"));
+        // The unibus tree first: it is the one carrying contacts, the launcher and
+        // the inbox, so a duplicate package id here should resolve to the tree that
+        // actually declares those apps.
         roots.push(home.join("src/fungOS/spores-unibus/spores"));
+        roots.push(home.join("src/fungOS/spores/spores"));
     }
     roots.push(PathBuf::from("spores"));
     roots
@@ -74,6 +95,19 @@ pub fn scan() -> Vec<SporeApp> {
     });
     apps.dedup_by(|left, right| left.id == right.id);
     apps
+}
+
+/// `#rrggbb`, the notation a manifest author would write.
+fn rgb(value: &str) -> Option<[u8; 3]> {
+    let hex = value.strip_prefix('#').unwrap_or(value);
+    if hex.len() != 6 {
+        return None;
+    }
+    Some([
+        u8::from_str_radix(&hex[0..2], 16).ok()?,
+        u8::from_str_radix(&hex[2..4], 16).ok()?,
+        u8::from_str_radix(&hex[4..6], 16).ok()?,
+    ])
 }
 
 fn workspace_for(name: &str) -> String {
@@ -121,6 +155,9 @@ fn scan_root(root: &Path, apps: &mut Vec<SporeApp>) {
             summary: manifest.spore.summary,
             workspace: workspace_for(&manifest.spore.name),
             default_surface: manifest.launch.default,
+            canvas_module: manifest.launch.canvas_module.clone(),
+            badge: manifest.presentation.badge.clone(),
+            tint: manifest.presentation.color.as_deref().and_then(rgb),
         });
     }
 }

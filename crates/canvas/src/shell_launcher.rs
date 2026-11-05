@@ -31,6 +31,8 @@ pub enum Choice {
     Spore {
         module: String,
     },
+    /// A live terminal on a real pty, which is what the Terminal app is.
+    Terminal { shell: String },
     Workspace { id: String },
     Surface { id: String },
     Application { path: PathBuf },
@@ -59,7 +61,10 @@ impl Scope {
             || matches!(
                 (self, choice),
                 (Self::Workspaces, Choice::Workspace { .. })
-                    | (Self::Canvas, Choice::Surface { .. } | Choice::Spore { .. })
+                    | (
+                        Self::Canvas,
+                        Choice::Surface { .. } | Choice::Spore { .. } | Choice::Terminal { .. }
+                    )
                     | (Self::Native, Choice::Application { .. })
             )
     }
@@ -72,6 +77,50 @@ pub struct Entry {
     pub detail: String,
     pub available: bool,
     pub choice: Choice,
+    /// What the row shows at a glance. A launcher that only has text makes every
+    /// app look identical, which is the difference between a list and a launcher.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<Icon>,
+}
+
+/// The small mark beside a row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Icon {
+    /// One or two characters. A monogram is honest: it needs no asset, cannot
+    /// ship malware, and reads at 20 px where a bitmap would not.
+    pub glyph: String,
+    /// RGB, from the Spore's own manifest. A host that invents colours makes two
+    /// versions of one app look unrelated.
+    pub tint: [u8; 3],
+}
+
+impl Entry {
+    pub fn new(
+        id: impl Into<String>,
+        title: impl Into<String>,
+        detail: impl Into<String>,
+        available: bool,
+        choice: Choice,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            detail: detail.into(),
+            available,
+            choice,
+            icon: None,
+        }
+    }
+
+    /// Attach a monogram and tint, taken from the app's own manifest.
+    pub fn badged(mut self, glyph: impl Into<String>, tint: [u8; 3]) -> Self {
+        let glyph = glyph.into();
+        if !glyph.is_empty() && glyph.len() <= 2 && !glyph.chars().any(char::is_control) {
+            self.icon = Some(Icon { glyph, tint });
+        }
+        self
+    }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -83,36 +132,45 @@ impl Catalog {
     pub fn collect(snapshot: &RuntimeSnapshot) -> Self {
         let mut entries = Vec::new();
         for s in &snapshot.surfaces {
-            entries.push(Entry {
-                id: format!("surface:{}", s.id),
-                title: s.title.clone(),
-                detail: if snapshot.minimized_surface_ids.contains(&s.id) {
+            entries.push(Entry::new(
+                format!("surface:{}", s.id),
+                s.title.clone(),
+                if snapshot.minimized_surface_ids.contains(&s.id) {
                     "WINDOW · minimized"
                 } else {
                     "WINDOW · open"
-                }
-                .into(),
-                available: s.content != crate::control::ContentKind::Empty,
-                choice: Choice::Surface { id: s.id.clone() },
-            });
+                },
+                s.content != crate::control::ContentKind::Empty,
+                Choice::Surface { id: s.id.clone() },
+            )
+            .badged("▢", [126, 138, 156]));
         }
         for id in &snapshot.workspaces {
             let summary = snapshot
                 .workspace_summaries
                 .iter()
                 .find(|s| &s.project_id == id);
-            entries.push(Entry {
-                id: format!("workspace:{id}"),
-                title: summary.map(|s| s.name.clone()).unwrap_or(id.clone()),
-                detail: if id == &snapshot.project_id {
+            entries.push(Entry::new(
+                format!("workspace:{id}"),
+                summary.map(|s| s.name.clone()).unwrap_or(id.clone()),
+                if id == &snapshot.project_id {
                     "WORKSPACE · current"
                 } else {
                     "WORKSPACE"
-                }
-                .into(),
-                available: true,
-                choice: Choice::Workspace { id: id.clone() },
-            });
+                },
+                true,
+                Choice::Workspace { id: id.clone() },
+            )
+            .badged(
+                summary
+                    .map(|s| s.name.clone())
+                    .unwrap_or_else(|| id.clone())
+                    .chars()
+                    .next()
+                    .map(|first| first.to_uppercase().to_string())
+                    .unwrap_or_else(|| "W".into()),
+                [140, 150, 176],
+            ));
         }
         entries.extend(applications());
         entries.sort_by(|a, b| {
@@ -190,13 +248,13 @@ pub fn applications() -> Vec<Entry> {
                 && !label.chars().any(char::is_control)
                 && seen.insert(name.to_string())
             {
-                apps.push(Entry {
-                    id: format!("app:{}", path.display()),
-                    title: label,
-                    detail: "APPLICATION · native".into(),
-                    available: true,
-                    choice: Choice::Application { path },
-                });
+                apps.push(Entry::new(
+                    format!("app:{}", path.display()),
+                    label,
+                    "APPLICATION · native",
+                    true,
+                    Choice::Application { path },
+                ));
             }
         }
     }
@@ -645,6 +703,45 @@ impl Launcher {
         }
     }
     #[cfg(feature = "lua-scenes")]
+    /// The inputs one render will see, as the module receives them.
+    ///
+    /// Exposed so a test can ask "did the row get its mark" without a window, and
+    /// so a future chrome Spore can be fed from the same contract.
+    pub fn inputs(
+        &self,
+        now: u64,
+    ) -> std::collections::BTreeMap<String, crate::lua_module::ModuleInputValue> {
+        let mut values = std::collections::BTreeMap::new();
+        let fresh = self.catalog.is_some()
+            && (self.window_cycle || now.saturating_sub(self.observed) < LEASE_MS)
+            && !self.busy;
+        let rows = self.matches();
+        let start = self.row_start();
+        for (slot, (_, entry)) in rows
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(self.visible_rows())
+            .enumerate()
+        {
+            if let Some(icon) = &entry.icon {
+                values.insert(
+                    format!("row{slot}-badge"),
+                    crate::lua_module::ModuleInputValue::Text(icon.glyph.clone()),
+                );
+                values.insert(
+                    format!("row{slot}-tint"),
+                    crate::lua_module::ModuleInputValue::Text(format!(
+                        "#{:02x}{:02x}{:02x}",
+                        icon.tint[0], icon.tint[1], icon.tint[2]
+                    )),
+                );
+            }
+        }
+        let _ = fresh;
+        values
+    }
+
     pub fn render(
         &mut self,
         theme: crate::lua_module::ModuleThemeTokens,
@@ -722,8 +819,32 @@ impl Launcher {
                 format!("row{slot}-available"),
                 ModuleInputValue::Boolean(fresh && e.available),
             );
+            // A mark and a colour per row: two apps whose rows differ only in text
+            // are two entries a person has to read to tell apart.
+            if let Some(icon) = &e.icon {
+                values.insert(
+                    format!("row{slot}-badge"),
+                    ModuleInputValue::Text(icon.glyph.clone()),
+                );
+                values.insert(
+                    format!("row{slot}-tint"),
+                    ModuleInputValue::Text(format!(
+                        "#{:02x}{:02x}{:02x}",
+                        icon.tint[0], icon.tint[1], icon.tint[2]
+                    )),
+                );
+            }
         }
         values.insert("count".into(), ModuleInputValue::Number(rows.len() as f64));
+        values.extend(self.inputs(now));
+        if std::env::var_os("CANVAS_LAUNCHER_TRACE").is_some() {
+            eprintln!(
+                "launcher trace: rows={} icon0={:?} badge0={:?}",
+                rows.len(),
+                rows.first().and_then(|entry| entry.icon.clone()),
+                values.get("row0-badge")
+            );
+        }
         self.presentation
             .refresh_files(
                 crate::shell_presentation::DESKTOP_LAUNCHER,
@@ -739,6 +860,14 @@ impl Launcher {
             .presentation
             .retained()
             .map(|output| output.scene.clone());
+        if std::env::var_os("CANVAS_LAUNCHER_TRACE").is_some() {
+            eprintln!(
+                "launcher scene: {:?}",
+                self.scene
+                    .as_ref()
+                    .map(|scene| scene.nodes.iter().map(|node| node.id.clone()).collect::<Vec<_>>())
+            );
+        }
         self.buttons = self
             .presentation
             .retained()
@@ -752,4 +881,87 @@ pub enum Input {
     Cancel,
     Apply,
     Reload,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn theme() -> crate::lua_module::ModuleThemeTokens {
+        canvas_core::ProjectTheme {
+            mode: canvas_core::ThemeMode::Dark,
+            accent: canvas_core::Accent::Info,
+        }
+        .into()
+    }
+
+    fn launcher_with(entries: Vec<Entry>) -> Launcher {
+        let mut launcher = Launcher::new().expect("launcher");
+        launcher.catalog = Some(Catalog {
+            revision: "test".into(),
+            entries,
+        });
+        launcher.loading = false;
+        launcher.observed = 1_000;
+        launcher
+    }
+
+    #[test]
+    fn a_badged_app_row_reaches_the_module_as_badge_and_tint() {
+        // The catalog carries the icon; whether the view ever sees it is a
+        // question about this translation, not about the drawing.
+        let mut launcher = launcher_with(vec![
+            Entry::new(
+                "app:dev.fungos.unibus",
+                "Inbox",
+                "APP · 0.1.0",
+                true,
+                Choice::Spore {
+                    module: "spore-dev-inbox".into(),
+                },
+            )
+            .badged("I", [0x6e, 0xa8, 0xfe]),
+        ]);
+        launcher.viewport = [600.0, 440.0];
+        let inputs = launcher.inputs(1_000);
+        let badge = inputs
+            .get("row0-badge")
+            .expect("the first row carries its monogram");
+        let tint = inputs.get("row0-tint").expect("and its tint");
+        assert_eq!(
+            badge,
+            &crate::lua_module::ModuleInputValue::Text("I".into()),
+            "the module receives the glyph, not a placeholder"
+        );
+        assert_eq!(
+            tint,
+            &crate::lua_module::ModuleInputValue::Text("#6ea8fe".into())
+        );
+    }
+
+    #[test]
+    fn the_launcher_draws_the_badge_through_the_real_render() {
+        let mut launcher = launcher_with(vec![
+            Entry::new(
+                "app:dev.fungos.unibus",
+                "Inbox",
+                "APP · 0.1.0",
+                true,
+                Choice::Spore {
+                    module: "spore-dev-inbox".into(),
+                },
+            )
+            .badged("I", [0x6e, 0xa8, 0xfe]),
+        ]);
+        launcher.viewport = [600.0, 440.0];
+        launcher.render(theme(), 1_000).expect("the launcher renders");
+        let scene = launcher.scene.as_ref().expect("a scene");
+        let mark = scene.nodes.iter().find(|node| node.id == "row0-mark");
+        assert!(
+            mark.is_some(),
+            "a badged row must draw its mark; nodes were {:?}",
+            scene.nodes.iter().map(|node| node.id.clone()).collect::<Vec<_>>()
+        );
+        assert!(scene.nodes.iter().any(|node| node.id == "row0-glyph"));
+    }
 }
