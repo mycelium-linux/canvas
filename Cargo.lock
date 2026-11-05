@@ -475,6 +475,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "soil-layout",
+ "soil-scene",
  "soil-vt",
  "stream-descriptors",
  "subtle",
@@ -5065,6 +5066,14 @@ source = "git+ssh://git@github.com/fungOS-linux/soil.git?rev=9717d3c7594818b7bb2
 dependencies = [
  "serde",
  "taffy",
+]
+
+[[package]]
+name = "soil-scene"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

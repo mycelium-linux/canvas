@@ -71,6 +71,8 @@ mod presence;
 use ::canvas::screensaver;
 use ::canvas::stream_contract::{STREAM_FIRST_EVENT_TIMEOUT, STREAM_STALE_AFTER};
 use keyboard_input::*;
+mod spore_present;
+mod spore_socket;
 mod terminal;
 mod transition;
 mod visual_overlays;
@@ -258,6 +260,21 @@ impl ModuleSurface {
 }
 
 #[derive(Debug, Clone)]
+/// What a Spore last presented, plus the decoded image when it gave pixels.
+struct PresentedSurface {
+    present: soil_scene::Present,
+    handle: Option<iced::widget::image::Handle>,
+    /// Digest of the payload, so an unchanged frame is not re-composited.
+    signature: u64,
+    last_seen: Option<std::time::Instant>,
+    /// Pacing counters, reported when tracing: intervals and handler cost.
+    frames: u64,
+    interval_us: u64,
+    handler_us: u64,
+    last_at: Option<std::time::Instant>,
+}
+
+#[derive(Debug, Clone)]
 enum ContentSource {
     Image {
         _path: PathBuf,
@@ -279,6 +296,8 @@ enum ContentSource {
         /// it has no cells, no attributes, and no idea what a cursor is.
         host: soil_vt::Host,
     },
+    /// A Spore-owned surface: the payload this producer last presented.
+    Spore,
     Scene {
         scene: Scene,
     },
@@ -495,6 +514,7 @@ enum Message {
     /// Bytes that arrived from a terminal's pty. Delivered by a subscription, so
     /// the emulator sees output as it happens rather than on the next tick.
     TerminalChunk(String, Vec<u8>),
+    SporeEvent(crate::spore_socket::SporeEvent),
     TerminalBlink,
     LauncherReply {
         generation: u64,
@@ -771,6 +791,9 @@ struct App {
     /// What each module view has chosen for itself. Not application state: it
     /// is the view's own memory of a click, and it dies with the window.
     module_views: BTreeMap<String, ::canvas::lua_module::ModuleView>,
+    /// The last payload each Spore presented, and the decoded frame when it gave
+    /// pixels rather than a scene.
+    spores: BTreeMap<String, PresentedSurface>,
     cursor_on: bool,
     document: WorkspaceDocument,
     runtime_revision: u64,
@@ -1234,6 +1257,11 @@ impl App {
             theme_chrome_for(&theme_packs, &theme_pack_ids, &document.project_id).titlebar_height;
         let (terminal_sender, terminal_receiver) = tokio::sync::mpsc::unbounded_channel();
         let _ = TERMINAL_SENDER.set(terminal_sender.clone());
+        if let Some(receiver) = crate::spore_socket::start()
+            && let Ok(mut slot) = SPORE_EVENTS.lock()
+        {
+            *slot = Some(receiver);
+        }
         if let Ok(mut slot) = TERMINAL_CHUNKS.lock() {
             *slot = Some(terminal_receiver);
         }
@@ -1332,6 +1360,7 @@ impl App {
             terminal_config: TerminalConfig::load(),
             terminal_bells: BTreeMap::new(),
             module_views: BTreeMap::new(),
+            spores: BTreeMap::new(),
             cursor_on: true,
             visible_indicator_id: None,
             indicator_started: Instant::now(),
@@ -1816,6 +1845,10 @@ impl App {
                 if ring {
                     self.terminal_config.bell.ring();
                 }
+                Task::none()
+            }
+            Message::SporeEvent(event) => {
+                self.handle_spore_event(event);
                 Task::none()
             }
             Message::TerminalBlink => {
@@ -5118,6 +5151,19 @@ impl App {
             Command::Performance => {
                 let mut metrics = self.update_timings.snapshot();
                 metrics["pending_raster_decodes"] = serde_json::json!(self.live_pending.len());
+                // A producer asking "is it lagging" deserves numbers, not an
+                // opinion: frames handled, the interval they arrived at, and what
+                // the host spent on each.
+                metrics["spore_pacing"] = serde_json::json!(self
+                    .spore_pacing()
+                    .into_iter()
+                    .map(|(id, frames, interval_ms, handler_ms)| serde_json::json!({
+                        "surface_id": id,
+                        "frames": frames,
+                        "interval_ms": (interval_ms * 100.0).round() / 100.0,
+                        "handler_ms": (handler_ms * 1000.0).round() / 1000.0,
+                    }))
+                    .collect::<Vec<_>>());
                 metrics["video_sources"] = serde_json::json!(self.decoded.values().filter_map(|surface| {
                     let ContentSource::LiveVideo { source_id, path, width, height, .. } = &surface.source else { return None; };
                     let age = std::fs::metadata(path).ok()
@@ -10037,6 +10083,32 @@ impl App {
                 .width(width)
                 .height(height)
                 .into(),
+            ContentSource::Spore => match self.spores.get(&surface.snapshot.id) {
+                Some(presented) => match &presented.present {
+                    soil_scene::Present::Scene(scene) => {
+                        let transparent = scene.transparent;
+                        let scene = crate::spore_present::scene(scene);
+                        self.spore_ground(transparent, width, height, &scene, viewport)
+                    }
+                    soil_scene::Present::Rgba(_) => match &presented.handle {
+                        Some(handle) => image_widget(handle.clone())
+                            .content_fit(ContentFit::Contain)
+                            .width(width)
+                            .height(height)
+                            .into(),
+                        None => space::horizontal().into(),
+                    },
+                    soil_scene::Present::GpuLease(lease) => container(text(format!(
+                        "GPU lease {} · {}x{} · revision {}",
+                        lease.source_id, lease.width, lease.height, lease.revision
+                    )))
+                    .center(width)
+                    .into(),
+                },
+                None => container(text("Spore surface has not presented yet"))
+                    .center(width)
+                    .into(),
+            },
             ContentSource::DataViz { chart } => {
                 let visual = self.presented_visual_theme();
                 let palette = visual.palette;
@@ -10285,6 +10357,46 @@ impl App {
                 // two failure shapes stay distinguishable on the wall: an
                 // unresolved module says "unresolved", a resolved one that failed
                 // says why.
+                // A Spore drew this: a scene the host rasterizes, pixels it
+                // rendered, or a lease it will fill. The window, chrome, z-order
+                // and input routing are still the host's.
+                if matches!(surface.source, ContentSource::Spore) {
+                    return match self.spores.get(&surface.snapshot.id) {
+                        Some(presented) => match &presented.present {
+                            soil_scene::Present::Scene(scene) => {
+                                let transparent = scene.transparent;
+                                let scene = crate::spore_present::scene(scene);
+                                self.spore_ground(transparent, width, height, &scene, viewport)
+                            }
+                            soil_scene::Present::Rgba(_) => {
+                                match &presented.handle {
+                                    Some(handle) => image_widget(handle.clone())
+                                        .content_fit(ContentFit::Contain)
+                                        .width(width)
+                                        .height(height)
+                                        .into(),
+                                    None => space::horizontal().into(),
+                                }
+                            }
+                            soil_scene::Present::GpuLease(lease) => container(
+                                text(format!(
+                                    "GPU lease {} · {}x{} · revision {}",
+                                    lease.source_id, lease.width, lease.height, lease.revision
+                                ))
+                                .size(self.presented_visual_theme().metrics.small),
+                            )
+                            .center(width)
+                            .into(),
+                        },
+                        None => container(
+                            text("Spore surface has not presented yet")
+                                .size(self.presented_visual_theme().metrics.small),
+                        )
+                        .center(width)
+                        .into(),
+                    };
+                }
+
                 #[cfg(feature = "lua-scenes")]
                 if let canvas_widgets::WidgetKind::Module { .. } = &spec.kind {
                     return match self.modules.get(&surface.snapshot.id) {
@@ -10984,6 +11096,239 @@ impl App {
     /// Whether a terminal is on screen. A terminal is the one surface whose
     /// latency is felt directly: every millisecond of poll interval is a
     /// millisecond between a key and its echo.
+    /// A Spore opened, presented, or closed a surface.
+    /// A Spore scene, on a host ground unless it asked to composite.
+    ///
+    /// Without a ground a window has nothing to show when a frame is late, and a
+    /// late frame is normal: the producer, the socket and the frame gate all
+    /// take time. The desktop showing through that gap is the flicker.
+    fn spore_ground<'a>(
+        &self,
+        transparent: bool,
+        width: Length,
+        height: Length,
+        scene: &canvas_workspace::Scene,
+        viewport: LogicalSize,
+    ) -> Element<'a, Message> {
+        let layer = container(self.scene_layer(scene, viewport))
+            .width(width)
+            .height(height);
+        if transparent {
+            return layer.into();
+        }
+        let palette = self.presented_palette();
+        let ground = color(palette.background);
+        layer
+            .style(move |_| container::Style {
+                background: Some(ground.into()),
+                ..Default::default()
+            })
+            .into()
+    }
+
+    fn handle_spore_event(&mut self, event: crate::spore_socket::SporeEvent) {
+        use crate::spore_socket::SporeEvent;
+        if std::env::var_os("CANVAS_SPORE_TRACE").is_some() {
+            eprintln!("spore event: {event:?}");
+        }
+        match event {
+            SporeEvent::Hello {
+                surface_id,
+                title,
+                width,
+                height,
+            } => self.open_spore_surface(&surface_id, &title, width, height),
+            SporeEvent::Present {
+                surface_id,
+                present,
+                signature,
+            } => {
+                let now = std::time::Instant::now();
+                let previous = self.spores.get(&surface_id);
+                // Same frame twice is not a repaint: nothing has changed, and a
+                // composite would produce the same pixels.
+                if previous.is_some_and(|previous| previous.signature == signature) {
+                    return;
+                }
+                let started = std::time::Instant::now();
+                let handle = match &present {
+                    soil_scene::Present::Rgba(frame) => Some(iced::widget::image::Handle::from_rgba(
+                        frame.width,
+                        frame.height,
+                        frame.pixels.0.clone(),
+                    )),
+                    _ => None,
+                };
+                let (mut frames, mut interval_us, mut handler_us, last_at) = previous
+                    .map(|previous| {
+                        (
+                            previous.frames,
+                            previous.interval_us,
+                            previous.handler_us,
+                            previous.last_at,
+                        )
+                    })
+                    .unwrap_or((0, 0, 0, None));
+                frames += 1;
+                interval_us += last_at
+                    .map(|last| now.duration_since(last).as_micros() as u64)
+                    .unwrap_or(0);
+                handler_us += started.elapsed().as_micros() as u64;
+                self.spores.insert(
+                    surface_id.clone(),
+                    PresentedSurface {
+                        present,
+                        handle,
+                        signature,
+                        last_seen: Some(now),
+                        frames,
+                        interval_us,
+                        handler_us,
+                        last_at: Some(now),
+                    },
+                );
+                // A Spore that presents before its surface is known still gets a
+                // window: the payload is the better evidence of intent.
+                if !self.decoded.contains_key(&surface_id) {
+                    self.open_spore_surface(&surface_id, &surface_id.clone(), 640, 420);
+                }
+                self.bump();
+            }
+            SporeEvent::Gone { surface_id } => {
+                self.spores.remove(&surface_id);
+                self.close_spore_surface(&surface_id);
+                self.bump();
+            }
+        }
+    }
+
+    fn open_spore_surface(&mut self, surface_id: &str, title: &str, width: u32, height: u32) {
+        if !self.document.surfaces.iter().any(|s| s.id == surface_id) {
+            let bounds = NormalizedRect {
+                x: 0.12,
+                y: 0.12,
+                width: (width as f32 / self.frame.width.max(1) as f32).clamp(0.2, 0.9),
+                height: (height as f32 / self.frame.height.max(1) as f32).clamp(0.2, 0.9),
+            };
+            self.document.surfaces.push(Surface {
+                id: surface_id.to_owned(),
+                title: title.to_owned(),
+                content: SurfaceContent::Scene {
+                    scene: Scene { nodes: Vec::new() },
+                },
+                inputs: Vec::new(),
+            });
+            let mut placements = match self.document.active_layout() {
+                Layout::Canvas { placements } => placements.clone(),
+                Layout::Surface { surface_id } => vec![Placement {
+                    surface_id: surface_id.clone(),
+                    bounds: NormalizedRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 1.0,
+                        height: 1.0,
+                    },
+                    layer: 0,
+                }],
+                _ => Vec::new(),
+            };
+            placements.push(Placement {
+                surface_id: surface_id.to_owned(),
+                bounds,
+                layer: placements.len() as i32,
+            });
+            self.document.layout = Layout::Canvas { placements };
+        }
+        self.decoded.insert(
+            surface_id.to_owned(),
+            RuntimeSurface {
+                snapshot: SurfaceSnapshot {
+                    id: surface_id.to_owned(),
+                    title: title.to_owned(),
+                    content: ContentKind::Widget,
+                    asset_sha256: None,
+                    page_index: None,
+                    page_count: None,
+                    source_pixels: None,
+                    rendered_pixels: None,
+                    display_logical: None,
+                    scale_factor: None,
+                },
+                source: ContentSource::Spore,
+                handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
+                source_pixels: [1, 1],
+                media_plan: MediaPlan {
+                    viewport_logical: LogicalSize {
+                        width: 1920.0,
+                        height: 1080.0,
+                    },
+                    source_dimensions: SourceDimensions::RasterPixels(PixelSize {
+                        width: 1,
+                        height: 1,
+                    }),
+                    target_px: PixelSize {
+                        width: 1,
+                        height: 1,
+                    },
+                    display_logical: LogicalSize {
+                        width: 1920.0,
+                        height: 1080.0,
+                    },
+                    scale_factor: 1.0,
+                    cache_key: MediaCacheKey {
+                        source_id: format!("spore:{surface_id}"),
+                        variant: MediaVariant::Raster,
+                        pixel_size: PixelSize {
+                            width: 1,
+                            height: 1,
+                        },
+                    },
+                },
+                upload_pixels: [1, 1],
+            },
+        );
+        self.start_transition();
+        self.bump();
+    }
+
+    fn close_spore_surface(&mut self, surface_id: &str) {
+        self.document.surfaces.retain(|s| s.id != surface_id);
+        if let Layout::Canvas { placements } = &mut self.document.layout {
+            placements.retain(|placement| placement.surface_id != surface_id);
+        }
+        self.decoded.remove(surface_id);
+    }
+
+    /// Whether a Spore is presenting right now.
+    ///
+    /// Recency rather than existence: a producer that stopped presenting should
+    /// not keep the compositor at 60 Hz forever.
+    /// Pacing for a Spore surface: interval between frames, and what handling
+    /// cost. Cheap to keep, and the only honest answer to "is it lagging".
+    fn spore_pacing(&self) -> Vec<(String, u64, f64, f64)> {
+        self.spores
+            .iter()
+            .filter(|(_, presented)| presented.frames > 0)
+            .map(|(id, presented)| {
+                let frames = presented.frames.max(1);
+                (
+                    id.clone(),
+                    frames,
+                    presented.interval_us as f64 / frames as f64 / 1000.0,
+                    presented.handler_us as f64 / frames as f64 / 1000.0,
+                )
+            })
+            .collect()
+    }
+
+    fn has_live_spore(&self) -> bool {
+        self.spores.values().any(|presented| {
+            presented
+                .last_seen
+                .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(2))
+        })
+    }
+
     fn has_terminal(&self) -> bool {
         self.decoded
             .values()
@@ -14354,9 +14699,22 @@ static TERMINAL_SENDER: std::sync::OnceLock<
     tokio::sync::mpsc::UnboundedSender<(String, Vec<u8>)>,
 > = std::sync::OnceLock::new();
 
+static SPORE_EVENTS: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<crate::spore_socket::SporeEvent>>> =
+    Mutex::new(None);
 static TERMINAL_CHUNKS: std::sync::Mutex<
     Option<tokio::sync::mpsc::UnboundedReceiver<(String, Vec<u8>)>>,
 > = std::sync::Mutex::new(None);
+
+fn spore_events_stream() -> impl iced::futures::Stream<Item = Message> {
+    let receiver = SPORE_EVENTS.lock().ok().and_then(|mut slot| slot.take());
+    iced::futures::stream::unfold(receiver, |state| async move {
+        let mut receiver = state?;
+        receiver
+            .recv()
+            .await
+            .map(|event| (Message::SporeEvent(event), Some(receiver)))
+    })
+}
 
 fn terminal_chunks_stream() -> impl iced::futures::Stream<Item = Message> {
     let receiver = TERMINAL_CHUNKS.lock().ok().and_then(|mut slot| slot.take());
@@ -14688,6 +15046,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .subscription(|app| {
         let terminal = iced::Subscription::run(terminal_chunks_stream);
+        let spores = iced::Subscription::run(spore_events_stream);
         // One timer, only while a terminal is on screen, and it does nothing
         // except flip a bool: a blink is not worth a redraw when nothing blinks.
         let blink = if app.has_terminal() && app.terminal_config.cursor.blink {
@@ -14722,7 +15081,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         // Live camera frames deserve sub-second pickup without becoming a
         // steady redraw: the reload itself only fires when bytes change.
-        let cadence = if app.has_terminal() {
+        let cadence = if app.has_live_spore() {
+            // A Spore presenting frames is an animation: the idle tick would
+            // quantise it to 30 Hz with uneven spacing, which reads as lag.
+            cadence.min(Duration::from_millis(16))
+        } else if app.has_terminal() {
             // Typing latency is dominated by this number: a keystroke's echo
             // waits for the next poll, so 33ms average became 16ms worst case.
             cadence.min(Duration::from_millis(16))
@@ -14740,6 +15103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Terminal output is event-driven: the reader threads wake the app
             // when a program writes, so no keystroke's echo waits for a tick.
             terminal,
+            spores,
             #[cfg(all(unix, feature = "lua-scenes"))]
             if app.native_switcher.is_some() {
                 iced::time::every(Duration::from_millis(40)).map(|_| Message::NativeSwitcherTick)
