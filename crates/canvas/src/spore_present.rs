@@ -148,7 +148,7 @@ fn content(content: &soil_scene::Content) -> NodeContent {
         // Canvas's 2D retained scene has no polyline yet. Keep the node as a
         // group so a GPU scene survives the fallback path without inventing a
         // second chart renderer in the compositor.
-        From::Polyline(_) | From::Shader(_) => NodeContent::Group,
+        From::Area(_) | From::Polyline(_) | From::Shader(_) => NodeContent::Group,
     }
 }
 
