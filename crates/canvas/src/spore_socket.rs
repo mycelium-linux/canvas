@@ -7,11 +7,12 @@
 //! payload is versioned data, and a producer that ships from a build farm should
 //! not need to link the compositor to draw into it.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -53,6 +54,10 @@ pub enum SporeEvent {
 
 static SENDER: OnceLock<UnboundedSender<SporeEvent>> = OnceLock::new();
 static RECEIVER: Mutex<Option<UnboundedReceiver<SporeEvent>>> = Mutex::new(None);
+/// Producers keep the same socket open for replies and host input. Canvas owns
+/// the connection, so it can send pointer/scroll/key events back without a
+/// second listener or a producer-chosen path.
+static WRITERS: OnceLock<Mutex<HashMap<String, Arc<Mutex<UnixStream>>>>> = OnceLock::new();
 
 /// Start listening, once. Returns the receiver the app subscribes to.
 pub fn start() -> Option<UnboundedReceiver<SporeEvent>> {
@@ -98,11 +103,51 @@ pub fn socket_path() -> Option<PathBuf> {
     canvas_core::runtime_root().map(|root| root.join("ui.sock"))
 }
 
+/// Send one host input event to the producer that owns `surface_id`.
+///
+/// The producer always sees the same line-delimited JSON stream it writes on.
+/// A producer that does not read input can ignore these lines; Canvas never
+/// waits for an acknowledgement.
+pub fn send_input(surface_id: &str, message: serde_json::Value) -> Result<(), String> {
+    let writers = WRITERS
+        .get()
+        .ok_or_else(|| "spore socket is not listening".to_string())?;
+    let writer = writers
+        .lock()
+        .map_err(|_| "spore writer registry poisoned".to_string())?
+        .get(surface_id)
+        .cloned()
+        .ok_or_else(|| format!("surface {surface_id} is not connected"))?;
+    let mut line = serde_json::to_vec(&message).map_err(|error| error.to_string())?;
+    line.push(b'\n');
+    let mut stream = writer
+        .lock()
+        .map_err(|_| "spore connection poisoned".to_string())?;
+    stream.write_all(&line).map_err(|error| error.to_string())?;
+    stream.flush().map_err(|error| error.to_string())
+}
+
+fn writers() -> &'static Mutex<HashMap<String, Arc<Mutex<UnixStream>>>> {
+    WRITERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn register_writer(surface_id: &str, writer: Arc<Mutex<UnixStream>>) {
+    if let Ok(mut writers) = writers().lock() {
+        writers.insert(surface_id.to_owned(), writer);
+    }
+}
+
+fn unregister_writer(surface_id: &str) {
+    if let Ok(mut writers) = writers().lock() {
+        writers.remove(surface_id);
+    }
+}
+
 fn serve(stream: UnixStream, sender: UnboundedSender<SporeEvent>) {
     let Ok(write_half) = stream.try_clone() else {
         return;
     };
-    let mut writer = write_half;
+    let writer = Arc::new(Mutex::new(write_half));
     let reader = BufReader::new(stream);
     let mut surface: Option<String> = None;
     let mut generation: u64 = 1;
@@ -113,7 +158,7 @@ fn serve(stream: UnixStream, sender: UnboundedSender<SporeEvent>) {
             continue;
         }
         let Ok(message) = serde_json::from_str::<serde_json::Value>(&line) else {
-            let _ = reply(&mut writer, "error", "message is not JSON", generation);
+            let _ = reply(&writer, "error", "message is not JSON", generation);
             continue;
         };
         match message.get("kind").and_then(|kind| kind.as_str()) {
@@ -123,7 +168,7 @@ fn serve(stream: UnixStream, sender: UnboundedSender<SporeEvent>) {
                     .and_then(|value| value.as_str())
                     .filter(|id| safe_id(id))
                 else {
-                    let _ = reply(&mut writer, "error", "surface_id must be a safe id", generation);
+                    let _ = reply(&writer, "error", "surface_id must be a safe id", generation);
                     continue;
                 };
                 let title = message
@@ -133,7 +178,10 @@ fn serve(stream: UnixStream, sender: UnboundedSender<SporeEvent>) {
                     .to_owned();
                 let width = extent(message.get("width"));
                 let height = extent(message.get("height"));
-                surface = Some(id.to_owned());
+                if let Some(previous) = surface.replace(id.to_owned()) {
+                    unregister_writer(&previous);
+                }
+                register_writer(id, writer.clone());
                 if sender
                     .send(SporeEvent::Hello {
                         surface_id: id.to_owned(),
@@ -145,23 +193,21 @@ fn serve(stream: UnixStream, sender: UnboundedSender<SporeEvent>) {
                 {
                     return;
                 }
-                let _ = reply(&mut writer, "state", "ok", generation);
+                let _ = reply(&writer, "state", "ok", generation);
             }
             Some("present") => {
                 let Some(id) = surface.clone() else {
-                    let _ = reply(&mut writer, "error", "present before hello", generation);
+                    let _ = reply(&writer, "error", "present before hello", generation);
                     continue;
                 };
                 let Some(payload) = message.get("payload") else {
-                    let _ = reply(&mut writer, "error", "present needs a payload", generation);
+                    let _ = reply(&writer, "error", "present needs a payload", generation);
                     continue;
                 };
                 let signature = digest(line.as_bytes());
                 let decoded = serde_json::from_value::<soil_scene::Present>(payload.clone())
                     .map_err(|error| error.to_string())
-                    .and_then(|present| {
-                        present.validate().map(|()| present).map_err(|e| e.0)
-                    });
+                    .and_then(|present| present.validate().map(|()| present).map_err(|e| e.0));
                 match decoded {
                     Ok(present) => {
                         if sender
@@ -175,12 +221,12 @@ fn serve(stream: UnixStream, sender: UnboundedSender<SporeEvent>) {
                             return;
                         }
                         generation = generation.saturating_add(1);
-                        let _ = reply(&mut writer, "state", "ok", generation);
+                        let _ = reply(&writer, "state", "ok", generation);
                     }
                     Err(error) => {
                         // Refusals name the reason: a producer that cannot see why
                         // its scene was dropped has nothing to fix.
-                        let _ = reply(&mut writer, "error", &error, generation);
+                        let _ = reply(&writer, "error", &error, generation);
                     }
                 }
             }
@@ -191,7 +237,7 @@ fn serve(stream: UnixStream, sender: UnboundedSender<SporeEvent>) {
                     .filter(|id| safe_id(id));
                 let Some(source_id) = source_id else {
                     let _ = reply(
-                        &mut writer,
+                        &writer,
                         "error",
                         "gpu_frame source_id must be a safe id",
                         generation,
@@ -208,7 +254,7 @@ fn serve(stream: UnixStream, sender: UnboundedSender<SporeEvent>) {
                     .and_then(|value| u32::try_from(value).ok());
                 let (Some(width), Some(height)) = (width, height) else {
                     let _ = reply(
-                        &mut writer,
+                        &writer,
                         "error",
                         "gpu_frame needs integer width and height",
                         generation,
@@ -221,7 +267,7 @@ fn serve(stream: UnixStream, sender: UnboundedSender<SporeEvent>) {
                     || height > MAX_GPU_FRAME_DIMENSION
                 {
                     let _ = reply(
-                        &mut writer,
+                        &writer,
                         "error",
                         "gpu_frame extent is outside 1..=4096",
                         generation,
@@ -229,19 +275,19 @@ fn serve(stream: UnixStream, sender: UnboundedSender<SporeEvent>) {
                     continue;
                 }
                 let Some(encoded) = message.get("rgba").and_then(|value| value.as_str()) else {
-                    let _ = reply(&mut writer, "error", "gpu_frame needs rgba", generation);
+                    let _ = reply(&writer, "error", "gpu_frame needs rgba", generation);
                     continue;
                 };
                 let Some(expected) = (width as usize)
                     .checked_mul(height as usize)
                     .and_then(|pixels| pixels.checked_mul(4))
                 else {
-                    let _ = reply(&mut writer, "error", "gpu_frame extent overflows", generation);
+                    let _ = reply(&writer, "error", "gpu_frame extent overflows", generation);
                     continue;
                 };
                 if expected > MAX_GPU_FRAME_BYTES {
                     let _ = reply(
-                        &mut writer,
+                        &writer,
                         "error",
                         "gpu_frame is over the byte ceiling",
                         generation,
@@ -249,12 +295,12 @@ fn serve(stream: UnixStream, sender: UnboundedSender<SporeEvent>) {
                     continue;
                 }
                 let Ok(rgba) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
-                    let _ = reply(&mut writer, "error", "gpu_frame rgba is not base64", generation);
+                    let _ = reply(&writer, "error", "gpu_frame rgba is not base64", generation);
                     continue;
                 };
                 if rgba.len() != expected {
                     let _ = reply(
-                        &mut writer,
+                        &writer,
                         "error",
                         "gpu_frame rgba length does not match its extent",
                         generation,
@@ -278,7 +324,7 @@ fn serve(stream: UnixStream, sender: UnboundedSender<SporeEvent>) {
                     return;
                 }
                 generation = generation.saturating_add(1);
-                let _ = reply(&mut writer, "state", "ok", generation);
+                let _ = reply(&writer, "state", "ok", generation);
             }
             Some("gpu_frame_shm") => {
                 let source_id = message
@@ -287,7 +333,7 @@ fn serve(stream: UnixStream, sender: UnboundedSender<SporeEvent>) {
                     .filter(|id| safe_id(id));
                 let Some(source_id) = source_id else {
                     let _ = reply(
-                        &mut writer,
+                        &writer,
                         "error",
                         "gpu_frame_shm source_id must be a safe id",
                         generation,
@@ -295,7 +341,7 @@ fn serve(stream: UnixStream, sender: UnboundedSender<SporeEvent>) {
                     continue;
                 };
                 let Some(path) = message.get("path").and_then(|value| value.as_str()) else {
-                    let _ = reply(&mut writer, "error", "gpu_frame_shm needs path", generation);
+                    let _ = reply(&writer, "error", "gpu_frame_shm needs path", generation);
                     continue;
                 };
                 match soil_scene::shm::read(path) {
@@ -313,11 +359,11 @@ fn serve(stream: UnixStream, sender: UnboundedSender<SporeEvent>) {
                             return;
                         }
                         generation = generation.saturating_add(1);
-                        let _ = reply(&mut writer, "state", "ok", generation);
+                        let _ = reply(&writer, "state", "ok", generation);
                     }
                     Err(error) => {
                         let _ = reply(
-                            &mut writer,
+                            &writer,
                             "error",
                             &format!("gpu_frame_shm refused: {error}"),
                             generation,
@@ -327,17 +373,19 @@ fn serve(stream: UnixStream, sender: UnboundedSender<SporeEvent>) {
             }
             Some("close") => {
                 if let Some(id) = surface.take() {
+                    unregister_writer(&id);
                     let _ = sender.send(SporeEvent::Gone { surface_id: id });
                 }
-                let _ = reply(&mut writer, "state", "ok", generation);
+                let _ = reply(&writer, "state", "ok", generation);
                 return;
             }
             _ => {
-                let _ = reply(&mut writer, "error", "unknown kind", generation);
+                let _ = reply(&writer, "error", "unknown kind", generation);
             }
         }
     }
     if let Some(id) = surface {
+        unregister_writer(&id);
         let _ = sender.send(SporeEvent::Gone { surface_id: id });
     }
 }
@@ -349,7 +397,12 @@ fn digest(bytes: &[u8]) -> u64 {
     hasher.finish()
 }
 
-fn reply(writer: &mut UnixStream, kind: &str, message: &str, generation: u64) -> std::io::Result<()> {
+fn reply(
+    writer: &Arc<Mutex<UnixStream>>,
+    kind: &str,
+    message: &str,
+    generation: u64,
+) -> std::io::Result<()> {
     let body = serde_json::json!({
         "kind": kind,
         "message": message,
@@ -357,8 +410,11 @@ fn reply(writer: &mut UnixStream, kind: &str, message: &str, generation: u64) ->
     });
     let mut line = serde_json::to_vec(&body).unwrap_or_default();
     line.push(b'\n');
-    writer.write_all(&line)?;
-    writer.flush()
+    let mut stream = writer
+        .lock()
+        .map_err(|_| std::io::Error::other("spore writer poisoned"))?;
+    stream.write_all(&line)?;
+    stream.flush()
 }
 
 fn extent(value: Option<&serde_json::Value>) -> u32 {

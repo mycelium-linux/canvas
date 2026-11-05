@@ -882,6 +882,9 @@ struct App {
     _external_surface_socket:
         Option<::canvas::external_surface_binding::ExternalSurfaceSocketGuard>,
     external_surface_pointer: Option<ExternalPointerCapture>,
+    /// A pointer gesture currently belongs to a GPU-lease Spore producer, so
+    /// the compositor must not also start a window drag or orbit.
+    spore_pointer_down: bool,
     hid_output: hid_output::HidOutput,
     update_timings: ::canvas::performance::UpdateTimings,
     #[cfg(feature = "lua-scenes")]
@@ -1336,6 +1339,7 @@ impl App {
             external_surfaces,
             _external_surface_socket: external_surface_socket,
             external_surface_pointer: None,
+            spore_pointer_down: false,
             hid_output: hid_output::HidOutput::default(),
             update_timings: ::canvas::performance::UpdateTimings::default(),
             #[cfg(feature = "lua-scenes")]
@@ -7477,11 +7481,23 @@ impl App {
             Event::ButtonPressed(Button::Left) => {
                 if let Some(position) = self.cursor {
                     self.module_pointer(position, ::canvas::lua_module::PointerPhase::Press);
+                    let surfaces = self.interaction_surfaces();
+                    if self.handle_spore_pointer("press", position, &surfaces) {
+                        self.primary_pointer_down = true;
+                        self.spore_pointer_down = true;
+                        return Task::none();
+                    }
                 }
             }
             Event::ButtonReleased(Button::Left) => {
                 if let Some(position) = self.cursor {
                     self.module_pointer(position, ::canvas::lua_module::PointerPhase::Release);
+                    let surfaces = self.interaction_surfaces();
+                    if self.handle_spore_pointer("release", position, &surfaces) {
+                        self.primary_pointer_down = false;
+                        self.spore_pointer_down = false;
+                        return Task::none();
+                    }
                 }
             }
             _ => {}
@@ -7500,6 +7516,13 @@ impl App {
                 {
                     self.module_hover(cursor);
                 }
+                if let Some(cursor) = self.cursor {
+                    let surfaces = self.interaction_surfaces();
+                    self.handle_spore_pointer("move", cursor, &surfaces);
+                }
+                if self.spore_pointer_down {
+                    return Task::none();
+                }
                 self.primary_pointer_down.then_some(PointerPhase::Move)
             }
             Event::ButtonPressed(Button::Left) => {
@@ -7513,6 +7536,14 @@ impl App {
             Event::CursorLeft => {
                 #[cfg(feature = "lua-scenes")]
                 self.clear_module_hover();
+                if let Some(cursor) = self.cursor {
+                    let surfaces = self.interaction_surfaces();
+                    self.handle_spore_pointer("leave", cursor, &surfaces);
+                }
+                if self.spore_pointer_down {
+                    self.spore_pointer_down = false;
+                    self.primary_pointer_down = false;
+                }
                 if self.cursor_window != Some(window) {
                     None
                 } else if self.primary_pointer_down {
@@ -7560,32 +7591,37 @@ impl App {
         let (Some(phase), Some(position)) = (phase, self.cursor) else {
             if let Event::WheelScrolled { delta } = event
                 && let Some(position) = self.cursor
-                && let Ok(Some(target)) = hit_test(
-                    &surfaces,
-                    position,
-                    SURFACE_RESIZE_HANDLE_SIZE,
-                    f64::from(self.window_chrome().titlebar_height),
-                )
-                && let Some(decoded) = self.decoded.get(&target.surface_id)
-                && let ContentSource::ExternalSurface { source_id } = &decoded.source
-                && let Some(geometry) = surfaces.iter().find(|s| s.surface_id == target.surface_id)
             {
                 let (dx, dy) = match delta {
                     iced::mouse::ScrollDelta::Lines { x, y } => (x * 40.0, y * 40.0),
                     iced::mouse::ScrollDelta::Pixels { x, y } => (x, y),
                 };
-                let x = ((position.x - geometry.bounds.x) / geometry.bounds.width).clamp(0.0, 1.0)
-                    as f32;
-                let y = ((position.y - geometry.bounds.y) / geometry.bounds.height).clamp(0.0, 1.0)
-                    as f32;
-                if let Err(error) = self.external_surfaces.send_scroll(
-                    source_id,
-                    x,
-                    y,
-                    dx.clamp(-4096.0, 4096.0),
-                    dy.clamp(-4096.0, 4096.0),
-                ) {
-                    self.status = format!("Canvas external scroll failed: {error}");
+                if self.handle_spore_scroll(position, &surfaces, dx, dy) {
+                    return Task::none();
+                }
+                if let Ok(Some(target)) = hit_test(
+                    &surfaces,
+                    position,
+                    SURFACE_RESIZE_HANDLE_SIZE,
+                    f64::from(self.window_chrome().titlebar_height),
+                ) && let Some(decoded) = self.decoded.get(&target.surface_id)
+                    && let ContentSource::ExternalSurface { source_id } = &decoded.source
+                    && let Some(geometry) =
+                        surfaces.iter().find(|s| s.surface_id == target.surface_id)
+                {
+                    let x = ((position.x - geometry.bounds.x) / geometry.bounds.width)
+                        .clamp(0.0, 1.0) as f32;
+                    let y = ((position.y - geometry.bounds.y) / geometry.bounds.height)
+                        .clamp(0.0, 1.0) as f32;
+                    if let Err(error) = self.external_surfaces.send_scroll(
+                        source_id,
+                        x,
+                        y,
+                        dx.clamp(-4096.0, 4096.0),
+                        dy.clamp(-4096.0, 4096.0),
+                    ) {
+                        self.status = format!("Canvas external scroll failed: {error}");
+                    }
                 }
             }
             return Task::none();
@@ -7958,6 +7994,100 @@ impl App {
         }
         if matches!(phase, PointerPhase::Release | PointerPhase::Cancel) {
             self.external_surface_pointer = None;
+        }
+        true
+    }
+
+    /// The producer owning a GPU lease under the pointer, with module-local
+    /// normalized coordinates. Canvas owns the hit test and the window
+    /// geometry; the producer only ever sees the normalized event.
+    fn spore_input_target(
+        &self,
+        position: LogicalPoint,
+        surfaces: &[SurfaceGeometry],
+    ) -> Option<(String, f32, f32)> {
+        let Ok(Some(target)) = hit_test(
+            surfaces,
+            position,
+            SURFACE_RESIZE_HANDLE_SIZE,
+            f64::from(self.window_chrome().titlebar_height),
+        ) else {
+            return None;
+        };
+        if !matches!(target.region, HitRegion::Body | HitRegion::TopBar) {
+            return None;
+        }
+        let presented = self.spores.get(&target.surface_id)?;
+        if !matches!(presented.present, soil_scene::Present::GpuLease(_)) {
+            return None;
+        }
+        let geometry = surfaces
+            .iter()
+            .find(|surface| surface.surface_id == target.surface_id)?;
+        if geometry.bounds.width <= 0.0 || geometry.bounds.height <= 0.0 {
+            return None;
+        }
+        let x = ((position.x - geometry.bounds.x) / geometry.bounds.width).clamp(0.0, 1.0)
+            as f32;
+        let y = ((position.y - geometry.bounds.y) / geometry.bounds.height).clamp(0.0, 1.0)
+            as f32;
+        Some((target.surface_id, x, y))
+    }
+
+    fn handle_spore_pointer(
+        &mut self,
+        phase: &str,
+        position: LogicalPoint,
+        surfaces: &[SurfaceGeometry],
+    ) -> bool {
+        let Some((surface_id, x, y)) = self.spore_input_target(position, surfaces) else {
+            return false;
+        };
+        if phase == "press" {
+            self.apply_interaction_intents(vec![
+                InteractionIntent::Focus {
+                    surface_id: surface_id.clone(),
+                },
+                InteractionIntent::PromoteToFront {
+                    surface_id: surface_id.clone(),
+                },
+            ]);
+        }
+        if let Err(error) = crate::spore_socket::send_input(
+            &surface_id,
+            serde_json::json!({
+                "kind": "pointer",
+                "phase": phase,
+                "x": x,
+                "y": y,
+            }),
+        ) {
+            self.status = format!("Canvas spore pointer failed: {error}");
+        }
+        true
+    }
+
+    fn handle_spore_scroll(
+        &mut self,
+        position: LogicalPoint,
+        surfaces: &[SurfaceGeometry],
+        dx: f32,
+        dy: f32,
+    ) -> bool {
+        let Some((surface_id, x, y)) = self.spore_input_target(position, surfaces) else {
+            return false;
+        };
+        if let Err(error) = crate::spore_socket::send_input(
+            &surface_id,
+            serde_json::json!({
+                "kind": "scroll",
+                "x": x,
+                "y": y,
+                "dx": dx.clamp(-4096.0, 4096.0),
+                "dy": dy.clamp(-4096.0, 4096.0),
+            }),
+        ) {
+            self.status = format!("Canvas spore scroll failed: {error}");
         }
         true
     }
