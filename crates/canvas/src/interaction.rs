@@ -332,10 +332,10 @@ impl InteractionEngine {
             active.dragging = true;
         }
 
-        // Snapping belongs to the moment a gesture settles. Applying it on the
-        // way makes the window hop between grid cells while the pointer moves
-        // smoothly between them, which reads as the window lagging the hand.
-        let next = manipulate(self.config, active, event.position, release);
+        // Snap while moving as well as on release: the grid is part of the
+        // desk. What made this feel detached was not the quantisation but the
+        // un-reanchored correction, which `move_rect` now applies.
+        let next = manipulate(self.config, active, event.position, true);
         active.last_position = event.position;
         active.snap_zone = match active.region {
             HitRegion::TopBar | HitRegion::Body => snap_zone_for_move(self.config, event.position),

@@ -554,6 +554,15 @@ enum Message {
     /// to reach the app even when the surface's own controls capture it — that
     /// filtering is why minimize and maximize did nothing on a live surface.
     MouseEvent(iced::window::Id, iced::mouse::Event, bool),
+    ContextMenuOpen {
+        surface_id: String,
+        position: LogicalPoint,
+    },
+    ContextMenuPick {
+        surface_id: String,
+        action: WindowAction,
+    },
+    ContextMenuDismiss,
     RestoreSurface(String),
     BackgroundTileClicked(usize),
     LiveFrameLoaded {
@@ -633,11 +642,48 @@ impl Failure {
     }
 }
 
+/// Where a right press opened its menu, in window-local points.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContextMenu {
+    surface_id: String,
+    x: i32,
+    y: i32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WindowAction {
     Close,
     Minimize,
     Maximize,
+}
+
+/// Hover/pressed treatment for a menu row, from the same palette as everything
+/// else so a menu is never a differently-themed rectangle.
+fn menu_item_style(
+    visual: VisualTheme,
+    status: iced::widget::button::Status,
+) -> iced::widget::button::Style {
+    use iced::widget::button::Status;
+    let palette = visual.palette;
+    let background = match status {
+        Status::Hovered | Status::Pressed => Some(
+            Color {
+                a: 0.14,
+                ..color(palette.primary)
+            }
+            .into(),
+        ),
+        _ => None,
+    };
+    iced::widget::button::Style {
+        background,
+        text_color: color(palette.text),
+        border: iced::Border {
+            radius: 6.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
 
 fn window_action_label(action: WindowAction, maximized: bool) -> &'static str {
@@ -878,6 +924,9 @@ struct App {
     status: String,
     interaction: InteractionEngine,
     snap_preview: Option<LogicalRect>,
+    /// A menu opened by a right press. Host-owned so every surface and every
+    /// Spore gets one without each of them drawing its own popup.
+    context_menu: Option<ContextMenu>,
     cursor: Option<LogicalPoint>,
     /// Offset added to raw pointer positions, so a global cursor can be turned
     /// back into window-local coordinates for hit-testing.
@@ -1317,6 +1366,7 @@ impl App {
             },
             interaction,
             snap_preview: None,
+            context_menu: None,
             cursor: None,
             cursor_offset: LogicalPoint { x: 0.0, y: 0.0 },
             cursor_window: None,
@@ -2275,6 +2325,33 @@ impl App {
                         );
                     }
                     self.replan_rasters();
+                }
+                Task::none()
+            }
+            Message::ContextMenuOpen {
+                surface_id,
+                position,
+            } => {
+                self.context_menu = Some(ContextMenu {
+                    surface_id,
+                    x: position.x.round() as i32,
+                    y: position.y.round() as i32,
+                });
+                self.bump();
+                Task::none()
+            }
+            Message::ContextMenuPick {
+                surface_id,
+                action,
+            } => {
+                self.context_menu = None;
+                self.apply_window_action(&surface_id, action);
+                self.bump();
+                Task::none()
+            }
+            Message::ContextMenuDismiss => {
+                if self.context_menu.take().is_some() {
+                    self.bump();
                 }
                 Task::none()
             }
@@ -6985,6 +7062,35 @@ impl App {
             _ => {}
         }
 
+        if let Event::ButtonPressed(Button::Right) = &event {
+            let surfaces = self.interaction_surfaces();
+            let point = self.cursor.map(|position| LogicalPoint {
+                x: position.x - offset.x,
+                y: position.y - offset.y,
+            });
+            let target = point.and_then(|point| {
+                hit_test(
+                    &surfaces,
+                    point,
+                    SURFACE_RESIZE_HANDLE_SIZE,
+                    f64::from(self.window_chrome().titlebar_height),
+                )
+                .ok()
+                .flatten()
+            });
+            // The menu opens at the pointer, in the same window-local points the
+            // layer is padded by.
+            self.context_menu = match (target, point) {
+                (Some(target), Some(point)) => Some(ContextMenu {
+                    surface_id: target.surface_id,
+                    x: point.x.round() as i32,
+                    y: point.y.round() as i32,
+                }),
+                _ => None,
+            };
+            self.bump();
+            return Task::none();
+        }
         if let Event::ButtonPressed(Button::Left) = &event
             && let Some(position) = self.cursor
             && self.activate_chrome_control(LogicalPoint {
@@ -6998,6 +7104,10 @@ impl App {
         // and content must not also act on it.
         if captured && matches!(event, Event::ButtonPressed(_)) {
             return Task::none();
+        }
+
+        if matches!(event, Event::ButtonPressed(Button::Left)) && self.context_menu.take().is_some() {
+            self.bump();
         }
 
         let phase = match event {
@@ -7493,6 +7603,14 @@ impl App {
         let Some((surface_id, action)) = hit else {
             return false;
         };
+        self.apply_window_action(&surface_id, action);
+        true
+    }
+
+    /// Everything a window control does, shared by the chrome hit test and the
+    /// right-click menu so both produce exactly one behaviour per action.
+    fn apply_window_action(&mut self, surface_id: &str, action: WindowAction) {
+        let surface_id = surface_id.to_owned();
         self.desktop_press = None;
         self.desktop_focused = false;
         match action {
@@ -7533,7 +7651,6 @@ impl App {
                 self.bump();
             }
         }
-        true
     }
 
     fn hit_test_surface_control(&self) -> Option<(String, WindowAction)> {
@@ -11160,6 +11277,63 @@ impl App {
         }
         if let Some(picker) = self.theme_picker.as_ref() {
             layers.push(picker.view::<Message>(&|index| Message::ThemePickerSelect(index)));
+        }
+        if let Some(menu) = self.context_menu.as_ref() {
+            let visual = self.presented_visual_theme();
+            let palette = visual.palette;
+            let maximized = self.maximized_surfaces.contains(&menu.surface_id);
+            let rows: Vec<Element<'static, Message>> = [
+                WindowAction::Minimize,
+                WindowAction::Maximize,
+                WindowAction::Close,
+            ]
+            .into_iter()
+            .map(|action| {
+                let surface_id = menu.surface_id.clone();
+                button(
+                    text(window_action_label(action, maximized))
+                        .size(visual.metrics.small)
+                        .width(Length::Fill)
+                        .color(color(if action == WindowAction::Close {
+                            palette.danger
+                        } else {
+                            palette.text
+                        })),
+                )
+                .width(Length::Fill)
+                .padding([6, 10])
+                .style(move |_, status| menu_item_style(visual, status))
+                .on_press(Message::ContextMenuPick {
+                    surface_id,
+                    action,
+                })
+                .into()
+            })
+            .collect();
+            // Positioned by padding rather than by an absolute layer so it
+            // shares the window's own coordinate space with every other overlay.
+            layers.push(
+                container(
+                    container(column(rows).width(Length::Fixed(180.0)))
+                        .style(move |_| container::Style {
+                            background: Some(color(palette.surface_muted).into()),
+                            border: iced::Border {
+                                color: color(palette.border),
+                                width: 1.0,
+                                radius: 8.0.into(),
+                            },
+                            ..Default::default()
+                        }),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding(iced::Padding {
+                    top: menu.y.max(0) as f32,
+                    left: menu.x.max(0) as f32,
+                    ..Default::default()
+                })
+                .into(),
+            );
         }
         if let Some(picker) = self.project_switcher.as_ref() {
             #[cfg(feature = "lua-scenes")]
