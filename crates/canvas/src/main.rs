@@ -100,7 +100,9 @@ struct TransientNotification {
 }
 const SURFACE_CONTROL_HIT_SIZE: f64 = 18.0;
 const SURFACE_CONTROL_INSET: f64 = 4.0;
-const SURFACE_RESIZE_HANDLE_SIZE: f64 = 10.0;
+// Generous on purpose: an edge you have to hit exactly is an edge people give up
+// on. The visual border stays thin; only the target grew.
+const SURFACE_RESIZE_HANDLE_SIZE: f64 = 14.0;
 const CANVAS_TOGGLE_KEYS: &str = "Ctrl-Option-C";
 const SNAP_LAYOUT_KEYS: &str = "Ctrl-Option-L";
 const FIT_LAYOUT_KEYS: &str = "Ctrl-Option-F";

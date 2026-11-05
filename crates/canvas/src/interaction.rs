@@ -412,11 +412,20 @@ pub fn hit_test(
     let hit = surfaces
         .iter()
         .enumerate()
-        .filter(|(_, surface)| surface.bounds.contains(point))
+        .filter(|(_, surface)| {
+            surface.bounds.contains(point)
+                || within_margin(surface.bounds, point, OUTER_RESIZE_MARGIN)
+        })
         .max_by_key(|(index, surface)| (surface.z_order, *index));
     Ok(hit.map(|(_, surface)| {
-        let resize = resize_region(surface.bounds, point, resize_handle_size);
-        let in_top_bar = point.y <= surface.bounds.y + top_bar_height;
+        let resize = resize_region_band(
+            surface.bounds,
+            point,
+            resize_handle_size,
+            OUTER_RESIZE_MARGIN,
+        );
+        let in_top_bar = point.y <= surface.bounds.y + top_bar_height
+            && point.y >= surface.bounds.y - OUTER_RESIZE_MARGIN;
         // The north edge overlaps the title bar, and a title bar that resizes
         // when you grab it is a title bar you cannot drag: the window's top edge
         // follows your hand while its bottom stays still, which reads as the
@@ -446,7 +455,10 @@ pub fn hit_test(
             resize
         } else if in_top_bar {
             HitRegion::TopBar
+        } else if surface.bounds.contains(point) {
+            HitRegion::Body
         } else {
+            // Outside every edge band and outside the window: not this surface.
             HitRegion::Body
         };
         HitTarget {
@@ -675,9 +687,45 @@ fn resize_rect(
     }
 }
 
+/// How far outside a window a resize press may land and still grab its edge.
+const OUTER_RESIZE_MARGIN: f64 = 8.0;
+
+/// Whether `point` is inside `bounds` grown by `margin` on every side.
+fn within_margin(bounds: LogicalRect, point: LogicalPoint, margin: f64) -> bool {
+    point.x >= bounds.x - margin
+        && point.x <= bounds.right() + margin
+        && point.y >= bounds.y - margin
+        && point.y <= bounds.bottom() + margin
+}
+
 fn resize_region(bounds: LogicalRect, point: LogicalPoint, handle: f64) -> HitRegion {
-    let horizontal = nearest_edge(point.x - bounds.x, bounds.right() - point.x, handle);
-    let vertical = nearest_edge(point.y - bounds.y, bounds.bottom() - point.y, handle);
+    resize_region_band(bounds, point, handle, OUTER_RESIZE_MARGIN)
+}
+
+/// Which edge of `bounds`, if any, the point is grabbing.
+///
+/// `inside` is how far into the window counts as the edge; `outside` is how far
+/// beyond it does. The outside band is what makes an edge forgiving: aiming at a
+/// window's border from the desktop side still grabs it, which is where a hand
+/// actually arrives from.
+fn resize_region_band(
+    bounds: LogicalRect,
+    point: LogicalPoint,
+    inside: f64,
+    outside: f64,
+) -> HitRegion {
+    let horizontal = nearest_edge_band(
+        point.x - bounds.x,
+        bounds.right() - point.x,
+        inside,
+        outside,
+    );
+    let vertical = nearest_edge_band(
+        point.y - bounds.y,
+        bounds.bottom() - point.y,
+        inside,
+        outside,
+    );
     let resize = match (horizontal, vertical) {
         (Some(Edge::Low), Some(Edge::Low)) => Some(ResizeHandle::NorthWest),
         (None, Some(Edge::Low)) => Some(ResizeHandle::North),
@@ -698,9 +746,14 @@ enum Edge {
     High,
 }
 
-fn nearest_edge(low_distance: f64, high_distance: f64, handle: f64) -> Option<Edge> {
-    let low = low_distance <= handle;
-    let high = high_distance <= handle;
+fn nearest_edge_band(
+    low_distance: f64,
+    high_distance: f64,
+    inside: f64,
+    outside: f64,
+) -> Option<Edge> {
+    let low = low_distance <= inside && low_distance >= -outside;
+    let high = high_distance <= inside && high_distance >= -outside;
     match (low, high) {
         (true, true) if high_distance < low_distance => Some(Edge::High),
         (true, _) => Some(Edge::Low),
@@ -1341,5 +1394,74 @@ mod tests {
             ]
         );
         assert_eq!(engine.captured_pointer(), None);
+    }
+}
+
+#[cfg(test)]
+mod grab_tests {
+    use super::*;
+
+    fn card() -> Vec<SurfaceGeometry> {
+        vec![SurfaceGeometry {
+            surface_id: "card".into(),
+            bounds: LogicalRect {
+                x: 100.0,
+                y: 100.0,
+                width: 300.0,
+                height: 200.0,
+            },
+            z_order: 1,
+        }]
+    }
+
+    fn hit(x: f64, y: f64) -> Option<HitRegion> {
+        hit_test(&card(), LogicalPoint { x, y }, 14.0, 26.0)
+            .unwrap()
+            .map(|target| target.region)
+    }
+
+    #[test]
+    fn an_edge_can_be_grabbed_from_just_outside_the_window() {
+        // Seven points past the border is where a hand arrives from, and it must
+        // resize: aiming at a one-pixel rim is a game, not a gesture.
+        assert_eq!(
+            hit(93.0, 200.0),
+            Some(HitRegion::Resize {
+                handle: ResizeHandle::West
+            })
+        );
+        assert_eq!(
+            hit(407.0, 200.0),
+            Some(HitRegion::Resize {
+                handle: ResizeHandle::East
+            })
+        );
+        assert_eq!(
+            hit(250.0, 307.0),
+            Some(HitRegion::Resize {
+                handle: ResizeHandle::South
+            })
+        );
+    }
+
+    #[test]
+    fn a_corner_grabs_from_outside_on_both_axes() {
+        assert_eq!(
+            hit(406.0, 306.0),
+            Some(HitRegion::Resize {
+                handle: ResizeHandle::SouthEast
+            })
+        );
+    }
+
+    #[test]
+    fn far_outside_is_nobody() {
+        assert_eq!(hit(500.0, 500.0), None);
+        assert_eq!(hit(60.0, 100.0), None);
+    }
+
+    #[test]
+    fn the_middle_of_the_title_bar_still_moves_the_window() {
+        assert_eq!(hit(250.0, 110.0), Some(HitRegion::TopBar));
     }
 }
