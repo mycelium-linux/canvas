@@ -270,7 +270,9 @@ enum ContentSource {
         stdin_fd: i32,
         #[allow(dead_code)]
         pid: u32,
-        buffer: String,
+        /// The emulator, on its own thread. A string buffer is not a terminal:
+        /// it has no cells, no attributes, and no idea what a cursor is.
+        host: soil_vt::Host,
     },
     Scene {
         scene: Scene,
@@ -6661,12 +6663,12 @@ impl App {
         let mut changed = false;
         for surface in self.decoded.values_mut() {
             if let ContentSource::Terminal {
-                master_fd, buffer, ..
+                master_fd, host, ..
             } = &mut surface.source
             {
                 let data = terminal::read_fd(*master_fd);
-                if let Some(text) = String::from_utf8(data).ok().filter(|t| !t.is_empty()) {
-                    buffer.push_str(&text);
+                if !data.is_empty() {
+                    host.write(&data);
                     changed = true;
                 }
             }
@@ -9267,6 +9269,64 @@ impl App {
         self.modules.retain(|id, _| live.contains(id));
     }
 
+    /// Draw an emulated terminal grid: one rich-text line per row, one span per
+    /// colour run. Monospaced, because a terminal is a grid and not prose that
+    /// happens to contain newlines.
+    fn terminal_layer<'a>(
+        &self,
+        snapshot: &soil_vt::Snapshot,
+        width: Length,
+        height: Length,
+    ) -> Element<'a, Message> {
+        use iced::widget::text::{self, Span};
+        let palette = self.presented_palette();
+        let default = color(palette.text);
+        let mut lines: Vec<Element<'a, Message>> = Vec::with_capacity(usize::from(snapshot.rows));
+        for y in 0..snapshot.rows {
+            // Owned spans: the text is copied out of the grid, so the element
+            // does not borrow the snapshot it was built from.
+            let mut spans: Vec<Span<'static, (), iced::Font>> = Vec::new();
+            let mut run = String::new();
+            let mut run_color = default;
+            for x in 0..snapshot.cols {
+                let Some(cell) = snapshot.cell(x, y) else { continue };
+                let ink = cell
+                    .fg
+                    .map(|rgb| Color::from_rgb8(rgb.r, rgb.g, rgb.b))
+                    .unwrap_or(default);
+                if ink != run_color && !run.is_empty() {
+                    spans.push(Span::new(run.clone()).color(run_color));
+                    run.clear();
+                }
+                run_color = ink;
+                if cell.text.is_empty() {
+                    run.push(' ');
+                } else {
+                    run.push_str(&cell.text);
+                }
+            }
+            if !run.is_empty() {
+                spans.push(Span::new(run).color(run_color));
+            }
+            lines.push(
+                iced::widget::rich_text(spans)
+                    .font(iced::Font::MONOSPACE)
+                    .size(13)
+                    .width(Length::Fill)
+                    .into(),
+            );
+        }
+        container(scrollable(column(lines)))
+            .width(width)
+            .height(height)
+            .padding(8)
+            .style(move |_| container::Style {
+                background: Some(Color::from_rgb8(0, 0, 0).into()),
+                ..Default::default()
+            })
+            .into()
+    }
+
     /// Draw a scene's text nodes in 2D, sized and coloured from the presented theme.
     ///
     /// Shared by document-authored scenes and resolved Lua modules, so an
@@ -9458,12 +9518,9 @@ impl App {
             .width(width)
             .height(height)
             .into(),
-            ContentSource::Terminal { buffer, .. } => {
-                let palette = self.project_palette();
-                scrollable(text(buffer).color(color(palette.text)).width(Length::Fill))
-                    .width(width)
-                    .height(height)
-                    .into()
+            ContentSource::Terminal { host, .. } => {
+                let snapshot = host.snapshot();
+                self.terminal_layer(&snapshot, width, height)
             }
             ContentSource::Scene { scene } => container(self.scene_layer(scene, viewport))
                 .width(width)
@@ -11970,6 +12027,8 @@ fn load_terminal(
     title: Option<String>,
 ) -> Result<LoadedContent, Failure> {
     let (master_fd, stdin_fd, pid) = terminal::spawn_terminal(shell).map_err(Failure::resource)?;
+    let host = soil_vt::Host::spawn(120, 40, 2_000)
+        .map_err(|error| Failure::resource(error.to_string()))?;
     let display_title = title.unwrap_or_else(|| format!("Terminal: {shell}"));
     let snapshot = SurfaceSnapshot {
         id: surface_id.clone(),
@@ -11989,7 +12048,7 @@ fn load_terminal(
             master_fd,
             stdin_fd,
             pid,
-            buffer: String::new(),
+            host,
         },
         handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
         asset: AssetRef {

@@ -1,12 +1,17 @@
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, IntoRawFd};
 use std::os::unix::io::RawFd;
 use std::process::{Command, Stdio};
 
 pub fn spawn_terminal(shell: &str) -> Result<(i32, i32, u32), String> {
-    let mut child = Command::new(shell)
+    // `script` allocates a pty for the child, which is the difference between an
+    // interactive program and one that thinks it is talking to a file: a shell on
+    // pipes gets no prompt, no echo, and no job control. This is the smallest way
+    // to get a real terminal without a pty abstraction in this crate.
+    let mut child = Command::new("/usr/bin/script")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .args(["-q", "/dev/null", shell])
         .spawn()
         .map_err(|e| format!("spawn {shell} failed: {e}"))?;
 
@@ -19,8 +24,12 @@ pub fn spawn_terminal(shell: &str) -> Result<(i32, i32, u32), String> {
         .take()
         .ok_or_else(|| "no stdin to shell".to_string())?;
 
-    let stdout_fd = stdout.as_raw_fd();
-    let stdin_fd = stdin.as_raw_fd();
+    // Take ownership of the descriptors. Dropping the `File`s here closed both
+    // ends of the pipe immediately, so the surface never received a byte and
+    // typing went into a closed descriptor: a terminal that was connected to
+    // nothing, which looked exactly like a terminal that had crashed.
+    let stdout_fd = stdout.into_raw_fd();
+    let stdin_fd = stdin.into_raw_fd();
 
     unsafe {
         let flags = libc::fcntl(stdout_fd, libc::F_GETFL);
