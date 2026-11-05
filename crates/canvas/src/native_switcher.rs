@@ -19,6 +19,7 @@ const ARTIFACT: Artifact = Artifact {
     source_path: "modules/native-switcher-v1.lua",
     manifest_fallback: include_str!("../../../config/modules/native-switcher-v1.json"),
     source_fallback: include_str!("../../../config/modules/native-switcher-v1.lua"),
+    region: Some("switcher"),
 };
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]

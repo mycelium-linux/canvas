@@ -30,6 +30,8 @@ struct Manifest {
     launch: Launch,
     #[serde(default)]
     presentation: Presentation,
+    #[serde(default)]
+    chrome: Chrome,
 }
 
 #[derive(Deserialize)]
@@ -45,6 +47,14 @@ struct Launch {
     default: String,
     #[serde(default)]
     canvas_module: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct Chrome {
+    #[serde(default)]
+    regions: Vec<String>,
+    #[serde(default)]
+    sources: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -80,6 +90,63 @@ pub fn roots() -> Vec<PathBuf> {
     }
     roots.push(PathBuf::from("spores"));
     roots
+}
+
+/// A shell region a Spore draws, with the composed Lua that draws it.
+///
+/// Chrome is a region, not a window: the host owns the extent, input routing and
+/// the fallback. A chrome Spore that fails to render must never leave a hole in
+/// the desktop, so the built-in module takes over per region.
+pub struct ChromeRegion {
+    pub region: String,
+    pub spore_id: String,
+    pub source: String,
+}
+
+/// Resolve one region from the installed chrome Spores, first match wins.
+///
+/// Roots are ordered by trust: a runtime-installed package beats a source tree,
+/// so a shipped chrome can be replaced without rebuilding the shell.
+pub fn chrome_source(region: &str) -> Option<ChromeRegion> {
+    for root in roots() {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        let mut packages: Vec<_> = entries.filter_map(Result::ok).map(|entry| entry.path()).collect();
+        packages.sort();
+        for package in packages {
+            if !package.is_dir() {
+                continue;
+            }
+            let Ok(source) = std::fs::read_to_string(package.join("spore.toml")) else {
+                continue;
+            };
+            let Ok(manifest) = toml::from_str::<Manifest>(&source) else {
+                continue;
+            };
+            if !manifest.chrome.regions.iter().any(|name| name == region) {
+                continue;
+            }
+            let Some(relative) = manifest.chrome.sources.get(region) else {
+                continue;
+            };
+            if relative.starts_with('/') || relative.contains("..") {
+                continue;
+            }
+            let Ok(lua) = std::fs::read_to_string(package.join(relative)) else {
+                continue;
+            };
+            if lua.len() > 256 * 1024 {
+                continue;
+            }
+            return Some(ChromeRegion {
+                region: region.to_owned(),
+                spore_id: manifest.spore.id,
+                source: lua,
+            });
+        }
+    }
+    None
 }
 
 pub fn scan() -> Vec<SporeApp> {

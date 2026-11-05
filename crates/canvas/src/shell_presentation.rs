@@ -17,6 +17,8 @@ pub struct Artifact {
     pub manifest_fallback: &'static str,
     pub source_path: &'static str,
     pub source_fallback: &'static str,
+    /// The shell region this artifact draws, if a Spore may claim it.
+    pub region: Option<&'static str>,
 }
 
 pub const DESKTOP_BAR: Artifact = Artifact {
@@ -24,18 +26,21 @@ pub const DESKTOP_BAR: Artifact = Artifact {
     manifest_fallback: include_str!("../../../config/modules/desktop-bar-v1.json"),
     source_path: "modules/desktop-bar-v1.lua",
     source_fallback: include_str!("../../../config/modules/desktop-bar-v1.lua"),
+    region: Some("top-bar"),
 };
 pub const DESKTOP_LAUNCHER: Artifact = Artifact {
     manifest_path: "modules/desktop-launcher-v1.json",
     manifest_fallback: include_str!("../../../config/modules/desktop-launcher-v1.json"),
     source_path: "modules/desktop-launcher-v1.lua",
     source_fallback: include_str!("../../../config/modules/desktop-launcher-v1.lua"),
+    region: Some("launcher"),
 };
 pub const DESKTOP_DOCK: Artifact = Artifact {
     manifest_path: "modules/desktop-dock-v1.json",
     manifest_fallback: include_str!("../../../config/modules/desktop-dock-v1.json"),
     source_path: "modules/desktop-dock-v1.lua",
     source_fallback: include_str!("../../../config/modules/desktop-dock-v1.lua"),
+    region: Some("dock"),
 };
 
 /// Frameless instruments are desktop content, not app-switching destinations.
@@ -44,6 +49,9 @@ pub use crate::shell_launcher::dock_surfaces;
 
 #[derive(Debug, Clone, Default)]
 pub struct Presentation {
+    /// Which Spore last drew this presentation, so a change of owner is logged
+    /// once rather than every frame.
+    chrome_source: Option<String>,
     key: Option<[u8; 32]>,
     retained: Option<RetainedModuleScene>,
     current: Option<(std::sync::Arc<str>, std::sync::Arc<str>)>,
@@ -77,6 +85,23 @@ impl Presentation {
         snapshot: ModuleInputSnapshot,
         theme: ModuleThemeTokens,
     ) -> crate::Result<bool> {
+        // A chrome Spore draws the region if one is installed: the shell keeps
+        // the extent, the input routing and the fallback, and the Spore owns the
+        // composition. An uninstalled or broken region falls back per region, so
+        // the desktop never loses its bar because a package did not load.
+        let spore = artifact.region.and_then(|region| {
+            let chrome = crate::spore_catalog::chrome_source(region)?;
+            if !self.chrome_source.as_deref().is_some_and(|current| current == chrome.spore_id) {
+                eprintln!(
+                    "canvas: chrome {region} from Spore {}",
+                    chrome.spore_id
+                );
+            }
+            Some(chrome)
+        });
+        if let Some(chrome) = &spore {
+            self.chrome_source = Some(chrome.spore_id.clone());
+        }
         let read = |path: &str, fallback: &str| -> crate::Result<String> {
             crate::runtime_config::read(std::path::Path::new(path), 32 * 1024)
                 .map_err(|e| crate::Error(e.to_string()))?
@@ -88,9 +113,13 @@ impl Presentation {
         // prepended, so its identity is carried as a marker comment: the cache key
         // hashes the source text, and an edited button must invalidate the scene
         // it drew.
+        let source = match spore {
+            Some(chrome) => chrome.source,
+            None => read(artifact.source_path, artifact.source_fallback)?,
+        };
         let source = format!(
             "{}\n-- canvas-widgets {}",
-            read(artifact.source_path, artifact.source_fallback)?,
+            source,
             crate::lua_module::widget_fingerprint()
         );
         self.refresh(
