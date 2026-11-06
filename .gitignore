@@ -13,3 +13,6 @@ __pycache__/
 target/
 .worktrees/
 .dock/
+
+# Local Marbles migration marker
+.marbles/beads-migrated
