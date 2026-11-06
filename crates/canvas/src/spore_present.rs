@@ -149,6 +149,7 @@ fn content(content: &soil_scene::Content) -> NodeContent {
         // group so a GPU scene survives the fallback path without inventing a
         // second chart renderer in the compositor.
         From::Area(_)
+        | From::Band(_)
         | From::Points(_)
         | From::Heatmap(_)
         | From::Candles(_)
