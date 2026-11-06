@@ -484,6 +484,9 @@ pub struct Launcher {
     pub status: String,
     pub busy: bool,
     pub loading: bool,
+    /// Automatic retries after a failed catalog request, so a compositor restart
+    /// does not leave the launcher reading "Connecting…" until a human retypes.
+    pub retries: u32,
     #[cfg(feature = "lua-scenes")]
     pub scene: Option<crate::Scene>,
     #[cfg(feature = "lua-scenes")]
@@ -508,6 +511,7 @@ impl Launcher {
             status: "Loading live catalog…".into(),
             busy: false,
             loading: true,
+            retries: 0,
             #[cfg(feature = "lua-scenes")]
             scene: None,
             #[cfg(feature = "lua-scenes")]
@@ -573,6 +577,7 @@ impl Launcher {
         self.selected = 0;
         match result {
             Ok(c) => {
+                self.retries = 0;
                 self.catalog = Some(c);
                 self.selected = selected
                     .and_then(|id| self.matches().iter().position(|e| e.id == id))

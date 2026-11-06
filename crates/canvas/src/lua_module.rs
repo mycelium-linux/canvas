@@ -1050,7 +1050,9 @@ fn install_button_api(
 widget.hit = function(spec)
   spec["local"] = true
   spec.appearance = "hit"
-  spec.label = spec.label or " "
+  -- The label is never drawn for a hit region, but it still has to be text the
+  -- scene validator accepts: a blank label rejects the whole view.
+  spec.label = spec.label or "hit"
   spec.enabled = spec.enabled ~= false
   spec.body = spec.body or { ["local"] = true }
   return widget.button(spec)

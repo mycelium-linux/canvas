@@ -92,7 +92,9 @@ module = {
   animate = function() end,
 }
 widget = {}
+-- The host supplies these; a preview only needs their shape.
 widget.button = function(spec) return spec end
+widget.hit = function(spec) return spec end
 
 local function run(path)
   local file = assert(io.open(path, "r"), "cannot read " .. path)

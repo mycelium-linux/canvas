@@ -1464,15 +1464,50 @@ pub fn send(request: &ControlRequest) -> Result<ControlReply, String> {
 
     request.validate()?;
     let path = socket_path()?;
-    let metadata = std::fs::symlink_metadata(&path)
-        .map_err(|error| format!("Canvas runtime unavailable at {}: {error}", path.display()))?;
+    // A compositor restart is a normal event -- a theme rebuild, a crash, a
+    // deliberate kick -- and the socket is absent for a few hundred milliseconds
+    // while it comes back. Reporting that window as "no such file or directory"
+    // turns every caller into a broken caller, so wait it out briefly before
+    // believing it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+    let metadata = loop {
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => break metadata,
+            Err(error) => {
+                let transient = matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                );
+                if !transient || std::time::Instant::now() >= deadline {
+                    return Err(format!(
+                        "Canvas runtime unavailable at {}: {error}",
+                        path.display()
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(60));
+            }
+        }
+    };
     if !metadata.file_type().is_socket()
         || metadata.uid() != unsafe { libc::geteuid() }
         || metadata.mode() & 0o077 != 0
     {
         return Err("unsafe Canvas socket type, ownership, or permissions".into());
     }
-    let mut stream = UnixStream::connect(path).map_err(|error| error.to_string())?;
+    let mut stream = loop {
+        match UnixStream::connect(&path) {
+            Ok(stream) => break stream,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(60));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    };
     canvas_control::verify_peer(&stream)?;
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))

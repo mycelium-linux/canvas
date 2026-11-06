@@ -89,7 +89,7 @@ pub fn write_frame(writer: &mut impl Write, value: &serde_json::Value) -> io::Re
 }
 
 pub fn bind(path: &std::path::Path) -> io::Result<std::os::unix::net::UnixListener> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("socket needs private parent"))?;
@@ -103,8 +103,29 @@ pub fn bind(path: &std::path::Path) -> io::Result<std::os::unix::net::UnixListen
             "control socket parent must be owner-only",
         ));
     }
-    // Never unlink an unknown path or steal an existing compositor's socket.
-    let listener = std::os::unix::net::UnixListener::bind(path)?;
+    // Never unlink an unknown path or steal an existing compositor's socket. A
+    // socket file left behind by an instance that died is neither: nothing listens
+    // there, it is the same owner, and refusing to replace it means every restart
+    // after a crash needs a human with `rm`. Prove nobody is listening, then take
+    // exactly that file.
+    let listener = match std::os::unix::net::UnixListener::bind(path) {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            let stale = std::os::unix::net::UnixStream::connect(path).is_err()
+                && std::fs::symlink_metadata(path)
+                    .map(|metadata| {
+                        metadata.file_type().is_socket()
+                            && metadata.uid() == unsafe { libc::geteuid() }
+                    })
+                    .unwrap_or(false);
+            if !stale {
+                return Err(error);
+            }
+            std::fs::remove_file(path)?;
+            std::os::unix::net::UnixListener::bind(path)?
+        }
+        Err(error) => return Err(error),
+    };
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     Ok(listener)
 }
@@ -128,6 +149,28 @@ mod tests {
             assert!(frame.y + frame.height as i32 <= area.y + height as i32);
         }
     }
+    #[test]
+    fn a_socket_left_by_a_dead_instance_is_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::path::PathBuf::from("/tmp").join(format!(
+            "canvas-control-stale-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.join("control.sock");
+        // Bind and drop without unlinking, which is what a crash looks like.
+        drop(bind(&path).unwrap());
+        assert!(path.exists(), "the dead instance left its socket behind");
+        let listener = bind(&path).expect("a stale socket is not a reason to refuse to start");
+        drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn binding_never_overwrites_an_existing_endpoint() {
         use std::os::unix::fs::PermissionsExt;

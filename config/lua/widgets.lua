@@ -52,10 +52,15 @@ function widget.panel(spec)
   }
 end
 
+-- An empty label is not a label. Emitting one is worse than skipping it: scene
+-- validation rejects blank text, so one empty caption takes the whole region's
+-- scene down with it and the surface silently keeps its previous frame.
 function widget.label(spec)
+  local value = tostring(spec.text or "")
+  if value:match("^%s*$") then return end
   canvas.text {
     id = required(spec, "id"), parent = spec.parent,
-    text = tostring(spec.text or "—"), ink = spec.ink or "text",
+    text = value, ink = spec.ink or "text",
     translation = point(spec),
     scale = text_scale(spec.size or module.theme.body),
   }

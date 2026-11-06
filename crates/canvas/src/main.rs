@@ -2023,7 +2023,15 @@ impl App {
                         Receipt::ShellCatalog { catalog } => Ok(catalog),
                         _ => Err("Target does not support launcher catalog".into()),
                     });
+                    let failed = catalog.is_err();
                     l.accept(generation, catalog, now_unix_ms());
+                    // A failed catalog is usually a compositor that is still
+                    // starting. Mark it for another try; the shell's own poll asks
+                    // again, so no timer is needed and nothing spins.
+                    if failed && l.retries < 5 {
+                        l.retries += 1;
+                        l.loading = true;
+                    }
                 }
                 self.refresh_launcher_scene();
                 self.bump();
@@ -2432,6 +2440,18 @@ impl App {
                 if self.chrome_poll_at.elapsed() >= Duration::from_millis(chrome_interval) {
                     self.chrome_poll_at = Instant::now();
                     self.refresh_desktop_bar(true);
+                    // A launcher whose catalog request failed asks again on this
+                    // cadence, so a compositor restart cannot leave it reading
+                    // "Connecting…" until someone retypes.
+                    if let Some(launcher) = self.project_switcher.as_mut()
+                        && launcher.loading
+                        && launcher.retries <= 5
+                    {
+                        launcher.loading = false;
+                        let target = launcher.targets[launcher.target].clone();
+                        let generation = launcher.generation;
+                        tasks.push(launcher_task(target, Command::ShellCatalog, generation, false));
+                    }
                     if self.project_switcher.is_some() {
                         self.refresh_launcher_scene();
                     }
