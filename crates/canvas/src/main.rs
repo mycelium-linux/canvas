@@ -523,7 +523,7 @@ fn orbit_action(event: &iced::keyboard::Event) -> Option<canvas_model_viewer::Or
 /// Canvas still owns the key map: this is only reached after global shortcuts,
 /// pickers, prompt input and model orbit have had their chance. Named keys use
 /// lowercase names (`arrowleft`, `home`) so producers do not need iced types.
-fn spore_key_message(event: &iced::keyboard::Event) -> Option<serde_json::Value> {
+fn spore_key_event(event: &iced::keyboard::Event) -> Option<soil_input::InputEvent> {
     use iced::keyboard::{Event, Key};
     let Event::KeyPressed {
         key, modifiers, ..
@@ -531,18 +531,22 @@ fn spore_key_message(event: &iced::keyboard::Event) -> Option<serde_json::Value>
     else {
         return None;
     };
-    let name = match key {
-        Key::Character(character) => character.to_string(),
-        Key::Named(named) => format!("{named:?}").to_lowercase(),
+    let key = match key {
+        Key::Character(character) => soil_input::Key::Character(character.to_string()),
+        Key::Named(named) => soil_input::Key::named(&format!("{named:?}").to_lowercase()),
         _ => return None,
     };
-    Some(serde_json::json!({
-        "kind": "key",
-        "key": name,
-        "shift": modifiers.shift(),
-        "control": modifiers.control(),
-        "alt": modifiers.alt(),
-        "meta": modifiers.logo(),
+    Some(soil_input::InputEvent::Key(soil_input::KeyEvent {
+        key,
+        text: None,
+        repeat: false,
+        modifiers: soil_input::Modifiers {
+            shift: modifiers.shift(),
+            control: modifiers.control(),
+            alt: modifiers.alt(),
+            meta: modifiers.logo(),
+        },
+        at_ms: Some(unix_ms()),
     }))
 }
 
@@ -2835,8 +2839,10 @@ impl App {
                         .is_some_and(|presented| {
                             matches!(presented.present, soil_scene::Present::GpuLease(_))
                         })
-                    && let Some(message) = spore_key_message(&kbd_event)
+                    && let Some(event) = spore_key_event(&kbd_event)
                 {
+                    let message = serde_json::to_value(event)
+                        .unwrap_or_else(|_| serde_json::json!({"kind": "key"}));
                     if let Err(error) = crate::spore_socket::send_input(&surface_id, message) {
                         self.status = format!("Canvas spore key failed: {error}");
                     }
@@ -8157,20 +8163,31 @@ impl App {
                 },
             ]);
         }
-        if let Err(error) = crate::spore_socket::send_input(
-            &surface_id,
-            serde_json::json!({
-                "kind": "pointer",
-                "phase": phase,
-                "x": x,
-                "y": y,
-                "shift": self.keyboard_modifiers.shift(),
-                "control": self.keyboard_modifiers.control(),
-                "alt": self.keyboard_modifiers.alt(),
-                "meta": self.keyboard_modifiers.logo(),
-                "at_ms": now_unix_ms(),
-            }),
-        ) {
+        let phase = match phase {
+            "press" => soil_input::PointerPhase::Press,
+            "release" => soil_input::PointerPhase::Release,
+            "leave" => soil_input::PointerPhase::Leave,
+            "enter" => soil_input::PointerPhase::Enter,
+            "cancel" => soil_input::PointerPhase::Cancel,
+            _ => soil_input::PointerPhase::Move,
+        };
+        let event = soil_input::InputEvent::Pointer(soil_input::PointerEvent {
+            phase,
+            x,
+            y,
+            pointer_id: 1,
+            button: Some(soil_input::PointerButton::Primary),
+            modifiers: soil_input::Modifiers {
+                shift: self.keyboard_modifiers.shift(),
+                control: self.keyboard_modifiers.control(),
+                alt: self.keyboard_modifiers.alt(),
+                meta: self.keyboard_modifiers.logo(),
+            },
+            at_ms: Some(now_unix_ms()),
+        });
+        let message = serde_json::to_value(event)
+            .unwrap_or_else(|_| serde_json::json!({"kind": "pointer"}));
+        if let Err(error) = crate::spore_socket::send_input(&surface_id, message) {
             self.status = format!("Canvas spore pointer failed: {error}");
         }
         true
@@ -8186,20 +8203,22 @@ impl App {
         let Some((surface_id, x, y)) = self.spore_input_target(position, surfaces) else {
             return false;
         };
-        if let Err(error) = crate::spore_socket::send_input(
-            &surface_id,
-            serde_json::json!({
-                "kind": "scroll",
-                "x": x,
-                "y": y,
-                "dx": dx.clamp(-4096.0, 4096.0),
-                "dy": dy.clamp(-4096.0, 4096.0),
-                "shift": self.keyboard_modifiers.shift(),
-                "control": self.keyboard_modifiers.control(),
-                "alt": self.keyboard_modifiers.alt(),
-                "meta": self.keyboard_modifiers.logo(),
-            }),
-        ) {
+        let event = soil_input::InputEvent::Scroll(soil_input::ScrollEvent {
+            x,
+            y,
+            dx: dx.clamp(-4096.0, 4096.0),
+            dy: dy.clamp(-4096.0, 4096.0),
+            modifiers: soil_input::Modifiers {
+                shift: self.keyboard_modifiers.shift(),
+                control: self.keyboard_modifiers.control(),
+                alt: self.keyboard_modifiers.alt(),
+                meta: self.keyboard_modifiers.logo(),
+            },
+            at_ms: Some(now_unix_ms()),
+        });
+        let message = serde_json::to_value(event)
+            .unwrap_or_else(|_| serde_json::json!({"kind": "scroll"}));
+        if let Err(error) = crate::spore_socket::send_input(&surface_id, message) {
             self.status = format!("Canvas spore scroll failed: {error}");
         }
         true

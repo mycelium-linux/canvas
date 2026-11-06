@@ -19,6 +19,7 @@ mcp = ["dep:rmcp", "dep:schemars", "dep:tokio", "dep:axum", "dep:reqwest", "canv
 # hosts, one opinion about what an escape sequence means.
 soil-vt = { path = "../../../soil/crates/soil-vt" }
 soil-scene = { path = "../../../soil/crates/soil-scene" }
+soil-input = { path = "../../../soil/crates/soil-input" }
 portable-pty = "0.9"
 fpl-gfx.workspace = true
 canvas-workspace = { path = "../canvas-workspace" }

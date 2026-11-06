@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 canvas-core.workspace = true
+soil-input = { path = "../../../soil/crates/soil-input" }
 iced = { version = "0.14", default-features = false, features = ["wgpu", "webgl", "tiny-skia", "canvas", "thread-pool"] }
 serde.workspace = true
 serde_json.workspace = true

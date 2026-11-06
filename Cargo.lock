@@ -474,6 +474,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "soil-input",
  "soil-layout",
  "soil-scene",
  "soil-vt",
@@ -784,6 +785,7 @@ dependencies = [
  "js-sys",
  "serde",
  "serde_json",
+ "soil-input",
  "tokio",
  "toml",
  "wasm-bindgen",
@@ -5057,6 +5059,13 @@ dependencies = [
  "web-sys",
  "windows-sys 0.61.2",
  "x11rb",
+]
+
+[[package]]
+name = "soil-input"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

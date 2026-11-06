@@ -152,13 +152,25 @@ pub fn run() -> Result<(), JsValue> {
         if key_lod.get() {
             return;
         }
-        let encoded = js_sys::encode_uri_component(&event.key());
+        let key_event = KeyEvent {
+            key: Key::character(event.key()),
+            text: Some(event.key()),
+            repeat: event.repeat(),
+            modifiers: Modifiers {
+                shift: event.shift_key(),
+                control: event.ctrl_key(),
+                alt: event.alt_key(),
+                meta: event.meta_key(),
+            },
+            at_ms: None,
+        };
+        let encoded = js_sys::encode_uri_component(&key_event.key.as_str());
         let url = format!(
             "http://127.0.0.1:8090/v1/key?key={encoded}&shift={}&control={}&alt={}&meta={}",
-            event.shift_key(),
-            event.ctrl_key(),
-            event.alt_key(),
-            event.meta_key(),
+            key_event.modifiers.shift,
+            key_event.modifiers.control,
+            key_event.modifiers.alt,
+            key_event.modifiers.meta,
         );
         let _ = web_sys::window().map(|window| window.fetch_with_str(&url));
         event.prevent_default();
@@ -604,7 +616,7 @@ fn install_native_pointer(
         }
         if let Some((x, y)) = normalized_pointer(&down_canvas, &down_image, &event) {
             down_dragging.set(true);
-            send_pointer("press", x, y, 0.0);
+            send_pointer(PointerPhase::Press, x, y, 0.0);
             event.prevent_default();
         }
     });
@@ -619,7 +631,7 @@ fn install_native_pointer(
             return;
         }
         if let Some((x, y)) = normalized_pointer(&move_canvas, &move_image, &event) {
-            send_pointer("drag", x, y, 0.0);
+            send_pointer(PointerPhase::Move, x, y, 0.0);
             event.prevent_default();
         }
     });
@@ -636,7 +648,7 @@ fn install_native_pointer(
             return;
         }
         if let Some((x, y)) = normalized_pointer(&up_canvas, &up_image, &event) {
-            send_pointer("release", x, y, 0.0);
+            send_pointer(PointerPhase::Release, x, y, 0.0);
             event.prevent_default();
         }
     });
@@ -658,7 +670,7 @@ fn install_native_pointer(
             f64::from(event.client_x()),
             f64::from(event.client_y()),
         ) {
-            send_pointer("zoom", x, y, (-event.delta_y() / 50.0) as f32);
+            send_scroll(x, y, (-event.delta_y() / 50.0) as f32);
             event.prevent_default();
         }
     });
@@ -699,8 +711,40 @@ fn normalized_client(
     Some((x.clamp(0.0, 1.0) as f32, y.clamp(0.0, 1.0) as f32))
 }
 
-fn send_pointer(phase: &str, x: f32, y: f32, delta: f32) {
-    let url = format!("http://127.0.0.1:8090/v1/pointer?phase={phase}&x={x}&y={y}&delta={delta}");
+fn send_pointer(phase: PointerPhase, x: f32, y: f32, delta: f32) {
+    let event = PointerEvent {
+        phase,
+        x,
+        y,
+        pointer_id: 1,
+        button: Some(soil_input::PointerButton::Primary),
+        modifiers: Modifiers::default(),
+        at_ms: None,
+    };
+    let url = format!(
+        "http://127.0.0.1:8090/v1/pointer?phase={}&x={}&y={}&delta={delta}",
+        event.phase.as_str(),
+        event.x,
+        event.y,
+    );
+    let _ = web_sys::window().map(|window| window.fetch_with_str(&url));
+}
+
+fn send_scroll(x: f32, y: f32, delta: f32) {
+    let event = ScrollEvent {
+        x,
+        y,
+        dx: 0.0,
+        dy: -delta,
+        modifiers: Modifiers::default(),
+        at_ms: None,
+    };
+    let url = format!(
+        "http://127.0.0.1:8090/v1/pointer?phase=zoom&x={}&y={}&delta={}",
+        event.x,
+        event.y,
+        -event.dy,
+    );
     let _ = web_sys::window().map(|window| window.fetch_with_str(&url));
 }
 
