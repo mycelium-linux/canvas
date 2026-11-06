@@ -361,6 +361,63 @@ enum ContentSource {
     },
 }
 
+/// The two runtime backends a surface can have.
+///
+/// The document may still carry older, more specific content kinds; this is the
+/// boundary new code should use. Application state and composition belong to a
+/// Spore. Devices, transports and privileged renderers belong to the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SurfaceBackend {
+    Spore,
+    Native(NativeSurface),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeSurface {
+    Terminal,
+    Media(MediaSurface),
+    External,
+    Document,
+    Shell,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaSurface {
+    LiveImage,
+    LiveVideo,
+    Stream,
+}
+
+impl ContentSource {
+    /// Classify a runtime source at the migration boundary.
+    ///
+    /// This does not remove the legacy `ContentSource` variants yet. It makes
+    /// their long-term owner explicit, so new rendering and input code can stop
+    /// growing a union of one-off application kinds.
+    fn backend(&self) -> SurfaceBackend {
+        match self {
+            Self::Spore | Self::Scene { .. } | Self::DataViz { .. } => SurfaceBackend::Spore,
+            Self::Terminal { .. } => SurfaceBackend::Native(NativeSurface::Terminal),
+            Self::LiveImage { .. } => {
+                SurfaceBackend::Native(NativeSurface::Media(MediaSurface::LiveImage))
+            }
+            Self::LiveVideo { .. } => {
+                SurfaceBackend::Native(NativeSurface::Media(MediaSurface::LiveVideo))
+            }
+            Self::Stream { .. } => {
+                SurfaceBackend::Native(NativeSurface::Media(MediaSurface::Stream))
+            }
+            Self::ExternalSurface { .. } => SurfaceBackend::Native(NativeSurface::External),
+            Self::Image { .. } | Self::Pdf { .. } | Self::Markdown { .. } => {
+                SurfaceBackend::Native(NativeSurface::Document)
+            }
+            Self::Widget { .. } | Self::Prompt { .. } => {
+                SurfaceBackend::Native(NativeSurface::Shell)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct LocalTask {
     id: u64,
@@ -11686,18 +11743,17 @@ impl App {
     }
 
     fn has_terminal(&self) -> bool {
-        self.decoded
-            .values()
-            .any(|surface| matches!(surface.source, ContentSource::Terminal { .. }))
+        self.decoded.values().any(|surface| {
+            surface.source.backend() == SurfaceBackend::Native(NativeSurface::Terminal)
+        })
     }
 
     fn has_live_frames(&self) -> bool {
         self.decoded.values().any(|surface| {
             matches!(
-                surface.source,
-                ContentSource::LiveImage { .. }
-                    | ContentSource::LiveVideo { .. }
-                    | ContentSource::ExternalSurface { .. }
+                surface.source.backend(),
+                SurfaceBackend::Native(NativeSurface::Media(_))
+                    | SurfaceBackend::Native(NativeSurface::External)
             )
         })
     }
