@@ -107,11 +107,39 @@
       "id": "row5-selected",
       "kind": "boolean",
       "required": false
+    },
+    {
+      "id": "hover",
+      "kind": "number",
+      "required": false
     }
   ],
   "capabilities": {
     "write_scene": true,
-    "read_inputs": ["width", "height", "health", "row0-title", "row0-detail", "row0-selected", "row1-title", "row1-detail", "row1-selected", "row2-title", "row2-detail", "row2-selected", "row3-title", "row3-detail", "row3-selected", "row4-title", "row4-detail", "row4-selected", "row5-title", "row5-detail", "row5-selected"],
+    "read_inputs": [
+      "width",
+      "height",
+      "health",
+      "row0-title",
+      "row0-detail",
+      "row0-selected",
+      "row1-title",
+      "row1-detail",
+      "row1-selected",
+      "row2-title",
+      "row2-detail",
+      "row2-selected",
+      "row3-title",
+      "row3-detail",
+      "row3-selected",
+      "row4-title",
+      "row4-detail",
+      "row4-selected",
+      "row5-title",
+      "row5-detail",
+      "row5-selected",
+      "hover"
+    ],
     "read_theme": true
   }
 }

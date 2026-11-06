@@ -19,6 +19,7 @@ const ARTIFACT: Artifact = Artifact {
     source_path: "modules/native-switcher-v1.lua",
     manifest_fallback: include_str!("../../../config/modules/native-switcher-v1.json"),
     source_fallback: include_str!("../../../config/modules/native-switcher-v1.lua"),
+    region: Some("switcher"),
 };
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -50,6 +51,7 @@ pub struct Host {
     last_error: Option<String>,
     revision: u64,
     observed_ms: u64,
+    hover: Option<usize>,
 }
 impl Drop for Host {
     fn drop(&mut self) {
@@ -100,7 +102,16 @@ impl Host {
             last_error: None,
             revision: 0,
             observed_ms: 0,
+            hover: None,
         }
+    }
+    /// Whether the switcher's last accepted scene asked for frames.
+    pub fn animated(&self) -> bool {
+        self.presentation.animated()
+    }
+    /// The tile the pointer is over, handed to the scene as a hover index.
+    pub fn set_hover(&mut self, slot: Option<usize>) {
+        self.hover = slot;
     }
     pub fn refresh(&mut self, theme: ModuleThemeTokens) -> Result<bool, String> {
         let update = self.latest.lock().map_err(|e| e.to_string())?.take();
@@ -128,7 +139,17 @@ impl Host {
         let Some(snapshot) = &self.snapshot else {
             return Ok(false);
         };
-        let inputs = snapshot.inputs(self.last_error.as_deref(), self.revision, self.observed_ms);
+        // Stamped per refresh, not per change: a view that says `module.animate()`
+        // reads the clock, and a frozen clock is a frozen animation.
+        self.observed_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or(self.observed_ms);
+        let mut inputs = snapshot.inputs(self.last_error.as_deref(), self.revision, self.observed_ms);
+        inputs.values.insert(
+            "hover".into(),
+            ModuleInputValue::Number(self.hover.map_or(-1.0, |slot| slot as f64)),
+        );
         let reload = self.last_reload.elapsed() >= Duration::from_secs(1);
         let result = if reload {
             self.last_reload = Instant::now();

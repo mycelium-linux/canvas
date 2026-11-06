@@ -1,12 +1,34 @@
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, IntoRawFd};
 use std::os::unix::io::RawFd;
 use std::process::{Command, Stdio};
 
 pub fn spawn_terminal(shell: &str) -> Result<(i32, i32, u32), String> {
-    let mut child = Command::new(shell)
+    // `script` allocates a pty for the child, which is the difference between an
+    // interactive program and one that thinks it is talking to a file: a shell on
+    // pipes gets no prompt, no echo, and no job control. This is the smallest way
+    // to get a real terminal without a pty abstraction in this crate.
+    let mut child = Command::new("/usr/bin/script");
+    // A GUI app inherits no terminal environment. Without TERM every curses
+    // program refuses to start, and the shell's own line editor degrades; the
+    // surface looks broken for a reason that has nothing to do with the surface.
+    let mut child = child
+        .env("TERM", "xterm-256color")
+        .env("COLORTERM", "truecolor")
+        .env("TERM_PROGRAM", "canvas")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // Wide on purpose: the pty's size is fixed for the life of the process
+        // (there is no descriptor here to ioctl), and a shell that thinks it has
+        // 80 columns wraps its prompt at 80 even when the surface is wider. A
+        // generous width lets the *emulator's* grid decide where lines break.
+        .args([
+            "-q",
+            "/dev/null",
+            "/bin/sh",
+            "-c",
+            &format!("stty cols 200 rows 50 2>/dev/null; exec {shell}"),
+        ])
         .spawn()
         .map_err(|e| format!("spawn {shell} failed: {e}"))?;
 
@@ -19,20 +41,51 @@ pub fn spawn_terminal(shell: &str) -> Result<(i32, i32, u32), String> {
         .take()
         .ok_or_else(|| "no stdin to shell".to_string())?;
 
-    let stdout_fd = stdout.as_raw_fd();
-    let stdin_fd = stdin.as_raw_fd();
+    // Take ownership of the descriptors. Dropping the `File`s here closed both
+    // ends of the pipe immediately, so the surface never received a byte and
+    // typing went into a closed descriptor: a terminal that was connected to
+    // nothing, which looked exactly like a terminal that had crashed.
+    let stdout_fd = stdout.into_raw_fd();
+    let stdin_fd = stdin.into_raw_fd();
 
-    unsafe {
-        let flags = libc::fcntl(stdout_fd, libc::F_GETFL);
-        if flags >= 0 {
-            libc::fcntl(stdout_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        }
-    }
-
+    // Deliberately left *blocking*: the read lives on its own thread and is
+    // woken by the kernel when the program writes. Non-blocking here would have
+    // meant a poll loop, which is latency added to every keystroke's echo.
     let pid = child.id();
     std::mem::forget(child);
 
     Ok((stdout_fd, stdin_fd, pid))
+}
+
+/// Read a terminal's output forever, handing each chunk to `sink`.
+///
+/// Blocking, on its own thread: a poll loop adds its interval to every keystroke's
+/// echo, and there is no reason for a terminal to be polled when the kernel will
+/// wake a thread the moment bytes exist.
+pub fn pump(
+    mut reader: Box<dyn std::io::Read + Send>,
+    surface_id: String,
+    sink: tokio::sync::mpsc::UnboundedSender<(String, Vec<u8>)>,
+) {
+    std::thread::Builder::new()
+        .name(format!("terminal-{surface_id}"))
+        .spawn(move || {
+            let mut buffer = [0u8; 8192];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => return,
+                    Ok(read) => {
+                        let bytes = buffer[..read].to_vec();
+                        if sink.send((surface_id.clone(), bytes)).is_err() {
+                            return;
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => return,
+                }
+            }
+        })
+        .ok();
 }
 
 pub fn read_fd(fd: RawFd) -> Vec<u8> {
@@ -70,5 +123,102 @@ pub fn kill_pid(pid: u32) {
 pub fn close_fd(fd: RawFd) {
     unsafe {
         libc::close(fd);
+    }
+}
+
+
+/// A real pseudo-terminal.
+///
+/// `script` was a way to get a pty without writing one, and it had the flaw that
+/// matters: its window size is fixed when it starts. A full-screen program like
+/// nvim asks the tty how big it is, draws for that size, and then the emulator
+/// crops it to a different one — which is what turns a working editor into
+/// garbage. Owning the pty means owning the size, and resizing it raises
+/// SIGWINCH so the program reflows itself.
+pub struct Pty {
+    /// Behind a mutex because `MasterPty` is `!Sync`: a pty handle cannot be
+    /// shared between threads, and a surface that owns one has to be.
+    master: std::sync::Mutex<Box<dyn portable_pty::MasterPty + Send>>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    writer: std::sync::Mutex<Box<dyn std::io::Write + Send>>,
+    size: std::sync::Mutex<(u16, u16)>,
+}
+
+impl std::fmt::Debug for Pty {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pty").finish_non_exhaustive()
+    }
+}
+
+impl Pty {
+    pub fn spawn(shell: &str, cols: u16, rows: u16) -> Result<std::sync::Arc<Self>, String> {
+        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|error| format!("open a pty: {error}"))?;
+        let mut command = CommandBuilder::new(shell);
+        command.env("TERM", "xterm-256color");
+        command.env("COLORTERM", "truecolor");
+        command.env("TERM_PROGRAM", "canvas");
+        let child = pair
+            .slave
+            .spawn_command(command)
+            .map_err(|error| format!("spawn {shell}: {error}"))?;
+        drop(pair.slave);
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|error| format!("pty writer: {error}"))?;
+        Ok(std::sync::Arc::new(Self {
+            master: std::sync::Mutex::new(pair.master),
+            child,
+            writer: std::sync::Mutex::new(writer),
+            size: std::sync::Mutex::new((cols, rows)),
+        }))
+    }
+
+    /// The reading end, for the thread that blocks on it.
+    pub fn reader(&self) -> Result<Box<dyn std::io::Read + Send>, String> {
+        self.master
+            .lock()
+            .map_err(|_| "pty lock poisoned".to_string())?
+            .try_clone_reader()
+            .map_err(|error| format!("pty reader: {error}"))
+    }
+
+    pub fn write(&self, bytes: &[u8]) {
+        if let Ok(mut writer) = self.writer.lock() {
+            let _ = writer.write_all(bytes);
+            let _ = writer.flush();
+        }
+    }
+
+    /// Resize the terminal, which raises SIGWINCH in the program. Idempotent so a
+    /// view can call it every frame without shouting at the child.
+    pub fn resize(&self, cols: u16, rows: u16) {
+        let Ok(mut size) = self.size.lock() else {
+            return;
+        };
+        if *size == (cols, rows) {
+            return;
+        }
+        let Ok(master) = self.master.lock() else { return };
+        let _ = master.resize(portable_pty::PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+        *size = (cols, rows);
+    }
+
+    pub fn kill(&self) {
+        let _ = self.child.process_id();
     }
 }

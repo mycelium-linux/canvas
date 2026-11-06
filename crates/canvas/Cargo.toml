@@ -14,6 +14,12 @@ voice-popup = []
 mcp = ["dep:rmcp", "dep:schemars", "dep:tokio", "dep:axum", "dep:reqwest", "canvas-widgets/schema", "canvas-workspace/schema"]
 
 [dependencies]
+# The terminal emulator lives in Soil, so a Spore can run a program without the
+# compositor; Canvas borrows it to draw a terminal surface. One emulator, two
+# hosts, one opinion about what an escape sequence means.
+soil-vt = { path = "../../../soil/crates/soil-vt" }
+soil-scene = { path = "../../../soil/crates/soil-scene" }
+portable-pty = "0.9"
 fpl-gfx.workspace = true
 canvas-workspace = { path = "../canvas-workspace" }
 base64 = "0.22"
@@ -39,6 +45,7 @@ sha2 = "0.10"
 schemars = { version = "1", optional = true }
 sysinfo = "0.36"
 unibus.workspace = true
+soil-layout.workspace = true
 unibus-device = { path = "../../../unibus/crates/unibus-device" }
 unibus-sdk = { path = "../../../unibus/crates/unibus-sdk", optional = true }
 stream-descriptors.workspace = true

@@ -71,6 +71,9 @@ mod presence;
 use ::canvas::screensaver;
 use ::canvas::stream_contract::{STREAM_FIRST_EVENT_TIMEOUT, STREAM_STALE_AFTER};
 use keyboard_input::*;
+mod scene_anim;
+mod spore_present;
+mod spore_socket;
 mod terminal;
 mod transition;
 mod visual_overlays;
@@ -100,7 +103,17 @@ struct TransientNotification {
 }
 const SURFACE_CONTROL_HIT_SIZE: f64 = 18.0;
 const SURFACE_CONTROL_INSET: f64 = 4.0;
-const SURFACE_RESIZE_HANDLE_SIZE: f64 = 10.0;
+// Generous on purpose: an edge you have to hit exactly is an edge people give
+// up on. The visual border stays thin; only the target grew.
+const SURFACE_RESIZE_HANDLE_SIZE: f64 = 14.0;
+
+/// Terminal cell metrics. These are the numbers the grid is *sized* by, so they
+/// have to agree with what the renderer draws with — a mismatch shows up as
+/// wrapped lines and an empty half-screen.
+const TERMINAL_FONT_SIZE: f32 = 13.0;
+const TERMINAL_CELL_WIDTH: f32 = 7.8;
+const TERMINAL_LINE_HEIGHT: f32 = 15.6;
+const TERMINAL_PADDING: f32 = 8.0;
 const CANVAS_TOGGLE_KEYS: &str = "Ctrl-Option-C";
 const SNAP_LAYOUT_KEYS: &str = "Ctrl-Option-L";
 const FIT_LAYOUT_KEYS: &str = "Ctrl-Option-F";
@@ -248,6 +261,21 @@ impl ModuleSurface {
 }
 
 #[derive(Debug, Clone)]
+/// What a Spore last presented, plus the decoded image when it gave pixels.
+struct PresentedSurface {
+    present: soil_scene::Present,
+    handle: Option<iced::widget::image::Handle>,
+    /// Digest of the payload, so an unchanged frame is not re-composited.
+    signature: u64,
+    last_seen: Option<std::time::Instant>,
+    /// Pacing counters, reported when tracing: intervals and handler cost.
+    frames: u64,
+    interval_us: u64,
+    handler_us: u64,
+    last_at: Option<std::time::Instant>,
+}
+
+#[derive(Debug, Clone)]
 enum ContentSource {
     Image {
         _path: PathBuf,
@@ -263,13 +291,14 @@ enum ContentSource {
         items: Vec<markdown::Item>,
     },
     Terminal {
-        #[allow(dead_code)]
-        master_fd: i32,
-        stdin_fd: i32,
-        #[allow(dead_code)]
-        pid: u32,
-        buffer: String,
+        /// The real terminal: bytes, size, and the signal that goes with it.
+        pty: std::sync::Arc<terminal::Pty>,
+        /// The emulator, on its own thread. A string buffer is not a terminal:
+        /// it has no cells, no attributes, and no idea what a cursor is.
+        host: soil_vt::Host,
     },
+    /// A Spore-owned surface: the payload this producer last presented.
+    Spore,
     Scene {
         scene: Scene,
     },
@@ -344,6 +373,22 @@ const MAX_PROMPT_CHARS: usize = 400;
 
 /// How many sent lines a prompt surface remembers.
 const PROMPT_SENT_TAIL: usize = 3;
+
+/// How long the waiting mark stays up at minimum.
+///
+/// Below about a fifth of a second a state is a flicker: the eye registers that
+/// something changed but not what it was. Holding the mark costs a beat on a
+/// fast start and buys a legible one.
+const LOADING_MIN_MS: u64 = 240;
+
+/// `CANVAS_LOADING_MIN_MS` overrides the floor, so the mark can be looked at
+/// without a camera that is faster than an eye.
+fn loading_min_ms() -> u64 {
+    std::env::var("CANVAS_LOADING_MIN_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(LOADING_MIN_MS)
+}
 
 #[derive(Debug, Clone)]
 struct RuntimeSurface {
@@ -483,6 +528,11 @@ type TimelineAction = canvas_model_viewer::view::TimelineAction;
 
 #[derive(Debug, Clone)]
 enum Message {
+    /// Bytes that arrived from a terminal's pty. Delivered by a subscription, so
+    /// the emulator sees output as it happens rather than on the next tick.
+    TerminalChunk(String, Vec<u8>),
+    SporeEvent(crate::spore_socket::SporeEvent),
+    TerminalBlink,
     LauncherReply {
         generation: u64,
         target_id: String,
@@ -492,14 +542,32 @@ enum Message {
     Tick,
     #[cfg(all(unix, feature = "lua-scenes"))]
     NativeSwitcherTick,
+    /// Advances the waiting mark while a surface has no first frame.
+    SurfaceLoadingTick,
+    /// Pointer position over the switcher overlay, in logical pixels.
+    SwitcherHover { x: f64, y: f64 },
     #[cfg(feature = "lua-scenes")]
     ModuleActivate {
         surface_id: String,
         target_id: String,
     },
+    /// A press or release inside a module view, delivered by the view's own
+    /// mouse area rather than guessed at by the compositor.
+    #[cfg(feature = "lua-scenes")]
+    ModulePointer {
+        surface_id: String,
+        phase: ::canvas::lua_module::PointerPhase,
+    },
+    /// A window control was clicked. The chrome draws these itself, so the
+    /// widget has to name the action it drew.
+    ChromeAction {
+        surface_id: String,
+        action: WindowAction,
+    },
     ShellBack,
     ShellForward,
     ShellProjects,
+    ControlCenterDismiss,
     ShellCanvasApps,
     ShellLauncherScope {
         generation: u64,
@@ -736,6 +804,43 @@ fn surface_title_visible(mode: SurfaceTitleMode, focused: bool) -> bool {
 
 struct App {
     catalog: Catalog,
+    /// How a terminal behaves in this Spore: cursor blink, and what a bell does.
+    /// Read from Lua, because how loud a bell is, or whether it exists at all, is
+    /// a property of the application rather than of the compositor.
+    terminal_config: TerminalConfig,
+    /// Bells already acted on per surface, so a redraw is not a second ring.
+    terminal_bells: BTreeMap<String, u64>,
+    /// What each module view has chosen for itself. Not application state: it
+    /// is the view's own memory of a click, and it dies with the window.
+    module_views: BTreeMap<String, ::canvas::lua_module::ModuleView>,
+    /// The last payload each Spore presented, and the decoded frame when it gave
+    /// pixels rather than a scene.
+    spores: BTreeMap<String, PresentedSurface>,
+    /// When the last frame callback went out, so `dt` is the host's answer to
+    /// "how long since you last drew" rather than a producer's guess.
+    spore_clock: Option<u64>,
+    /// Throttle for polling chrome artifacts, so a save is visible without a
+    /// restart and an idle shell does no filesystem work per frame.
+    chrome_poll_at: Instant,
+    /// The control center, drawn from the chrome Spore's region.
+    control_center: ::canvas::shell_presentation::Presentation,
+    control_center_open: bool,
+    /// Interpolation between retained scenes, keyed by region or surface.
+    scene_anim: crate::scene_anim::Animator,
+    cursor_on: bool,
+    /// Radians for the waiting mark, advanced by the host's frame clock.
+    loading_phase: f32,
+    loading_traced: bool,
+    /// Surfaces whose waiting mark is being held for a minimum time.
+    ///
+    /// A producer that presents in 40 ms would otherwise flash a loader that the
+    /// eye reads as a glitch: the state is real, it is just shorter than the time
+    /// it takes to see it. Holding it is the difference between "durable" and
+    /// "flicker".
+    loading_hold: BTreeMap<String, Instant>,
+    /// Which switcher tile the pointer is over, if any.
+    #[cfg(all(unix, feature = "lua-scenes"))]
+    switcher_hover: Option<usize>,
     document: WorkspaceDocument,
     runtime_revision: u64,
     /// Last list written, so an unchanged set costs nothing.
@@ -878,11 +983,19 @@ struct App {
     cursor_window: Option<iced::window::Id>,
     desktop_focused: bool,
     hovered_surface_id: Option<String>,
+    /// Last module hit target the pointer entered. Hover moves are dispatched
+    /// only when this changes, never per mouse event.
+    #[cfg(feature = "lua-scenes")]
+    hovered_module_target: Option<(String, Option<String>)>,
     focus_emphasis_started: Option<Instant>,
     primary_pointer_down: bool,
     desktop_press: Option<(Instant, LogicalPoint)>,
     kiosk: bool,
     minimized_surfaces: BTreeSet<String>,
+    /// Reader threads hand terminal output here; a subscription turns it into
+    /// messages, so a program's output wakes the app instead of being polled for.
+    terminal_chunks: tokio::sync::mpsc::UnboundedSender<(String, Vec<u8>)>,
+
     maximized_surfaces: BTreeSet<String>,
     transition: Option<transition::Transition>,
     workspaces: WorkspaceStore,
@@ -1188,6 +1301,16 @@ impl App {
             .unwrap_or_default();
         let titlebar_height =
             theme_chrome_for(&theme_packs, &theme_pack_ids, &document.project_id).titlebar_height;
+        let (terminal_sender, terminal_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let _ = TERMINAL_SENDER.set(terminal_sender.clone());
+        if let Some(receiver) = crate::spore_socket::start()
+            && let Ok(mut slot) = SPORE_EVENTS.lock()
+        {
+            *slot = Some(receiver);
+        }
+        if let Ok(mut slot) = TERMINAL_CHUNKS.lock() {
+            *slot = Some(terminal_receiver);
+        }
         let interaction = interaction_engine(desktop_frame, document.chrome, titlebar_height);
         let mut app = Self {
             catalog,
@@ -1280,6 +1403,21 @@ impl App {
             presence: None,
             presence_received: None,
             presence_preview: None,
+            terminal_config: TerminalConfig::load(),
+            terminal_bells: BTreeMap::new(),
+            module_views: BTreeMap::new(),
+            spores: BTreeMap::new(),
+            spore_clock: None,
+            chrome_poll_at: Instant::now(),
+            control_center: Default::default(),
+            control_center_open: false,
+            scene_anim: crate::scene_anim::Animator::default(),
+            cursor_on: true,
+            loading_phase: 0.0,
+            loading_traced: false,
+            loading_hold: BTreeMap::new(),
+            #[cfg(all(unix, feature = "lua-scenes"))]
+            switcher_hover: None,
             visible_indicator_id: None,
             indicator_started: Instant::now(),
             indicator_dismissing: None,
@@ -1314,11 +1452,14 @@ impl App {
             cursor_window: None,
             desktop_focused: false,
             hovered_surface_id: None,
+            #[cfg(feature = "lua-scenes")]
+            hovered_module_target: None,
             focus_emphasis_started: None,
             primary_pointer_down: false,
             desktop_press: None,
             kiosk,
             minimized_surfaces: BTreeSet::new(),
+            terminal_chunks: terminal_sender,
             maximized_surfaces: BTreeSet::new(),
             transition: None,
             workspaces,
@@ -1427,12 +1568,16 @@ impl App {
     /// The normalized bounds the view should render for a surface: an
     /// interpolation from its previous bounds while a transition is in
     /// flight, otherwise the target.
-    fn presented_bounds(&self, surface_id: &str, bounds: NormalizedRect) -> [f32; 4] {
-        let target = [bounds.x, bounds.y, bounds.width, bounds.height];
-        self.transition
-            .as_ref()
-            .map(|t| t.placement(surface_id, target))
-            .unwrap_or(target)
+    /// Where a surface is drawn, in normalized coordinates.
+    ///
+    /// Deliberately *not* animated. Palette and opacity may ease; geometry may
+    /// not, because geometry is what the pointer is dragging. Interpolating it
+    /// means the window lags the hand by up to a transition's worth of frames,
+    /// and any surface that was not in the transition's starting set begins the
+    /// animation at the origin — which reads as a window jumping down the page
+    /// the moment you click it. A window is where the layout says it is.
+    fn presented_bounds(&self, _surface_id: &str, bounds: NormalizedRect) -> [f32; 4] {
+        [bounds.x, bounds.y, bounds.width, bounds.height]
     }
 
     fn tick_transition(&mut self) {
@@ -1731,6 +1876,91 @@ impl App {
 
     fn update_inner(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::TerminalChunk(surface_id, bytes) => {
+                let mut ring = false;
+                if let Some(surface) = self.decoded.get_mut(&surface_id)
+                    && let ContentSource::Terminal { host, pty, .. } = &mut surface.source
+                {
+                    host.write(&bytes);
+                    // Some of what the program sends is a question — a device
+                    // status report, a mode query. libghostty-vt answers it, and
+                    // the answer has to go back down the pty or the program waits
+                    // for a reply that never comes.
+                    let answers = host.drain_responses();
+                    if !answers.is_empty() {
+                        pty.write(&answers);
+                    }
+                    let bells = host.snapshot().bells;
+                    let seen = self.terminal_bells.entry(surface_id.clone()).or_insert(0);
+                    if bells > *seen {
+                        *seen = bells;
+                        ring = true;
+                    }
+                    self.bump();
+                }
+                if ring {
+                    self.terminal_config.bell.ring();
+                }
+                Task::none()
+            }
+            Message::SporeEvent(event) => {
+                self.handle_spore_event(event);
+                Task::none()
+            }
+            Message::TerminalBlink => {
+                self.cursor_on = !self.cursor_on;
+                if self.has_terminal() {
+                    self.bump();
+                }
+                Task::none()
+            }
+            Message::SwitcherHover { x, y } => {
+                #[cfg(all(unix, feature = "lua-scenes"))]
+                {
+                    // The tile under the pointer, from the same geometry the scene
+                    // is composed with: inset 16, gap 12, tiles sharing the rest.
+                    let slot = self.native_switcher.as_ref().and_then(|host| {
+                        let snapshot = host.snapshot.as_ref()?;
+                        let count = snapshot.switcher.windows.len().min(6);
+                        if count == 0 || x < 0.0 {
+                            return None;
+                        }
+                        let w = f64::from(snapshot.switcher.frame.width);
+                        let inset = 16.0;
+                        let gap = 12.0;
+                        let tile = (w - 2.0 * inset - gap * (count as f64 - 1.0)) / count as f64;
+                        let slot = ((x - inset) / (tile + gap)).floor();
+                        (slot >= 0.0 && (slot as usize) < count).then_some(slot as usize)
+                    });
+                    if slot != self.switcher_hover {
+                        self.switcher_hover = slot;
+                        if let Some(host) = self.native_switcher.as_mut() {
+                            host.set_hover(slot);
+                        }
+                        self.bump();
+                    }
+                }
+                Task::none()
+            }
+            Message::SurfaceLoadingTick => {
+                self.loading_phase = (self.loading_phase + 0.16) % std::f32::consts::TAU;
+                let now = Instant::now();
+                self.loading_hold.retain(|_, until| *until > now);
+                // Traced because the wait is short: without a line in the log
+                // there is no way to tell "the mark never drew" from "the producer
+                // was faster than a screenshot".
+                if self.awaiting_first_frame() {
+                    if !self.loading_traced {
+                        self.loading_traced = true;
+                        eprintln!("canvas: waiting for a surface's first frame");
+                    }
+                    self.bump();
+                } else if self.loading_traced {
+                    self.loading_traced = false;
+                    eprintln!("canvas: first frame arrived");
+                }
+                Task::none()
+            }
             #[cfg(all(unix, feature = "lua-scenes"))]
             Message::NativeSwitcherTick => {
                 let visual = self.presented_visual_theme();
@@ -1793,7 +2023,15 @@ impl App {
                         Receipt::ShellCatalog { catalog } => Ok(catalog),
                         _ => Err("Target does not support launcher catalog".into()),
                     });
+                    let failed = catalog.is_err();
                     l.accept(generation, catalog, now_unix_ms());
+                    // A failed catalog is usually a compositor that is still
+                    // starting. Mark it for another try; the shell's own poll asks
+                    // again, so no timer is needed and nothing spins.
+                    if failed && l.retries < 5 {
+                        l.retries += 1;
+                        l.loading = true;
+                    }
                 }
                 self.refresh_launcher_scene();
                 self.bump();
@@ -1807,6 +2045,23 @@ impl App {
                 self.activate_module(&surface_id, &target_id);
                 Task::none()
             }
+            #[cfg(feature = "lua-scenes")]
+            Message::ModulePointer {
+                surface_id,
+                phase,
+            } => {
+                if let Some(position) = self.cursor {
+                    self.module_pointer_in(&surface_id, position, phase);
+                }
+                Task::none()
+            }
+            Message::ChromeAction {
+                surface_id,
+                action,
+            } => {
+                self.apply_window_action(&surface_id, action);
+                Task::none()
+            }
             Message::ShellBack => {
                 self.jump_back();
                 Task::none()
@@ -1816,6 +2071,11 @@ impl App {
                 Task::none()
             }
             Message::ShellProjects => self.toggle_project_switcher(),
+            Message::ControlCenterDismiss => {
+                self.control_center_open = false;
+                self.bump();
+                Task::none()
+            }
             Message::ShellCanvasApps => {
                 self.toggle_shell_launcher(::canvas::shell_launcher::Scope::Canvas)
             }
@@ -2109,7 +2369,6 @@ impl App {
                     self.presence_preview = None;
                     self.bump();
                 }
-                self.refresh_terminal();
                 self.refresh_camera_detections();
                 self.reconcile_external_stream_visibility();
                 #[cfg(feature = "lua-scenes")]
@@ -2167,6 +2426,39 @@ impl App {
                 if jump_forward {
                     self.jump_forward();
                 }
+                // Editing a chrome Spore should land like an edit, not like a
+                // scheduled refresh: poll the artifacts often enough that a save
+                // is visible, and cheaply enough that an idle shell costs nothing
+                // (the refresh hashes and no-ops when nothing changed).
+                #[cfg(feature = "lua-scenes")]
+                // A region that called `module.animate()` gets a frame clock; an
+                // idle shell keeps the cheap poll and pays nothing for it.
+                let chrome_animating = self.desktop_bar.animated()
+                    || self.desktop_dock.animated()
+                    || self.control_center.animated();
+                let chrome_interval = if chrome_animating { 16 } else { 200 };
+                if self.chrome_poll_at.elapsed() >= Duration::from_millis(chrome_interval) {
+                    self.chrome_poll_at = Instant::now();
+                    self.refresh_desktop_bar(true);
+                    // A launcher whose catalog request failed asks again on this
+                    // cadence, so a compositor restart cannot leave it reading
+                    // "Connecting…" until someone retypes.
+                    if let Some(launcher) = self.project_switcher.as_mut()
+                        && launcher.loading
+                        && launcher.retries <= 5
+                    {
+                        launcher.loading = false;
+                        let target = launcher.targets[launcher.target].clone();
+                        let generation = launcher.generation;
+                        tasks.push(launcher_task(target, Command::ShellCatalog, generation, false));
+                    }
+                    if self.project_switcher.is_some() {
+                        self.refresh_launcher_scene();
+                    }
+                }
+                // The frame callback: a Spore draws when the compositor can draw,
+                // and is told how long it has been since the last one.
+                self.tick_spore_frames();
                 Task::batch(tasks)
             }
             Message::WindowReady(window) => {
@@ -2492,6 +2784,28 @@ impl App {
                         }
                     }
                 }
+                if control_center_requested(&kbd_event) {
+                    self.refresh_control_center(true);
+                    return self.toggle_control_center();
+                }
+                if self.control_center_open
+                    && matches!(
+                        kbd_event,
+                        iced::keyboard::Event::KeyPressed {
+                            key: iced::keyboard::Key::Named(
+                                iced::keyboard::key::Named::Escape
+                            ),
+                            ..
+                        }
+                    )
+                {
+                    self.control_center_open = false;
+                    self.bump();
+                    return Task::none();
+                }
+                if launcher_requested(&kbd_event) {
+                    return self.toggle_shell_launcher(::canvas::shell_launcher::Scope::Canvas);
+                }
                 if snap_layout_requested(&kbd_event) {
                     self.toggle_snapped_layout();
                     return Task::none();
@@ -2597,10 +2911,10 @@ impl App {
                     .clone()
                     .and_then(|id| self.decoded.get_mut(&id))
                 {
-                    if let ContentSource::Terminal { stdin_fd, .. } = &mut surface.source {
+                    if let ContentSource::Terminal { pty, .. } = &mut surface.source {
                         let bytes = key_to_bytes(&kbd_event);
                         if !bytes.is_empty() {
-                            let _ = terminal::write_fd(*stdin_fd, &bytes);
+                            pty.write(&bytes);
                         }
                     }
                 }
@@ -4120,6 +4434,17 @@ impl App {
         let action = picker.action(now_unix_ms());
         let generation = picker.generation;
         picker.busy = action.is_some();
+        // Choosing is the end of the launcher, not the middle of it: Spotlight
+        // closes on Enter, and a launcher still on screen after it launched
+        // something reads as if the launch failed.
+        if action.is_some() {
+            self.project_switcher = None;
+            self.desktop_focused = false;
+            self.bump();
+            return action
+                .map(|(target, command)| launcher_task(target, command, generation, true))
+                .unwrap_or_else(Task::none);
+        }
         picker.status = if action.is_some() {
             "Opening on selected screen…"
         } else {
@@ -4150,6 +4475,7 @@ impl App {
                     [self.frame.width as f32, self.frame.height as f32],
                 );
                 if let Err(error) = launcher.render(theme, now_unix_ms()) {
+                    eprintln!("Canvas launcher presentation: {error}");
                     launcher.status = format!("Launcher Lua error: {error}");
                     self.status = launcher.status.clone();
                 }
@@ -4183,11 +4509,11 @@ impl App {
             ),
             (
                 "padding".into(),
-                Value::Number(f64::from(fpl_gfx::chrome::BAR_PADDING)),
+                Value::Number(f64::from(::canvas::DESKTOP_BAR_PADDING)),
             ),
             (
                 "labelsize".into(),
-                Value::Number(f64::from(fpl_gfx::chrome::BAR_TEXT_SIZE)),
+                Value::Number(f64::from(::canvas::DESKTOP_BAR_TEXT_SIZE)),
             ),
             (
                 "workspace".into(),
@@ -4238,10 +4564,135 @@ impl App {
         } else {
             self.desktop_bar.refresh_current(artifact, snapshot, theme)
         };
-        if let Err(error) = result {
-            self.status = format!("Desktop bar Lua error (last good retained): {error}");
+        match result {
+            // A changed artifact is a new frame: hot reload is only hot if the
+            // compositor is told to draw the new one.
+            Ok(true) => self.bump(),
+            Ok(false) => {}
+            Err(error) => {
+                self.status = format!("Desktop bar Lua error (last good retained): {error}")
+            }
         }
         self.refresh_desktop_dock(poll_files);
+    }
+
+    /// Fill the control center from what the shell already knows.
+    ///
+    /// Nothing here is invented: the clock, the focused window and the surface
+    /// count come from the same places the bar and the dock read, so the panel
+    /// cannot disagree with them.
+    #[cfg(feature = "lua-scenes")]
+    fn refresh_control_center(&mut self, poll_files: bool) {
+        use ::canvas::lua_module::{
+            ModuleInputSnapshot, ModuleInputValue as Value, ModuleThemeTokens,
+        };
+        let now = now_unix_ms();
+        let parts = ::canvas::hud::local_parts(now);
+        let focused = self
+            .document
+            .focused_surface_id
+            .as_ref()
+            .and_then(|id| self.document.surfaces.iter().find(|s| &s.id == id))
+            .map(|surface| surface.title.clone())
+            .unwrap_or_else(|| "no window focused".into());
+        // Battery is the host's: a panel that guessed would be lying at exactly the
+        // moment someone looked.
+        let battery = String::from("—");
+        let values = BTreeMap::from([
+            ("width".to_string(), Value::Number(380.0)),
+            ("height".to_string(), Value::Number(520.0)),
+            (
+                "clock".to_string(),
+                Value::Text(format!("{:02}:{:02}", parts.hour, parts.minute)),
+            ),
+            (
+                "date".to_string(),
+                Value::Text(format!(
+                    "{:02}/{:02}/{:04}",
+                    parts.day, parts.month, parts.year
+                )),
+            ),
+            (
+                "workspace".to_string(),
+                Value::Text(
+                    workspace_identity_name(&self.catalog, &self.document.project_id).to_owned(),
+                ),
+            ),
+            (
+                "surfaces".to_string(),
+                Value::Number(self.document.surfaces.len() as f64),
+            ),
+            ("focused".to_string(), Value::Text(focused)),
+            ("battery".to_string(), Value::Text(battery)),
+            (
+                "sources".to_string(),
+                Value::Number(
+                    self.decoded
+                        .values()
+                        .filter(|surface| matches!(surface.source, ContentSource::LiveVideo { .. }))
+                        .count() as f64,
+                ),
+            ),
+        ]);
+        // The first few open windows, so the panel can list what is running
+        // instead of only counting it.
+        let mut values = values;
+        for (slot, surface) in self
+            .document
+            .surfaces
+            .iter()
+            .take(5)
+            .enumerate()
+        {
+            let title = surface.title.chars().take(32).collect::<String>();
+            values.insert(format!("window{slot}"), Value::Text(title));
+        }
+        let visual = self.presented_visual_theme();
+        let theme =
+            ModuleThemeTokens::from_visual(&visual, self.effective_theme(&self.document).accent());
+        let snapshot = ModuleInputSnapshot {
+            revision: 1,
+            now_ms: (now / 1000 * 1000).max(1),
+            values,
+        };
+        let artifact = ::canvas::shell_presentation::CONTROL_CENTER;
+        let result = if poll_files {
+            self.control_center.refresh_files(artifact, snapshot, theme)
+        } else {
+            self.control_center.refresh_current(artifact, snapshot, theme)
+        };
+        match result {
+            Ok(true) => {
+                if let Some(scene) = self.control_center.retained() {
+                    let scene = scene.scene.clone();
+                    self.scene_anim
+                        .present("chrome:control-center", &scene, Instant::now());
+                }
+                self.bump();
+            }
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("canvas: control center Lua error: {error}");
+                self.status = format!("Control center Lua error: {error}");
+            }
+        }
+    }
+
+    #[cfg(feature = "lua-scenes")]
+    fn toggle_control_center(&mut self) -> Task<Message> {
+        self.control_center_open = !self.control_center_open;
+        if self.control_center_open {
+            // Ease in from a collapsed copy: opening is a change of presence, and
+            // the scene behind it is identical to the one it opens with.
+            if let Some(scene) = self.control_center.retained() {
+                let scene = scene.scene.clone();
+                self.scene_anim
+                    .begin("chrome:control-center", &scene, Instant::now());
+            }
+            self.refresh_control_center(true);
+        }
+        self.bump();
+        Task::none()
     }
 
     #[cfg(feature = "lua-scenes")]
@@ -4400,12 +4851,14 @@ impl App {
         // Native pins remain saved and available in the explicit native launcher.
         // The Canvas dock represents Canvas windows, not host applications.
         ::canvas::shell_launcher::dock_surfaces(&self.document)
-            .map(|s| Entry {
-                id: format!("surface:{}", s.id),
-                title: s.title.clone(),
-                detail: "WINDOW".into(),
-                available: self.decoded.contains_key(&s.id),
-                choice: Choice::Surface { id: s.id.clone() },
+            .map(|s| {
+                Entry::new(
+                    format!("surface:{}", s.id),
+                    s.title.clone(),
+                    "WINDOW",
+                    self.decoded.contains_key(&s.id),
+                    Choice::Surface { id: s.id.clone() },
+                )
             })
             .collect()
     }
@@ -4493,13 +4946,13 @@ impl App {
                             .surfaces
                             .iter()
                             .find(|surface| &surface.id == id)?;
-                        Some(::canvas::shell_launcher::Entry {
-                            id: format!("surface:{id}"),
-                            title: surface.title.clone(),
-                            detail: "WINDOW · recent".into(),
-                            available: true,
-                            choice: ::canvas::shell_launcher::Choice::Surface { id: id.clone() },
-                        })
+                        Some(::canvas::shell_launcher::Entry::new(
+                            format!("surface:{id}"),
+                            surface.title.clone(),
+                            "WINDOW · recent",
+                            true,
+                            ::canvas::shell_launcher::Choice::Surface { id: id.clone() },
+                        ))
                     })
                     .collect();
                 launcher.window_cycle = true;
@@ -4864,6 +5317,73 @@ impl App {
                         self.focus_shell_surface(&id);
                         Task::none()
                     }
+                    Choice::Terminal { shell } => {
+                        let surface_id = self.free_surface_id("term");
+                        let request = ControlRequest {
+                            schema_version: pending.request.schema_version,
+                            request_id: pending.request.request_id.clone(),
+                            expected_revision: pending.request.expected_revision,
+                            actor: pending.request.actor.clone(),
+                            command: ::canvas::control::Command::OpenFile {
+                                surface_id,
+                                path: format!("tty://{shell}"),
+                                title: Some("Terminal".into()),
+                            },
+                        };
+                        return self.execute(Pending {
+                            request,
+                            reply: pending.reply,
+                        });
+                    }
+                    Choice::Spore { module } => {
+                        // A launcher entry asks to see the app, not to own a second
+                        // copy of it: a workspace that already has this module
+                        // mounted gets its surface raised instead of a twin window
+                        // drawn from the same Lua.
+                        if let Some(existing) = self.surface_running_module(&module) {
+                            self.minimized_surfaces.remove(&existing);
+                            self.document.focused_surface_id = Some(existing.clone());
+                            self.bump();
+                            let surface = self
+                                .decoded
+                                .get(&existing)
+                                .map(|runtime| runtime.snapshot.clone());
+                            if let Some(surface) = surface {
+                                self.answer(pending, Outcome::Ok {
+                                    receipt: Receipt::SurfaceOpened { surface },
+                                });
+                                return Task::none();
+                            }
+                            self.fail(pending, Failure::resource("the surface vanished"));
+                            return Task::none();
+                        }
+                        let surface_id = format!("spore-{module}");
+                        let spec_path = match write_spore_spec(&surface_id, &module) {
+                            Ok(path) => path,
+                            Err(message) => {
+                                self.fail(pending, Failure::invalid(message));
+                                return Task::none();
+                            }
+                        };
+                        // Re-enter the widget path instead of copying it: a
+                        // launcher launch and an explicit open_widget must produce
+                        // the same surface, or the launcher becomes a second
+                        // renderer with its own half of the rules.
+                        let request = ControlRequest {
+                            schema_version: pending.request.schema_version,
+                            request_id: pending.request.request_id.clone(),
+                            expected_revision: pending.request.expected_revision,
+                            actor: pending.request.actor.clone(),
+                            command: ::canvas::control::Command::OpenWidget {
+                                surface_id,
+                                spec_path: spec_path.into(),
+                            },
+                        };
+                        return self.execute(Pending {
+                            request,
+                            reply: pending.reply,
+                        });
+                    }
                     Choice::Application { path } => {
                         let (send, receive) = iced::futures::channel::oneshot::channel();
                         std::thread::spawn(move || {
@@ -4903,6 +5423,53 @@ impl App {
                 );
                 Task::none()
             }
+            Command::ToggleControlCenter => {
+                // One toggle path, so the seeded transition happens however the
+                // panel was opened -- key, command or a future bar control.
+                #[cfg(feature = "lua-scenes")]
+                let task = self.toggle_control_center();
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::ControlCenterToggled {
+                            open: self.control_center_open,
+                        },
+                    },
+                );
+                #[cfg(feature = "lua-scenes")]
+                return task;
+                #[cfg(not(feature = "lua-scenes"))]
+                Task::none()
+            }
+            Command::OpenLauncher { scope } => {
+                let scope = match scope {
+                    Some(::canvas::control::LauncherScope::Workspaces) => {
+                        ::canvas::shell_launcher::Scope::Workspaces
+                    }
+                    Some(::canvas::control::LauncherScope::Native) => {
+                        ::canvas::shell_launcher::Scope::Native
+                    }
+                    _ => ::canvas::shell_launcher::Scope::Canvas,
+                };
+                let task = self.toggle_shell_launcher(scope);
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::LauncherOpened {
+                            scope: match scope {
+                                ::canvas::shell_launcher::Scope::Workspaces => {
+                                    ::canvas::control::LauncherScope::Workspaces
+                                }
+                                ::canvas::shell_launcher::Scope::Native => {
+                                    ::canvas::control::LauncherScope::Native
+                                }
+                                _ => ::canvas::control::LauncherScope::Canvas,
+                            },
+                        },
+                    },
+                );
+                task
+            }
             Command::Inspect => {
                 let snapshot = self.snapshot();
                 self.answer(
@@ -4916,6 +5483,20 @@ impl App {
             Command::Performance => {
                 let mut metrics = self.update_timings.snapshot();
                 metrics["pending_raster_decodes"] = serde_json::json!(self.live_pending.len());
+                // A producer asking "is it lagging" deserves numbers, not an
+                // opinion: frames handled, the interval they arrived at, and what
+                // the host spent on each.
+                metrics["spore_dropped"] = serde_json::json!(crate::spore_socket::dropped_frames());
+                metrics["spore_pacing"] = serde_json::json!(self
+                    .spore_pacing()
+                    .into_iter()
+                    .map(|(id, frames, interval_ms, handler_ms)| serde_json::json!({
+                        "surface_id": id,
+                        "frames": frames,
+                        "interval_ms": (interval_ms * 100.0).round() / 100.0,
+                        "handler_ms": (handler_ms * 1000.0).round() / 1000.0,
+                    }))
+                    .collect::<Vec<_>>());
                 metrics["video_sources"] = serde_json::json!(self.decoded.values().filter_map(|surface| {
                     let ContentSource::LiveVideo { source_id, path, width, height, .. } = &surface.source else { return None; };
                     let age = std::fs::metadata(path).ok()
@@ -6536,6 +7117,97 @@ impl App {
                 }
                 Task::none()
             }
+            Command::SurfaceScene { surface_id } => {
+                let Some(surface) = self.decoded.get(&surface_id) else {
+                    self.fail(
+                        pending,
+                        Failure {
+                            code: ErrorCode::NotFound,
+                            message: format!("unknown Canvas surface: {surface_id}"),
+                        },
+                    );
+                    return Task::none();
+                };
+                let mut scene = Scene { nodes: Vec::new() };
+                let mut buttons = Vec::new();
+                #[cfg(feature = "lua-scenes")]
+                if let Some(ModuleSurface::Rendered {
+                    scene: retained,
+                    buttons: retained_buttons,
+                    ..
+                }) = self.modules.get(&surface_id)
+                {
+                    scene = retained.clone();
+                    buttons = retained_buttons.clone();
+                }
+                if scene.nodes.is_empty()
+                    && let ContentSource::Scene { scene: retained } = &surface.source
+                {
+                    scene = retained.clone();
+                }
+                let visual = self.presented_visual_theme();
+                let theme = ::canvas::lua_module::ModuleThemeTokens::from_visual(
+                    &visual,
+                    self.effective_theme(&self.document).accent(),
+                );
+                let viewport = surface
+                    .snapshot
+                    .display_logical
+                    .map(|[width, height]| [width, height])
+                    .or_else(|| {
+                        surface
+                            .snapshot
+                            .source_pixels
+                            .map(|[width, height]| [f64::from(width), f64::from(height)])
+                    })
+                    .unwrap_or([1200.0, 1800.0]);
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::SurfaceScene {
+                            surface_id,
+                            title: surface.snapshot.title.clone(),
+                            scene: serde_json::to_value(scene).unwrap_or_default(),
+                            buttons: serde_json::to_value(buttons).unwrap_or_default(),
+                            theme: serde_json::to_value(theme).unwrap_or_default(),
+                            viewport,
+                        },
+                    },
+                );
+                Task::none()
+            }
+            Command::ReloadModule { surface_id } => {
+                #[cfg(feature = "lua-scenes")]
+                {
+                    self.modules.remove(&surface_id);
+                    self.refresh_modules();
+                    self.bump();
+                }
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::ModuleReloaded { surface_id },
+                    },
+                );
+                Task::none()
+            }
+            Command::SurfaceActivate {
+                surface_id,
+                target_id,
+            } => {
+                #[cfg(feature = "lua-scenes")]
+                self.activate_module(&surface_id, &target_id);
+                self.answer(
+                    pending,
+                    Outcome::Ok {
+                        receipt: Receipt::SurfaceActivated {
+                            surface_id,
+                            target_id,
+                        },
+                    },
+                );
+                Task::none()
+            }
             Command::Screenshot { surface_id, region } => {
                 let window_id = self.windows.keys().next().copied();
                 let Some(window_id) = window_id else {
@@ -6547,7 +7219,15 @@ impl App {
                 };
                 let resolved_region = surface_id
                     .as_ref()
-                    .and_then(|id| self.snapshot().surface_bounds.get(id).copied());
+                    .and_then(|id| self.snapshot().surface_bounds.get(id).copied())
+                    // Surface bounds are desktop coordinates; the window
+                    // screenshot is window-local. Crop the same rectangle the
+                    // user sees, not a rectangle shifted by the Canvas origin.
+                    .map(|mut region| {
+                        region.x -= self.frame.x;
+                        region.y -= self.frame.y;
+                        region
+                    });
                 let capture_region = region.or(resolved_region);
                 let mut pending = Some(pending);
                 iced::window::screenshot(window_id).map(move |screenshot| {
@@ -6573,25 +7253,6 @@ impl App {
             self.notifications.remove(0);
         }
         self.bump();
-    }
-
-    fn refresh_terminal(&mut self) {
-        let mut changed = false;
-        for surface in self.decoded.values_mut() {
-            if let ContentSource::Terminal {
-                master_fd, buffer, ..
-            } = &mut surface.source
-            {
-                let data = terminal::read_fd(*master_fd);
-                if let Some(text) = String::from_utf8(data).ok().filter(|t| !t.is_empty()) {
-                    buffer.push_str(&text);
-                    changed = true;
-                }
-            }
-        }
-        if changed {
-            self.bump();
-        }
     }
 
     fn refresh_metrics(&mut self) {
@@ -6718,13 +7379,100 @@ impl App {
         let mut catalog = ::canvas::shell_launcher::Catalog::collect(&self.snapshot());
         for project in &self.catalog.projects {
             if !catalog.entries.iter().any(|e|matches!(&e.choice,::canvas::shell_launcher::Choice::Workspace{id} if id==&project.id)) {
-                catalog.entries.push(::canvas::shell_launcher::Entry{id:format!("workspace:{}",project.id),title:project.name.clone(),detail:"WORKSPACE · available".into(),available:true,choice: ::canvas::shell_launcher::Choice::Workspace{id:project.id.clone()}});
+                catalog.entries.push(::canvas::shell_launcher::Entry::new(
+                    format!("workspace:{}", project.id),
+                    project.name.clone(),
+                    "WORKSPACE · available",
+                    true,
+                    ::canvas::shell_launcher::Choice::Workspace { id: project.id.clone() },
+                ));
             }
         }
+        let composed = composed_modules();
+        let mut claimed = std::collections::BTreeSet::new();
+        for app in ::canvas::spore_catalog::scan() {
+            if catalog
+                .entries
+                .iter()
+                .any(|entry| entry.id == format!("app:{}", app.id))
+            {
+                continue;
+            }
+            // An app is an app: the Spore's name, not the title of whichever
+            // module happened to render one of its panels. A list of panel titles
+            // reads as a list of internals, which is what it is.
+            let module = app
+                .canvas_module
+                .clone()
+                .filter(|module| composed.iter().any(|(id, _)| id == module));
+            // The Terminal app is a terminal: a pty and a shell, which the host
+            // can do today. Pointing it at a workspace that does not exist would
+            // make the most basic app the least launchable one.
+            let terminal = app.name.eq_ignore_ascii_case("terminal");
+            if let Some(module) = &module {
+                claimed.insert(module.clone());
+            }
+            let available = terminal
+                || module.is_some()
+                || self
+                    .snapshot()
+                    .workspaces
+                    .iter()
+                    .any(|workspace| workspace == &app.workspace);
+            let badge = app.badge.clone().unwrap_or_else(|| {
+                app.name
+                    .chars()
+                    .next()
+                    .map(|first| first.to_uppercase().to_string())
+                    .unwrap_or_default()
+            });
+            let detail = match (&module, app.canvas_module.is_some()) {
+                (Some(_), _) => format!("APP · {} · {}", app.version, app.summary),
+                (None, true) => format!("APP · {} · UI not composed", app.version),
+                (None, false) => format!("APP · {} · needs its workspace", app.version),
+            };
+            let choice = if terminal {
+                ::canvas::shell_launcher::Choice::Terminal {
+                    shell: std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into()),
+                }
+            } else if let Some(module) = module {
+                ::canvas::shell_launcher::Choice::Spore { module }
+            } else {
+                ::canvas::shell_launcher::Choice::Workspace { id: app.workspace }
+            };
+            let entry = ::canvas::shell_launcher::Entry::new(
+                format!("app:{}", app.id),
+                app.name,
+                detail,
+                available,
+                choice,
+            );
+            catalog.entries.push(match app.tint {
+                Some(tint) => entry.badged(badge, tint),
+                None => entry,
+            });
+        }
+        // A composed Lua UI is an app: the Spore's own entry in the launcher,
+        // without a workspace to install first. These live in the runtime
+        // modules directory, which is where composition writes them.
+        // Unclaimed UIs are panels, not apps, and a launcher that lists them is a
+        // launcher that offers "Approve reply" as if it were a product. They stay
+        // reachable by name through open_widget.
+        let _ = &claimed;
+        // Apps first, then windows, then workspaces, then native applications.
+        // Spotlight's promise is that typing an app's name opens the app, which
+        // cannot hold if nineteen native binaries sort above it alphabetically.
+        let rank = |entry: &::canvas::shell_launcher::Entry| match &entry.choice {
+            ::canvas::shell_launcher::Choice::Spore { .. }
+            | ::canvas::shell_launcher::Choice::Terminal { .. } => 0,
+            ::canvas::shell_launcher::Choice::Surface { .. } => 1,
+            ::canvas::shell_launcher::Choice::Workspace { .. } => 2,
+            ::canvas::shell_launcher::Choice::Application { .. } => 3,
+        };
         catalog.entries.sort_by(|a, b| {
-            a.title
-                .to_lowercase()
-                .cmp(&b.title.to_lowercase())
+            rank(a)
+                .cmp(&rank(b))
+                .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
                 .then_with(|| a.id.cmp(&b.id))
         });
         catalog
@@ -6972,47 +7720,25 @@ impl App {
         if let Event::ButtonPressed(Button::Left) = &event
             && let Some((surface_id, action)) = self.hit_test_surface_control()
         {
-            self.desktop_press = None;
-            self.desktop_focused = false;
-            match action {
-                WindowAction::Close => {
-                    if self.document.surfaces.iter().any(|s| s.id == surface_id) {
-                        self.document.surfaces.retain(|s| s.id != surface_id);
-                        self.document
-                            .bindings
-                            .retain(|b| b.target.surface_id != surface_id);
-                        self.decoded.remove(&surface_id);
-                        self.shared_views.remove(&surface_id);
-                        self.minimized_surfaces.remove(&surface_id);
-                        self.maximized_surfaces.remove(&surface_id);
-                        self.rebuild_stack();
-                        if self.document.focused_surface_id.as_ref() == Some(&surface_id) {
-                            self.document.focused_surface_id =
-                                self.document.surfaces.last().map(|s| s.id.clone());
-                        }
-                        self.bump();
-                        self.status = format!("Closed {surface_id}.");
-                    }
-                }
-                WindowAction::Minimize => {
-                    if self.minimized_surfaces.insert(surface_id.clone()) {
-                        self.bump();
-                        self.status = format!("Minimized {surface_id}.");
-                    }
-                }
-                WindowAction::Maximize => {
-                    self.start_transition();
-                    self.status = if self.maximized_surfaces.remove(&surface_id) {
-                        format!("Restored {surface_id}.")
-                    } else {
-                        self.maximized_surfaces.clear();
-                        self.maximized_surfaces.insert(surface_id.clone());
-                        format!("Maximized {surface_id}.")
-                    };
-                    self.bump();
+            self.apply_window_action(&surface_id, action);
+            return Task::none();
+        }
+
+        // A click belongs to the module view under it before it means anything to
+        // the window manager: a view that wants a press has to get the press.
+        #[cfg(feature = "lua-scenes")]
+        match &event {
+            Event::ButtonPressed(Button::Left) => {
+                if let Some(position) = self.cursor {
+                    self.module_pointer(position, ::canvas::lua_module::PointerPhase::Press);
                 }
             }
-            return Task::none();
+            Event::ButtonReleased(Button::Left) => {
+                if let Some(position) = self.cursor {
+                    self.module_pointer(position, ::canvas::lua_module::PointerPhase::Release);
+                }
+            }
+            _ => {}
         }
 
         let phase = match event {
@@ -7022,6 +7748,12 @@ impl App {
                     y: f64::from(position.y) + offset.y,
                 });
                 self.cursor_window = Some(window);
+                #[cfg(feature = "lua-scenes")]
+                if !self.primary_pointer_down
+                    && let Some(cursor) = self.cursor
+                {
+                    self.module_hover(cursor);
+                }
                 self.primary_pointer_down.then_some(PointerPhase::Move)
             }
             Event::ButtonPressed(Button::Left) => {
@@ -7033,6 +7765,8 @@ impl App {
                 Some(PointerPhase::Release)
             }
             Event::CursorLeft => {
+                #[cfg(feature = "lua-scenes")]
+                self.clear_module_hover();
                 if self.cursor_window != Some(window) {
                     None
                 } else if self.primary_pointer_down {
@@ -7496,6 +8230,69 @@ impl App {
         }
     }
 
+    /// Close, minimize or maximize one surface.
+    ///
+    /// Shared by the chrome's own buttons and by the compositor's hit test: two
+    /// ways to ask for the same thing must not drift into two behaviours.
+    fn apply_window_action(&mut self, surface_id: &str, action: WindowAction) {
+        self.desktop_press = None;
+        self.desktop_focused = false;
+        let surface_id = surface_id.to_owned();
+        match action {
+                WindowAction::Close => {
+                    if self.document.surfaces.iter().any(|s| s.id == surface_id) {
+                        self.document.surfaces.retain(|s| s.id != surface_id);
+                        self.document
+                            .bindings
+                            .retain(|b| b.target.surface_id != surface_id);
+                        self.decoded.remove(&surface_id);
+                        self.shared_views.remove(&surface_id);
+                        self.minimized_surfaces.remove(&surface_id);
+                        self.maximized_surfaces.remove(&surface_id);
+                        self.rebuild_stack();
+                        if self.document.focused_surface_id.as_ref() == Some(&surface_id) {
+                            self.document.focused_surface_id =
+                                self.document.surfaces.last().map(|s| s.id.clone());
+                        }
+                        self.bump();
+                        self.status = format!("Closed {surface_id}.");
+                    }
+                }
+                WindowAction::Minimize => {
+                    if self.minimized_surfaces.insert(surface_id.clone()) {
+                        self.bump();
+                        self.status = format!("Minimized {surface_id}.");
+                    }
+                }
+                WindowAction::Maximize => {
+                    self.start_transition();
+                    self.status = if self.maximized_surfaces.remove(&surface_id) {
+                        format!("Restored {surface_id}.")
+                    } else {
+                        self.maximized_surfaces.clear();
+                        self.maximized_surfaces.insert(surface_id.clone());
+                        format!("Maximized {surface_id}.")
+                    };
+                    self.bump();
+                }
+        }
+    }
+
+    /// The first of `base`, `base2`, `base3`… that no surface is using.
+    fn free_surface_id(&self, base: &str) -> String {
+        let taken = |id: &str| {
+            self.document.surfaces.iter().any(|surface| surface.id == id)
+                || self.decoded.contains_key(id)
+        };
+        if !taken(base) {
+            return base.to_owned();
+        }
+        (2..)
+            .map(|n| format!("{base}{n}"))
+            .find(|id| !taken(id))
+            .expect("an unused surface id exists")
+    }
+
     fn hit_test_surface_control(&self) -> Option<(String, WindowAction)> {
         if self.document.chrome.title == SurfaceTitleMode::Hidden {
             return None;
@@ -7624,6 +8421,10 @@ impl App {
                 InteractionIntent::SetBounds { surface_id, bounds } => {
                     let frame = self.frame;
                     let chrome = self.document.chrome;
+                    let shell_height = self
+                        .overlay_on_viewport(self.overlays.fpl_mark, self.frame)
+                        .then_some(::canvas::DESKTOP_BAR_HEIGHT)
+                        .unwrap_or_default();
                     let Layout::Canvas { placements } = self.document.active_layout_mut() else {
                         continue;
                     };
@@ -7631,7 +8432,12 @@ impl App {
                         .iter_mut()
                         .find(|placement| placement.surface_id == surface_id)
                     {
-                        let normalized = normalize_visible_surface_bounds(bounds, frame, chrome);
+                        let normalized = normalize_visible_surface_bounds_with_shell(
+                            bounds,
+                            frame,
+                            chrome,
+                            shell_height,
+                        );
                         if placement.bounds != normalized {
                             placement.bounds = normalized;
                             changed = true;
@@ -8841,8 +9647,21 @@ impl App {
 
     #[cfg(feature = "lua-scenes")]
     fn activate_module(&mut self, surface_id: &str, target_id: &str) {
-        // Re-evaluate the current artifact and state: a stale button cannot
-        // replay the body retained before a reload or newer controller revision.
+        self.dispatch_module(
+            surface_id,
+            ::canvas::lua_module::ModuleEvent::Activate {
+                target_id: target_id.to_owned(),
+            },
+        );
+    }
+
+    /// Re-evaluate a module with one event and route whatever actions it emitted.
+    ///
+    /// Every input path — a named button, a click on the scene, later a key —
+    /// ends here, because the rule is the same for all of them: the view is a
+    /// function of state plus event, and anything it decides leaves as an intent.
+    #[cfg(feature = "lua-scenes")]
+    fn dispatch_module(&mut self, surface_id: &str, event: ::canvas::lua_module::ModuleEvent) {
         let Some(surface) = self.decoded.get(surface_id) else {
             return;
         };
@@ -8853,21 +9672,31 @@ impl App {
             return;
         };
         let visual = self.presented_visual_theme();
-        let theme = ::canvas::lua_module::ModuleThemeTokens::from_visual(
+        let mut theme = ::canvas::lua_module::ModuleThemeTokens::from_visual(
             &visual,
             self.effective_theme(&self.document).accent(),
         );
-        let result = resolve_module_event(
-            module,
-            inputs,
-            theme,
-            now_unix_ms(),
-            Some(::canvas::lua_module::ModuleEvent::Activate {
-                target_id: target_id.to_owned(),
-            }),
-        );
+        if let Some(bounds) = self.snapshot().surface_bounds.get(surface_id) {
+            theme.viewport = [bounds.width as f32, bounds.height as f32];
+        }
+        let view = self.module_views.get(surface_id).cloned().unwrap_or_default();
+        let result = resolve_module_event(module, inputs, theme, now_unix_ms(), Some(event), view);
         match result {
             Ok(retained) => {
+                if let Some(next) = self.module_views.get_mut(surface_id) {
+                    *next = retained.view.clone();
+                } else {
+                    self.module_views
+                        .insert(surface_id.to_owned(), retained.view.clone());
+                }
+                if let Some(ModuleSurface::Rendered { scene, buttons, last_error, .. }) =
+                    self.modules.get_mut(surface_id)
+                {
+                    *scene = retained.scene.clone();
+                    *buttons = retained.buttons.clone();
+                    *last_error = None;
+                    self.bump();
+                }
                 for action in retained.actions {
                     match self.module_bus.publish(action) {
                         Ok(request_id) => {
@@ -8883,6 +9712,178 @@ impl App {
         }
     }
 
+    /// The topmost module surface under a point, with the pointer expressed in
+    /// that surface's own normalized space.
+    #[cfg(feature = "lua-scenes")]
+    fn module_under_pointer(
+        &self,
+        position: LogicalPoint,
+    ) -> Option<(String, ::canvas::lua_module::PointerPhase, f32, f32)> {
+        let Layout::Canvas { placements } = self.document.active_layout() else {
+            return None;
+        };
+        let mut order = placements.iter().collect::<Vec<_>>();
+        order.sort_by_key(|placement| {
+            std::cmp::Reverse((
+                self.maximized_surfaces.contains(&placement.surface_id),
+                placement.layer,
+            ))
+        });
+        for placement in order {
+            let Some(surface) = self.decoded.get(&placement.surface_id) else {
+                continue;
+            };
+            let ContentSource::Widget { spec } = &surface.source else {
+                continue;
+            };
+            if !matches!(spec.kind, canvas_widgets::WidgetKind::Module { .. }) {
+                continue;
+            }
+            let Some(bounds) = self.surface_screen_bounds(&placement.surface_id) else {
+                continue;
+            };
+            let (bx, by) = (f64::from(bounds.x), f64::from(bounds.y));
+            let (bw, bh) = (f64::from(bounds.width), f64::from(bounds.height));
+            if bw <= 0.0 || bh <= 0.0 {
+                continue;
+            }
+            if position.x < bx
+                || position.y < by
+                || position.x > bx + bw
+                || position.y > by + bh
+            {
+                continue;
+            }
+            let x = ((position.x - bx) / bw) as f32;
+            let y = ((position.y - by) / bh) as f32;
+            return Some((
+                placement.surface_id.clone(),
+                ::canvas::lua_module::PointerPhase::Press,
+                x,
+                y,
+            ));
+        }
+        None
+    }
+
+    /// Find the retained module hit target under the pointer, if any.
+    ///
+    /// This deliberately uses the module's own hit targets, not a Lua re-render,
+    /// so a mouse move costs a linear scan over at most 64 buttons. A Move event
+    /// is sent only when this target changes.
+    #[cfg(feature = "lua-scenes")]
+    fn module_hover_target(
+        &self,
+        position: LogicalPoint,
+    ) -> Option<(String, Option<String>, f32, f32)> {
+        let (surface_id, _, x, y) = self.module_under_pointer(position)?;
+        let target = match self.modules.get(&surface_id) {
+            Some(ModuleSurface::Rendered { buttons, .. }) => buttons
+                .iter()
+                .rev()
+                .find(|button| button.enabled && module_button_contains(button, x, y))
+                .map(|button| button.id.clone()),
+            _ => None,
+        };
+        Some((surface_id, target, x, y))
+    }
+
+    /// Dispatch a hover update only when the target changes.
+    #[cfg(feature = "lua-scenes")]
+    fn module_hover(&mut self, position: LogicalPoint) {
+        let target = self.module_hover_target(position);
+        let key = target
+            .as_ref()
+            .map(|(surface, id, _, _)| (surface.clone(), id.clone()));
+        if key == self.hovered_module_target {
+            return;
+        }
+
+        let previous = self.hovered_module_target.take();
+        self.hovered_module_target = key;
+        if let Some((surface_id, _)) = previous {
+            let same_surface = target
+                .as_ref()
+                .is_some_and(|(surface, _, _, _)| surface == &surface_id);
+            if !same_surface {
+                self.dispatch_module(
+                    &surface_id,
+                    ::canvas::lua_module::ModuleEvent::Pointer {
+                        x: 0.0,
+                        y: 0.0,
+                        phase: ::canvas::lua_module::PointerPhase::Leave,
+                    },
+                );
+            }
+        }
+        if let Some((surface_id, _, x, y)) = target {
+            self.dispatch_module(
+                &surface_id,
+                ::canvas::lua_module::ModuleEvent::Pointer {
+                    x,
+                    y,
+                    phase: ::canvas::lua_module::PointerPhase::Move,
+                },
+            );
+        }
+    }
+
+    /// Clear hover when the pointer leaves the window or module surface.
+    #[cfg(feature = "lua-scenes")]
+    fn clear_module_hover(&mut self) {
+        let Some((surface_id, _)) = self.hovered_module_target.take() else {
+            return;
+        };
+        self.dispatch_module(
+            &surface_id,
+            ::canvas::lua_module::ModuleEvent::Pointer {
+                x: 0.0,
+                y: 0.0,
+                phase: ::canvas::lua_module::PointerPhase::Leave,
+            },
+        );
+    }
+
+    /// Deliver a click to a module view.
+    ///
+    /// Press and release only: hover would mean re-rendering Lua on every mouse
+    /// move, and a view that re-renders per frame is exactly what the retained
+    /// scene model exists to avoid.
+    #[cfg(feature = "lua-scenes")]
+    fn module_pointer(&mut self, position: LogicalPoint, phase: ::canvas::lua_module::PointerPhase) {
+        let Some((surface_id, _, x, y)) = self.module_under_pointer(position) else {
+            return;
+        };
+        self.dispatch_module(
+            &surface_id,
+            ::canvas::lua_module::ModuleEvent::Pointer { x, y, phase },
+        );
+    }
+
+    /// The same, for a press the view itself reported, so no hit test is needed.
+    #[cfg(feature = "lua-scenes")]
+    fn module_pointer_in(
+        &mut self,
+        surface_id: &str,
+        position: LogicalPoint,
+        phase: ::canvas::lua_module::PointerPhase,
+    ) {
+        let Some(bounds) = self.surface_screen_bounds(surface_id) else {
+            return;
+        };
+        let (bx, by) = (f64::from(bounds.x), f64::from(bounds.y));
+        let (bw, bh) = (f64::from(bounds.width), f64::from(bounds.height));
+        if bw <= 0.0 || bh <= 0.0 {
+            return;
+        }
+        let x = (((position.x - bx) / bw) as f32).clamp(0.0, 1.0);
+        let y = (((position.y - by) / bh) as f32).clamp(0.0, 1.0);
+        self.dispatch_module(
+            surface_id,
+            ::canvas::lua_module::ModuleEvent::Pointer { x, y, phase },
+        );
+    }
+
     #[cfg(feature = "lua-scenes")]
     fn module_button_layer(
         &self,
@@ -8892,13 +9893,15 @@ impl App {
     ) -> Element<'static, Message> {
         let visual = self.presented_visual_theme();
         let children = self.native_module_buttons(buttons, viewport, |control| {
-            (control.enabled && self.module_bus.connected()).then(|| Message::ModuleActivate {
+            // A local control is the application's own button: it does not need a
+            // controller on the other end of a bus to be worth clicking.
+            control.enabled.then(|| Message::ModuleActivate {
                 surface_id: surface_id.to_owned(),
                 target_id: control.id.clone(),
             })
         });
         let mut children = children;
-        if !buttons.is_empty() && !self.module_bus.connected() {
+        if buttons.iter().any(|button| !button.local) && !self.module_bus.connected() {
             children.push(
                 container(
                     text("CONTROLS OFFLINE · Unibus session unavailable")
@@ -8945,7 +9948,11 @@ impl App {
                 let selected = selected(control);
                 let appearance = control.appearance;
                 let message = action(control);
-                let content: Element<'static, Message> = if let Some(icon) = control.icon {
+                let content: Element<'static, Message> = if appearance
+                    == ::canvas::lua_module::ModuleButtonAppearance::Hit
+                {
+                    space::horizontal().into()
+                } else if let Some(icon) = control.icon {
                     let id = match &message {
                         Some(Message::ShellFocusSurface(id)) => Some(id.as_str()),
                         Some(Message::ShellLauncherPick { entry_id, .. }) => {
@@ -9015,9 +10022,21 @@ impl App {
                         picture
                     };
                     container(content).center(Length::Fill).into()
+                } else if control.align == ::canvas::lua_module::ButtonAlign::Left {
+                    container(
+                        text(control.label.clone())
+                            .size(::canvas::DESKTOP_BAR_TEXT_SIZE),
+                    )
+                    .width(width)
+                    .padding(iced::Padding {
+                        left: 12.0,
+                        ..Default::default()
+                    })
+                    .align_x(iced::alignment::Horizontal::Left)
+                    .into()
                 } else {
                     text(control.label.clone())
-                        .size(fpl_gfx::chrome::BAR_TEXT_SIZE)
+                        .size(::canvas::DESKTOP_BAR_TEXT_SIZE)
                         .center()
                         .into()
                 };
@@ -9035,6 +10054,9 @@ impl App {
                             canvas_widgets::live::app_chrome::quiet_button_style(
                                 visual, selected, status,
                             )
+                        }
+                        ::canvas::lua_module::ModuleButtonAppearance::Hit => {
+                            button::Style::default()
                         }
                     });
                 let pin_id = match &message {
@@ -9086,6 +10108,7 @@ impl App {
         let visual = self.presented_visual_theme();
         let accent = self.effective_theme(&self.document).accent();
         let theme = ::canvas::lua_module::ModuleThemeTokens::from_visual(&visual, accent);
+        let surface_bounds = self.snapshot().surface_bounds;
         let today = ::canvas::hud::local_parts(now_ms);
         let mut targets = Vec::new();
         for (id, surface) in &self.decoded {
@@ -9106,6 +10129,12 @@ impl App {
                 let key = spec
                     .refresh_ms
                     .map_or(key, |refresh| key ^ (now_ms / refresh.max(1_000)));
+                // A viewport change is a different layout input, not just a
+                // paint: circles and aspect-relative gutters must re-resolve.
+                let key = surface_bounds.get(id).map_or(key, |bounds| {
+                    key ^ u64::from(bounds.width).rotate_left(17)
+                        ^ u64::from(bounds.height).rotate_left(41)
+                });
                 targets.push((id.clone(), module.clone(), inputs.clone(), key));
             }
         }
@@ -9113,6 +10142,10 @@ impl App {
         for (id, name, inputs, key) in targets {
             if self.modules.get(&id).is_some_and(|done| done.key() == key) {
                 continue;
+            }
+            let mut theme = theme;
+            if let Some(bounds) = surface_bounds.get(&id) {
+                theme.viewport = [bounds.width as f32, bounds.height as f32];
             }
             let resolved = match resolve_module(&name, &inputs, theme, now_ms) {
                 Ok(scene) => ModuleSurface::Rendered {
@@ -9144,6 +10177,28 @@ impl App {
         self.modules.retain(|id, _| live.contains(id));
     }
 
+    /// Draw an emulated terminal grid: one rich-text line per row, one span per
+    /// colour run. Monospaced, because a terminal is a grid and not prose that
+    /// happens to contain newlines.
+    fn terminal_layer<'a>(
+        &self,
+        snapshot: std::sync::Arc<soil_vt::Snapshot>,
+        width: Length,
+        height: Length,
+    ) -> Element<'a, Message> {
+        let palette = self.presented_palette();
+        iced::widget::canvas(TerminalGrid {
+            snapshot,
+            background: color(palette.background),
+            default_ink: color(palette.text),
+            cursor_ink: color(palette.background),
+            cursor_on: self.cursor_on,
+        })
+        .width(width)
+        .height(height)
+        .into()
+    }
+
     /// Draw a scene's text nodes in 2D, sized and coloured from the presented theme.
     ///
     /// Shared by document-authored scenes and resolved Lua modules, so an
@@ -9154,12 +10209,60 @@ impl App {
 
     /// Lua owns the shell panel geometry; native chrome adds the shared border
     /// and shadow without drawing its opaque ground a second time.
+    /// What a surface shows while it waits for its producer's first frame.
+    ///
+    /// Deliberately not chrome: this is the window's own body, and a window that
+    /// says nothing while it starts looks broken. The caption states the wait
+    /// rather than claiming progress the host cannot know.
+    fn awaiting_surface(
+        &self,
+        width: iced::Length,
+        height: iced::Length,
+    ) -> Element<'static, Message> {
+        let visual = self.presented_visual_theme();
+        let phase = self.loading_phase;
+        let mark = Canvas::new(::canvas::loading_mark::LoadingMark {
+            phase,
+            ink: color(visual.palette.primary),
+            muted: color(visual.palette.text_muted),
+        })
+        .width(Length::Fixed(170.0))
+        .height(Length::Fixed(130.0));
+        container(
+            column![
+                mark,
+                text("Starting")
+                    .size(visual.metrics.small)
+                    .color(color(visual.palette.text_muted)),
+            ]
+            .spacing(6)
+            .align_x(iced::alignment::Horizontal::Center),
+        )
+        .width(width)
+        .height(height)
+        .align_x(iced::alignment::Horizontal::Center)
+        .align_y(iced::alignment::Vertical::Center)
+        .into()
+    }
+
+    /// True while some surface is waiting for a first frame, or is inside the
+    /// floor that keeps a quick start from flashing.
+    fn awaiting_first_frame(&self) -> bool {
+        let now = Instant::now();
+        self.decoded.iter().any(|(id, surface)| {
+            matches!(surface.source, ContentSource::Spore)
+                && (!self.spores.contains_key(id)
+                    || self.loading_hold.get(id).is_some_and(|until| now < *until))
+        })
+    }
+
     fn shell_scene_layer(&self, scene: &Scene, viewport: LogicalSize) -> Element<'static, Message> {
         let Some(node) = scene.nodes.iter().find(|node| node.id == "ground") else {
             return self.scene_layer(scene, viewport);
         };
         let NodeContent::Rect {
             ink,
+            rgb,
             opacity,
             radius,
         } = node.content
@@ -9168,7 +10271,7 @@ impl App {
         };
         let [x, y] = scene_node_position(node.transform.translation, viewport);
         let palette = self.presented_palette();
-        let mut fill = color(scene_ink(ink, &palette));
+        let mut fill = color(rgb.unwrap_or_else(|| scene_ink(ink, &palette)));
         fill.a = opacity;
         let border = color(palette.border);
         let panel = container(space::horizontal())
@@ -9218,7 +10321,9 @@ impl App {
                 (!shell_ground || node.id != "ground")
                     && matches!(
                         node.content,
-                        NodeContent::Text { .. } | NodeContent::Rect { .. }
+                        NodeContent::Text { .. }
+                            | NodeContent::Rect { .. }
+                            | NodeContent::Shader { .. }
                     )
             })
             .map(|(index, _)| index)
@@ -9238,26 +10343,29 @@ impl App {
                 let [pos_x, pos_y] = scene_node_position(translation, viewport);
                 let z_scale = scene_node_scale(translation[2]);
                 let content: Element<'static, Message> = match &node.content {
-                    NodeContent::Text { text: label, ink } => {
+                    NodeContent::Text {
+                        text: label,
+                        ink,
+                        rgb,
+                        opacity,
+                    } => {
                         // Font size is a length, not an area: multiplying X
                         // and Y made a 2x Lua label grow 4x and clip its frame.
                         let font_size =
                             scene_text_size(scale[1], metrics.body, z_scale, metrics.micro);
-                        container(
-                            text(label.clone())
-                                .size(font_size)
-                                .color(color(scene_ink(*ink, &palette))),
-                        )
-                        .into()
+                        let mut ink_color = color(rgb.unwrap_or_else(|| scene_ink(*ink, &palette)));
+                        ink_color.a *= opacity.clamp(0.0, 1.0);
+                        container(text(label.clone()).size(font_size).color(ink_color)).into()
                     }
                     NodeContent::Rect {
                         ink,
+                        rgb,
                         opacity,
                         radius,
                     } => {
                         let width = (scale[0].abs() * viewport.width as f32 / 8.0).max(1.0);
                         let height = (scale[1].abs() * viewport.height as f32 / 8.0).max(1.0);
-                        let mut fill = color(scene_ink(*ink, &palette));
+                        let mut fill = color(rgb.unwrap_or_else(|| scene_ink(*ink, &palette)));
                         fill.a = *opacity;
                         let radius = *radius;
                         container(space::horizontal())
@@ -9272,6 +10380,17 @@ impl App {
                                 ..Default::default()
                             })
                             .into()
+                    }
+                    NodeContent::Shader { wgsl, uniforms } => {
+                        let width = (scale[0].abs() * viewport.width as f32 / 8.0).max(1.0);
+                        let height = (scale[1].abs() * viewport.height as f32 / 8.0).max(1.0);
+                        container(canvas_widgets::live::data_shader::view(
+                            wgsl.clone(),
+                            uniforms.clone(),
+                        ))
+                        .width(width)
+                        .height(height)
+                        .into()
                     }
                     _ => container(text("")).into(),
                 };
@@ -9335,17 +10454,73 @@ impl App {
             .width(width)
             .height(height)
             .into(),
-            ContentSource::Terminal { buffer, .. } => {
-                let palette = self.project_palette();
-                scrollable(text(buffer).color(color(palette.text)).width(Length::Fill))
-                    .width(width)
-                    .height(height)
-                    .into()
+            ContentSource::Terminal { host, pty, .. } => {
+                // The grid is a function of the window, not of a number chosen
+                // at spawn time. A 120-column grid drawn in a 60-column window
+                // wraps every line at the widget's width, which is what made the
+                // surface look like it had the wrong dimensions: it did.
+                let cell_w = TERMINAL_CELL_WIDTH;
+                let cell_h = TERMINAL_LINE_HEIGHT;
+                let cols = ((viewport.width as f32 - TERMINAL_PADDING * 2.0)
+                    / cell_w)
+                    .floor()
+                    .max(20.0) as u16;
+                let rows = ((viewport.height as f32 - TERMINAL_PADDING * 2.0)
+                    / cell_h)
+                    .floor()
+                    .max(4.0) as u16;
+                host.resize(cols, rows);
+                pty.resize(cols, rows);
+                let snapshot = host.snapshot();
+                self.terminal_layer(snapshot, width, height)
             }
             ContentSource::Scene { scene } => container(self.scene_layer(scene, viewport))
                 .width(width)
                 .height(height)
                 .into(),
+            ContentSource::Spore => match self.spores.get(&surface.snapshot.id) {
+                // A frame that arrived faster than the eye can register waits its
+                // turn behind the mark: a flash of a finished window reads as a
+                // rendering fault, which is worse than arriving 200 ms late.
+                _ if self
+                    .loading_hold
+                    .get(&surface.snapshot.id)
+                    .is_some_and(|until| Instant::now() < *until) =>
+                {
+                    self.awaiting_surface(width, height)
+                }
+                Some(presented) => match &presented.present {
+                    soil_scene::Present::Scene(scene) => {
+                        let transparent = scene.transparent;
+                        let scene = self
+                            .scene_anim
+                            .frame(
+                                &format!("spore:{}", surface.snapshot.id),
+                                std::time::Instant::now(),
+                            )
+                            .unwrap_or_else(|| crate::spore_present::scene(scene));
+                        self.spore_ground(transparent, width, height, &scene, viewport)
+                    }
+                    soil_scene::Present::Rgba(_) => match &presented.handle {
+                        Some(handle) => image_widget(handle.clone())
+                            .content_fit(ContentFit::Contain)
+                            .width(width)
+                            .height(height)
+                            .into(),
+                        None => space::horizontal().into(),
+                    },
+                    soil_scene::Present::GpuLease(lease) => container(text(format!(
+                        "GPU lease {} · {}x{} · revision {}",
+                        lease.source_id, lease.width, lease.height, lease.revision
+                    )))
+                    .center(width)
+                    .into(),
+                },
+                // A surface that exists and has not spoken yet: show that it is
+                // working, not that it failed. This is the window's own frame, so
+                // the host may draw it; chrome stays the Spore's.
+                None => self.awaiting_surface(width, height),
+            },
             ContentSource::DataViz { chart } => {
                 let visual = self.presented_visual_theme();
                 let palette = visual.palette;
@@ -9594,6 +10769,52 @@ impl App {
                 // two failure shapes stay distinguishable on the wall: an
                 // unresolved module says "unresolved", a resolved one that failed
                 // says why.
+                // A Spore drew this: a scene the host rasterizes, pixels it
+                // rendered, or a lease it will fill. The window, chrome, z-order
+                // and input routing are still the host's.
+                if matches!(surface.source, ContentSource::Spore) {
+                    return match self.spores.get(&surface.snapshot.id) {
+                        // Same floor as the other arm: a finished frame that beat
+                        // the eye waits its turn behind the mark.
+                        _ if self
+                            .loading_hold
+                            .get(&surface.snapshot.id)
+                            .is_some_and(|until| Instant::now() < *until) =>
+                        {
+                            self.awaiting_surface(width, height)
+                        }
+                        Some(presented) => match &presented.present {
+                            soil_scene::Present::Scene(scene) => {
+                                let transparent = scene.transparent;
+                                let scene = crate::spore_present::scene(scene);
+                                self.spore_ground(transparent, width, height, &scene, viewport)
+                            }
+                            soil_scene::Present::Rgba(_) => {
+                                match &presented.handle {
+                                    Some(handle) => image_widget(handle.clone())
+                                        .content_fit(ContentFit::Contain)
+                                        .width(width)
+                                        .height(height)
+                                        .into(),
+                                    // Pixels promised but not decoded yet is the
+                                    // same wait, so it gets the same mark.
+                                    None => self.awaiting_surface(width, height),
+                                }
+                            }
+                            soil_scene::Present::GpuLease(lease) => container(
+                                text(format!(
+                                    "GPU lease {} · {}x{} · revision {}",
+                                    lease.source_id, lease.width, lease.height, lease.revision
+                                ))
+                                .size(self.presented_visual_theme().metrics.small),
+                            )
+                            .center(width)
+                            .into(),
+                        },
+                        None => self.awaiting_surface(width, height),
+                    };
+                }
+
                 #[cfg(feature = "lua-scenes")]
                 if let canvas_widgets::WidgetKind::Module { .. } = &spec.kind {
                     return match self.modules.get(&surface.snapshot.id) {
@@ -9609,6 +10830,20 @@ impl App {
                             ])
                             .width(Length::Fill)
                             .height(Length::Fill);
+                            // The view's own surface reports presses, instead of
+                            // relying on the compositor to win them back from a
+                            // widget that captured them. `self.cursor` carries the
+                            // position, because a click is preceded by a move.
+                            let surface_id = surface.snapshot.id.clone();
+                            let scene = iced::widget::mouse_area(scene)
+                                .on_press(Message::ModulePointer {
+                                    surface_id: surface_id.clone(),
+                                    phase: ::canvas::lua_module::PointerPhase::Press,
+                                })
+                                .on_release(Message::ModulePointer {
+                                    surface_id,
+                                    phase: ::canvas::lua_module::PointerPhase::Release,
+                                });
                             if let Some(error) = last_error {
                                 let visual = self.presented_visual_theme();
                                 let palette = visual.palette;
@@ -9625,7 +10860,7 @@ impl App {
                                 .height(height)
                                 .into()
                             } else {
-                                scene.width(width).height(height).into()
+                                container(scene).width(width).height(height).into()
                             }
                         }
                         Some(ModuleSurface::Failed { reason, .. }) => {
@@ -9972,6 +11207,7 @@ impl App {
 
     fn surface_controls<'a>(
         &self,
+        surface_id: &str,
         title: &'a str,
         focused: bool,
         maximized: bool,
@@ -10033,16 +11269,25 @@ impl App {
                     .into(),
             }
         };
-        let control = |rgb, symbol: &'static str, label: &'static str| {
+        let control = |rgb, symbol: &'static str, label: &'static str, action: WindowAction| {
+            let surface_id = surface_id.to_owned();
+            let tooltip_ready = mouse_area(
+                container(mark(rgb, symbol))
+                    .width(Length::Fixed(SURFACE_CONTROL_HIT_SIZE as f32))
+                    .height(Length::Fixed(bar_height))
+                    .align_x(iced::alignment::Horizontal::Center)
+                    .align_y(iced::alignment::Vertical::Center),
+            )
+            .interaction(mouse::Interaction::Pointer);
+            // Without this the control was decoration that ate the click: it
+            // took the press and told nobody, and the compositor's own hit test
+            // never ran because the widget had captured it.
+            let tooltip_ready = tooltip_ready.on_press(Message::ChromeAction {
+                surface_id: surface_id.clone(),
+                action,
+            });
             tooltip(
-                mouse_area(
-                    container(mark(rgb, symbol))
-                        .width(Length::Fixed(SURFACE_CONTROL_HIT_SIZE as f32))
-                        .height(Length::Fixed(bar_height))
-                        .align_x(iced::alignment::Horizontal::Center)
-                        .align_y(iced::alignment::Vertical::Center),
-                )
-                .interaction(mouse::Interaction::Pointer),
+                tooltip_ready,
                 container(text(label).size(11)).padding(6),
                 tooltip::Position::Bottom,
             )
@@ -10082,17 +11327,20 @@ impl App {
                     control(
                         palette.danger,
                         "×",
-                        window_action_label(WindowAction::Close, maximized)
+                        window_action_label(WindowAction::Close, maximized),
+                        WindowAction::Close
                     ),
                     control(
                         palette.warning,
                         "−",
-                        window_action_label(WindowAction::Minimize, maximized)
+                        window_action_label(WindowAction::Minimize, maximized),
+                        WindowAction::Minimize
                     ),
                     control(
                         palette.success,
                         if maximized { "◇" } else { "□" },
-                        window_action_label(WindowAction::Maximize, maximized)
+                        window_action_label(WindowAction::Maximize, maximized),
+                        WindowAction::Maximize
                     ),
                 ]
                 .spacing(0)
@@ -10261,6 +11509,365 @@ impl App {
                 surface.media_plan = plan;
             }
         }
+    }
+
+    /// Whether a terminal is on screen. A terminal is the one surface whose
+    /// latency is felt directly: every millisecond of poll interval is a
+    /// millisecond between a key and its echo.
+    /// A Spore opened, presented, or closed a surface.
+    /// A Spore scene, on a host ground unless it asked to composite.
+    ///
+    /// Without a ground a window has nothing to show when a frame is late, and a
+    /// late frame is normal: the producer, the socket and the frame gate all
+    /// take time. The desktop showing through that gap is the flicker.
+    fn spore_ground<'a>(
+        &self,
+        transparent: bool,
+        width: Length,
+        height: Length,
+        scene: &canvas_workspace::Scene,
+        viewport: LogicalSize,
+    ) -> Element<'a, Message> {
+        let layer = container(self.scene_layer(scene, viewport))
+            .width(width)
+            .height(height);
+        if transparent {
+            return layer.into();
+        }
+        let palette = self.presented_palette();
+        let ground = color(palette.background);
+        layer
+            .style(move |_| container::Style {
+                background: Some(ground.into()),
+                ..Default::default()
+            })
+            .into()
+    }
+
+    fn handle_spore_event(&mut self, event: crate::spore_socket::SporeEvent) {
+        use crate::spore_socket::SporeEvent;
+        if std::env::var_os("CANVAS_SPORE_TRACE").is_some() {
+            eprintln!("spore event: {event:?}");
+        }
+        match event {
+            SporeEvent::Hello {
+                surface_id,
+                title,
+                width,
+                height,
+            } => {
+                if !self.adopt_spore_surface(&surface_id, &title) {
+                    self.open_spore_surface(&surface_id, &title, width, height);
+                }
+            }
+            SporeEvent::PresentAvailable { surface_id } => {
+                let Some((present, signature)) = crate::spore_socket::take(&surface_id) else {
+                    return;
+                };
+                let now = std::time::Instant::now();
+                let previous = self.spores.get(&surface_id);
+                // Same frame twice is not a repaint: nothing has changed, and a
+                // composite would produce the same pixels.
+                if previous.is_some_and(|previous| previous.signature == signature) {
+                    return;
+                }
+                let started = std::time::Instant::now();
+                let handle = match &present {
+                    soil_scene::Present::Rgba(frame) => Some(iced::widget::image::Handle::from_rgba(
+                        frame.width,
+                        frame.height,
+                        frame.pixels.0.clone(),
+                    )),
+                    _ => None,
+                };
+                let (mut frames, mut interval_us, mut handler_us, last_at) = previous
+                    .map(|previous| {
+                        (
+                            previous.frames,
+                            previous.interval_us,
+                            previous.handler_us,
+                            previous.last_at,
+                        )
+                    })
+                    .unwrap_or((0, 0, 0, None));
+                frames += 1;
+                interval_us += last_at
+                    .map(|last| now.duration_since(last).as_micros() as u64)
+                    .unwrap_or(0);
+                handler_us += started.elapsed().as_micros() as u64;
+                if let soil_scene::Present::Scene(scene) = &present {
+                    let host = crate::spore_present::scene(scene);
+                    self.scene_anim
+                        .present(&format!("spore:{surface_id}"), &host, now);
+                }
+                self.spores.insert(
+                    surface_id.clone(),
+                    PresentedSurface {
+                        present,
+                        handle,
+                        signature,
+                        last_seen: Some(now),
+                        frames,
+                        interval_us,
+                        handler_us,
+                        last_at: Some(now),
+                    },
+                );
+                // A Spore that presents before its surface is known still gets a
+                // window: the payload is the better evidence of intent. A producer
+                // that never says hello is the common case here, so the same
+                // adoption applies: the launcher's window is the app's window.
+                if !self.decoded.contains_key(&surface_id)
+                    && !self.adopt_spore_surface(&surface_id, &surface_id.clone())
+                {
+                    self.open_spore_surface(&surface_id, &surface_id.clone(), 640, 420);
+                }
+                // Ask for the next frame as soon as this one is taken. One
+                // outstanding request is the flow control, so this cannot race
+                // ahead of the compositor -- it just removes a whole tick of
+                // latency from the loop.
+                let now = now_unix_ms();
+                let dt = self
+                    .spore_clock
+                    .replace(now)
+                    .map(|previous| now.saturating_sub(previous))
+                    .unwrap_or(16);
+                crate::spore_socket::request_frame(&surface_id, now, dt);
+                self.bump();
+            }
+            SporeEvent::Gone { surface_id } => {
+                self.spores.remove(&surface_id);
+                self.close_spore_surface(&surface_id);
+                self.bump();
+            }
+        }
+    }
+
+    /// Take over the window the launcher opened for this app.
+    ///
+    /// The launcher creates a window before the app can speak -- it has to, or a
+    /// click would do nothing visible -- and it names it `spore-<producer>`. When
+    /// the producer then says hello under its own id, the honest move is to give
+    /// it that window rather than opening a second one on top: the placement, the
+    /// z-order and any drag the user did belong to the window that exists.
+    ///
+    /// Returns false when there is nothing to adopt, in which case the caller
+    /// opens a window as before.
+    /// The surface already rendering `module`, if any.
+    fn surface_running_module(&self, module: &str) -> Option<String> {
+        self.decoded.iter().find_map(|(id, runtime)| {
+            let ContentSource::Widget { spec } = &runtime.source else {
+                return None;
+            };
+            match &spec.kind {
+                canvas_widgets::WidgetKind::Module { module: running, .. } if running == module => {
+                    Some(id.clone())
+                }
+                _ => None,
+            }
+        })
+    }
+
+    fn adopt_spore_surface(&mut self, producer_id: &str, title: &str) -> bool {
+        let candidate = format!("spore-{producer_id}");
+        let Some(mut runtime) = self.decoded.remove(&candidate) else {
+            return false;
+        };
+        // The module's own surface was a widget; the frames that follow are the
+        // app's, and the renderer decides what to draw by this field.
+        runtime.source = ContentSource::Spore;
+        runtime.snapshot.id = producer_id.to_owned();
+        runtime.snapshot.title = title.to_owned();
+        self.decoded.insert(producer_id.to_owned(), runtime);
+
+        if let Some(surface) = self
+            .document
+            .surfaces
+            .iter_mut()
+            .find(|surface| surface.id == candidate)
+        {
+            surface.id = producer_id.to_owned();
+            surface.title = title.to_owned();
+        }
+        match &mut self.document.layout {
+            Layout::Canvas { placements } => {
+                for placement in placements.iter_mut() {
+                    if placement.surface_id == candidate {
+                        placement.surface_id = producer_id.to_owned();
+                    }
+                }
+            }
+            Layout::Surface { surface_id } if *surface_id == candidate => {
+                *surface_id = producer_id.to_owned();
+            }
+            _ => {}
+        }
+        // The window has been on screen since the click, so the wait it is showing
+        // starts now: this is the moment the app actually begins loading.
+        self.loading_hold.insert(
+            producer_id.to_owned(),
+            Instant::now() + Duration::from_millis(loading_min_ms()),
+        );
+        eprintln!("canvas: adopted {candidate} as {producer_id}");
+        self.bump();
+        true
+    }
+
+    fn open_spore_surface(&mut self, surface_id: &str, title: &str, width: u32, height: u32) {
+        self.loading_hold.insert(
+            surface_id.to_owned(),
+            Instant::now() + Duration::from_millis(loading_min_ms()),
+        );
+        if !self.document.surfaces.iter().any(|s| s.id == surface_id) {
+            let bounds = NormalizedRect {
+                x: 0.12,
+                y: 0.12,
+                width: (width as f32 / self.frame.width.max(1) as f32).clamp(0.2, 0.9),
+                height: (height as f32 / self.frame.height.max(1) as f32).clamp(0.2, 0.9),
+            };
+            self.document.surfaces.push(Surface {
+                id: surface_id.to_owned(),
+                title: title.to_owned(),
+                content: SurfaceContent::Scene {
+                    scene: Scene { nodes: Vec::new() },
+                },
+                inputs: Vec::new(),
+            });
+            let mut placements = match self.document.active_layout() {
+                Layout::Canvas { placements } => placements.clone(),
+                Layout::Surface { surface_id } => vec![Placement {
+                    surface_id: surface_id.clone(),
+                    bounds: NormalizedRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 1.0,
+                        height: 1.0,
+                    },
+                    layer: 0,
+                }],
+                _ => Vec::new(),
+            };
+            placements.push(Placement {
+                surface_id: surface_id.to_owned(),
+                bounds,
+                layer: placements.len() as i32,
+            });
+            self.document.layout = Layout::Canvas { placements };
+        }
+        self.decoded.insert(
+            surface_id.to_owned(),
+            RuntimeSurface {
+                snapshot: SurfaceSnapshot {
+                    id: surface_id.to_owned(),
+                    title: title.to_owned(),
+                    content: ContentKind::Widget,
+                    asset_sha256: None,
+                    page_index: None,
+                    page_count: None,
+                    source_pixels: None,
+                    rendered_pixels: None,
+                    display_logical: None,
+                    scale_factor: None,
+                },
+                source: ContentSource::Spore,
+                handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
+                source_pixels: [1, 1],
+                media_plan: MediaPlan {
+                    viewport_logical: LogicalSize {
+                        width: 1920.0,
+                        height: 1080.0,
+                    },
+                    source_dimensions: SourceDimensions::RasterPixels(PixelSize {
+                        width: 1,
+                        height: 1,
+                    }),
+                    target_px: PixelSize {
+                        width: 1,
+                        height: 1,
+                    },
+                    display_logical: LogicalSize {
+                        width: 1920.0,
+                        height: 1080.0,
+                    },
+                    scale_factor: 1.0,
+                    cache_key: MediaCacheKey {
+                        source_id: format!("spore:{surface_id}"),
+                        variant: MediaVariant::Raster,
+                        pixel_size: PixelSize {
+                            width: 1,
+                            height: 1,
+                        },
+                    },
+                },
+                upload_pixels: [1, 1],
+            },
+        );
+        self.start_transition();
+        self.bump();
+    }
+
+    fn close_spore_surface(&mut self, surface_id: &str) {
+        self.document.surfaces.retain(|s| s.id != surface_id);
+        if let Layout::Canvas { placements } = &mut self.document.layout {
+            placements.retain(|placement| placement.surface_id != surface_id);
+        }
+        self.decoded.remove(surface_id);
+    }
+
+    /// Whether a Spore is presenting right now.
+    ///
+    /// Recency rather than existence: a producer that stopped presenting should
+    /// not keep the compositor at 60 Hz forever.
+    /// Pacing for a Spore surface: interval between frames, and what handling
+    /// cost. Cheap to keep, and the only honest answer to "is it lagging".
+    fn spore_pacing(&self) -> Vec<(String, u64, f64, f64)> {
+        self.spores
+            .iter()
+            .filter(|(_, presented)| presented.frames > 0)
+            .map(|(id, presented)| {
+                let frames = presented.frames.max(1);
+                (
+                    id.clone(),
+                    frames,
+                    presented.interval_us as f64 / frames as f64 / 1000.0,
+                    presented.handler_us as f64 / frames as f64 / 1000.0,
+                )
+            })
+            .collect()
+    }
+
+    /// Hand each Spore surface a frame callback, with the host's clock.
+    ///
+    /// The producer draws when it is asked, not on a timer of its own, so the
+    /// two cannot drift into a queue of frames nobody will ever draw.
+    fn tick_spore_frames(&mut self) -> Task<Message> {
+        let now = now_unix_ms();
+        let dt = self
+            .spore_clock
+            .replace(now)
+            .map(|previous| now.saturating_sub(previous))
+            .unwrap_or(0);
+        // Every registered producer is clocked, including one that has not
+        // drawn yet: otherwise the first frame could never be asked for, and a
+        // Spore would sit waiting for a callback that only comes after it draws.
+        for surface_id in crate::spore_socket::surfaces() {
+            crate::spore_socket::request_frame(&surface_id, now, dt);
+        }
+        Task::none()
+    }
+
+    fn has_live_spore(&self) -> bool {
+        self.spores.values().any(|presented| {
+            presented
+                .last_seen
+                .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(2))
+        })
+    }
+
+    fn has_terminal(&self) -> bool {
+        self.decoded
+            .values()
+            .any(|surface| matches!(surface.source, ContentSource::Terminal { .. }))
     }
 
     fn has_live_frames(&self) -> bool {
@@ -10587,13 +12194,24 @@ impl App {
             if let (Some(snapshot), Some(retained)) = (&host.snapshot, host.presentation.retained())
             {
                 let frame = snapshot.switcher.frame;
-                return self.shell_scene_layer(
-                    &retained.scene,
-                    LogicalSize {
-                        width: f64::from(frame.width),
-                        height: f64::from(frame.height),
-                    },
-                );
+                let size = LogicalSize {
+                    width: f64::from(frame.width),
+                    height: f64::from(frame.height),
+                };
+                // scene_layer, not shell_scene_layer: the composition draws its own
+                // ground, and the shell layer would re-draw an opaque sheet over it
+                // and clip the tiles to the header.
+                let scene = self
+                    .scene_anim
+                    .frame("chrome:switcher", Instant::now())
+                    .unwrap_or_else(|| retained.scene.clone());
+                let scene = iced::widget::mouse_area(self.scene_layer(&scene, size))
+                    .on_move(|point| Message::SwitcherHover {
+                        x: f64::from(point.x),
+                        y: f64::from(point.y),
+                    })
+                    .on_exit(Message::SwitcherHover { x: -1.0, y: -1.0 });
+                return scene.into();
             }
             return container(space::horizontal()).into();
         }
@@ -10725,6 +12343,7 @@ impl App {
                         let chrome_style = window_chrome.clone();
                         let plane = container(column![
                             self.surface_controls(
+                                &surface.snapshot.id,
                                 &surface.snapshot.title,
                                 focused,
                                 maximized,
@@ -10917,6 +12536,7 @@ impl App {
                             self.surface_widget(surface, Length::Fill, Length::Fill, viewport);
                         container(column![
                             self.surface_controls(
+                                &surface.snapshot.id,
                                 &surface.snapshot.title,
                                 true,
                                 true,
@@ -10996,7 +12616,11 @@ impl App {
                     width: width as f64,
                     height: height as f64,
                 };
-                let mut sheet_layers = vec![self.shell_scene_layer(scene, size)];
+                // `shell_scene_layer` re-draws an opaque ground and drops the rest
+                // of the scene on the floor: every rect and glyph in the sheet
+                // vanished, which is why a launcher row could have a badge in its
+                // scene and nothing on screen. The overlay draws its own ground.
+                let mut sheet_layers = vec![self.scene_layer(scene, size)];
                 let rows = picker.matches();
                 let start = picker.row_start();
                 sheet_layers.extend(self.native_module_buttons_selected(
@@ -11054,6 +12678,47 @@ impl App {
                     .center(Length::Fill)
                     .into(),
             );
+        }
+        if self.control_center_open {
+            #[cfg(feature = "lua-scenes")]
+            if let Some(presentation) = self.control_center.retained() {
+                let size = LogicalSize {
+                    width: 380.0,
+                    height: 520.0,
+                };
+                // scene_layer, not shell_scene_layer: the latter re-draws an
+                // opaque ground and clips the rest of the sheet, which is how a
+                // launcher row lost its badge and how this panel lost its rows.
+                let scene = self
+                    .scene_anim
+                    .frame("chrome:control-center", Instant::now())
+                    .unwrap_or_else(|| presentation.scene.clone());
+                let mut sheet = vec![self.scene_layer(&scene, size)];
+                sheet.extend(self.native_module_buttons_selected(
+                    &presentation.buttons,
+                    size,
+                    |control| match control.id.as_str() {
+                        "apps" => Some(Message::ShellCanvasApps),
+                        "projects" => Some(Message::ShellProjects),
+                        "dismiss" => Some(Message::ControlCenterDismiss),
+                        _ => None,
+                    },
+                    |_| false,
+                ));
+                layers.push(
+                    container(container(stack(sheet)).width(Length::Fixed(380.0)).height(Length::Fixed(520.0)))
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .padding(iced::Padding {
+                            top: 56.0,
+                            right: 18.0,
+                            ..Default::default()
+                        })
+                        .align_x(iced::alignment::Horizontal::Right)
+                        .align_y(iced::alignment::Vertical::Top)
+                        .into(),
+                );
+            }
         }
         if let Some(picker) = self.project_picker.as_ref() {
             layers.push(picker.view(&self.catalog, &self.document.project_id));
@@ -11171,9 +12836,9 @@ impl App {
                 .style(move |_, status| {
                     canvas_widgets::live::app_chrome::cube_button_style(visual_theme, false, status)
                 });
-            let project = button(text(project_label).size(fpl_gfx::chrome::BAR_TEXT_SIZE))
-                .height(Length::Fixed(fpl_gfx::chrome::BAR_CONTROL_HEIGHT as f32))
-                .padding([0, fpl_gfx::chrome::BAR_PADDING as u16])
+            let project = button(text(project_label).size(::canvas::DESKTOP_BAR_TEXT_SIZE))
+                .height(Length::Fixed(::canvas::DESKTOP_BAR_HEIGHT as f32))
+                .padding([0, ::canvas::DESKTOP_BAR_PADDING as u16])
                 .on_press(Message::ShellProjects)
                 .style(move |_, status| {
                     canvas_widgets::live::app_chrome::quiet_button_style(visual_theme, true, status)
@@ -11192,25 +12857,25 @@ impl App {
                 });
             let identity = row![
                 text("fungOS")
-                    .size(fpl_gfx::chrome::BAR_TEXT_SIZE)
+                    .size(::canvas::DESKTOP_BAR_TEXT_SIZE)
                     .color(primary),
                 back,
                 forward,
                 project,
                 text("/").size(11).color(Color { a: 0.40, ..muted }),
                 text(self.document.active_page_name().to_owned())
-                    .size(fpl_gfx::chrome::BAR_TEXT_SIZE)
+                    .size(::canvas::DESKTOP_BAR_TEXT_SIZE)
                     .color(Color { a: 0.72, ..muted }),
                 create,
             ]
-            .spacing(fpl_gfx::chrome::BAR_PADDING)
+            .spacing(::canvas::DESKTOP_BAR_PADDING)
             .align_y(iced::Alignment::Center);
             let health = row![
                 text(format!("{live_sources} SOURCES"))
                     .size(10)
                     .color(Color { a: 0.72, ..primary }),
                 text(clock.chars().take(5).collect::<String>())
-                    .size(fpl_gfx::chrome::BAR_TEXT_SIZE)
+                    .size(::canvas::DESKTOP_BAR_TEXT_SIZE)
                     .color(Color {
                         a: 0.94,
                         ..text_color
@@ -11222,7 +12887,7 @@ impl App {
             let signature = container(bar)
                 .width(Length::Fill)
                 .height(Length::Fixed(shell_bar_height as f32))
-                .padding([0, fpl_gfx::chrome::BAR_PADDING as u16])
+                .padding([0, ::canvas::DESKTOP_BAR_PADDING as u16])
                 .align_y(iced::alignment::Vertical::Center)
                 .style(move |_| container::Style {
                     background: Some(color(visual_theme.palette.surface).into()),
@@ -11846,7 +13511,22 @@ fn load_terminal(
     shell: &str,
     title: Option<String>,
 ) -> Result<LoadedContent, Failure> {
-    let (master_fd, stdin_fd, pid) = terminal::spawn_terminal(shell).map_err(Failure::resource)?;
+    let pty = terminal::Pty::spawn(shell, 100, 32).map_err(Failure::resource)?;
+    // The reading end belongs to a thread that blocks: the kernel wakes it when
+    // the program writes, so no keystroke's echo waits for a poll.
+    match pty.reader() {
+        Ok(reader) => {
+            if let Some(sender) = TERMINAL_SENDER.get() {
+                terminal::pump(reader, surface_id.clone(), sender.clone());
+            }
+        }
+        Err(error) => return Err(Failure::resource(error)),
+    }
+    if let Some(surface_id_reader) = Some(surface_id.clone()) {
+        let _ = surface_id_reader;
+    }
+    let host = soil_vt::Host::spawn(120, 40, 2_000)
+        .map_err(|error| Failure::resource(error.to_string()))?;
     let display_title = title.unwrap_or_else(|| format!("Terminal: {shell}"));
     let snapshot = SurfaceSnapshot {
         id: surface_id.clone(),
@@ -11863,10 +13543,8 @@ fn load_terminal(
     Ok(LoadedContent {
         snapshot,
         source: ContentSource::Terminal {
-            master_fd,
-            stdin_fd,
-            pid,
-            buffer: String::new(),
+            pty,
+            host,
         },
         handle: iced::widget::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
         asset: AssetRef {
@@ -12054,9 +13732,12 @@ fn interaction_engine(
         minimum_surface_size: LogicalPoint { x: 160.0, y: 120.0 },
         resize_handle_size: SURFACE_RESIZE_HANDLE_SIZE,
         top_bar_height: f64::from(titlebar_height),
-        snap_distance: 12.0,
-        snap_zone_trigger: 44.0,
-        grid_size: Some(8.0),
+        // Grid and edge snapping are off: a window should land where it is let
+        // go. Zone tiling is previewed before it commits, and it is off too
+        // until it commits on release only.
+        snap_distance: 0.0,
+        snap_zone_trigger: 0.0,
+        grid_size: None,
     })
     .expect("Canvas interaction defaults must remain valid")
 }
@@ -12226,13 +13907,37 @@ fn normalize_visible_surface_bounds(
     frame: Rect,
     chrome: SurfaceChrome,
 ) -> NormalizedRect {
-    let (padding, inner_width, inner_height, gap_inset) = surface_layout_metrics(frame, chrome);
+    normalize_visible_surface_bounds_with_shell(bounds, frame, chrome, 0)
+}
+
+/// The exact inverse of `presented_surface_geometry`.
+///
+/// A dragged rectangle arrives in the space surfaces are *drawn* in, which is
+/// the content frame moved down by the desktop bar. Storing it as a placement
+/// without undoing that offset adds the bar height on every pointer move.
+fn normalize_visible_surface_bounds_with_shell(
+    bounds: LogicalRect,
+    frame: Rect,
+    chrome: SurfaceChrome,
+    shell_height: u32,
+) -> NormalizedRect {
+    let bounds = LogicalRect {
+        y: bounds.y - f64::from(shell_height),
+        ..bounds
+    };
+    let content = Rect {
+        height: frame.height.saturating_sub(shell_height).max(1),
+        ..frame
+    };
+    let (padding, inner_width, inner_height, gap_inset) =
+        surface_layout_metrics(content, chrome);
     // Horizontal positions may be negative when a surface is parked partly
     // offscreen. The interaction engine has already kept a usable section of
     // its top bar reachable, so clamping the origin here would turn the move
     // into a resize by shortening the stored width to the workspace edge.
     let x = (bounds.x - gap_inset - padding) / inner_width;
-    let y = ((bounds.y - gap_inset - padding) / inner_height).max(0.0);
+    // No floor at zero: a window is allowed to sit partly off the top.
+    let y = (bounds.y - gap_inset - padding) / inner_height;
     let width = ((bounds.width + gap_inset * 2.0) / inner_width).clamp(f64::EPSILON, 1.0);
     let height = ((bounds.height + gap_inset * 2.0) / inner_height).clamp(f64::EPSILON, 1.0);
     NormalizedRect {
@@ -12302,6 +14007,11 @@ fn module_key(
     hasher.finish()
 }
 
+/// Generated modules carry a composed snapshot. Keep the source ceiling equal
+/// to the Lua scene ceiling rather than the smaller adapter ceiling.
+#[cfg(feature = "lua-scenes")]
+const MAX_MODULE_BYTES: usize = 64 * 1024;
+
 /// Digest the two authored files that define a module. Missing/error states are
 /// hashed too, so installing or repairing a file changes the retained key and
 /// triggers a fresh candidate render on the next one-second poll.
@@ -12313,7 +14023,7 @@ fn module_artifact_revision(name: &str) -> u64 {
         let relative = PathBuf::from("modules").join(format!("{name}.{extension}"));
         match ::canvas::runtime_config::read(
             &relative,
-            ::canvas::stream_binding::MAX_ADAPTER_BYTES as u64,
+            MAX_MODULE_BYTES as u64,
         ) {
             Ok(Some(bytes)) => bytes.hash(&mut hasher),
             Ok(None) => "missing".hash(&mut hasher),
@@ -12337,7 +14047,73 @@ fn resolve_module(
     theme: ::canvas::lua_module::ModuleThemeTokens,
     now_ms: u64,
 ) -> std::result::Result<::canvas::lua_module::RetainedModuleScene, String> {
-    resolve_module_event(name, inputs, theme, now_ms, None)
+    resolve_module_event(
+        name,
+        inputs,
+        theme,
+        now_ms,
+        None,
+        ::canvas::lua_module::ModuleView::default(),
+    )
+}
+
+/// Every composed Lua UI in the runtime modules directory.
+///
+/// Title from the manifest, because the file name is an implementation detail
+/// and the launcher is the one place a person reads names.
+fn composed_modules() -> Vec<(String, String)> {
+    let Some(root) = ::canvas::runtime_config::root() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(root.join("modules")) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(source) = std::fs::read_to_string(&path).ok() else {
+            continue;
+        };
+        let Ok(manifest) = ::canvas::lua_module::ModuleManifest::parse(&source) else {
+            continue;
+        };
+        // A module with required inputs is not launchable by a person: there is
+        // nothing to type into it from the launcher, and a surface that can never
+        // resolve is worse than an entry that is honest about it.
+        if manifest.inputs.iter().any(|input| input.required) {
+            continue;
+        }
+        if !manifest.capabilities.write_scene {
+            continue;
+        }
+        found.push((manifest.id.clone(), manifest.title.clone()));
+    }
+    found.sort();
+    found
+}
+
+/// Write the launch spec for a composed UI, returning its path.
+///
+/// The spec goes through the same sanctioned directory as any other widget, so a
+/// launcher entry cannot name a path of its own choosing.
+fn write_spore_spec(surface_id: &str, module: &str) -> Result<String, String> {
+    let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
+    let dir = PathBuf::from(home).join(".canvas/widgets");
+    std::fs::create_dir_all(&dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
+    let path = dir.join(format!("{surface_id}.json"));
+    let spec = serde_json::json!({
+        "schema_version": 2,
+        "id": surface_id,
+        "kind": "module",
+        "module": module,
+        "inputs": {},
+    });
+    std::fs::write(&path, serde_json::to_vec_pretty(&spec).map_err(|error| error.to_string())?)
+        .map_err(|error| format!("write {}: {error}", path.display()))?;
+    Ok(path.to_string_lossy().into_owned())
 }
 
 fn launcher_task(
@@ -12373,11 +14149,12 @@ fn resolve_module_event(
     theme: ::canvas::lua_module::ModuleThemeTokens,
     now_ms: u64,
     event: Option<::canvas::lua_module::ModuleEvent>,
+    view: ::canvas::lua_module::ModuleView,
 ) -> std::result::Result<::canvas::lua_module::RetainedModuleScene, String> {
     use ::canvas::lua_module::{LuaModule, ModuleInputSnapshot, ModuleManifest};
     use ::canvas::lua_scene::{LuaSceneCapabilities, LuaSceneLimits};
 
-    let limit = ::canvas::stream_binding::MAX_ADAPTER_BYTES as u64;
+    let limit = MAX_MODULE_BYTES as u64;
     let read = |file: &str| -> std::result::Result<Option<String>, String> {
         let relative = PathBuf::from("modules").join(file);
         ::canvas::runtime_config::read(&relative, limit)
@@ -12408,23 +14185,22 @@ fn resolve_module_event(
     // a surface reference has to come from a trusted caller, and a spec written
     // by an agent is not one. A module that asks for one fails loudly here
     // rather than drawing a blank where a video should be.
-    let mut module = LuaModule::load(
+    let mut module = LuaModule::load_with_view(
         manifest,
         source,
         snapshot.clone(),
         theme,
+        view,
         BTreeMap::new(),
         LuaSceneCapabilities::default(),
         LuaSceneLimits::default(),
     )
     .map_err(|error| error.to_string())?;
     if let Some(event) = event {
-        let snapshot = ModuleInputSnapshot {
-            revision: 2,
-            ..snapshot
-        };
+        // No input changed: a click is not new data, so the revision stays where
+        // it is and only the event and the view's memory move.
         module
-            .update(snapshot, theme, event)
+            .update_event(theme, event)
             .map_err(|error| error.to_string())?;
     }
     Ok(module.retained().clone())
@@ -12471,6 +14247,18 @@ fn scene_ink(ink: Option<SemanticInk>, palette: &ThemePalette) -> [u8; 3] {
         SemanticInk::Danger => palette.danger,
         SemanticInk::Info => palette.info,
     }
+}
+
+fn module_button_contains(
+    button: &::canvas::lua_module::ModuleButton,
+    x: f32,
+    y: f32,
+) -> bool {
+    let left = (button.x + 4.0) / 8.0;
+    let top = 1.0 - (button.y + 4.0) / 8.0;
+    let width = button.width / 8.0;
+    let height = button.height / 8.0;
+    x >= left && x <= left + width && y >= top && y <= top + height
 }
 
 fn scene_node_position(translation: [f32; 3], viewport: LogicalSize) -> [f32; 2] {
@@ -13490,6 +15278,258 @@ fn double_click(
     })
 }
 
+/// The receiving end of the terminal channel, taken by the subscription's builder.
+///
+/// `Subscription::run` takes a plain function pointer, so the receiver cannot be
+/// captured in a closure; a static is the idiomatic place for it in iced.
+static TERMINAL_SENDER: std::sync::OnceLock<
+    tokio::sync::mpsc::UnboundedSender<(String, Vec<u8>)>,
+> = std::sync::OnceLock::new();
+
+static SPORE_EVENTS: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<crate::spore_socket::SporeEvent>>> =
+    Mutex::new(None);
+static TERMINAL_CHUNKS: std::sync::Mutex<
+    Option<tokio::sync::mpsc::UnboundedReceiver<(String, Vec<u8>)>>,
+> = std::sync::Mutex::new(None);
+
+fn spore_events_stream() -> impl iced::futures::Stream<Item = Message> {
+    let receiver = SPORE_EVENTS.lock().ok().and_then(|mut slot| slot.take());
+    iced::futures::stream::unfold(receiver, |state| async move {
+        let mut receiver = state?;
+        receiver
+            .recv()
+            .await
+            .map(|event| (Message::SporeEvent(event), Some(receiver)))
+    })
+}
+
+fn terminal_chunks_stream() -> impl iced::futures::Stream<Item = Message> {
+    let receiver = TERMINAL_CHUNKS.lock().ok().and_then(|mut slot| slot.take());
+    iced::futures::stream::unfold(receiver, |state| async move {
+        let mut receiver = state?;
+        receiver
+            .recv()
+            .await
+            .map(|(surface_id, bytes)| (Message::TerminalChunk(surface_id, bytes), Some(receiver)))
+    })
+}
+
+/// A terminal grid drawn as one canvas.
+///
+/// The previous renderer was a column of `rich_text` widgets, one per row: iced
+/// laid out forty paragraphs per frame to draw one screen, and a row wider than
+/// the widget wrapped there instead of at the grid's edge. A canvas draws exactly
+/// the cells that fit, at the positions the emulator chose — and it can draw the
+/// cursor, which a text widget has no way to represent.
+/// Cursor and bell behaviour, read from the terminal Spore's Lua config.
+#[derive(Debug, Clone)]
+struct TerminalConfig {
+    cursor: CursorConfig,
+    bell: BellConfig,
+}
+
+#[derive(Debug, Clone)]
+struct CursorConfig {
+    blink: bool,
+    period_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct BellConfig {
+    enabled: bool,
+    sound: String,
+    volume: f32,
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            cursor: CursorConfig {
+                blink: true,
+                period_ms: 530,
+            },
+            bell: BellConfig {
+                enabled: true,
+                sound: "/System/Library/Sounds/Glass.aiff".to_owned(),
+                volume: 0.35,
+            },
+        }
+    }
+}
+
+impl TerminalConfig {
+    /// A missing or broken config is not an error: a terminal with the default
+    /// cursor and a quiet bell is still a terminal.
+    fn load() -> Self {
+        let mut config = Self::default();
+        let candidate = std::env::var_os("HOME").map(|home| {
+            std::path::PathBuf::from(home)
+                .join("Library/Application Support/Dock/canvas/modules/terminal-v1.lua")
+        });
+        let source = candidate
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .unwrap_or_else(|| {
+                include_str!("../../../config/modules/terminal-v1.lua").to_owned()
+            });
+        let lua = mlua::Lua::new();
+        let table: mlua::Table = match lua.load(&source).eval() {
+            Ok(table) => table,
+            Err(error) => {
+                eprintln!("terminal config: {error}");
+                return config;
+            }
+        };
+        if let Ok(cursor) = table.get::<mlua::Table>("cursor") {
+            config.cursor.blink = cursor.get("blink").unwrap_or(config.cursor.blink);
+            config.cursor.period_ms = cursor
+                .get::<u64>("period_ms")
+                .ok()
+                .filter(|ms| *ms >= 100)
+                .unwrap_or(config.cursor.period_ms);
+        }
+        if let Ok(bell) = table.get::<mlua::Table>("bell") {
+            config.bell.enabled = bell.get("enabled").unwrap_or(config.bell.enabled);
+            config.bell.sound = bell.get("sound").unwrap_or(config.bell.sound);
+            config.bell.volume = bell.get::<f32>("volume").unwrap_or(config.bell.volume);
+        }
+        config
+    }
+}
+
+impl BellConfig {
+    /// Ring the bell through the platform's own sound player.
+    ///
+    /// Not a crate: a bell is one short file and the system already knows how to
+    /// play it, and a detach-and-forget process cannot stall a frame.
+    fn ring(&self) {
+        if !self.enabled || self.sound.is_empty() {
+            return;
+        }
+        let mut command = std::process::Command::new("afplay");
+        command
+            .arg("-v")
+            .arg(format!("{:.2}", self.volume.clamp(0.0, 1.0)))
+            .arg(&self.sound)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let _ = command.spawn();
+    }
+}
+
+struct TerminalGrid {
+    snapshot: std::sync::Arc<soil_vt::Snapshot>,
+    background: Color,
+    default_ink: Color,
+    cursor_ink: Color,
+    cursor_on: bool,
+}
+
+impl iced::widget::canvas::Program<Message> for TerminalGrid {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &iced::Renderer,
+        _theme: &iced::Theme,
+        bounds: iced::Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<iced::widget::canvas::Geometry> {
+        use iced::widget::canvas::{Frame, Text};
+
+        let mut frame = Frame::new(renderer, bounds.size());
+        frame.fill_rectangle(iced::Point::ORIGIN, bounds.size(), self.background);
+
+        let cell_w = TERMINAL_CELL_WIDTH;
+        let cell_h = TERMINAL_LINE_HEIGHT;
+        let rows = ((bounds.height / cell_h).floor() as u16).min(self.snapshot.rows);
+        let cols = ((bounds.width / cell_w).floor() as u16).min(self.snapshot.cols);
+        let ink_of = |rgb: Option<soil_vt::Rgb>, fallback: Color| {
+            rgb.map(|rgb| Color::from_rgb8(rgb.r, rgb.g, rgb.b))
+                .unwrap_or(fallback)
+        };
+
+        for y in 0..rows {
+            let mut x = 0;
+            while x < cols {
+                let Some(cell) = self.snapshot.cell(x, y) else { break };
+                let ink = ink_of(cell.bg, self.background);
+                let start = x;
+                while x < cols {
+                    match self.snapshot.cell(x, y) {
+                        Some(next) if ink_of(next.bg, self.background) == ink => x += 1,
+                        _ => break,
+                    }
+                }
+                if ink != self.background {
+                    frame.fill_rectangle(
+                        iced::Point::new(f32::from(start) * cell_w, f32::from(y) * cell_h),
+                        iced::Size::new(f32::from(x - start) * cell_w, cell_h),
+                        ink,
+                    );
+                }
+            }
+
+            let mut x = 0;
+            while x < cols {
+                let Some(cell) = self.snapshot.cell(x, y) else { break };
+                let ink = ink_of(cell.fg, self.default_ink);
+                let start = x;
+                let mut run = String::new();
+                while x < cols {
+                    let Some(next) = self.snapshot.cell(x, y) else { break };
+                    if ink_of(next.fg, self.default_ink) != ink {
+                        break;
+                    }
+                    if next.text.is_empty() {
+                        run.push(' ');
+                    } else {
+                        run.push_str(&next.text);
+                    }
+                    x += 1;
+                }
+                if run.trim_end().is_empty() {
+                    continue;
+                }
+                frame.fill_text(Text {
+                    content: run.trim_end().to_owned(),
+                    position: iced::Point::new(f32::from(start) * cell_w, f32::from(y) * cell_h),
+                    color: ink,
+                    size: iced::Pixels(TERMINAL_FONT_SIZE),
+                    font: iced::Font::MONOSPACE,
+                    ..Text::default()
+                });
+            }
+        }
+
+        // The cursor: a filled block with the glyph punched back out, which is
+        // how every terminal shows where typing goes. A text grid without one
+        // looks like output, not an editor.
+        if self.cursor_on && let Some((cx, cy)) = self.snapshot.cursor {
+            if cx < cols && cy < rows {
+                let position = iced::Point::new(f32::from(cx) * cell_w, f32::from(cy) * cell_h);
+                let size = iced::Size::new(cell_w, cell_h);
+                frame.fill_rectangle(position, size, self.default_ink);
+                if let Some(cell) = self.snapshot.cell(cx, cy)
+                    && !cell.text.trim().is_empty()
+                {
+                    frame.fill_text(Text {
+                        content: cell.text.clone(),
+                        position,
+                        color: self.cursor_ink,
+                        size: iced::Pixels(TERMINAL_FONT_SIZE),
+                        font: iced::Font::MONOSPACE,
+                        ..Text::default()
+                    });
+                }
+            }
+        }
+
+        vec![frame.into_geometry()]
+    }
+}
+
 fn render_cadence(
     screensaver_enabled: bool,
     background_animated: bool,
@@ -13592,6 +15632,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         daemon_view,
     )
     .subscription(|app| {
+        let terminal = iced::Subscription::run(terminal_chunks_stream);
+        let spores = iced::Subscription::run(spore_events_stream);
+        // One timer, only while a terminal is on screen, and it does nothing
+        // except flip a bool: a blink is not worth a redraw when nothing blinks.
+        let blink = if app.has_terminal() && app.terminal_config.cursor.blink {
+            iced::time::every(std::time::Duration::from_millis(
+                app.terminal_config.cursor.period_ms,
+            ))
+            .map(|_| Message::TerminalBlink)
+        } else {
+            iced::Subscription::none()
+        };
+
         let animated = app.visible_indicator_id.is_some()
             || app.indicator_dismissing.is_some()
             || !app.notifications.is_empty()
@@ -13615,7 +15668,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         // Live camera frames deserve sub-second pickup without becoming a
         // steady redraw: the reload itself only fires when bytes change.
-        let cadence = if app.has_live_frames() {
+        let cadence = if app.scene_anim.animating(Instant::now()) {
+            // An easing panel is an animation: 33 Hz would show it as a stutter.
+            cadence.min(Duration::from_millis(16))
+        } else if app.has_live_spore() {
+            // A Spore presenting frames is an animation: the idle tick would
+            // quantise it to 30 Hz with uneven spacing, which reads as lag.
+            cadence.min(Duration::from_millis(16))
+        } else if app.has_terminal() {
+            // Typing latency is dominated by this number: a keystroke's echo
+            // waits for the next poll, so 33ms average became 16ms worst case.
+            cadence.min(Duration::from_millis(16))
+        } else if app.has_live_frames() {
             cadence.min(Duration::from_millis(40))
         } else {
             cadence
@@ -13626,15 +15690,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             cadence
         };
         Subscription::batch([
+            // Terminal output is event-driven: the reader threads wake the app
+            // when a program writes, so no keystroke's echo waits for a tick.
+            terminal,
+            spores,
+            #[cfg(all(unix, feature = "lua-scenes"))]
+            // A window that is waiting for its producer animates at the frame
+            // rate; one that is not costs nothing.
+            if app.awaiting_first_frame() {
+                iced::time::every(Duration::from_millis(16)).map(|_| Message::SurfaceLoadingTick)
+            } else {
+                Subscription::none()
+            },
             #[cfg(all(unix, feature = "lua-scenes"))]
             if app.native_switcher.is_some() {
-                iced::time::every(Duration::from_millis(40)).map(|_| Message::NativeSwitcherTick)
+                // The switcher exists only during Alt-Tab, so a frame clock while
+                // it is up costs nothing the rest of the time.
+                iced::time::every(Duration::from_millis(16)).map(|_| Message::NativeSwitcherTick)
             } else {
                 Subscription::none()
             },
             iced::time::every(cadence).map(|_| Message::Tick),
             iced::event::listen_with(|event, status, window| match event {
                 iced::Event::Window(event) => Some(Message::WindowEvent(window, event)),
+                // A press a widget has captured stays with that widget.
+                //
+                // Forwarding it as well made every gesture do two things at once:
+                // a drag inside a window moved the window, because the compositor
+                // and the widget both acted on the same press. The compositor gets
+                // the presses nobody claimed, which is exactly the chrome it draws
+                // itself; anything a widget owns stays its own.
                 iced::Event::Mouse(
                     iced::mouse::Event::ButtonPressed(_) | iced::mouse::Event::WheelScrolled { .. },
                 ) if status == iced::event::Status::Captured => None,
@@ -14198,24 +16283,29 @@ mod tests {
         // node_a (root) -> node_b -> node_c
         let nodes = vec![
             SceneNode {
+                transition_ms: None,
                 id: "a".into(),
                 parent_id: None,
                 transform: ::canvas::Transform3::default(),
                 content: NodeContent::Group,
             },
             SceneNode {
+                transition_ms: None,
                 id: "b".into(),
                 parent_id: Some("a".into()),
                 transform: ::canvas::Transform3::default(),
                 content: NodeContent::Group,
             },
             SceneNode {
+                transition_ms: None,
                 id: "c".into(),
                 parent_id: Some("b".into()),
                 transform: ::canvas::Transform3::default(),
                 content: NodeContent::Text {
                     text: "hi".into(),
                     ink: None,
+                    rgb: None,
+                    opacity: 1.0,
                 },
             },
         ];
@@ -16228,6 +18318,29 @@ mod tests {
             repeat: false,
         };
 
+        // Ctrl+Alt+Space is the launcher; Ctrl+Alt+L is the snap layout, so the
+        // two must not answer to the same chord.
+        let space = |modifiers| Event::KeyPressed {
+            key: Key::Named(key::Named::Space),
+            modified_key: Key::Named(key::Named::Space),
+            physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+            location: Location::Standard,
+            modifiers,
+            text: Some(" ".into()),
+            repeat: false,
+        };
+        assert!(launcher_requested(&space(Modifiers::CTRL | Modifiers::ALT)));
+        assert!(!launcher_requested(&space(Modifiers::CTRL)));
+        assert!(!launcher_requested(&pressed(Modifiers::CTRL | Modifiers::ALT)));
+        assert!(control_center_requested(&Event::KeyPressed {
+            key: Key::Character("c".into()),
+            modified_key: Key::Character("c".into()),
+            physical_key: key::Physical::Unidentified(key::NativeCode::Unidentified),
+            location: Location::Standard,
+            modifiers: Modifiers::CTRL | Modifiers::ALT,
+            text: Some("c".into()),
+            repeat: false,
+        }));
         assert!(snap_layout_requested(&pressed(
             Modifiers::CTRL | Modifiers::ALT
         )));

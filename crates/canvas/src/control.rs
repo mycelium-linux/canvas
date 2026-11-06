@@ -75,9 +75,28 @@ pub struct ActorContext {
     pub timestamp_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LauncherScope {
+    Canvas,
+    Workspaces,
+    Native,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
+    /// Open or close the control center, the way Ctrl+Alt+C does.
+    ToggleControlCenter,
+    /// Open the application launcher, the way the dock's apps button would.
+    ///
+    /// A shell needs one way back that does not depend on the shell: chrome can
+    /// be closed, mis-drawn, or reloaded into a broken state, and the launcher is
+    /// how a person recovers from that without editing a workspace file.
+    OpenLauncher {
+        #[serde(default)]
+        scope: Option<LauncherScope>,
+    },
     ShellCatalog,
     ShellDockPins,
     ShellDockPin {
@@ -274,6 +293,20 @@ pub enum Command {
         surface_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         region: Option<Rect>,
+    },
+    /// Return the retained, renderer-neutral scene for one surface so a
+    /// browser can draw the same window instead of polling pixels.
+    SurfaceScene {
+        surface_id: String,
+    },
+    /// Activate a retained module control from a browser-scene renderer.
+    SurfaceActivate {
+        surface_id: String,
+        target_id: String,
+    },
+    /// Re-resolve one authored module without reloading its workspace.
+    ReloadModule {
+        surface_id: String,
     },
 }
 
@@ -683,6 +716,12 @@ pub enum ErrorCode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Receipt {
+    ControlCenterToggled {
+        open: bool,
+    },
+    LauncherOpened {
+        scope: LauncherScope,
+    },
     ShellCatalog {
         catalog: crate::shell_launcher::Catalog,
     },
@@ -821,6 +860,21 @@ pub enum Receipt {
         sha256: String,
         width: u32,
         height: u32,
+    },
+    SurfaceScene {
+        surface_id: String,
+        title: String,
+        scene: serde_json::Value,
+        buttons: serde_json::Value,
+        theme: serde_json::Value,
+        viewport: [f64; 2],
+    },
+    SurfaceActivated {
+        surface_id: String,
+        target_id: String,
+    },
+    ModuleReloaded {
+        surface_id: String,
     },
 }
 
@@ -1040,6 +1094,7 @@ impl ControlRequest {
             return Err("request_id must be 1–64 lowercase identifier characters".into());
         }
         match &self.command {
+            Command::OpenLauncher { .. } | Command::ToggleControlCenter => {}
             Command::ShellActivate {
                 catalog_revision,
                 entry_id,
@@ -1074,6 +1129,8 @@ impl ControlRequest {
                 }
             }
             Command::CloseSurface { surface_id }
+            | Command::SurfaceScene { surface_id }
+            | Command::ReloadModule { surface_id }
             | Command::Navigate { surface_id, .. }
             | Command::PatchView { surface_id, .. } => {
                 if !identifier(surface_id) {
@@ -1265,6 +1322,18 @@ impl ControlRequest {
                     return Err("invalid external surface or source id".into());
                 }
             }
+            Command::SurfaceActivate {
+                surface_id,
+                target_id,
+            } => {
+                if !identifier(surface_id)
+                    || target_id.is_empty()
+                    || target_id.len() > 128
+                    || target_id.chars().any(char::is_control)
+                {
+                    return Err("invalid surface activation".into());
+                }
+            }
             Command::ApplyDocument { .. }
             | Command::ApplyPatch { .. }
             | Command::Inspect
@@ -1395,15 +1464,50 @@ pub fn send(request: &ControlRequest) -> Result<ControlReply, String> {
 
     request.validate()?;
     let path = socket_path()?;
-    let metadata = std::fs::symlink_metadata(&path)
-        .map_err(|error| format!("Canvas runtime unavailable at {}: {error}", path.display()))?;
+    // A compositor restart is a normal event -- a theme rebuild, a crash, a
+    // deliberate kick -- and the socket is absent for a few hundred milliseconds
+    // while it comes back. Reporting that window as "no such file or directory"
+    // turns every caller into a broken caller, so wait it out briefly before
+    // believing it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+    let metadata = loop {
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => break metadata,
+            Err(error) => {
+                let transient = matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                );
+                if !transient || std::time::Instant::now() >= deadline {
+                    return Err(format!(
+                        "Canvas runtime unavailable at {}: {error}",
+                        path.display()
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(60));
+            }
+        }
+    };
     if !metadata.file_type().is_socket()
         || metadata.uid() != unsafe { libc::geteuid() }
         || metadata.mode() & 0o077 != 0
     {
         return Err("unsafe Canvas socket type, ownership, or permissions".into());
     }
-    let mut stream = UnixStream::connect(path).map_err(|error| error.to_string())?;
+    let mut stream = loop {
+        match UnixStream::connect(&path) {
+            Ok(stream) => break stream,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(60));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    };
     canvas_control::verify_peer(&stream)?;
     stream
         .set_read_timeout(Some(Duration::from_secs(30)))
@@ -1865,6 +1969,8 @@ pub mod text {
         match &reply.outcome {
             Outcome::Ok { receipt } => {
                 let detail = match receipt {
+                    Receipt::ControlCenterToggled { open } => format!("control_center={open}"),
+                    Receipt::LauncherOpened { scope } => format!("launcher={scope:?}"),
                     Receipt::Performance { metrics } => metrics.to_string(),
                     Receipt::DocumentSnapshot { snapshot, .. } => format!(
                         "project={} frame={},{},{},{} focus={} surfaces={} indicators={}",
@@ -2037,6 +2143,16 @@ pub mod text {
                             width,
                             height
                         )
+                    }
+                    Receipt::SurfaceScene { surface_id, .. } => {
+                        format!("surface scene={surface_id}")
+                    }
+                    Receipt::SurfaceActivated {
+                        surface_id,
+                        target_id,
+                    } => format!("surface={surface_id} activated={target_id}"),
+                    Receipt::ModuleReloaded { surface_id } => {
+                        format!("module reloaded={surface_id}")
                     }
                 };
                 format!("OK rev={} {}", reply.revision, detail)

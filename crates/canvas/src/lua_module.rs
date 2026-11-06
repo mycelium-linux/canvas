@@ -12,7 +12,9 @@ use super::{
     visible,
 };
 use canvas_core::{Accent, ProjectTheme, ThemeMode, VisualTheme};
-use mlua::{Lua, LuaSerdeExt, Table};
+use iced::advanced::graphics::text::{self as iced_text, cosmic_text};
+use mlua::{Lua, LuaSerdeExt, Table, Value};
+use soil_layout::{Node as LayoutNode, TextMeasurer, TextStyle};
 use serde::{Deserialize, Serialize};
 use std::{
     cell::RefCell,
@@ -29,99 +31,39 @@ const MAX_RESOURCE_SURFACES: usize = 64;
 /// Modules compose these primitives; the host owns their theme and geometry
 /// conventions. Keeping this prelude in one place prevents every widget from
 /// inventing another label scale, badge opacity, or metric hierarchy.
-const WIDGET_PRIMITIVES_V1: &str = r#"
--- Logical pixels are the layout vocabulary; scene coordinates stay internal.
-function widget.pixel_space(width, height)
-  if width <= 0 or height <= 0 then error("pixel space needs positive dimensions") end
-  return {
-    x = function(px) return -4 + 8 * px / width end,
-    y = function(px) return 4 - 8 * px / height end,
-    w = function(px) return 8 * px / width end,
-    h = function(px) return 8 * px / height end,
-  }
-end
+/// The widget vocabulary, as an artifact rather than as a Rust string.
+///
+/// Rust keeps the draw ABI -- `canvas.rect`, `canvas.text`, buttons as hit
+/// regions -- and nothing else. Everything above it (a panel, a button, a row) is
+/// Lua that the host reads from the runtime directory, so a component can be
+/// changed while the shell is running instead of after a rebuild.
+const WIDGETS_FALLBACK: &str = include_str!("../../../config/lua/widgets.lua");
 
-function widget.icon_button(spec)
-  spec.icon = spec.icon or "window"
-  spec.icon_size = spec.icon_size or 28
-  spec.appearance = spec.appearance or "quiet"
-  widget.button(spec)
-end
+/// The live widget library: disk first, embedded copy second.
+///
+/// Composed into every module's source, which is also how an edit invalidates the
+/// retained scene -- the cache key covers the bytes that actually ran.
+pub fn widget_library() -> String {
+    crate::runtime_config::read(std::path::Path::new("lua/widgets.lua"), 128 * 1024)
+        .ok()
+        .flatten()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_else(|| WIDGETS_FALLBACK.to_owned())
+}
 
-local function required(spec, key)
-  local value = spec[key]
-  if value == nil then error("widget primitive requires " .. key, 3) end
-  return value
-end
-
-local function point(spec)
-  return { spec.x or 0, spec.y or 0, spec.z or 0.2 }
-end
-
-local function text_scale(px)
-  local unit = module.theme.body * 1.25
-  return { px / unit, px / unit, 1 }
-end
-
-function widget.panel(spec)
-  canvas.rect {
-    id = required(spec, "id"), parent = spec.parent,
-    ink = spec.ink or "text", opacity = spec.opacity or 0.055,
-    radius = spec.radius or module.theme.radius,
-    translation = point(spec),
-    scale = { required(spec, "width"), required(spec, "height"), 1 },
-  }
-end
-
-function widget.label(spec)
-  canvas.text {
-    id = required(spec, "id"), parent = spec.parent,
-    text = tostring(spec.text or "—"), ink = spec.ink or "text",
-    translation = point(spec),
-    scale = text_scale(spec.size or module.theme.body),
-  }
-end
-
-function widget.badge(spec)
-  local id = required(spec, "id")
-  widget.panel {
-    id = id .. "-bg", parent = spec.parent,
-    x = spec.x, y = spec.y, z = spec.z or 0.1,
-    width = required(spec, "width"), height = required(spec, "height"),
-    ink = spec.ink or "primary", opacity = spec.opacity or 0.18,
-    radius = spec.radius or module.theme.radius,
-  }
-  widget.label {
-    id = id, parent = spec.parent, text = required(spec, "text"),
-    x = spec.text_x or spec.x, y = spec.text_y or spec.y,
-    z = (spec.z or 0.1) + 0.1, ink = spec.text_ink or spec.ink or "primary",
-    size = spec.size or module.theme.small,
-  }
-end
-
-function widget.metric(spec)
-  local id = required(spec, "id")
-  widget.label {
-    id = id .. "-caption", parent = spec.parent,
-    text = required(spec, "label"), x = spec.x, y = spec.y,
-    ink = "muted", size = module.theme.micro,
-  }
-  widget.label {
-    id = id .. "-value", parent = spec.parent,
-    text = required(spec, "value"), x = spec.x,
-    y = (spec.y or 0) - (spec.value_offset or 0.46),
-    ink = spec.ink or "text", size = spec.size or module.theme.hero,
-  }
-  if spec.detail ~= nil and spec.detail ~= "" then
-    widget.label {
-      id = id .. "-detail", parent = spec.parent,
-      text = spec.detail, x = spec.x,
-      y = (spec.y or 0) - (spec.detail_offset or 0.92),
-      ink = "muted", size = module.theme.small,
-    }
-  end
-end
-"#;
+/// A short digest of the live widget library.
+///
+/// Folded into the retained-scene cache key so that editing a component
+/// invalidates the scene it drew, instead of waiting for some unrelated input to
+/// move.
+pub fn widget_fingerprint() -> String {
+    use sha2::{Digest, Sha256};
+    let digest: [u8; 32] = Sha256::digest(widget_library().as_bytes()).into();
+    digest[..8].iter().fold(String::new(), |mut out, byte| {
+        out.push_str(&format!("{byte:02x}"));
+        out
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -157,9 +99,23 @@ pub struct ModuleButton {
     pub height: f32,
     pub enabled: bool,
     pub appearance: ModuleButtonAppearance,
+    /// Local controls re-render this module with an activation event without
+    /// publishing an Unibus command. Use them for selection and view state.
+    pub local: bool,
     pub icon: Option<canvas_widgets::ShellIcon>,
     pub icon_size: f32,
     pub icon_caption: bool,
+    /// Which edge the label hugs. A launcher row reads left-to-right, a toolbar
+    /// button reads centred; both are buttons, and neither is wrong.
+    pub align: ButtonAlign,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ButtonAlign {
+    #[default]
+    Center,
+    Left,
 }
 
 /// Semantic control treatment; Lua never supplies native colors or callbacks.
@@ -169,6 +125,8 @@ pub enum ModuleButtonAppearance {
     #[default]
     Standard,
     Quiet,
+    /// An invisible local hit target over retained scene content.
+    Hit,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -337,8 +295,39 @@ pub enum ModuleEvent {
     Load,
     DataChanged { changed_inputs: Vec<String> },
     Activate { target_id: String },
+    /// A pointer gesture in module-local coordinates, normalized to the surface.
+    ///
+    /// Normalized rather than pixel: the same view has to answer the same
+    /// question at any window size, and a re-render on resize must not move what
+    /// the pointer is over.
+    Pointer { x: f32, y: f32, phase: PointerPhase },
     Pulse { sequence: u64, delta_ms: f64 },
     Reload,
+}
+
+/// The part of a pointer gesture a view can act on.
+///
+/// Moves are included because hover is how a person knows a thing is clickable,
+/// but the host throttles them: a view must not be re-rendered per frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PointerPhase {
+    Move,
+    Press,
+    Release,
+    /// The pointer left the module surface; clear view-local hover.
+    Leave,
+}
+
+impl PointerPhase {
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Move => "move",
+            Self::Press => "press",
+            Self::Release => "release",
+            Self::Leave => "leave",
+        }
+    }
 }
 
 /// Coherence values copied from `ProjectTheme` at the call boundary.
@@ -369,6 +358,11 @@ pub struct ModuleThemeTokens {
     pub title: f32,
     pub display: f32,
     pub hero: f32,
+    /// The presented surface rectangle in logical pixels, when known.
+    ///
+    /// Scene coordinates are centred and aspect-free; a module that wants a
+    /// circle, a square, or a viewport-relative gutter needs the actual shape.
+    pub viewport: [f32; 2],
 }
 
 impl ModuleThemeTokens {
@@ -404,6 +398,7 @@ impl ModuleThemeTokens {
             title: metrics.title,
             display: metrics.display,
             hero: metrics.hero,
+            viewport: [0.0, 0.0],
         }
     }
 }
@@ -432,6 +427,7 @@ impl From<ProjectTheme> for ModuleThemeTokens {
             title: metrics.title,
             display: metrics.display,
             hero: metrics.hero,
+            viewport: [0.0, 0.0],
         }
     }
 }
@@ -445,6 +441,18 @@ pub struct HostResourceSurface {
     pub resource: HostResourceRef,
 }
 
+/// What a view has chosen for itself, as opposed to what the application knows.
+///
+/// A calendar highlighting Tuesday is not application state: nothing outside the
+/// view can observe it, and it must survive the re-render that follows it. It is
+/// also not durable -- reopen the window and today is unmarked again -- which is
+/// exactly the difference between a view's choice and a Spore's data.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ModuleView {
+    /// The id the view last nominated with `module.select`, if any.
+    pub selected: Option<String>,
+}
+
 /// Last known-good renderer-neutral output retained by the Rust host.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RetainedModuleScene {
@@ -454,8 +462,13 @@ pub struct RetainedModuleScene {
     pub scene: Scene,
     pub host_resources: Vec<HostResourceSurface>,
     pub buttons: Vec<ModuleButton>,
+    /// The view's own choice after this render, for the host to hand to the next.
+    pub view: ModuleView,
     /// Intents from one validated activation; never emitted on load/reload.
     pub actions: Vec<ModuleAction>,
+    /// True when the view called `module.animate()`: it has something that moves,
+    /// and the host should hand it a frame clock instead of a refresh poll.
+    pub animated: bool,
 }
 
 pub struct LuaModule {
@@ -567,6 +580,30 @@ impl LuaModule {
         scene_capabilities: LuaSceneCapabilities,
         limits: LuaSceneLimits,
     ) -> Result<Self> {
+        Self::load_with_view(
+            manifest,
+            source,
+            snapshot,
+            theme,
+            ModuleView::default(),
+            resources,
+            scene_capabilities,
+            limits,
+        )
+    }
+
+    /// Load carrying a view's remembered choice, so a re-render does not erase it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_with_view(
+        manifest: ModuleManifest,
+        source: impl Into<String>,
+        snapshot: ModuleInputSnapshot,
+        theme: ModuleThemeTokens,
+        view: ModuleView,
+        resources: BTreeMap<String, HostResourceRef>,
+        scene_capabilities: LuaSceneCapabilities,
+        limits: LuaSceneLimits,
+    ) -> Result<Self> {
         manifest.validate()?;
         validate_snapshot(&manifest, &snapshot)?;
         validate_resources(&manifest, &resources)?;
@@ -579,6 +616,7 @@ impl LuaModule {
             snapshot: &snapshot,
             theme,
             event: &ModuleEvent::Load,
+            view,
             resources: &resources,
             scene_capabilities: &scene_capabilities,
             limits,
@@ -625,11 +663,41 @@ impl LuaModule {
             snapshot: &snapshot,
             theme,
             event: &event,
+            view: self.retained.view.clone(),
             resources: &self.resources,
             scene_capabilities: &self.scene_capabilities,
             limits: self.limits,
         })?;
         self.snapshot = snapshot;
+        self.theme = theme;
+        self.retained = retained;
+        Ok(&self.retained)
+    }
+
+    /// Re-render for an event that did not change any input.
+    ///
+    /// A click is not new data: the revision cannot advance, because the inputs
+    /// are byte for byte the ones the view already saw. What changed is what the
+    /// person just did, and the view's own memory of it comes along.
+    pub fn update_event(
+        &mut self,
+        theme: ModuleThemeTokens,
+        event: ModuleEvent,
+    ) -> Result<&RetainedModuleScene> {
+        validate_event(&self.manifest, &event)?;
+        let retained = render_module(RenderRequest {
+            manifest: &self.manifest,
+            source: &self.source,
+            generation: self.generation,
+            output_revision: self.retained.output_revision + 1,
+            snapshot: &self.snapshot,
+            theme,
+            event: &event,
+            view: self.retained.view.clone(),
+            resources: &self.resources,
+            scene_capabilities: &self.scene_capabilities,
+            limits: self.limits,
+        })?;
         self.theme = theme;
         self.retained = retained;
         Ok(&self.retained)
@@ -654,6 +722,7 @@ impl LuaModule {
             snapshot: &self.snapshot,
             theme: self.theme,
             event: &ModuleEvent::Reload,
+            view: self.retained.view.clone(),
             resources: &self.resources,
             scene_capabilities: &self.scene_capabilities,
             limits: self.limits,
@@ -674,6 +743,7 @@ struct RenderRequest<'a> {
     snapshot: &'a ModuleInputSnapshot,
     theme: ModuleThemeTokens,
     event: &'a ModuleEvent,
+    view: ModuleView,
     resources: &'a BTreeMap<String, HostResourceRef>,
     scene_capabilities: &'a LuaSceneCapabilities,
     limits: LuaSceneLimits,
@@ -689,6 +759,10 @@ fn render_module(request: RenderRequest<'_>) -> Result<RetainedModuleScene> {
     let resources = request.resources.clone();
     let buttons = Rc::new(RefCell::new(Vec::new()));
     let actions = Rc::new(RefCell::new(Vec::new()));
+    let selection = Rc::new(RefCell::new(request.view.selected.clone()));
+    let setup_selection = Rc::clone(&selection);
+    let animated = Rc::new(std::cell::Cell::new(false));
+    let setup_animated = Rc::clone(&animated);
     let setup_buttons = buttons.clone();
     let setup_actions = actions.clone();
     let scene = generate_scene_with_setup(
@@ -696,7 +770,18 @@ fn render_module(request: RenderRequest<'_>) -> Result<RetainedModuleScene> {
         request.scene_capabilities,
         request.limits,
         move |lua| {
-            install_module_context(lua, &manifest, &snapshot, request.theme, &event, &resources)?;
+            install_module_context(
+                lua,
+                &manifest,
+                &snapshot,
+                request.theme,
+                &event,
+                &request.view,
+                setup_selection,
+                &resources,
+                setup_animated,
+            )?;
+            install_layout_api(lua, request.limits.max_nodes)?;
             install_button_api(lua, &manifest, &event, setup_buttons, setup_actions)?;
             install_host_resource_api(lua, &manifest, &resources, setup_placements)
         },
@@ -725,8 +810,98 @@ fn render_module(request: RenderRequest<'_>) -> Result<RetainedModuleScene> {
         scene,
         host_resources,
         buttons,
+        view: ModuleView {
+            selected: selection.borrow().clone(),
+        },
         actions,
+        animated: animated.get(),
     })
+}
+
+struct CanvasTextMeasurer;
+
+impl TextMeasurer for CanvasTextMeasurer {
+    fn measure(
+        &mut self,
+        text: &str,
+        style: &TextStyle,
+        max_width: Option<f32>,
+    ) -> soil_layout::Size {
+        let mut font_system = iced_text::font_system()
+            .write()
+            .expect("Canvas text font system lock");
+        let mut buffer = cosmic_text::Buffer::new(
+            font_system.raw(),
+            cosmic_text::Metrics::new(style.size, style.line_height),
+        );
+        let width = max_width.unwrap_or(1_000_000.0).max(0.0);
+        buffer.set_size(font_system.raw(), Some(width), Some(1_000_000.0));
+        buffer.set_wrap(
+            font_system.raw(),
+            if style.wrap && max_width.is_some() {
+                cosmic_text::Wrap::WordOrGlyph
+            } else {
+                cosmic_text::Wrap::None
+            },
+        );
+        buffer.set_text(
+            font_system.raw(),
+            text,
+            &iced_text::to_attributes(iced::Font::default()),
+            cosmic_text::Shaping::Advanced,
+            None,
+        );
+        let (size, _) = iced_text::measure(&buffer);
+        soil_layout::Size::new(size.width, size.height)
+    }
+}
+
+fn layout_node_count(node: &LayoutNode) -> usize {
+    1 + node.children.iter().map(layout_node_count).sum::<usize>()
+}
+
+fn install_layout_api(lua: &Lua, max_nodes: usize) -> Result<()> {
+    let canvas: Table = lua.globals().get("canvas").map_err(lua_error)?;
+    canvas
+        .set(
+            "measure_text",
+            lua.create_function(move |lua, (text, style): (String, Option<Table>)| {
+                if text.len() > 16_384 {
+                    return Err(mlua::Error::external("Canvas text exceeds 16 KiB"));
+                }
+                let style: TextStyle = match style {
+                    Some(style) => lua.from_value(Value::Table(style))?,
+                    None => TextStyle::default(),
+                };
+                let size = CanvasTextMeasurer.measure(&text, &style, None);
+                lua.to_value(&size)
+            })
+            .map_err(lua_error)?,
+        )
+        .map_err(lua_error)?;
+
+    canvas
+        .set(
+            "layout",
+            lua.create_function(move |lua, (tree, width, height): (Table, f32, f32)| {
+                let node: LayoutNode = lua.from_value(Value::Table(tree))?;
+                let count = layout_node_count(&node);
+                if count > max_nodes.max(1) {
+                    return Err(mlua::Error::external(format!(
+                        "Canvas layout tree exceeds {max_nodes} nodes"
+                    )));
+                }
+                let result = soil_layout::solve(
+                    &node,
+                    soil_layout::Size::new(width, height),
+                    &mut CanvasTextMeasurer,
+                )
+                .map_err(mlua::Error::external)?;
+                lua.to_value(&result)
+            })
+            .map_err(lua_error)?,
+        )
+        .map_err(lua_error)
 }
 
 fn install_button_api(
@@ -759,18 +934,27 @@ fn install_button_api(
                         "height",
                         "enabled",
                         "appearance",
+                        "local",
                         "icon",
                         "icon_size",
                         "icon_caption",
+                        "align",
                     ],
                 )?;
                 let id = required_string(&spec, "id")?;
                 let label = required_string(&spec, "label")?;
-                let action_id = required_string(&spec, "action")?;
-                let grant = grants
-                    .iter()
-                    .find(|grant| grant.id == action_id)
-                    .ok_or_else(|| mlua::Error::external("undeclared module action"))?;
+                let local = spec.get::<Option<bool>>("local")?.unwrap_or(false);
+                let action_id = spec.get::<Option<String>>("action")?;
+                let grant = match action_id.as_deref() {
+                    Some(action_id) => Some(
+                        grants
+                            .iter()
+                            .find(|grant| grant.id == action_id)
+                            .ok_or_else(|| mlua::Error::external("undeclared module action"))?,
+                    ),
+                    None if local => None,
+                    None => return Err(mlua::Error::external("module button needs an action")),
+                };
                 let button = ModuleButton {
                     icon: spec
                         .get::<Option<String>>("icon")?
@@ -781,6 +965,15 @@ fn install_button_api(
                         .transpose()?,
                     icon_size: spec.get::<Option<f32>>("icon_size")?.unwrap_or(28.0),
                     icon_caption: spec.get::<Option<bool>>("icon_caption")?.unwrap_or(false),
+                    align: match spec.get::<Option<String>>("align")?.as_deref() {
+                        Some("left") => ButtonAlign::Left,
+                        Some("center") | None => ButtonAlign::Center,
+                        Some(other) => {
+                            return Err(mlua::Error::RuntimeError(format!(
+                                "Canvas Lua button align must be left or center; got {other}"
+                            )));
+                        }
+                    },
                     id,
                     label,
                     x: spec.get("x")?,
@@ -791,8 +984,10 @@ fn install_button_api(
                     appearance: match spec.get::<Option<String>>("appearance")?.as_deref() {
                         None | Some("standard") => ModuleButtonAppearance::Standard,
                         Some("quiet") => ModuleButtonAppearance::Quiet,
+                        Some("hit") => ModuleButtonAppearance::Hit,
                         _ => return Err(mlua::Error::external("unknown module button appearance")),
                     },
+                    local,
                 };
                 if !identifier(&button.id)
                     || !visible(&button.label)
@@ -809,9 +1004,10 @@ fn install_button_api(
                     || !(-4.0..=4.0).contains(&button.x)
                     || !(-4.0..=4.0).contains(&button.y)
                 {
-                    return Err(mlua::Error::external(
-                        "invalid module button geometry or label",
-                    ));
+                    return Err(mlua::Error::external(format!(
+                        "invalid module button geometry or label: id={:?} label={:?} x={} y={} w={} h={}",
+                        button.id, button.label, button.x, button.y, button.width, button.height
+                    )));
                 }
                 let body: serde_json::Value = lua.from_value(spec.get("body")?)?;
                 if !body.is_object()
@@ -826,13 +1022,16 @@ fn install_button_api(
                     ));
                 }
                 let mut retained = buttons.borrow_mut();
-                if retained.len() >= 16 || retained.iter().any(|existing| existing.id == button.id)
+                if retained.len() >= 64 || retained.iter().any(|existing| existing.id == button.id)
                 {
                     return Err(mlua::Error::external(
                         "duplicate or excessive module buttons",
                     ));
                 }
-                if button.enabled && target.as_deref() == Some(button.id.as_str()) {
+                if let Some(grant) = grant
+                    && button.enabled
+                    && target.as_deref() == Some(button.id.as_str())
+                {
                     actions.borrow_mut().push(ModuleAction {
                         destination: grant.destination.clone(),
                         kind: grant.kind.clone(),
@@ -844,7 +1043,25 @@ fn install_button_api(
             })
             .map_err(lua_error)?,
         )
-        .map_err(lua_error)
+        .map_err(lua_error)?;
+
+    lua.load(
+        r#"
+widget.hit = function(spec)
+  spec["local"] = true
+  spec.appearance = "hit"
+  -- The label is never drawn for a hit region, but it still has to be text the
+  -- scene validator accepts: a blank label rejects the whole view.
+  spec.label = spec.label or "hit"
+  spec.enabled = spec.enabled ~= false
+  spec.body = spec.body or { ["local"] = true }
+  return widget.button(spec)
+end
+"#,
+    )
+    .set_name("canvas-widget-hit")
+    .exec()
+    .map_err(lua_error)
 }
 
 fn install_module_context(
@@ -853,7 +1070,10 @@ fn install_module_context(
     snapshot: &ModuleInputSnapshot,
     theme: ModuleThemeTokens,
     event: &ModuleEvent,
+    view: &ModuleView,
+    selection: Rc<RefCell<Option<String>>>,
     resources: &BTreeMap<String, HostResourceRef>,
+    animated: Rc<std::cell::Cell<bool>>,
 ) -> Result<()> {
     let module = lua.create_table().map_err(lua_error)?;
     module.set("id", manifest.id.as_str()).map_err(lua_error)?;
@@ -870,14 +1090,70 @@ fn install_module_context(
     module
         .set("now", now_to_lua(lua, snapshot.now_ms)?)
         .map_err(lua_error)?;
+    module.set("now_ms", snapshot.now_ms).map_err(lua_error)?;
+    // Motion is a request for frames, not a fact the host can infer: a scene of
+    // rectangles looks identical animated and still, so the view has to say.
+    module
+        .set(
+            "animate",
+            lua.create_function(move |_, (): ()| {
+                animated.set(true);
+                Ok(())
+            })
+            .map_err(lua_error)?,
+        )
+        .map_err(lua_error)?;
     module
         .set("event", event_to_lua(lua, event)?)
+        .map_err(lua_error)?;
+    let view_table = lua.create_table().map_err(lua_error)?;
+    if let Some(selected) = &view.selected {
+        view_table
+            .set("selected", selected.as_str())
+            .map_err(lua_error)?;
+    }
+    module.set("view", view_table).map_err(lua_error)?;
+    // A view nominates what the pointer landed on. It is not an action: nothing
+    // leaves the process, and the Spore is never told. It is how a view remembers
+    // its own highlight across the re-render that the click itself caused.
+    module
+        .set(
+            "select",
+            lua.create_function(move |_, id: mlua::Value| {
+                match id {
+                    mlua::Value::Nil => *selection.borrow_mut() = None,
+                    mlua::Value::String(id) => {
+                        let id = id.to_str()?.to_owned();
+                        // A selection is an opaque key the view invented — a date,
+                        // a row id — not a name the host resolves. Bounded and
+                        // printable is the whole contract.
+                        if id.is_empty() || id.len() > 128 || id.chars().any(char::is_control) {
+                            return Err(mlua::Error::external(
+                                "Invalid Canvas Lua view selection",
+                            ));
+                        }
+                        *selection.borrow_mut() = Some(id);
+                    }
+                    _ => return Err(mlua::Error::external("Canvas Lua selection must be a string")),
+                }
+                Ok(())
+            })
+            .map_err(lua_error)?,
+        )
         .map_err(lua_error)?;
     if manifest.capabilities.read_theme {
         module
             .set("theme", theme_to_lua(lua, theme)?)
             .map_err(lua_error)?;
     }
+    let viewport = lua.create_table().map_err(lua_error)?;
+    viewport
+        .set("width", theme.viewport[0])
+        .map_err(lua_error)?;
+    viewport
+        .set("height", theme.viewport[1])
+        .map_err(lua_error)?;
+    module.set("viewport", viewport).map_err(lua_error)?;
 
     let resource_table = lua.create_table().map_err(lua_error)?;
     for alias in &manifest.capabilities.present_resources {
@@ -935,12 +1211,18 @@ fn install_widget_api(lua: &Lua, read_theme: bool, theme: ModuleThemeTokens) -> 
 
     lua.globals().set("widget", widget).map_err(lua_error)?;
 
+    // The widget vocabulary is an artifact, loaded into the host's writable
+    // globals: a component that lives in the runtime directory can be changed
+    // while the shell runs, which is the difference between iterating on a button
+    // and rebuilding a compositor to try one.
     if read_theme {
-        lua.load(WIDGET_PRIMITIVES_V1)
-            .set_name("canvas-widget-primitives-v1")
+        lua.load(widget_library())
+            .set_name("canvas-widgets")
             .exec()
             .map_err(lua_error)?;
     }
+
+
 
     let canvas: Table = lua.globals().get("canvas").map_err(lua_error)?;
     canvas
@@ -1101,6 +1383,12 @@ fn event_to_lua(lua: &Lua, event: &ModuleEvent) -> Result<Table> {
                 .set("target_id", target_id.as_str())
                 .map_err(lua_error)?;
         }
+        ModuleEvent::Pointer { x, y, phase } => {
+            table.set("kind", "pointer").map_err(lua_error)?;
+            table.set("phase", phase.wire_name()).map_err(lua_error)?;
+            table.set("x", *x).map_err(lua_error)?;
+            table.set("y", *y).map_err(lua_error)?;
+        }
         ModuleEvent::Pulse { sequence, delta_ms } => {
             table.set("kind", "pulse").map_err(lua_error)?;
             table.set("sequence", *sequence).map_err(lua_error)?;
@@ -1150,6 +1438,10 @@ fn theme_to_lua(lua: &Lua, theme: ModuleThemeTokens) -> Result<Table> {
     }
     table.set("space_2", theme.space_2).map_err(lua_error)?;
     table.set("radius", theme.radius).map_err(lua_error)?;
+    let viewport = lua.create_table().map_err(lua_error)?;
+    viewport.set("width", theme.viewport[0]).map_err(lua_error)?;
+    viewport.set("height", theme.viewport[1]).map_err(lua_error)?;
+    table.set("viewport", viewport).map_err(lua_error)?;
     for (name, size) in [
         ("micro", theme.micro),
         ("small", theme.small),
@@ -1278,6 +1570,12 @@ fn validate_event(manifest: &ModuleManifest, event: &ModuleEvent) -> Result<()> 
             ensure(
                 identifier(target_id),
                 "Invalid Canvas Lua activation target",
+            )?;
+        }
+        ModuleEvent::Pointer { x, y, .. } => {
+            ensure(
+                x.is_finite() && y.is_finite() && (0.0..=1.0).contains(x) && (0.0..=1.0).contains(y),
+                "Canvas Lua pointer must be normalized to the surface",
             )?;
         }
         ModuleEvent::Pulse { delta_ms, .. } => {
@@ -1935,13 +2233,91 @@ mod calendar_module_tests {
         module.retained().scene.clone()
     }
 
+    fn calendar_with(x: f32, y: f32, view: ModuleView) -> RetainedModuleScene {
+        let manifest =
+            ModuleManifest::parse(include_str!("../../../config/modules/calendar-v1.json"))
+                .expect("calendar manifest");
+        let mut module = LuaModule::load_with_view(
+            manifest,
+            include_str!("../../../config/modules/calendar-v1.lua"),
+            ModuleInputSnapshot {
+                revision: 1,
+                now_ms: SEPT_2026,
+                values: BTreeMap::new(),
+            },
+            theme(),
+            view,
+            BTreeMap::new(),
+            LuaSceneCapabilities::default(),
+            LuaSceneLimits::default(),
+        )
+        .expect("the calendar must render");
+        module
+            .update_event(
+                theme(),
+                ModuleEvent::Pointer {
+                    x,
+                    y,
+                    phase: PointerPhase::Press,
+                },
+            )
+            .expect("a click must re-render the view");
+        module.retained().clone()
+    }
+
+    #[test]
+    fn a_click_chooses_a_day_and_marks_it() {
+        // The first cell of a month grid. Exact to the pixel would make this test
+        // a copy of the layout; what matters is that a press lands on *a* day and
+        // that the choice is visible afterwards.
+        let rendered = calendar_with(0.095, 0.2675, ModuleView::default());
+        let selected = rendered
+            .view
+            .selected
+            .clone()
+            .expect("clicking a day must choose it");
+        assert!(
+            rendered.scene.nodes.iter().any(|node| node.id == format!("d{selected}")),
+            "the chosen day must be on the grid"
+        );
+        assert!(
+            rendered
+                .scene
+                .nodes
+                .iter()
+                .any(|node| node.id == format!("s{selected}")
+                    && matches!(node.content, NodeContent::Rect { .. })),
+            "the chosen day must be marked"
+        );
+    }
+
+    #[test]
+    fn a_chosen_day_survives_the_redraw_that_follows() {
+        let first = calendar_with(0.095, 0.2675, ModuleView::default());
+        let selected = first.view.selected.clone().expect("a choice");
+        // A view-local choice is deliberately not an intent: nothing leaves the
+        // process, so the Spore is never told which day is merely highlighted.
+        // A plain redraw, no pointer at all: the memory is the host's to carry,
+        // which is the whole reason it is passed in.
+        let second = calendar_with(0.0, 0.0, first.view.clone());
+        assert_eq!(second.view.selected.as_deref(), Some(selected.as_str()));
+        assert!(
+            second
+                .scene
+                .nodes
+                .iter()
+                .any(|node| node.id == format!("s{selected}")),
+            "the mark must still be there without a new click"
+        );
+    }
+
     fn text_node<'a>(scene: &'a Scene, id: &str) -> Option<(&'a str, Option<SemanticInk>)> {
         scene
             .nodes
             .iter()
             .find(|node| node.id == id)
             .map(|node| match &node.content {
-                NodeContent::Text { text, ink } => (text.as_str(), *ink),
+                NodeContent::Text { text, ink, .. } => (text.as_str(), *ink),
                 other => panic!("node {id} is not text: {other:?}"),
             })
     }
@@ -2110,6 +2486,113 @@ mod calendar_module_tests {
     }
 
     #[test]
+    fn host_layout_measures_text_and_fills_the_viewport() {
+        let manifest = ModuleManifest::parse(
+            r#"{
+              "schema_version":1,
+              "id":"layout-test",
+              "title":"Layout test",
+              "capabilities":{"write_scene":true,"read_inputs":[],"read_theme":true}
+            }"#,
+        )
+        .unwrap();
+        let source = r#"
+local laid = canvas.layout({
+  id = "root",
+  kind = "container",
+  layout = {
+    padding = { top = 10, right = 10, bottom = 10, left = 10 },
+    gap = 8,
+    direction = "column",
+  },
+  children = {
+    { id = "title", kind = "text", layout = {}, text = "Hello layout", style = { size = 16, line_height = 22, wrap = true } },
+    { id = "body", kind = "text", layout = {}, text = "one two three four five six seven eight nine ten", style = { size = 14, line_height = 20, wrap = true } },
+  },
+}, 240, 320)
+canvas.text { id = "root-width", text = string.format("%.0f", laid.root.width), translation = { 0, 0, 0.2 }, scale = { 1, 1, 1 } }
+canvas.text { id = "body-height", text = string.format("%.0f", laid.nodes[3].rect.height), translation = { 0, 0, 0.2 }, scale = { 1, 1, 1 } }
+"#;
+        let module = LuaModule::load(
+            manifest,
+            source,
+            ModuleInputSnapshot {
+                revision: 1,
+                now_ms: SEPT_2026,
+                values: BTreeMap::new(),
+            },
+            theme(),
+            BTreeMap::new(),
+            LuaSceneCapabilities::default(),
+            LuaSceneLimits::default(),
+        )
+        .expect("the host layout API must render");
+        let scene = &module.retained().scene;
+        let root_width = text_node(scene, "root-width").expect("root width").0;
+        let body_height = text_node(scene, "body-height").expect("body height").0;
+        assert_eq!(root_width, "240");
+        assert!(
+            body_height.parse::<f32>().unwrap() > 20.0,
+            "text should wrap to more than one line, got {body_height}"
+        );
+    }
+
+    #[test]
+    fn a_pointer_event_is_normalized_to_the_surface() {
+        let manifest = ModuleManifest::parse(include_str!(
+            "../../../config/modules/calendar-v1.json"
+        ))
+        .expect("manifest");
+
+        // Normalized coordinates are the contract: a view is re-rendered when a
+        // window resizes, so a pointer in pixels would mean something different
+        // after the re-render.
+        for (x, y) in [(0.0, 0.0), (1.0, 1.0), (0.5, 0.25)] {
+            validate_event(
+                &manifest,
+                &ModuleEvent::Pointer {
+                    x,
+                    y,
+                    phase: PointerPhase::Press,
+                },
+            )
+            .expect("a point inside the surface is valid");
+        }
+        for (x, y) in [(-0.1, 0.5), (0.5, 1.1), (f32::NAN, 0.5)] {
+            assert!(
+                validate_event(
+                    &manifest,
+                    &ModuleEvent::Pointer {
+                        x,
+                        y,
+                        phase: PointerPhase::Move,
+                    },
+                )
+                .is_err(),
+                "({x}, {y}) is outside the surface and must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pointer_event_reaches_lua_as_a_table() {
+        let lua = mlua::Lua::new();
+        let table = event_to_lua(
+            &lua,
+            &ModuleEvent::Pointer {
+                x: 0.25,
+                y: 0.75,
+                phase: PointerPhase::Release,
+            },
+        )
+        .expect("event table");
+        assert_eq!(table.get::<String>("kind").unwrap(), "pointer");
+        assert_eq!(table.get::<String>("phase").unwrap(), "release");
+        assert!((table.get::<f32>("x").unwrap() - 0.25).abs() < f32::EPSILON);
+        assert!((table.get::<f32>("y").unwrap() - 0.75).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn a_month_view_fits_the_hosts_node_budget() {
         // The default budget is 256 nodes. A month with an event on every day is
         // the worst case, and it must fit rather than fail at the host boundary.
@@ -2128,5 +2611,29 @@ mod calendar_module_tests {
             "{} nodes",
             scene.nodes.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod widget_artifact_tests {
+    use super::{widget_fingerprint, widget_library};
+
+    #[test]
+    fn the_widget_library_is_an_artifact() {
+        let library = widget_library();
+        // Composition helpers live here, not in Rust: a panel, a label, a badge.
+        // `widget.button` stays native because a button is a hit region the host
+        // has to know about; everything above the hit region is composition.
+        for helper in [
+            "function widget.panel",
+            "function widget.label",
+            "function widget.badge",
+            "function widget.pixel_space",
+        ] {
+            assert!(library.contains(helper), "missing {helper}");
+        }
+        let fingerprint = widget_fingerprint();
+        assert_eq!(fingerprint.len(), 16, "a short digest, not a whole file");
+        assert!(fingerprint.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }

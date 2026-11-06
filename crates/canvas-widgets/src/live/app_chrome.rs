@@ -418,12 +418,47 @@ pub fn quiet_button_style(
     active: bool,
     status: button::Status,
 ) -> button::Style {
-    shared_button_style(
-        visual,
-        active,
-        status,
-        fpl_gfx::chrome::ControlAppearance::Quiet,
-    )
+    // A quiet control is a label with a hit target, not a bordered box. The shared
+    // control face answers hover with a raised surface and a doubled primary
+    // outline, which is right for a button in a toolbar and wrong for a list row:
+    // the row jumps a border at you for the crime of moving a mouse over it. Here
+    // hover is a fill, pressed is a stronger fill, and the outline only appears
+    // when the control is actually selected.
+    let pressed = status == button::Status::Pressed;
+    let hovered = status == button::Status::Hovered;
+    let disabled = status == button::Status::Disabled;
+    let engaged = !disabled && (active || hovered || pressed);
+    let fill = if disabled {
+        None
+    } else if pressed {
+        Some(0.16)
+    } else if hovered || active {
+        Some(0.10)
+    } else {
+        None
+    };
+    button::Style {
+        background: fill.map(|alpha| {
+            Color {
+                a: alpha,
+                ..rgb(visual.palette.text)
+            }
+            .into()
+        }),
+        text_color: if disabled {
+            rgb(visual.palette.text_muted)
+        } else if engaged {
+            rgb(visual.palette.text)
+        } else {
+            rgb(visual.palette.text_muted)
+        },
+        border: iced::Border {
+            color: rgb(visual.palette.primary),
+            width: if active && !disabled { 1.0 } else { 0.0 },
+            radius: visual.metrics.radius_sm.into(),
+        },
+        ..Default::default()
+    }
 }
 
 pub(super) fn rgb(value: [u8; 3]) -> Color {

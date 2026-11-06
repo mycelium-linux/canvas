@@ -839,6 +839,10 @@ pub struct SceneNode {
     #[serde(default)]
     pub transform: Transform3,
     pub content: NodeContent,
+    /// How long this node takes to ease from its previous state, in
+    /// milliseconds. Absent means the host's default; zero means snap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -893,6 +897,14 @@ pub enum NodeContent {
     Rect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ink: Option<SemanticInk>,
+        /// A literal colour, when the thing being drawn has one of its own.
+        ///
+        /// An application's icon is the application's colour; a launcher that
+        /// recolours it into a palette makes two builds of one app look like
+        /// different apps. Semantic inks stay the default so a theme still owns
+        /// everything a theme should own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rgb: Option<[u8; 3]>,
         #[serde(default = "default_scene_opacity")]
         opacity: f32,
         #[serde(default)]
@@ -903,9 +915,26 @@ pub enum NodeContent {
         /// Absent in scenes written before ink existed, which draw as `Text`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ink: Option<SemanticInk>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rgb: Option<[u8; 3]>,
+        /// Text fades like anything else: a label that pops while its panel eases
+        /// reads as two different animations.
+        #[serde(default = "scene_opaque")]
+        opacity: f32,
     },
     Image {
         asset: AssetRef,
+    },
+    /// A GPU component the Spore wrote: WGSL plus the floats it reads.
+    ///
+    /// The source is data and the host caches the pipeline by digest, so a new
+    /// visual component is a document edit rather than a compositor rebuild. The
+    /// producer writes a fragment stage against one uniform block; the host
+    /// supplies the vertex stage and the extent.
+    Shader {
+        wgsl: String,
+        #[serde(default)]
+        uniforms: Vec<f32>,
     },
     Mesh {
         asset: AssetRef,
@@ -919,6 +948,10 @@ pub enum NodeContent {
 }
 
 fn default_scene_opacity() -> f32 {
+    1.0
+}
+
+const fn scene_opaque() -> f32 {
     1.0
 }
 
@@ -1087,11 +1120,25 @@ impl Scene {
                         "Scene rectangle radius must be finite and nonnegative",
                     )?;
                 }
-                NodeContent::Text { text, .. } => {
+                NodeContent::Text { text, opacity, .. } => {
                     check(visible(text), "Scene text must be printable")?;
+                    check(
+                        opacity.is_finite() && (0.0..=1.0).contains(opacity),
+                        "Scene text opacity must be between zero and one",
+                    )?;
                 }
                 NodeContent::Image { asset } | NodeContent::Mesh { asset } => {
                     asset.validate()?;
+                }
+                NodeContent::Shader { wgsl, uniforms } => {
+                    check(
+                        !wgsl.trim().is_empty() && wgsl.len() <= 64 * 1024,
+                        "Scene shader source must be 1-64 KiB of WGSL",
+                    )?;
+                    check(
+                        uniforms.len() <= 20 && uniforms.iter().all(|value| value.is_finite()),
+                        "Scene shader uniforms are at most 20 finite floats",
+                    )?;
                 }
                 NodeContent::Camera { projection } => projection.validate()?,
                 NodeContent::Light { light } => light.validate()?,

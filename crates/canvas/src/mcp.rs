@@ -2107,6 +2107,8 @@ mod tests {
             layout: Layout::Surface {
                 surface_id: "docs".into(),
             },
+            pages: Vec::new(),
+            active_page: 0,
             bindings: Vec::new(),
             focused_surface_id: Some("docs".into()),
         }));

@@ -17,6 +17,8 @@ pub struct Artifact {
     pub manifest_fallback: &'static str,
     pub source_path: &'static str,
     pub source_fallback: &'static str,
+    /// The shell region this artifact draws, if a Spore may claim it.
+    pub region: Option<&'static str>,
 }
 
 pub const DESKTOP_BAR: Artifact = Artifact {
@@ -24,18 +26,29 @@ pub const DESKTOP_BAR: Artifact = Artifact {
     manifest_fallback: include_str!("../../../config/modules/desktop-bar-v1.json"),
     source_path: "modules/desktop-bar-v1.lua",
     source_fallback: include_str!("../../../config/modules/desktop-bar-v1.lua"),
+    region: Some("top-bar"),
 };
 pub const DESKTOP_LAUNCHER: Artifact = Artifact {
     manifest_path: "modules/desktop-launcher-v1.json",
     manifest_fallback: include_str!("../../../config/modules/desktop-launcher-v1.json"),
     source_path: "modules/desktop-launcher-v1.lua",
     source_fallback: include_str!("../../../config/modules/desktop-launcher-v1.lua"),
+    region: Some("launcher"),
 };
 pub const DESKTOP_DOCK: Artifact = Artifact {
     manifest_path: "modules/desktop-dock-v1.json",
     manifest_fallback: include_str!("../../../config/modules/desktop-dock-v1.json"),
     source_path: "modules/desktop-dock-v1.lua",
     source_fallback: include_str!("../../../config/modules/desktop-dock-v1.lua"),
+    region: Some("dock"),
+};
+
+pub const CONTROL_CENTER: Artifact = Artifact {
+    manifest_path: "modules/control-center-v1.json",
+    manifest_fallback: include_str!("../../../config/modules/control-center-v1.json"),
+    source_path: "modules/control-center-v1.lua",
+    source_fallback: include_str!("../../../config/modules/control-center-v1.lua"),
+    region: Some("control-center"),
 };
 
 /// Frameless instruments are desktop content, not app-switching destinations.
@@ -44,6 +57,9 @@ pub use crate::shell_launcher::dock_surfaces;
 
 #[derive(Debug, Clone, Default)]
 pub struct Presentation {
+    /// Which Spore last drew this presentation, so a change of owner is logged
+    /// once rather than every frame.
+    chrome_source: Option<String>,
     key: Option<[u8; 32]>,
     retained: Option<RetainedModuleScene>,
     current: Option<(std::sync::Arc<str>, std::sync::Arc<str>)>,
@@ -52,6 +68,11 @@ pub struct Presentation {
 impl Presentation {
     pub fn retained(&self) -> Option<&RetainedModuleScene> {
         self.retained.as_ref()
+    }
+
+    /// Whether this region's current scene asked for a frame clock.
+    pub fn animated(&self) -> bool {
+        self.retained.as_ref().is_some_and(|retained| retained.animated)
     }
 
     /// Update native state immediately using the last accepted artifact, with
@@ -77,6 +98,23 @@ impl Presentation {
         snapshot: ModuleInputSnapshot,
         theme: ModuleThemeTokens,
     ) -> crate::Result<bool> {
+        // A chrome Spore draws the region if one is installed: the shell keeps
+        // the extent, the input routing and the fallback, and the Spore owns the
+        // composition. An uninstalled or broken region falls back per region, so
+        // the desktop never loses its bar because a package did not load.
+        let spore = artifact.region.and_then(|region| {
+            let chrome = crate::spore_catalog::chrome_source(region)?;
+            if !self.chrome_source.as_deref().is_some_and(|current| current == chrome.spore_id) {
+                eprintln!(
+                    "canvas: chrome {region} from Spore {}",
+                    chrome.spore_id
+                );
+            }
+            Some(chrome)
+        });
+        if let Some(chrome) = &spore {
+            self.chrome_source = Some(chrome.spore_id.clone());
+        }
         let read = |path: &str, fallback: &str| -> crate::Result<String> {
             crate::runtime_config::read(std::path::Path::new(path), 32 * 1024)
                 .map_err(|e| crate::Error(e.to_string()))?
@@ -84,9 +122,22 @@ impl Presentation {
                 .transpose()
                 .map(|value| value.unwrap_or_else(|| fallback.into()))
         };
+        // The widget library is executed inside the module's context, not
+        // prepended, so its identity is carried as a marker comment: the cache key
+        // hashes the source text, and an edited button must invalidate the scene
+        // it drew.
+        let source = match spore {
+            Some(chrome) => chrome.source,
+            None => read(artifact.source_path, artifact.source_fallback)?,
+        };
+        let source = format!(
+            "{}\n-- canvas-widgets {}",
+            source,
+            crate::lua_module::widget_fingerprint()
+        );
         self.refresh(
             &read(artifact.manifest_path, artifact.manifest_fallback)?,
-            &read(artifact.source_path, artifact.source_fallback)?,
+            &source,
             snapshot,
             theme,
         )
@@ -148,6 +199,46 @@ mod tests {
             now_ms: 1_768_000_000_000,
             values: Default::default(),
         }
+    }
+
+    #[test]
+    fn launcher_rows_draw_a_tinted_monogram() {
+        use crate::lua_module::ModuleInputValue as V;
+        let mut p = Presentation::default();
+        let mut s = snapshot();
+        s.values = std::collections::BTreeMap::from([
+            ("width".into(), V::Number(600.0)),
+            ("height".into(), V::Number(440.0)),
+            ("live".into(), V::Boolean(true)),
+            ("count".into(), V::Number(1.0)),
+            ("row0-title".into(), V::Text("Inbox".into())),
+            ("row0-detail".into(), V::Text("APP · 0.1.0".into())),
+            ("row0-available".into(), V::Boolean(true)),
+            ("row0-selected".into(), V::Boolean(true)),
+            ("row0-badge".into(), V::Text("I".into())),
+            ("row0-tint".into(), V::Text("#6ea8fe".into())),
+        ]);
+        p.refresh(
+            DESKTOP_LAUNCHER.manifest_fallback,
+            DESKTOP_LAUNCHER.source_fallback,
+            s,
+            theme(),
+        )
+        .expect("the launcher must render a row with a mark");
+        let scene = &p.retained().expect("scene").scene;
+        let mark = scene
+            .nodes
+            .iter()
+            .find(|node| node.id == "row0-mark")
+            .unwrap_or_else(|| panic!("a row with a tint has a mark; got {:?}", scene.nodes.iter().map(|n| n.id.clone()).collect::<Vec<_>>()));
+        let canvas_workspace::NodeContent::Rect { rgb, .. } = &mark.content else {
+            panic!("the mark is a rectangle");
+        };
+        assert_eq!(*rgb, Some([0x6e, 0xa8, 0xfe]));
+        assert!(
+            scene.nodes.iter().any(|node| node.id == "row0-glyph"),
+            "the monogram is drawn"
+        );
     }
 
     #[test]
@@ -215,11 +306,11 @@ mod tests {
                 ("height".into(), V::Number(44.0)),
                 (
                     "padding".into(),
-                    V::Number(f64::from(fpl_gfx::chrome::BAR_PADDING)),
+                    V::Number(f64::from(crate::DESKTOP_BAR_PADDING)),
                 ),
                 (
                     "labelsize".into(),
-                    V::Number(f64::from(fpl_gfx::chrome::BAR_TEXT_SIZE)),
+                    V::Number(f64::from(crate::DESKTOP_BAR_TEXT_SIZE)),
                 ),
                 ("workspace".into(), V::Text("HOME".into())),
                 ("page".into(), V::Text("DESKTOP".into())),

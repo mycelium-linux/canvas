@@ -197,6 +197,42 @@ local function title_text()
   return string.format("%s %d", MONTHS[am], ay)
 end
 
+-- A click chooses a day. The choice belongs to the view, not to the Spore: it
+-- has to survive the re-render the click itself causes, and it should not
+-- outlive the window. `module.select` is that memory; the pointer event is what
+-- fills it, and the highlight below is what reads it back.
+local selected = module.view and module.view.selected or nil
+local press_x, press_y = nil, nil
+local event = module.event
+if event and event.kind == "pointer" and event.phase ~= "move" then
+  -- Scene space is -4..4 on both axes with y growing upward; a pointer arrives
+  -- normalized to the surface, top-left origin. One conversion, one place.
+  press_x = (event.x - 0.5) * 8
+  press_y = (0.5 - event.y) * 8
+end
+
+local function hits(x, y, width, height)
+  return press_x ~= nil
+    and press_x >= x
+    and press_x <= x + width
+    and press_y >= y
+    and press_y <= y + height
+end
+
+local function highlight(id, key, x, y, width, height)
+  if key ~= selected then
+    return
+  end
+  canvas.rect({
+    id = id,
+    ink = "primary",
+    opacity = 0.16,
+    radius = theme.radius,
+    translation = { x + width * 0.5, y + height * 0.5, -0.4 },
+    scale = { width, height, 1 },
+  })
+end
+
 label("title", title_text(), LEFT, TOP, size(theme.title), "text")
 
 local header_y = TOP - 0.66
@@ -234,6 +270,12 @@ if view == "month" then
       elseif not own then
         ink = "muted"
       end
+      local cell_x = LEFT + (column - 1) * COL_W
+      if hits(cell_x, y - row_h, COL_W, row_h) then
+        selected = key
+        module.select(key)
+      end
+      highlight("s" .. key, key, cell_x, y - row_h, COL_W, row_h)
       label(string.format("d%s", key), string.format("%d", gd), x, y, size(theme.display), ink)
 
       local list = on(key)
@@ -278,7 +320,13 @@ else
   local line_h = view == "day" and 0.34 or 0.4
   for index, date in ipairs(dates) do
     local key = iso(date.year, date.month, date.day)
-    local x = LEFT + (index - 1) * column_w + 0.06
+    local column_x = LEFT + (index - 1) * column_w
+    if hits(column_x, BOTTOM, column_w, row_y + 0.34 - BOTTOM) then
+      selected = key
+      module.select(key)
+    end
+    highlight("s" .. key, key, column_x, BOTTOM, column_w, row_y + 0.34 - BOTTOM)
+    local x = column_x + 0.06
     label(
       string.format("c%d", index),
       string.format("%s %d", DOW[iso_weekday_of(date.year, date.month, date.day)], date.day),
