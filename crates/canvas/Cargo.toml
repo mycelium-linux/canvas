@@ -5,7 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = []
+# The compositor is Lua-authored: every bin requires `lua-scenes`, the retained
+# scene and shell modules are gated on it, and the hosts (canvas-mac,
+# canvas-linux) depend on this crate without naming a feature. Leaving it
+# off-by-default meant `cargo build` produced nothing that worked.
+default = ["lua-scenes"]
 lua-scenes = ["dep:mlua", "dep:unibus-sdk"]
 # The gfx `voice_popup` module is not committed upstream yet. Keep the call
 # sites compiled behind this off-by-default feature instead of deleting them;
