@@ -66,7 +66,7 @@ opt-level = 3
 rev = "a65388c03e802fc37e1025575cb0773a0339f63a"
 
 [workspace.metadata.soil]
-# f4c66e8 is soil#22, which added Mesh, Camera and Light to soil-scene. Canvas
-# now translates those three instead of flattening them into groups, so it does
-# not build against an older soil.
-rev = "f4c66e806d130186c19bba34f1e15e64d7e54d50"
+# Soil main after reverting the 3D node kinds (soil#23). Canvas keeps its own
+# meshes, cameras and lights as groups in a Soil scene, so it needs no newer
+# soil than this and must not be pinned to the revision that carried them.
+rev = "5695fe92fd51a8fe67298b2eee3fda56619204fe"
