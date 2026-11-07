@@ -11,7 +11,7 @@ lua-scenes = ["dep:mlua", "dep:unibus-sdk"]
 # sites compiled behind this off-by-default feature instead of deleting them;
 # the default build has no voice popup (see the cfg'd no-op call sites).
 voice-popup = []
-mcp = ["dep:rmcp", "dep:schemars", "dep:tokio", "dep:axum", "dep:reqwest", "canvas-widgets/schema", "canvas-workspace/schema"]
+mcp = ["dep:rmcp", "dep:schemars", "dep:axum", "dep:reqwest", "canvas-widgets/schema", "canvas-workspace/schema"]
 
 [dependencies]
 # The terminal emulator lives in Soil, so a Spore can run a program without the
@@ -53,7 +53,7 @@ stream-descriptors.workspace = true
 unibus-media = { path = "../../../unibus/crates/unibus-media" }
 wgpu = "27"
 rmcp = { version = "3.2", default-features = false, features = ["server", "transport-io", "transport-streamable-http-server"], optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "net", "signal"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "net", "signal"] }
 axum = { version = "0.8", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"], optional = true }
 subtle = "2.6"
@@ -76,6 +76,7 @@ required-features = ["lua-scenes"]
 [[bin]]
 name = "canvas"
 path = "src/main.rs"
+required-features = ["lua-scenes"]
 
 [[bin]]
 name = "canvas-edge"

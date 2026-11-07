@@ -9453,6 +9453,27 @@ impl App {
                         source_id: source_id.clone(),
                     },
                 ),
+                // A GPU lease has no presenter in this build. Keep the tile and
+                // say so, rather than dropping it out of the layout: the spore
+                // is running, and a missing frame is a named condition.
+                SurfaceContent::Gpu {
+                    source_id,
+                    width,
+                    height,
+                    revision,
+                    ..
+                } => {
+                    let reason = format!(
+                        "**GPU lease** `{source_id}`\n\n{width}x{height} at revision {revision}. This Canvas has no `soil:canvas-gpu` presenter yet, so no frame is imported.",
+                    );
+                    (
+                        ContentKind::Markdown,
+                        ContentSource::Markdown {
+                            path: PathBuf::new(),
+                            items: markdown::parse(&reason).collect(),
+                        },
+                    )
+                }
                 // Content this build cannot draw still gets a tile. Rendering it
                 // as markdown reuses a renderer that already exists rather than
                 // adding a path solely to say "no": the surface keeps its place
