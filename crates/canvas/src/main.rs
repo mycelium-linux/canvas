@@ -10175,7 +10175,11 @@ impl App {
                                 key,
                                 scene: scene.clone(),
                                 buttons: buttons.clone(),
-                                last_error: Some(reason),
+                                // Keep the last good scene and put the full
+                                // traceback on the CLI. Painting an error over a
+                                // running app obscures the thing the person was
+                                // using; the terminal is where a developer reads it.
+                                last_error: None,
                             }
                         }
                         _ => ModuleSurface::Failed { key, reason },
@@ -10766,11 +10770,16 @@ impl App {
                                 stack![
                                     scene,
                                     container(
-                                        text(format!("RELOAD REJECTED · {error}"))
-                                            .size(visual.metrics.micro)
-                                            .color(color(palette.danger)),
+                                        text(format!(
+                                            "MODULE ERROR · {} · full trace on the CLI",
+                                            error
+                                        ))
+                                        .size(visual.metrics.micro)
+                                        .color(color(palette.danger))
+                                        .width(Length::Fill),
                                     )
-                                    .padding(visual.metrics.space_2),
+                                    .padding(visual.metrics.space_2)
+                                    .width(width),
                                 ]
                                 .width(width)
                                 .height(height)
@@ -10787,9 +10796,13 @@ impl App {
                                     text(surface.snapshot.title.clone())
                                         .size(metrics.title)
                                         .color(color(palette.text)),
-                                    text(reason.clone())
+                                    text(module_error_summary(reason))
                                         .size(metrics.small)
-                                        .color(color(palette.danger)),
+                                        .color(color(palette.danger))
+                                        .width(Length::Fill),
+                                    text("Full traceback is on the Canvas CLI.")
+                                        .size(metrics.micro)
+                                        .color(color(palette.text_muted)),
                                 ]
                                 .spacing(metrics.space_2),
                             )
@@ -13880,6 +13893,29 @@ fn module_artifact_revision(name: &str) -> u64 {
         }
     }
     hasher.finish()
+}
+
+/// A module failure a person can scan, while the complete traceback stays on
+/// the CLI. A stack trace pasted over a window obscures the app behind it; the
+/// wall needs the first actionable line, not the whole Lua trace.
+fn module_error_summary(reason: &str) -> String {
+    // Lua's traceback separator is a newline, but a host can also hand us a
+    // Unicode line break or a single escaped line. Stop at any of them, and at
+    // the traceback marker even if the separator was lost in transport.
+    let reason = reason
+        .split_once("stack traceback:")
+        .map_or(reason, |(head, _)| head);
+    let line = reason
+        .split(['\n', '\r', '\u{2028}', '\u{2029}', '\u{0085}'])
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("module render failed");
+    let line = line.strip_prefix("Canvas Lua rejected: ").unwrap_or(line);
+    let mut summary: String = line.chars().take(180).collect();
+    if line.chars().count() > 180 {
+        summary.push('…');
+    }
+    summary
 }
 
 /// Run an authored module against its declared inputs and return its scene.

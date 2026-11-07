@@ -154,7 +154,9 @@ fn content(content: &soil_scene::Content) -> NodeContent {
         | From::Heatmap(_)
         | From::Candles(_)
         | From::Polyline(_)
-        | From::Shader(_) => NodeContent::Group,
+        | From::Shader(_)
+        | From::GpuDense(_)
+        | From::GpuPoints3D(_) => NodeContent::Group,
     }
 }
 
