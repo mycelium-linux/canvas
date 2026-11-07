@@ -133,9 +133,20 @@ EOF
 # Pinned revisions come from Cargo.toml (single source of truth), not from a
 # hardcoded copy that can drift.
 gfx_pin=$(sed -n 's/.*fpl-gfx = { git = "https:\/\/github.com\/ajmwagar\/gfx.git", rev = "\([0-9a-f]*\)".*/\1/p' Cargo.toml | head -n1)
-unibus_pin=$(sed -n 's/.*unibus = { git = "ssh:\/\/git@github.com\/FuturePresentLabs\/unibus.git", rev = "\([0-9a-f]*\)".*/\1/p' Cargo.toml | head -n1)
-if [ -z "$gfx_pin" ] || [ -z "$unibus_pin" ]; then
-  echo "ci-local: FATAL: could not read pinned gfx/unibus revisions from $repo_root/Cargo.toml" >&2
+# unibus and soil resolve by sibling path, so their expected revisions are
+# metadata rather than dependency revs. Read them the same way as gfx: from the
+# manifest, never from a copy that can drift.
+metadata_rev() {
+  awk -v section="$1" '
+    $0 == "[" section "]" { inside = 1; next }
+    /^\[/ { inside = 0 }
+    inside && /^rev *=/ { split($0, parts, "\""); print parts[2]; exit }
+  ' Cargo.toml
+}
+unibus_pin=$(metadata_rev "workspace.metadata.unibus")
+soil_pin=$(metadata_rev "workspace.metadata.soil")
+if [ -z "$gfx_pin" ] || [ -z "$unibus_pin" ] || [ -z "$soil_pin" ]; then
+  echo "ci-local: FATAL: could not read the pinned gfx/unibus/soil revisions from $repo_root/Cargo.toml" >&2
   exit 2
 fi
 
@@ -155,8 +166,8 @@ gfx=$(require_dep gfx "ajmwagar/gfx" "$gfx_pin" "${gfx_candidates[@]}") || \
   missing_dep gfx "ajmwagar/gfx" "$gfx_pin" Cargo.toml "${gfx_candidates[@]}"
 unibus=$(require_dep unibus "FuturePresentLabs/unibus" "$unibus_pin" "${unibus_candidates[@]}") || \
   missing_dep unibus "FuturePresentLabs/unibus" "$unibus_pin" crates/stream-descriptors/Cargo.toml "${unibus_candidates[@]}"
-soil=$(require_dep soil "fungOS-linux/soil" "" "${soil_candidates[@]}") || \
-  missing_dep soil "fungOS-linux/soil" "" crates/soil-scene/src/lib.rs "${soil_candidates[@]}"
+soil=$(require_dep soil "fungOS-linux/soil" "$soil_pin" "${soil_candidates[@]}") || \
+  missing_dep soil "fungOS-linux/soil" "$soil_pin" crates/soil-scene/src/lib.rs "${soil_candidates[@]}"
 
 # Cargo resolves the workspace's path dependencies itself (`../gfx` and
 # `../unibus` from this manifest). A verified checkout somewhere else is NOT
@@ -203,7 +214,7 @@ require_cargo_path soil "$soil" "$repo_root/../soil"
 # that names a directory instead of the missing capability.
 for crate in soil-scene soil-input soil-vt; do
   [ -f "$soil/crates/$crate/Cargo.toml" ] || \
-    missing_dep soil "fungOS-linux/soil" "" "crates/$crate/Cargo.toml" "$soil"
+    missing_dep soil "fungOS-linux/soil" "$soil_pin" "crates/$crate/Cargo.toml" "$soil"
 done
 
 git_head() {

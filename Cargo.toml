@@ -31,9 +31,20 @@ dcp = { git = "https://github.com/FuturePresentLabs/dcp.git", rev = "d3a1335" }
 tempfile = "3"
 coherence-tokens = { path = "vendor/coherence-tokens" }
 # The household bus contract, shared with JARVIS (dock marbles dock-pubd).
-# Pinned by rev; bump deliberately alongside unibus releases.
-unibus = { git = "ssh://git@github.com/FuturePresentLabs/unibus.git", rev = "b47a6cc15a6246296ac34136d513533d21dd11c1" }
-soil-layout = { git = "ssh://git@github.com/fungOS-linux/soil.git", rev = "9717d3c7594818b7bb293bc3806ef6b2197a092e" }
+# One unibus, by sibling checkout. The expected revision is declared in
+# [workspace.metadata.unibus] below and checked by scripts/ci-local.sh, so a
+# bump stays deliberate and reviewable. It is deliberately NOT a git rev on the
+# dependency: a git pin plus path dependencies on the same crates let cargo
+# resolve two different revisions of one library, which is how the pin came to
+# name a revision that has no crates/stream-descriptors at all.
+unibus = { path = "../unibus/crates/unibus" }
+unibus-device = { path = "../unibus/crates/unibus-device" }
+unibus-media = { path = "../unibus/crates/unibus-media" }
+unibus-sdk = { path = "../unibus/crates/unibus-sdk" }
+soil-scene = { path = "../soil/crates/soil-scene" }
+soil-input = { path = "../soil/crates/soil-input" }
+soil-vt = { path = "../soil/crates/soil-vt" }
+soil-layout = { path = "../soil/crates/soil-layout" }
 stream-descriptors = { path = "../unibus/crates/stream-descriptors" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 
@@ -45,3 +56,14 @@ opt-level = 3
 
 [profile.dev.package.zune-jpeg]
 opt-level = 3
+
+# The sibling revisions this workspace is expected to build against. Cargo does
+# not read these; scripts/ci-local.sh does, so the bump is still a deliberate,
+# reviewable line rather than an incidental one. They are metadata rather than
+# dependency revs because every ecosystem crate resolves by path, and a git rev
+# beside a path dependency on the same crate lets cargo pick two revisions.
+[workspace.metadata.unibus]
+rev = "a65388c03e802fc37e1025575cb0773a0339f63a"
+
+[workspace.metadata.soil]
+rev = "0f39575a16c2deac1ae88c5ae373e43ad98af620"
