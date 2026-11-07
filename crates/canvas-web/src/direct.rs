@@ -61,7 +61,7 @@ pub fn run() -> Result<(), JsValue> {
     let app = Rc::new(RefCell::new(App::default()));
     let lod = Rc::new(Cell::new(false));
     resize(&canvas)?;
-    start_native_mirror(&canvas, &context, Rc::clone(&lod))?;
+    start_native_mirror(&canvas, &context, Rc::clone(&app), Rc::clone(&lod))?;
     set_status("EXACT NATIVE MIRROR · L TOGGLE LOD", "ready");
 
     let click_canvas = canvas.clone();
@@ -144,7 +144,7 @@ pub fn run() -> Result<(), JsValue> {
         }
         let encoded = js_sys::encode_uri_component(&event.key());
         let url = format!(
-            "http://127.0.0.1:8090/v1/key?key={encoded}&shift={}&control={}&alt={}&meta={}",
+            "/v1/key?key={encoded}&shift={}&control={}&alt={}&meta={}",
             event.shift_key(),
             event.ctrl_key(),
             event.alt_key(),
@@ -169,6 +169,7 @@ fn resize(canvas: &HtmlCanvasElement) -> Result<(), JsValue> {
 fn start_native_mirror(
     canvas: &HtmlCanvasElement,
     context: &CanvasRenderingContext2d,
+    app: Rc<RefCell<App>>,
     lod: Rc<Cell<bool>>,
 ) -> Result<(), JsValue> {
     let image = HtmlImageElement::new()?;
@@ -209,10 +210,23 @@ fn start_native_mirror(
     loaded.forget();
 
     let failed_lod = Rc::clone(&lod);
+    let failed_canvas = canvas.clone();
+    let failed_context = context.clone();
+    let failed_app = Rc::clone(&app);
     let failed = Closure::<dyn FnMut()>::new(move || {
-        if !failed_lod.get() {
-            set_status("WAITING FOR LOCAL CANVAS · START canvas-web-host", "error");
+        if failed_lod.get() {
+            return;
         }
+        // No native Canvas behind the bridge (or it is unreachable from this
+        // origin). Draw the WASM view instead of leaving the page blank: a
+        // dead mirror is a failure the viewer should see, not an empty box.
+        failed_lod.set(true);
+        let _ = draw(
+            &failed_canvas,
+            &failed_context,
+            &failed_app.borrow(),
+        );
+        set_status("LOW-DETAIL WASM MODE · NO LOCAL CANVAS · F9 RETRY", "error");
     });
     image.set_onerror(Some(failed.as_ref().unchecked_ref()));
     failed.forget();
@@ -220,7 +234,7 @@ fn start_native_mirror(
     let next_image = image.clone();
     let tick = Closure::<dyn FnMut()>::new(move || {
         next_image.set_src(&format!(
-            "http://127.0.0.1:8090/v1/frame?t={}",
+            "/v1/frame?t={}",
             js_sys::Date::now()
         ));
     });
@@ -231,7 +245,7 @@ fn start_native_mirror(
             125,
         )?;
     tick.forget();
-    image.set_src("http://127.0.0.1:8090/v1/frame?t=0");
+    image.set_src("/v1/frame?t=0");
     install_native_pointer(canvas, &image, lod)?;
     Ok(())
 }
@@ -349,7 +363,7 @@ fn normalized_client(
 }
 
 fn send_pointer(phase: &str, x: f32, y: f32, delta: f32) {
-    let url = format!("http://127.0.0.1:8090/v1/pointer?phase={phase}&x={x}&y={y}&delta={delta}");
+    let url = format!("/v1/pointer?phase={phase}&x={x}&y={y}&delta={delta}");
     let _ = web_sys::window().map(|window| window.fetch_with_str(&url));
 }
 
