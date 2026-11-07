@@ -344,14 +344,15 @@ fn public_text(value: &str, max: usize, empty: bool) -> bool {
         && !value.chars().any(char::is_control)
 }
 
-fn safe_web_uri(entry: &super::resources::Entry) -> Option<&str> {
-    let url = url::Url::parse(&entry.uri).ok()?;
+fn safe_web_uri(entry: &super::resources::Entry) -> Option<String> {
+    let target = super::resources::target(entry);
+    let url = url::Url::parse(&target).ok()?;
     (entry.id != "@home"
         && url.scheme() == "https"
         && url.host_str().is_some()
         && url.username().is_empty()
         && url.password().is_none())
-    .then_some(entry.uri.as_str())
+    .then_some(target)
 }
 
 fn public_resources(entries: &[super::resources::Entry]) -> Result<Vec<Value>, String> {
@@ -985,17 +986,17 @@ pub fn execute(name: &str, args: &Value) -> Result<Value, String> {
             let entries = super::resources::project_entries(project)?;
             let entry = entries
                 .iter()
-                .find(|entry| entry.id == resource && entry.id != "@home")
+                .find(|entry| entry.id == resource)
                 .ok_or("Alfalfa resource does not exist in the requested project")?;
             let (destination, viewer) = if let Some(uri) = safe_web_uri(entry) {
                 super::remote::rpc(project, "desktop-recall", &[], None)?;
-                super::remote::rpc(project, "desktop-web-url", &[uri.into()], None)?;
+                super::remote::rpc(project, "desktop-web-url", &[uri], None)?;
                 (
                     "agora_browser",
                     Some(viewer_receipt(super::remote::open_desktop(project))),
                 )
             } else {
-                super::resources::open(entry)?;
+                super::resources::open(entry, workspace_theme(project))?;
                 ("mac", None)
             };
             json!({"project_id":project,"resource_id":resource,"title":entry.title,"kind":entry.kind,"opened":true,"destination":destination,"viewer":viewer})
@@ -1275,6 +1276,10 @@ mod tests {
         let mut http = entries[0].clone();
         http.uri = "http://example.test/public".into();
         assert_eq!(public_resources(&[http]).unwrap()[0]["destination"], "mac");
+        let mut home = entries[0].clone();
+        home.id = "@home".into();
+        home.uri = "alfalfa://projects/dock".into();
+        assert_eq!(safe_web_uri(&home), None);
         assert!(public_resources(&[entries[0].clone(), entries[0].clone()]).is_err());
     }
 

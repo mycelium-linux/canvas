@@ -2,385 +2,113 @@
   "schema_version": 1,
   "id": "transmog-workspace",
   "project_id": "transmog",
-  "revision": 6,
-  "theme": {
-    "source": "project"
-  },
-  "background": {
-    "kind": "shader",
-    "shader_id": "smoke-rings",
-    "speed": 0.45
-  },
-  "chrome": {
-    "title": "hidden",
-    "canvas_padding": 10,
-    "surface_gap": 10
-  },
+  "revision": 7,
+  "theme": { "source": "project" },
+  "background": { "kind": "shader", "shader_id": "smoke-rings", "speed": 0.22 },
+  "chrome": { "title": "hidden", "canvas_padding": 6, "surface_gap": 6 },
   "surfaces": [
     {
-      "id": "transmog-part",
-      "title": "Part under construction",
-      "content": {
-        "kind": "live_video",
-        "source_id": "transmog-step",
-        "width": 1280,
-        "height": 720,
-        "orbitable": true,
-        "timeline": true
-      },
-      "inputs": [
-        {
-          "id": "timeline",
-          "contract": "transmog.build.status.v1"
-        }
-      ]
-    },
-    {
-      "id": "transmog-fan",
-      "title": "Decisions",
-      "content": {
-        "kind": "widget",
-        "spec": {
-          "schema_version": 2,
-          "id": "transmog-fan",
-          "kind": "dag_graph",
-          "title": "Awaiting decision",
-          "nodes": [],
-          "edges": [],
-          "theme": null,
-          "refresh_ms": 250,
-          "chrome": "frameless",
-          "data": {
-            "state": "loading",
-            "source": "unibus:rlcd.decision.v1",
-            "observed_at": null,
-            "window": "live",
-            "detail": null,
-            "provenance": "live"
-          }
-        }
-      },
-      "inputs": [
-        {
-          "id": "fan",
-          "contract": "transmog.build.status.v1"
-        }
-      ]
-    },
-    {
-      "id": "transmog-brief",
-      "title": "Brief",
-      "content": {
-        "kind": "widget",
-        "spec": {
-          "schema_version": 2,
-          "id": "transmog-brief",
-          "kind": "event_log",
-          "title": "Brief \u00b7 idle",
-          "entries": [],
-          "theme": null,
-          "refresh_ms": 250,
-          "chrome": "frameless",
-          "data": {
-            "state": "loading",
-            "source": "transmog:construct",
-            "observed_at": null,
-            "window": "live",
-            "detail": null,
-            "provenance": "live"
-          }
-        }
-      },
-      "inputs": [
-        {
-          "id": "brief",
-          "contract": "transmog.build.status.v1"
-        }
-      ]
-    },
-    {
-      "id": "transmog-steps",
-      "title": "Build steps",
-      "content": {
-        "kind": "widget",
-        "spec": {
-          "schema_version": 2,
-          "id": "transmog-steps",
-          "kind": "event_log",
-          "title": "Steps \u00b7 idle",
-          "entries": [],
-          "theme": null,
-          "refresh_ms": 250,
-          "chrome": "frameless",
-          "data": {
-            "state": "loading",
-            "source": "transmog:build-stream",
-            "observed_at": null,
-            "window": "live",
-            "detail": null,
-            "provenance": "live"
-          }
-        }
-      },
-      "inputs": [
-        {
-          "id": "steps",
-          "contract": "transmog.build.status.v1"
-        }
-      ]
-    },
-    {
-      "id": "transmog-confidence",
-      "title": "Decision confidence",
-      "content": {
-        "kind": "widget",
-        "spec": {
-          "schema_version": 2,
-          "id": "transmog-confidence",
-          "kind": "ranked_bar",
-          "title": "Awaiting decision",
-          "bars": [
-            {
-              "label": "waiting",
-              "value": 0.0
-            }
-          ],
-          "unit": "%",
-          "theme": null,
-          "refresh_ms": 250,
-          "chrome": "frameless",
-          "data": {
-            "state": "loading",
-            "source": "transmog:construct",
-            "observed_at": null,
-            "window": "live",
-            "detail": null,
-            "provenance": "live"
-          }
-        }
-      },
-      "inputs": [
-        {
-          "id": "confidence",
-          "contract": "transmog.build.status.v1"
-        }
-      ]
-    },
-    {
-      "id": "transmog-ask",
-      "title": "Ask transmog",
-      "content": {
-        "kind": "prompt",
-        "target": "transmog",
-        "placeholder": "Describe the part or model you want…",
-        "task_kinds": ["PCB", "Model"],
-        "task_targets": {
-          "PCB": "lob",
-          "Model": "transmog"
-        }
-      },
+      "id": "transmog-files",
+      "title": "Project",
+      "content": { "kind": "project_browser", "project_id": "transmog" },
       "inputs": []
     },
     {
-      "id": "transmog-files",
-      "title": "Project files",
-      "content": {
-        "kind": "widget",
-        "spec": {
-          "schema_version": 2,
-          "id": "transmog-files",
-          "kind": "table",
-          "title": "All files",
-          "columns": ["Name", "Kind", "Folder", "Size"],
-          "rows": [],
-          "theme": null,
-          "refresh_ms": null,
-          "chrome": "frameless",
-          "data": {
-            "state": "loading",
-            "source": "alfalfa:transmog",
-            "observed_at": null,
-            "window": "current revision",
-            "detail": "Awaiting manifest index",
-            "provenance": "live"
-          }
-        }
-      },
-      "inputs": [{ "id": "results", "contract": "canvas.widget.snapshot.v1" }]
-    }
-  ],
-  "layout": {
-    "kind": "canvas",
-    "placements": [
-      {
-        "surface_id": "transmog-part",
-        "bounds": {
-          "x": 0.01,
-          "y": 0.02,
-          "width": 0.6,
-          "height": 0.7
-        },
-        "layer": 0
-      },
-      {
-        "surface_id": "transmog-fan",
-        "bounds": {
-          "x": 0.62,
-          "y": 0.02,
-          "width": 0.37,
-          "height": 0.44
-        },
-        "layer": 0
-      },
-      {
-        "surface_id": "transmog-steps",
-        "bounds": {
-          "x": 0.62,
-          "y": 0.47,
-          "width": 0.37,
-          "height": 0.25
-        },
-        "layer": 0
-      },
-      {
-        "surface_id": "transmog-brief",
-        "bounds": {
-          "x": 0.01,
-          "y": 0.8408,
-          "width": 0.36,
-          "height": 0.1392
-        },
-        "layer": 0
-      },
-      {
-        "surface_id": "transmog-confidence",
-        "bounds": {
-          "x": 0.38,
-          "y": 0.74,
-          "width": 0.61,
-          "height": 0.24
-        },
-        "layer": 0
-      },
-      {
-        "surface_id": "transmog-ask",
-        "bounds": {
-          "x": 0.01,
-          "y": 0.74,
-          "width": 0.36,
-          "height": 0.0912
-        },
-        "layer": 0
-      }
-    ]
-  },
-  "pages": [
+      "id": "transmog-part", "title": "Model",
+      "content": { "kind": "live_video", "source_id": "transmog-step", "width": 1280, "height": 720,
+        "orbitable": true, "timeline": true },
+      "inputs": [{ "id": "timeline", "contract": "transmog.build.status.v1" }]
+    },
     {
-      "name": "Files",
-      "layout": {
-        "kind": "surface",
-        "surface_id": "transmog-files"
-      }
+      "id": "transmog-run", "title": "Run",
+      "content": { "kind": "widget", "spec": {
+        "schema_version": 2, "id": "transmog-run", "kind": "status_list", "title": "Waiting for a run",
+        "nodes": [], "theme": null, "refresh_ms": 250, "chrome": "integrated",
+        "data": { "state": "no_data", "source": "eval.watch.v1", "observed_at": null,
+          "window": "live", "detail": "No active RLCD run", "provenance": "live" }
+      } },
+      "inputs": [{ "id": "run", "contract": "canvas.run.watch.v1" }]
+    },
+    {
+      "id": "transmog-decisions", "title": "Decisions",
+      "content": { "kind": "widget", "spec": {
+        "schema_version": 2, "id": "transmog-decisions", "kind": "dag_graph", "title": "Waiting for decisions",
+        "nodes": [], "edges": [], "theme": null, "refresh_ms": 250, "chrome": "integrated",
+        "data": { "state": "no_data", "source": "eval.watch.v1", "observed_at": null,
+          "window": "live", "detail": "No active RLCD run", "provenance": "live" }
+      } },
+      "inputs": [{ "id": "run", "contract": "canvas.run.watch.v1" }]
+    },
+    {
+      "id": "transmog-checks", "title": "Checks",
+      "content": { "kind": "widget", "spec": {
+        "schema_version": 2, "id": "transmog-checks", "kind": "status_list", "title": "Waiting for verification",
+        "nodes": [], "theme": null, "refresh_ms": 250, "chrome": "integrated",
+        "data": { "state": "no_data", "source": "eval.watch.v1", "observed_at": null,
+          "window": "live", "detail": "No active RLCD run", "provenance": "live" }
+      } },
+      "inputs": [{ "id": "run", "contract": "canvas.run.watch.v1" }]
+    },
+    {
+      "id": "transmog-events", "title": "Build and evaluation",
+      "content": { "kind": "widget", "spec": {
+        "schema_version": 2, "id": "transmog-events", "kind": "event_log", "title": "Run timeline",
+        "entries": [], "follow": true, "theme": null, "refresh_ms": 250, "chrome": "integrated",
+        "data": { "state": "no_data", "source": "eval.watch.v1", "observed_at": null,
+          "window": "live", "detail": "No active RLCD run", "provenance": "live" }
+      } },
+      "inputs": [{ "id": "run", "contract": "canvas.run.watch.v1" }]
+    },
+    {
+      "id": "transmog-ask", "title": "New or revise",
+      "content": { "kind": "prompt", "target": "transmog",
+        "placeholder": "Describe a new part or a change to the selected model…",
+        "task_kinds": ["PCB", "Model"], "task_targets": { "PCB": "lob", "Model": "transmog" } },
+      "inputs": []
     }
   ],
+  "layout": { "kind": "canvas", "placements": [
+    { "surface_id": "transmog-files", "bounds": { "x": 0.000, "y": 0.000, "width": 0.220, "height": 1.000 }, "layer": 0 },
+    { "surface_id": "transmog-part", "bounds": { "x": 0.220, "y": 0.000, "width": 0.570, "height": 0.760 }, "layer": 0 },
+    { "surface_id": "transmog-run", "bounds": { "x": 0.790, "y": 0.000, "width": 0.210, "height": 0.300 }, "layer": 0 },
+    { "surface_id": "transmog-decisions", "bounds": { "x": 0.790, "y": 0.300, "width": 0.210, "height": 0.406 }, "layer": 0 },
+    { "surface_id": "transmog-checks", "bounds": { "x": 0.790, "y": 0.706, "width": 0.210, "height": 0.294 }, "layer": 0 },
+    { "surface_id": "transmog-events", "bounds": { "x": 0.220, "y": 0.760, "width": 0.410, "height": 0.240 }, "layer": 0 },
+    { "surface_id": "transmog-ask", "bounds": { "x": 0.630, "y": 0.760, "width": 0.160, "height": 0.240 }, "layer": 0 }
+  ] },
+  "pages": [],
   "active_page": 0,
   "bindings": [
     {
       "id": "transmog-model-timeline-live",
-      "source": {
-        "owner": "mac-studio-transmog",
-        "stream": "transmog-timeline",
-        "contract": "transmog.build.status.v1"
-      },
-      "target": {
-        "surface_id": "transmog-part",
-        "input_id": "timeline"
-      },
-      "adapter": "transmog-build-v1",
-      "delivery": {
-        "mode": "latest"
-      }
+      "source": { "owner": "mac-studio-transmog", "stream": "transmog-timeline", "contract": "transmog.build.status.v1" },
+      "target": { "surface_id": "transmog-part", "input_id": "timeline" },
+      "adapter": "transmog-build-v1", "delivery": { "mode": "latest" }
     },
     {
-      "id": "transmog-fan-live",
-      "source": {
-        "owner": "mac-studio-transmog",
-        "stream": "transmog-fan",
-        "contract": "transmog.build.status.v1"
-      },
-      "target": {
-        "surface_id": "transmog-fan",
-        "input_id": "fan"
-      },
-      "adapter": "transmog-build-v1",
-      "delivery": {
-        "mode": "latest"
-      }
+      "id": "transmog-run-live",
+      "source": { "owner": "eval-studio", "stream": "eval-summary", "contract": "canvas.run.watch.v1" },
+      "target": { "surface_id": "transmog-run", "input_id": "run" },
+      "adapter": "eval-watch-v1", "delivery": { "mode": "latest" }
     },
     {
-      "id": "transmog-brief-live",
-      "source": {
-        "owner": "mac-studio-transmog",
-        "stream": "transmog-brief",
-        "contract": "transmog.build.status.v1"
-      },
-      "target": {
-        "surface_id": "transmog-brief",
-        "input_id": "brief"
-      },
-      "adapter": "transmog-build-v1",
-      "delivery": {
-        "mode": "latest"
-      }
+      "id": "transmog-decisions-live",
+      "source": { "owner": "eval-studio", "stream": "eval-decisions", "contract": "canvas.run.watch.v1" },
+      "target": { "surface_id": "transmog-decisions", "input_id": "run" },
+      "adapter": "eval-watch-v1", "delivery": { "mode": "latest" }
     },
     {
-      "id": "transmog-steps-live",
-      "source": {
-        "owner": "mac-studio-transmog",
-        "stream": "transmog-steps",
-        "contract": "transmog.build.status.v1"
-      },
-      "target": {
-        "surface_id": "transmog-steps",
-        "input_id": "steps"
-      },
-      "adapter": "transmog-build-v1",
-      "delivery": {
-        "mode": "latest"
-      }
+      "id": "transmog-checks-live",
+      "source": { "owner": "eval-studio", "stream": "eval-verification", "contract": "canvas.run.watch.v1" },
+      "target": { "surface_id": "transmog-checks", "input_id": "run" },
+      "adapter": "eval-watch-v1", "delivery": { "mode": "latest" }
     },
     {
-      "id": "transmog-confidence-live",
-      "source": {
-        "owner": "mac-studio-transmog",
-        "stream": "transmog-confidence",
-        "contract": "transmog.build.status.v1"
-      },
-      "target": {
-        "surface_id": "transmog-confidence",
-        "input_id": "confidence"
-      },
-      "adapter": "transmog-build-v1",
-      "delivery": {
-        "mode": "latest"
-      }
-    },
-    {
-      "id": "transmog-files-live",
-      "source": {
-        "owner": "canvas-artifact-index",
-        "stream": "transmog-artifacts",
-        "contract": "canvas.artifact.search.v1"
-      },
-      "target": {
-        "surface_id": "transmog-files",
-        "input_id": "results"
-      },
-      "adapter": "alfalfa-manifest-search-v1",
-      "delivery": {
-        "mode": "latest"
-      }
+      "id": "transmog-events-live",
+      "source": { "owner": "eval-studio", "stream": "eval-events", "contract": "canvas.run.watch.v1" },
+      "target": { "surface_id": "transmog-events", "input_id": "run" },
+      "adapter": "eval-watch-v1", "delivery": { "mode": "latest" }
     }
   ],
-  "focused_surface_id": "transmog-ask"
+  "focused_surface_id": "transmog-part"
 }

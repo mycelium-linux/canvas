@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.fpl.panopticon-globe-stream</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/ajmwagar/src/fpl/dock/target/release/canvas-map-stream</string>
+    <string>/Users/ajmwagar/src/fpl/dock/config/deploy/mac-studio/panopticon-globe-stream.json</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>3</integer>
+  <key>StandardOutPath</key><string>/Users/ajmwagar/Library/Logs/panopticon-globe-stream.log</string>
+  <key>StandardErrorPath</key><string>/Users/ajmwagar/Library/Logs/panopticon-globe-stream.log</string>
+</dict>
+</plist>

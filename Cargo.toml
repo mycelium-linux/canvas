@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/canvas-workspace", "crates/canvas-browser-host", "crates/canvas-feeds", "crates/canvas-alfalfa", "crates/canvas-bifrost", "crates/canvas-dcp", "crates/canvas-eval", "crates/canvas-fab", "crates/canvas-shroud", "crates/canvas-frigate", "crates/canvas-media-edge", "crates/canvas-model-host", "crates/canvas-model-viewer", "crates/canvas-metrics", "crates/canvas-sse", "crates/canvas", "crates/canvas-core", "crates/canvas-linux", "crates/canvas-mac", "crates/canvas-control", "crates/canvas-web", "crates/canvas-widgets", "crates/canvas-survey", "crates/canvas-agents", "crates/canvas-agent-bridge", ]
+members = ["crates/canvas-workspace", "crates/canvas-browser-host", "crates/canvas-feeds", "crates/canvas-alfalfa", "crates/canvas-bifrost", "crates/canvas-dcp", "crates/canvas-eval", "crates/canvas-fab", "crates/canvas-shroud", "crates/canvas-frigate", "crates/canvas-media-edge", "crates/canvas-model-host", "crates/canvas-model-viewer", "crates/canvas-metrics", "crates/canvas-sse", "crates/canvas", "crates/canvas-core", "crates/canvas-linux", "crates/canvas-mac", "crates/canvas-control", "crates/canvas-web", "crates/canvas-widgets", "crates/canvas-survey", "crates/canvas-agents", "crates/canvas-agent-bridge", "crates/canvas-map-wgpu", ]
 default-members = ["crates/canvas-core", "crates/canvas-linux", "crates/canvas-mac"]
 exclude = ["vendor/coherence-tokens", "vendor/coherence-native", "vendor/iced_wgpu"]
 resolver = "2"
@@ -30,9 +30,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 dcp = { git = "https://github.com/FuturePresentLabs/dcp.git", rev = "d3a1335" }
 tempfile = "3"
 coherence-tokens = { path = "vendor/coherence-tokens" }
-# The household bus contract, shared with JARVIS (dock marbles dock-pubd).
-# Pinned by rev; bump deliberately alongside unibus releases.
-unibus = { git = "ssh://git@github.com/FuturePresentLabs/unibus.git", rev = "b47a6cc15a6246296ac34136d513533d21dd11c1" }
+# The household bus contract, shared with JARVIS. Sourced from the sibling
+# checkout during local development; a release pins it by rev instead.
+unibus = { path = "../unibus/crates/unibus" }
 stream-descriptors = { path = "../unibus/crates/stream-descriptors" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 

@@ -44,11 +44,25 @@ pub struct Publisher {
 #[cfg(unix)]
 impl Publisher {
     pub fn new() -> Self {
+        let path = canvas_core::workspace_mirror_socket_path();
+        let stream = path
+            .as_ref()
+            .and_then(|path| std::os::unix::net::UnixStream::connect(path).ok());
         Self {
-            stream: None,
-            path: canvas_core::workspace_mirror_socket_path(),
+            stream,
+            path,
             last_sent: None,
         }
+    }
+
+    /// Whether this Canvas has a live local handoff to `canvas-edge`.
+    ///
+    /// This deliberately says nothing about remote peers: the local Unix
+    /// stream proves only that the authenticated transport owner accepted the
+    /// connection. Peer freshness belongs to the router registry rather than
+    /// being guessed from configuration or a socket pathname.
+    pub fn edge_connected(&self) -> bool {
+        self.stream.is_some()
     }
 
     /// Best-effort local publication. Absence of an edge is a valid disabled

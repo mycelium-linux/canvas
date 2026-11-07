@@ -49,6 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "       echo 'surface add-external studio-mix synesthesia/mix-overview' | canvasctl"
         );
         eprintln!("       echo 'surface center surf-browser 0.70' | canvasctl");
+        eprintln!("       echo 'file-actions \"/path/to/image.png\"' | canvasctl");
         eprintln!("       echo 'focus\\nbg dock' | canvasctl");
         eprintln!("       echo 'move 0 25 1920 1150' | canvasctl");
         eprintln!("       echo 'indicator status speaking \"Socket live\"' | canvasctl");

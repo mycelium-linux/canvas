@@ -1,0 +1,19 @@
+[Unit]
+Description=Announce remote video streams to Canvas
+After=network-online.target unibus-router.service canvas-media-edge.service
+Wants=network-online.target
+Requires=unibus-router.service canvas-media-edge.service
+
+[Service]
+Type=simple
+User=ajm
+Environment=HOME=/home/ajm
+ExecStart=/usr/local/bin/canvas-media-announce /home/ajm/.config/canvas/media-remote-video.json
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

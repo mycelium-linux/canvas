@@ -1,0 +1,31 @@
+{
+  "width": 1280,
+  "height": 720,
+  "frames_per_second": 24,
+  "source_id": "panopticon-globe",
+  "ffmpeg_binary": "/opt/homebrew/bin/ffmpeg",
+  "snapshot_path": "/Users/ajmwagar/src/fpl/dock/crates/canvas/tests/fixtures/spatial_snapshot_v1.json",
+  "raster_path": "/Users/ajmwagar/src/fpl/panopticon/galileo/wasm/assets/earth.jpg",
+  "theme": {
+    "background": "#101014",
+    "background_strong": "#08090c",
+    "surface": "#20242c",
+    "surface_muted": "#171a20",
+    "text": "#f2f4f8",
+    "text_muted": "#9299a6",
+    "primary": "#66ccff",
+    "success": "#57d38c",
+    "warning": "#f0bd5a",
+    "danger": "#f06a73",
+    "info": "#7aa7ff",
+    "border": "#343a46",
+    "border_strong": "#525b6b"
+  },
+  "camera": {
+    "latitude": 32.0,
+    "longitude": -118.0,
+    "distance_m": 16000000.0,
+    "pitch_degrees": 8.0,
+    "orbit_degrees_per_second": 1.5
+  }
+}

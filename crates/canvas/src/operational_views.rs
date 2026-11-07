@@ -236,6 +236,8 @@ fn appetite(kind: &WidgetKind) -> f32 {
         | WidgetKind::MediaTransport { .. }
         | WidgetKind::DawDeck { .. }
         | WidgetKind::MixField { .. }
+        | WidgetKind::WikiRaceHud { .. }
+        | WidgetKind::WikiRaceTrace { .. }
         | WidgetKind::ModelTelemetry { .. }
         | WidgetKind::SpanTimeline { .. }
         | WidgetKind::StateTimeline { .. }
@@ -254,8 +256,6 @@ fn appetite(kind: &WidgetKind) -> f32 {
         | WidgetKind::Launcher { .. }
         | WidgetKind::HyperspaceShader { .. }
         | WidgetKind::CdgViewer { .. }
-        | WidgetKind::WikiRaceHud { .. }
-        | WidgetKind::WikiRaceTrace { .. }
         | WidgetKind::LyricsDisplay { .. } => 1.0,
         WidgetKind::Stat { .. }
         | WidgetKind::MediaCard { .. }

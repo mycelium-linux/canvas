@@ -11,6 +11,7 @@ bytemuck = { version = "1.24", features = ["derive"] }
 canvas-core.workspace = true
 fpl-gfx = { path = "../../../gfx" }
 glam = { version = "0.30", features = ["bytemuck"] }
+gltf = { version = "1.4", default-features = false, features = ["utils"] }
 mlua = { version = "0.12.1", features = ["luau", "serialize"] }
 pollster = "0.4"
 serde.workspace = true

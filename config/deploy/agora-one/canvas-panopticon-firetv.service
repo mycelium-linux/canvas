@@ -1,0 +1,14 @@
+[Unit]
+Description=Panopticon globe HLS for Fire TV Canvas
+After=network-online.target canvas-tv-media-http.service
+Wants=canvas-tv-media-http.service
+
+[Service]
+ExecStart=/usr/bin/ffmpeg -hide_banner -loglevel warning -nostdin -fflags +genpts -i udp://100.80.85.86:55212?fifo_size=65536&overrun_nonfatal=1 -map 0:v:0 -an -c:v copy -f hls -hls_time 1 -hls_list_size 8 -hls_start_number_source epoch -hls_flags delete_segments+independent_segments+temp_file+discont_start+omit_endlist -hls_segment_filename /home/ajmwagar/.local/share/canvas-tv-hls/panopticon-%%09d.ts /home/ajmwagar/.local/share/canvas-tv-hls/panopticon.m3u8
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=5
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

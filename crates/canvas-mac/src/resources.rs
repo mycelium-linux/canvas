@@ -2,6 +2,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::process::{Command, Stdio};
+
+use canvas_core::{ThemeMode, ThemeSelection};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
@@ -146,7 +149,7 @@ fn entries(id: &str, context: &Value) -> Result<Vec<Entry>, String> {
         id: "@home".into(),
         title: format!("{name} project home"),
         kind: "project".into(),
-        uri: home.clone(),
+        uri: format!("alfalfa://projects/{id}"),
         note: None,
         home: home.clone(),
         status: project["status"].as_str().unwrap_or("active").into(),
@@ -198,12 +201,21 @@ pub fn project_entries(id: &str) -> Result<Vec<Entry>, String> {
 }
 
 pub fn load() -> Result<Index, String> {
-    let projects = super::alfalfa::list()?;
-    let projects = projects.as_array().ok_or("Invalid Alfalfa catalog")?;
     let mut index = Index::default();
+    let projects = match super::alfalfa::list() {
+        Ok(projects) => projects,
+        Err(_) => {
+            index.warnings.push(
+                "Alfalfa is unavailable; showing resources from the other project owners. Command-R to retry."
+                    .into(),
+            );
+            add_engineering_catalogs(&mut index);
+            return Ok(index);
+        }
+    };
+    let projects = projects.as_array().ok_or("Invalid Alfalfa catalog")?;
     match super::alfalfa::companies().and_then(companies) {
         Ok(companies) => index.companies = companies,
-        Err(error) if error == super::alfalfa::AUTHORIZATION_DENIED => return Err(error),
         Err(_) => index.warnings.push(
             "Company folders are unavailable; showing Unassigned workspaces. Command-R to retry."
                 .into(),
@@ -239,13 +251,6 @@ pub fn load() -> Result<Index, String> {
             }
         });
     }
-    if index
-        .warnings
-        .iter()
-        .any(|e| e == super::alfalfa::AUTHORIZATION_DENIED)
-    {
-        return Err(super::alfalfa::AUTHORIZATION_DENIED.into());
-    }
     if index.entries.iter().any(|e| {
         e.company_id
             .as_ref()
@@ -255,14 +260,169 @@ pub fn load() -> Result<Index, String> {
             .warnings
             .push("Some project companies are not in the current verified membership list.".into());
     }
+    add_engineering_catalogs(&mut index);
     match super::alfalfa::activity() {
         Ok(activity) => add_observations(&mut index, &activity)?,
-        Err(error) if error == super::alfalfa::AUTHORIZATION_DENIED => return Err(error),
         Err(_) => index
             .warnings
             .push("My agents is unavailable; showing registered projects.".into()),
     }
     Ok(index)
+}
+
+fn add_engineering_catalogs(index: &mut Index) {
+    let transmog = std::env::var("CANVAS_TRANSMOG_VIEWER_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:4173".into());
+    let lob =
+        std::env::var("CANVAS_LOB_VIEWER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".into());
+    let reads = std::thread::scope(|scope| {
+        let transmog = scope.spawn(|| owner_json(&transmog, "/api/state"));
+        let lob = scope.spawn(|| owner_json(&lob, "/api/circuits"));
+        (transmog.join(), lob.join())
+    });
+    match reads.0 {
+        Ok(Ok(value)) => match transmog_entries(&value, &transmog) {
+            Ok(entries) => index.entries.extend(entries),
+            Err(error) => index.warnings.push(error),
+        },
+        _ => index.warnings.push(
+            "Transmog is unavailable; models are not listed. Start `transmog serve` and refresh."
+                .into(),
+        ),
+    }
+    match reads.1 {
+        Ok(Ok(value)) => match lob_entries(&value, &lob) {
+            Ok(entries) => index.entries.extend(entries),
+            Err(error) => index.warnings.push(error),
+        },
+        _ => index.warnings.push(
+            "legion-of-bom is unavailable; circuits are not listed. Start `lob serve` and refresh."
+                .into(),
+        ),
+    }
+}
+
+fn owner_json(base: &str, path: &str) -> Result<Value, String> {
+    let mut url = safe_viewer_base(base).ok_or("Invalid engineering viewer URL")?;
+    url.path_segments_mut()
+        .map_err(|_| "Invalid engineering catalog URL")?
+        .pop_if_empty()
+        .extend(path.trim_matches('/').split('/'));
+    let output = super::bounded_output(
+        Command::new("/usr/bin/curl").args([
+            "--silent",
+            "--show-error",
+            "--noproxy",
+            "*",
+            "--connect-timeout",
+            "1",
+            "--max-time",
+            "3",
+            "--max-filesize",
+            "4194304",
+            "--fail",
+            "--header",
+            "Accept: application/json",
+            "--",
+            url.as_str(),
+        ]),
+        8,
+    )?;
+    serde_json::from_slice(&output.stdout).map_err(|_| "Owner returned invalid JSON".into())
+}
+
+fn owner_parent(project: &str, name: &str, purpose: &str, home: &str) -> Entry {
+    Entry {
+        company_id: None,
+        workspace_id: None,
+        project: project.into(),
+        project_name: name.into(),
+        id: "@home".into(),
+        title: name.into(),
+        kind: "project".into(),
+        uri: home.into(),
+        note: None,
+        home: home.into(),
+        status: "active".into(),
+        purpose: purpose.into(),
+    }
+}
+
+fn transmog_entries(value: &Value, base: &str) -> Result<Vec<Entry>, String> {
+    if value["schema"] != "transmog.viewer-index.v1" {
+        return Err("Transmog returned an unsupported catalog format.".into());
+    }
+    let projects = value["projects"]
+        .as_array()
+        .ok_or("Transmog catalog has no project list.")?;
+    let mut result = vec![owner_parent(
+        "owner-transmog",
+        "Transmog",
+        "Mechanical parts and assemblies",
+        base,
+    )];
+    let mut seen = std::collections::HashSet::new();
+    for project in projects.iter().take(256) {
+        let (Some(id), Some(name)) = (project["id"].as_str(), project["name"].as_str()) else {
+            continue;
+        };
+        if !owner_identifier(id) || !seen.insert(id) {
+            continue;
+        }
+        let count = project["parts"].as_array().map_or(0, Vec::len);
+        result.push(Entry {
+            company_id: None,
+            workspace_id: None,
+            project: "owner-transmog".into(),
+            project_name: "Transmog".into(),
+            id: id.into(),
+            title: name.into(),
+            kind: "model".into(),
+            uri: format!("transmog://projects/{id}"),
+            note: Some(format!("{count} parts/assemblies")),
+            home: base.into(),
+            status: "active".into(),
+            purpose: String::new(),
+        });
+    }
+    Ok(result)
+}
+
+fn lob_entries(value: &Value, base: &str) -> Result<Vec<Entry>, String> {
+    let circuits = value
+        .as_array()
+        .ok_or("legion-of-bom catalog has an unsupported format.")?;
+    let mut result = vec![owner_parent(
+        "owner-lob",
+        "legion-of-bom",
+        "Circuits, PCBs, BOMs, and source files",
+        base,
+    )];
+    let mut seen = std::collections::HashSet::new();
+    for circuit in circuits.iter().take(256) {
+        let Some(name) = circuit["name"].as_str() else {
+            continue;
+        };
+        if !owner_identifier(name) || !seen.insert(name) {
+            continue;
+        }
+        let artifacts = circuit["artifacts"].as_array().map_or(0, Vec::len);
+        result.push(Entry {
+            company_id: None,
+            workspace_id: None,
+            project: "owner-lob".into(),
+            project_name: "legion-of-bom".into(),
+            id: name.into(),
+            title: name.replace(['-', '_'], " "),
+            kind: "circuit".into(),
+            uri: format!("lob://circuits/{name}"),
+            note: Some(format!("{artifacts} tracked artifacts")),
+            home: base.into(),
+            status: "active".into(),
+            purpose: String::new(),
+        });
+    }
+    Ok(result)
 }
 
 fn repository_key(uri: &str) -> Option<String> {
@@ -395,6 +555,9 @@ pub fn matching(index: &Index, query: &str) -> Vec<usize> {
 /// User-activated targets only. Custom schemes and relative paths are delegated
 /// to the project page, rather than executed as local app commands.
 pub fn target(entry: &Entry) -> String {
+    if let Some(view) = owner_view_url(entry) {
+        return view;
+    }
     match url::Url::parse(&entry.uri) {
         Ok(url)
             if matches!(url.scheme(), "https" | "http")
@@ -438,7 +601,94 @@ pub fn target(entry: &Entry) -> String {
     }
 }
 
-pub fn open(entry: &Entry) -> Result<(), String> {
+/// Resolve engineering resources through the web view owned by their native
+/// tool. The Alfalfa URI keeps durable owner identity; the configured base is
+/// only where this Canvas host can currently reach that owner.
+pub fn owner_view_url(entry: &Entry) -> Option<String> {
+    let transmog = std::env::var("CANVAS_TRANSMOG_VIEWER_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:4173".into());
+    let lob =
+        std::env::var("CANVAS_LOB_VIEWER_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".into());
+    owner_view_url_with_bases(entry, &transmog, &lob)
+}
+
+fn owner_view_url_with_bases(entry: &Entry, transmog: &str, lob: &str) -> Option<String> {
+    // `url` correctly normalizes dot segments, but an owner locator is an
+    // identity, not a navigation request. Reject spelling that would change
+    // identity during parsing (including percent-encoded spellings).
+    if entry.uri.contains('%')
+        || entry
+            .uri
+            .split('/')
+            .any(|segment| matches!(segment, "." | ".."))
+    {
+        return None;
+    }
+    let locator = url::Url::parse(&entry.uri).ok()?;
+    if !locator.username().is_empty()
+        || locator.password().is_some()
+        || locator.query().is_some()
+        || locator.fragment().is_some()
+    {
+        return None;
+    }
+    let segments: Vec<_> = locator
+        .path_segments()?
+        .filter(|part| !part.is_empty())
+        .collect();
+    if segments.len() != 1 || !owner_identifier(segments[0]) {
+        return None;
+    }
+    let id = segments[0];
+    match (entry.kind.as_str(), locator.scheme(), locator.host_str()) {
+        ("model", "transmog", Some("projects")) => {
+            let mut base = safe_viewer_base(transmog)?;
+            let encoded: String = url::form_urlencoded::byte_serialize(id.as_bytes()).collect();
+            base.set_fragment(Some(&format!("/p/{encoded}")));
+            Some(base.into())
+        }
+        ("circuit", "lob", Some("circuits")) => {
+            let mut base = safe_viewer_base(lob)?;
+            base.path_segments_mut()
+                .ok()?
+                .pop_if_empty()
+                .extend(["c", id]);
+            Some(base.into())
+        }
+        _ => None,
+    }
+}
+
+fn owner_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+
+fn safe_viewer_base(value: &str) -> Option<url::Url> {
+    let mut url = url::Url::parse(value).ok()?;
+    let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
+    if !((url.scheme() == "https" && url.host_str().is_some())
+        || (url.scheme() == "http" && loopback))
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url)
+}
+
+pub fn open(entry: &Entry, theme: ThemeSelection) -> Result<(), String> {
+    if let Some(project) = alfalfa_project_id(entry) {
+        return launch_alfalfa_viewer(&project, theme);
+    }
     let output = super::bounded_output(
         std::process::Command::new("/usr/bin/open")
             .arg("--")
@@ -453,11 +703,315 @@ pub fn open(entry: &Entry) -> Result<(), String> {
     }
 }
 
+fn alfalfa_project_id(entry: &Entry) -> Option<String> {
+    if entry.kind != "project"
+        || entry.uri.contains('%')
+        || entry.uri.split('/').any(|part| matches!(part, "." | ".."))
+    {
+        return None;
+    }
+    let locator = url::Url::parse(&entry.uri).ok()?;
+    if locator.scheme() != "alfalfa"
+        || locator.host_str() != Some("projects")
+        || !locator.username().is_empty()
+        || locator.password().is_some()
+        || locator.query().is_some()
+        || locator.fragment().is_some()
+    {
+        return None;
+    }
+    let parts = locator
+        .path_segments()?
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    (parts.len() == 1 && owner_identifier(parts[0])).then(|| parts[0].to_owned())
+}
+
+fn hex(rgb: [u8; 3]) -> String {
+    format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2])
+}
+
+fn alfalfa_theme_snapshot(theme: ThemeSelection, project: &str) -> Value {
+    let palette = theme.palette();
+    serde_json::json!({
+        "schema": "coherence.resolved-theme/1",
+        "source": "canvas",
+        "mode": match theme.mode() { ThemeMode::Light => "light", ThemeMode::Dark => "dark" },
+        "palette": {
+            "background": hex(palette.background),
+            "surface": hex(palette.surface),
+            "text": hex(palette.text),
+            "text_muted": hex(palette.text_muted),
+            "primary": hex(palette.primary),
+            "success": hex(palette.success),
+            "warning": hex(palette.warning),
+            "danger": hex(palette.danger),
+            "border": hex(palette.border),
+        },
+        "provenance": format!("canvas-core/{}:project/{project}", env!("CARGO_PKG_VERSION")),
+    })
+}
+
+fn write_alfalfa_theme(project: &str, theme: ThemeSelection) -> Result<std::path::PathBuf, String> {
+    let directory = std::env::temp_dir()
+        .join("fpl-canvas")
+        .join("alfalfa-themes");
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("Cannot prepare Alfalfa viewer theme: {error}"))?;
+    let path = directory.join(format!("{project}.json"));
+    let temporary = directory.join(format!(".{project}.{}.tmp", std::process::id()));
+    let bytes = serde_json::to_vec_pretty(&alfalfa_theme_snapshot(theme, project))
+        .map_err(|error| format!("Cannot encode Alfalfa viewer theme: {error}"))?;
+    std::fs::write(&temporary, bytes)
+        .map_err(|error| format!("Cannot write Alfalfa viewer theme: {error}"))?;
+    std::fs::rename(&temporary, &path)
+        .map_err(|error| format!("Cannot publish Alfalfa viewer theme: {error}"))?;
+    Ok(path)
+}
+
+fn launch_alfalfa_viewer(project: &str, theme: ThemeSelection) -> Result<(), String> {
+    let viewer =
+        std::env::var_os("CANVAS_ALFALFA_VIEWER_BIN").unwrap_or_else(|| "alfalfa-viewer".into());
+    let port = std::env::var("DOCK_ALFALFA_PORT")
+        .unwrap_or_else(|_| "8791".into())
+        .parse::<u16>()
+        .map_err(|_| "Invalid Alfalfa port")?;
+    if port == 0 {
+        return Err("Invalid Alfalfa port".into());
+    }
+    launch_alfalfa_viewer_with(&viewer, port, project, theme)
+}
+
+fn launch_alfalfa_viewer_with(
+    viewer: &std::ffi::OsStr,
+    port: u16,
+    project: &str,
+    theme: ThemeSelection,
+) -> Result<(), String> {
+    let theme = write_alfalfa_theme(project, theme)?;
+    let arguments = alfalfa_launch_arguments(port, project, &theme);
+    let mut child = Command::new(viewer)
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("Cannot launch the Alfalfa manifest viewer: {error}"))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+fn alfalfa_launch_arguments(
+    port: u16,
+    project: &str,
+    theme: &std::path::Path,
+) -> Vec<std::ffi::OsString> {
+    [
+        std::ffi::OsString::from("--owner"),
+        std::ffi::OsString::from(format!("127.0.0.1:{port}")),
+        std::ffi::OsString::from("--project"),
+        std::ffi::OsString::from(project),
+        std::ffi::OsString::from("--theme"),
+        theme.as_os_str().to_owned(),
+    ]
+    .into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     fn fixture() -> Value {
         serde_json::json!({"definition":{"project":{"id":"business","name":"Studio business"},"resource":[{"id":"notes","title":"Weekly notes","kind":"note","uri":"notes.md","context_path":"notes.md"},{"id":"sales","title":"Sales dashboard","kind":"artifact","uri":"https://example.test/sales"}]},"sources":[{"path":"notes.md","content":"A real owner note"},{"path":"private.md","content":"Not included"}]})
+    }
+
+    fn engineering(kind: &str, uri: &str) -> Entry {
+        Entry {
+            company_id: None,
+            workspace_id: None,
+            project: "vehicle".into(),
+            project_name: "Vehicle".into(),
+            id: "design".into(),
+            title: "Design".into(),
+            kind: kind.into(),
+            uri: uri.into(),
+            note: None,
+            home: "https://alfalfa.example/projects/vehicle".into(),
+            status: "active".into(),
+            purpose: String::new(),
+        }
+    }
+
+    #[test]
+    fn engineering_resources_resolve_to_their_owner_web_views() {
+        let model = engineering("model", "transmog://projects/front-suspension");
+        assert_eq!(
+            owner_view_url_with_bases(
+                &model,
+                "https://transmog.example/viewer",
+                "https://lob.example"
+            )
+            .as_deref(),
+            Some("https://transmog.example/viewer#/p/front-suspension")
+        );
+        let circuit = engineering("circuit", "lob://circuits/controller-board");
+        assert_eq!(
+            owner_view_url_with_bases(
+                &circuit,
+                "https://transmog.example",
+                "https://lob.example/viewer/"
+            )
+            .as_deref(),
+            Some("https://lob.example/viewer/c/controller-board")
+        );
+    }
+
+    #[test]
+    fn alfalfa_project_home_is_an_owner_native_locator() {
+        let entries = entries("business", &fixture()).unwrap();
+        assert_eq!(entries[0].uri, "alfalfa://projects/business");
+        assert_eq!(alfalfa_project_id(&entries[0]).as_deref(), Some("business"));
+        assert_eq!(target(&entries[0]), entries[0].home);
+        for locator in [
+            "alfalfa://projects/a/b",
+            "alfalfa://projects/../secret",
+            "alfalfa://projects/name?token=secret",
+            "alfalfa://other/name",
+        ] {
+            let mut entry = entries[0].clone();
+            entry.uri = locator.into();
+            assert_eq!(alfalfa_project_id(&entry), None, "{locator}");
+        }
+    }
+
+    #[test]
+    fn alfalfa_theme_snapshot_uses_the_resolved_canvas_roles() {
+        let theme = ThemeSelection::Coherence {
+            mode: ThemeMode::Dark,
+            accent: canvas_core::Accent::Info,
+        };
+        let palette = theme.palette();
+        let snapshot = alfalfa_theme_snapshot(theme, "business");
+        assert_eq!(snapshot["schema"], "coherence.resolved-theme/1");
+        assert_eq!(snapshot["source"], "canvas");
+        assert_eq!(snapshot["mode"], "dark");
+        assert_eq!(snapshot["palette"]["primary"], hex(palette.primary));
+        assert_eq!(snapshot["palette"]["background"], hex(palette.background));
+        assert_eq!(snapshot["palette"]["border"], hex(palette.border));
+        assert!(snapshot["provenance"]
+            .as_str()
+            .unwrap()
+            .contains("project/business"));
+    }
+
+    #[test]
+    fn alfalfa_launch_arguments_bind_owner_project_and_theme() {
+        let arguments = alfalfa_launch_arguments(
+            8791,
+            "business",
+            std::path::Path::new("/tmp/business-theme.json"),
+        );
+        assert_eq!(
+            arguments,
+            [
+                "--owner",
+                "127.0.0.1:8791",
+                "--project",
+                "business",
+                "--theme",
+                "/tmp/business-theme.json",
+            ]
+            .map(std::ffi::OsString::from)
+        );
+    }
+
+    #[test]
+    fn alfalfa_launch_failure_is_visible() {
+        let theme = ThemeSelection::Coherence {
+            mode: ThemeMode::Dark,
+            accent: canvas_core::Accent::Brand,
+        };
+        let error = launch_alfalfa_viewer_with(
+            std::ffi::OsStr::new("/definitely/missing/alfalfa-viewer"),
+            8791,
+            "business",
+            theme,
+        )
+        .unwrap_err();
+        assert!(error.contains("Cannot launch the Alfalfa manifest viewer"));
+    }
+
+    #[test]
+    fn engineering_owner_catalogs_become_browsable_resources() {
+        let models = transmog_entries(
+            &serde_json::json!({
+                "schema":"transmog.viewer-index.v1",
+                "projects":[
+                    {"id":"fixie","name":"Fixie frame","parts":[{},{}]},
+                    {"id":"../escape","name":"Unsafe","parts":[]}
+                ]
+            }),
+            "http://127.0.0.1:4173",
+        )
+        .unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].project, "owner-transmog");
+        assert_eq!(models[0].kind, "project");
+        assert_eq!(models[1].uri, "transmog://projects/fixie");
+        assert_eq!(models[1].note.as_deref(), Some("2 parts/assemblies"));
+        assert_eq!(target(&models[1]), "http://127.0.0.1:4173/#/p/fixie");
+
+        let circuits = lob_entries(
+            &serde_json::json!([
+                {"name":"slew_limiter","artifacts":[{},{},{}]},
+                {"name":"bad/name","artifacts":[]}
+            ]),
+            "http://127.0.0.1:8080",
+        )
+        .unwrap();
+        assert_eq!(circuits.len(), 2);
+        assert_eq!(circuits[1].title, "slew limiter");
+        assert_eq!(circuits[1].uri, "lob://circuits/slew_limiter");
+        assert_eq!(target(&circuits[1]), "http://127.0.0.1:8080/c/slew_limiter");
+    }
+
+    #[test]
+    fn engineering_catalog_parsers_reject_wrong_owner_shapes() {
+        assert!(transmog_entries(
+            &serde_json::json!({"schema":"other","projects":[]}),
+            "http://127.0.0.1:4173"
+        )
+        .is_err());
+        assert!(lob_entries(&serde_json::json!({"circuits":[]}), "http://127.0.0.1:8080").is_err());
+    }
+
+    #[test]
+    fn owner_view_resolution_fails_closed() {
+        for (kind, locator) in [
+            ("model", "transmog://projects/a/b"),
+            ("model", "transmog://projects/../secret"),
+            ("model", "transmog://other/design"),
+            ("circuit", "lob://circuits/board?token=secret"),
+            ("file", "transmog://projects/design"),
+        ] {
+            let entry = engineering(kind, locator);
+            assert!(
+                owner_view_url_with_bases(
+                    &entry,
+                    "https://transmog.example",
+                    "https://lob.example"
+                )
+                .is_none(),
+                "{locator} must not resolve"
+            );
+        }
+        let model = engineering("model", "transmog://projects/design");
+        assert!(
+            owner_view_url_with_bases(&model, "http://transmog.example", "https://lob.example")
+                .is_none(),
+            "plain HTTP is allowed only on loopback"
+        );
     }
     #[test]
     fn canvas_workspace_identity_is_distinct_from_company_identity() {

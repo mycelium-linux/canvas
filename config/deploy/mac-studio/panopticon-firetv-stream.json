@@ -1,0 +1,94 @@
+{
+  "width": 1280,
+  "height": 720,
+  "frames_per_second": 24,
+  "endpoint": "udp://100.80.85.86:55212?pkt_size=1128",
+  "ffmpeg_binary": "/opt/homebrew/bin/ffmpeg",
+  "live_snapshot": {
+    "url": "http://127.0.0.1:18581/operator/spatial/snapshot?domains=ais,hf_radar,noaa_coops,marine_weather,nws_weather,peeringdb,ripe_atlas&limit=20000",
+    "key_file": "/Users/ajmwagar/.config/canvas-panopticon/spatial-owner.key"
+  },
+  "reference_snapshot_path": "/Users/ajmwagar/.config/canvas-panopticon/submarine-cables.json",
+  "raster_path": "/Users/ajmwagar/src/fpl/panopticon/galileo/wasm/assets/earth.jpg",
+  "detail_tile_template": "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+  "theme": {
+    "source": "coherence",
+    "mode": "dark",
+    "accent": "info"
+  },
+  "camera": {
+    "tour": {
+      "stops": [
+        {
+          "name": "Puget Sound",
+          "latitude": 47.6,
+          "longitude": -122.5,
+          "distance_m": 180000,
+          "hold_secs": 20,
+          "travel_secs": 10
+        },
+        {
+          "name": "Lake Union",
+          "latitude": 47.639,
+          "longitude": -122.333,
+          "distance_m": 6500,
+          "hold_secs": 18,
+          "travel_secs": 5
+        },
+        {
+          "name": "Fremont",
+          "latitude": 47.651,
+          "longitude": -122.351,
+          "distance_m": 4500,
+          "hold_secs": 18,
+          "travel_secs": 12
+        },
+        {
+          "name": "North Puget Sound",
+          "latitude": 48.25,
+          "longitude": -122.8,
+          "distance_m": 220000,
+          "hold_secs": 3,
+          "travel_secs": 8
+        },
+        {
+          "name": "San Juan Islands",
+          "latitude": 48.55,
+          "longitude": -123.02,
+          "distance_m": 90000,
+          "hold_secs": 22,
+          "travel_secs": 14
+        },
+        {
+          "name": "North America orbit",
+          "latitude": 33,
+          "longitude": -105,
+          "distance_m": 18000000,
+          "hold_secs": 3,
+          "travel_secs": 16
+        },
+        {
+          "name": "Puerto Rico",
+          "latitude": 18.3,
+          "longitude": -66.4,
+          "distance_m": 240000,
+          "hold_secs": 25,
+          "travel_secs": 14
+        },
+        {
+          "name": "Caribbean orbit",
+          "latitude": 25,
+          "longitude": -85,
+          "distance_m": 18000000,
+          "hold_secs": 4,
+          "travel_secs": 16
+        }
+      ]
+    },
+    "latitude": 47.3,
+    "longitude": -123.5,
+    "distance_m": 1000000,
+    "pitch_degrees": 8,
+    "orbit_degrees_per_second": 0
+  }
+}

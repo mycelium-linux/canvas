@@ -38,6 +38,29 @@ The registered catalog includes Alfalfa and Canvas. Other currently observed wor
 come from the changing My Agents feed. Declared business dashboard URLs become
 available inside their project as soon as they are added in Alfalfa.
 
+Engineering resources retain their owner-native identity while opening through
+the owner's existing web viewer. A `model` at
+`transmog://projects/<project-id>` opens the matching Transmog project route; a
+`circuit` at `lob://circuits/<circuit-id>` opens the matching Legion of BOM
+circuit workspace. Canvas does not read either tool's project directory or
+duplicate its CAD/EDA model. It resolves the locator only when it is opened.
+
+Alfalfa project homes use the same owner-native boundary. An
+`alfalfa://projects/<project-id>` resource launches Alfalfa's standalone native
+manifest viewer with the selected Canvas project's resolved Coherence theme.
+Canvas writes only the versioned `coherence.resolved-theme/1` semantic snapshot;
+Alfalfa remains responsible for manifest projection, navigation and rendering.
+Set `CANVAS_ALFALFA_VIEWER_BIN` when `alfalfa-viewer` is not on `PATH`, and
+`DOCK_ALFALFA_PORT` when the loopback owner does not use port 8791.
+
+The local defaults are the owners' documented development servers:
+`http://127.0.0.1:4173` for `transmog serve` and
+`http://127.0.0.1:8080` for `lob serve`. Set
+`CANVAS_TRANSMOG_VIEWER_URL` or `CANVAS_LOB_VIEWER_URL` to an HTTPS deployment
+base when the viewer is hosted. Plain HTTP overrides are accepted only on
+loopback. Canvas opens loopback views locally; HTTPS views may be presented in
+the project's Agora browser.
+
 ```sh
 canvas-mac resources
 canvas-mac resources dock notes

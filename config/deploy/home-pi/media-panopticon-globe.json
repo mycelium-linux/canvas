@@ -1,0 +1,44 @@
+{
+  "bus": {
+    "installation_id": "home",
+    "producer_id": "home-pi-media-announce",
+    "hub_endpoint": "127.0.0.1:18790",
+    "token_file": "/home/ajm/.config/canvas/home-pi-display.token",
+    "zones": ["living-room"],
+    "capabilities": ["camera.stream.source"],
+    "screen_anchors": [],
+    "schema_version": 1
+  },
+  "destination": "living-room",
+  "ttl_ms": 15000,
+  "streams": [
+    {
+      "schema_version": 1,
+      "camera_id": "surf-tv",
+      "display_name": "Surf · Agora",
+      "zone": "living-room",
+      "transport": "udp_mpeg_ts",
+      "endpoint": "udp://192.168.2.74:5603",
+      "codec": "h264",
+      "width": 1280,
+      "height": 720,
+      "frame_rate_millihz": 12000,
+      "announced_at_unix_ms": 0,
+      "valid_until_unix_ms": 1
+    },
+    {
+      "schema_version": 1,
+      "camera_id": "panopticon-globe",
+      "display_name": "Panopticon · Globe",
+      "zone": "living-room",
+      "transport": "udp_mpeg_ts",
+      "endpoint": "udp://192.168.10.74:5604",
+      "codec": "h264",
+      "width": 1280,
+      "height": 720,
+      "frame_rate_millihz": 24000,
+      "announced_at_unix_ms": 0,
+      "valid_until_unix_ms": 1
+    }
+  ]
+}

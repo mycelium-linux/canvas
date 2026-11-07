@@ -56,6 +56,12 @@ pub enum BrowserAction {
     Query(String),
     OpenFolder(String),
     Select(String),
+    /// Open this exact file from an icon/list activation. Unlike
+    /// `OpenSelected`, callers do not need a separate selection round-trip.
+    Open(String),
+    SelectNext,
+    SelectPrevious,
+    OpenParent,
     OpenSelected,
 }
 
@@ -292,6 +298,50 @@ impl ProjectManifest {
                     return Err(Error(format!("unknown project entry: {id}")));
                 }
                 state.selected_id = Some(id);
+            }
+            BrowserAction::Open(id) => {
+                let entry = self
+                    .entries
+                    .iter()
+                    .find(|entry| entry.id == id)
+                    .ok_or_else(|| Error(format!("unknown project entry: {id}")))?;
+                state.selected_id = Some(id);
+                return Ok(Some(entry.clone()));
+            }
+            BrowserAction::SelectNext | BrowserAction::SelectPrevious => {
+                let model = self.browse(state, MAX_ENTRIES)?;
+                let files = model
+                    .items
+                    .into_iter()
+                    .filter_map(|item| match item {
+                        BrowserItem::File { entry, .. } => Some(entry.id),
+                        BrowserItem::Folder { .. } => None,
+                    })
+                    .collect::<Vec<_>>();
+                if !files.is_empty() {
+                    let current = state
+                        .selected_id
+                        .as_ref()
+                        .and_then(|id| files.iter().position(|candidate| candidate == id));
+                    let next = match action {
+                        BrowserAction::SelectNext => {
+                            current.map_or(0, |index| (index + 1) % files.len())
+                        }
+                        BrowserAction::SelectPrevious => current.map_or(files.len() - 1, |index| {
+                            (index + files.len() - 1) % files.len()
+                        }),
+                        _ => unreachable!(),
+                    };
+                    state.selected_id = Some(files[next].clone());
+                }
+            }
+            BrowserAction::OpenParent => {
+                state.folder = state
+                    .folder
+                    .rsplit_once('/')
+                    .map_or_else(String::new, |(parent, _)| parent.to_owned());
+                state.query.clear();
+                state.selected_id = None;
             }
             BrowserAction::OpenSelected => {
                 let id = state
@@ -799,6 +849,39 @@ mod tests {
             .unwrap();
         assert_eq!(opened.cid, "bafyb");
         assert_eq!(opened.path, "docs/report.pdf");
+
+        let direct = manifest
+            .apply(&mut state, BrowserAction::Open("a".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(direct.path, "models/enclosure.stl");
+        assert_eq!(state.selected_id.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn keyboard_navigation_moves_between_files_and_back_to_the_parent() {
+        let manifest = manifest();
+        let mut state = BrowserState {
+            folder: "docs".into(),
+            ..BrowserState::default()
+        };
+        manifest
+            .apply(&mut state, BrowserAction::SelectNext)
+            .unwrap();
+        let first = state.selected_id.clone().expect("a file is selected");
+        manifest
+            .apply(&mut state, BrowserAction::SelectNext)
+            .unwrap();
+        assert_ne!(state.selected_id.as_deref(), Some(first.as_str()));
+        manifest
+            .apply(&mut state, BrowserAction::SelectPrevious)
+            .unwrap();
+        assert_eq!(state.selected_id.as_deref(), Some(first.as_str()));
+        manifest
+            .apply(&mut state, BrowserAction::OpenParent)
+            .unwrap();
+        assert!(state.folder.is_empty());
+        assert!(state.selected_id.is_none());
     }
 
     #[test]
