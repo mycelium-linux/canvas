@@ -10337,6 +10337,7 @@ impl App {
                         container(
                             text(label.clone())
                                 .size(font_size)
+                                .wrapping(iced::widget::text::Wrapping::None)
                                 .color(color(rgb.unwrap_or_else(|| scene_ink(*ink, &palette)))),
                         )
                         .into()
