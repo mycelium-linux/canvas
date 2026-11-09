@@ -8,6 +8,9 @@
 # Local Python environment and generated Dock artifacts
 .venv/
 build/
+# Proof builds compile a sibling checkout to a gigabyte of output; the proof is
+# the source, not the tree it leaves behind.
+proofs/counter/
 __pycache__/
 *.egg-info/
 target/
