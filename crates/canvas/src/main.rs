@@ -71,7 +71,6 @@ mod presence;
 use ::canvas::screensaver;
 use ::canvas::stream_contract::{STREAM_FIRST_EVENT_TIMEOUT, STREAM_STALE_AFTER};
 use keyboard_input::*;
-mod spore_present;
 mod spore_socket;
 mod terminal;
 mod transition;
@@ -2430,6 +2429,7 @@ impl App {
                     eprintln!("{}", self.status);
                 }
                 let frame = self.windows.get(&window).copied().unwrap_or(self.frame);
+                let maximized = self.display_frames.iter().any(|display| *display == frame);
                 let scale = iced::window::scale_factor(window)
                     .map(move |scale| Message::ScaleFactorChanged(window, scale));
                 if self.kiosk {
@@ -2452,12 +2452,21 @@ impl App {
                 }
                 // A decorated window keeps the compositor's zoom semantics: the
                 // title-bar double-click maximizes and restores, while
-                // fullscreen stays reserved for kiosk launches. Place the window
-                // on its display first, then request the maximize state; a
-                // resize here would fight the compositor's zoomed frame.
-                iced::window::move_to(window, Point::new(frame.x as f32, frame.y as f32))
-                    .chain(iced::window::maximize(window, true))
-                    .chain(scale)
+                // fullscreen stays reserved for kiosk launches. A display frame
+                // is placed and maximized; a custom frame keeps the exact extent
+                // it asked for.
+                let place =
+                    iced::window::move_to(window, Point::new(frame.x as f32, frame.y as f32));
+                if maximized {
+                    place.chain(iced::window::maximize(window, true)).chain(scale)
+                } else {
+                    place
+                        .chain(iced::window::resize(
+                            window,
+                            Size::new(frame.width as f32, frame.height as f32),
+                        ))
+                        .chain(scale)
+                }
             }
             Message::WindowEvent(window, event) => {
                 #[cfg(all(unix, feature = "lua-scenes"))]
@@ -2493,12 +2502,19 @@ impl App {
                             frame.x = point.x.round() as i32;
                             frame.y = point.y.round() as i32;
                         }
+                        sync_single_host_frame(&mut self.frame, &self.windows, window);
                     }
                     iced::window::Event::Resized(size) => {
                         if let Some(frame) = self.windows.get_mut(&window) {
                             frame.width = size.width.round().max(1.0) as u32;
                             frame.height = size.height.round().max(1.0) as u32;
                         }
+                        // A decorated host window's content is smaller than the
+                        // frame the caller asked for (the titlebar is outside the
+                        // client area). With one host window, that client area is
+                        // the viewport the scene must lay itself out in; keeping
+                        // the requested frame here clips the bottom of a scene.
+                        sync_single_host_frame(&mut self.frame, &self.windows, window);
                         metrics_changed = true;
                     }
                     iced::window::Event::Rescaled(scale) => {
@@ -3597,7 +3613,12 @@ impl App {
             .collect::<Vec<Task<Message>>>();
         self.windows.clear();
         for frame in frames {
-            let (window, open) = iced::window::open(canvas_window_settings(frame, self.kiosk));
+            // A display frame is a desktop: let the compositor maximize it.
+            // A custom frame is a window the caller chose; maximizing it would
+            // discard the chosen extent (and can land on another display).
+            let maximized = self.display_frames.iter().any(|display| *display == frame);
+            let (window, open) =
+                iced::window::open(canvas_window_settings(frame, self.kiosk, maximized));
             self.windows.insert(window, frame);
             tasks.push(open.map(Message::WindowReady));
         }
@@ -10456,7 +10477,7 @@ impl App {
                 Some(presented) => match &presented.present {
                     soil_scene::Present::Scene(scene) => {
                         let transparent = scene.transparent;
-                        let scene = crate::spore_present::scene(scene);
+                        let scene = ::canvas::spore_present::scene(scene);
                         self.spore_ground(transparent, width, height, &scene, viewport)
                     }
                     soil_scene::Present::Rgba(_) => match &presented.handle {
@@ -10731,7 +10752,7 @@ impl App {
                         Some(presented) => match &presented.present {
                             soil_scene::Present::Scene(scene) => {
                                 let transparent = scene.transparent;
-                                let scene = crate::spore_present::scene(scene);
+                                let scene = ::canvas::spore_present::scene(scene);
                                 self.spore_ground(transparent, width, height, &scene, viewport)
                             }
                             soil_scene::Present::Rgba(_) => {
@@ -15136,17 +15157,35 @@ fn daemon_theme(app: &App, _window: iced::window::Id) -> Theme {
     app.theme()
 }
 
+/// Keep the logical desktop equal to the client area of a single host window.
+///
+/// With one window there is no second display to compose against, so the
+/// requested frame (which includes the window chrome) cannot be the viewport:
+/// a scene laid out to it loses the titlebar height at the bottom. Multi-window
+/// display targets keep their union frame and their per-display viewports.
+fn sync_single_host_frame(
+    frame: &mut Rect,
+    windows: &BTreeMap<iced::window::Id, Rect>,
+    window: iced::window::Id,
+) {
+    if windows.len() == 1
+        && let Some(host) = windows.get(&window)
+    {
+        *frame = *host;
+    }
+}
+
 /// Host window geometry for one display.
 ///
 /// The default Canvas desktop is a normal decorated window that the compositor
 /// maximizes, so window management stays native: drag, resize, and title-bar
 /// double-click zoom all behave like any other app. Only an explicit kiosk
 /// launch (`CANVAS_KIOSK=1`) drops the chrome and takes the whole output.
-fn canvas_window_settings(frame: Rect, kiosk: bool) -> iced::window::Settings {
+fn canvas_window_settings(frame: Rect, kiosk: bool, maximized: bool) -> iced::window::Settings {
     iced::window::Settings {
         size: Size::new(frame.width as f32, frame.height as f32),
         position: iced::window::Position::Specific(Point::new(frame.x as f32, frame.y as f32)),
-        maximized: !kiosk,
+        maximized: maximized && !kiosk,
         fullscreen: kiosk,
         decorations: !kiosk,
         exit_on_close_request: false,
@@ -15160,7 +15199,7 @@ fn switcher_window_settings(frame: Rect) -> iced::window::Settings {
     iced::window::Settings {
         decorations: false,
         maximized: false,
-        ..canvas_window_settings(frame, false)
+        ..canvas_window_settings(frame, false, false)
     }
 }
 
@@ -15531,7 +15570,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 kiosk,
             )
             .expect("Canvas project workspace store must remain valid");
-            let (window, open) = iced::window::open(canvas_window_settings(initial_frame, kiosk));
+            let (window, open) =
+                iced::window::open(canvas_window_settings(initial_frame, kiosk, true));
             app.windows.insert(window, initial_frame);
             (app, open.map(Message::WindowReady))
         },
@@ -19613,7 +19653,7 @@ mod tests {
             width: 1920,
             height: 1200,
         };
-        let settings = canvas_window_settings(frame, false);
+        let settings = canvas_window_settings(frame, false, true);
         assert_eq!(settings.size, Size::new(1920.0, 1200.0));
         assert!(matches!(
             settings.position,
@@ -19627,6 +19667,25 @@ mod tests {
     }
 
     #[test]
+    fn canvas_window_can_keep_an_exact_custom_frame() {
+        let frame = Rect {
+            x: 2280,
+            y: 180,
+            width: 1200,
+            height: 840,
+        };
+        let settings = canvas_window_settings(frame, false, false);
+        assert_eq!(settings.size, Size::new(1200.0, 840.0));
+        assert!(matches!(
+            settings.position,
+            iced::window::Position::Specific(Point { x: 2280.0, y: 180.0 })
+        ));
+        assert!(settings.decorations);
+        assert!(!settings.maximized);
+        assert!(!settings.fullscreen);
+    }
+
+    #[test]
     fn canvas_kiosk_window_stays_borderless_and_fullscreen() {
         let frame = Rect {
             x: 0,
@@ -19634,7 +19693,7 @@ mod tests {
             width: 1920,
             height: 1200,
         };
-        let settings = canvas_window_settings(frame, true);
+        let settings = canvas_window_settings(frame, true, false);
         assert!(!settings.decorations);
         assert!(settings.fullscreen);
         assert!(!settings.maximized);
