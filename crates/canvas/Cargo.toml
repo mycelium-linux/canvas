@@ -23,6 +23,9 @@ mcp = ["dep:rmcp", "dep:schemars", "dep:axum", "dep:reqwest", "canvas-widgets/sc
 # hosts, one opinion about what an escape sequence means.
 soil-vt.workspace = true
 soil-scene.workspace = true
+# Scene surfaces render through the same GPU renderer the native `soil-viz`
+# window uses, so the compositor never falls back to a per-node widget tree.
+soil-scene-gpu.workspace = true
 soil-input.workspace = true
 portable-pty = "0.9"
 fpl-gfx.workspace = true

@@ -1620,6 +1620,15 @@ impl App {
         visual
     }
 
+    /// The colour roles and type base the scene GPU renderer resolves inks with.
+    ///
+    /// The GPU renderer takes semantic inks, never literal colours, so it needs
+    /// the same presented palette the widget path uses — one theme, two
+    /// renderers, no second opinion about what a scene's `primary` looks like.
+    fn scene_theme(&self) -> soil_scene_gpu::Theme {
+        ::canvas::scene_gpu::theme_from(&self.presented_visual_theme())
+    }
+
     /// The normalized bounds the view should render for a surface: an
     /// interpolation from its previous bounds while a transition is in
     /// flight, otherwise the target.
@@ -10469,10 +10478,22 @@ impl App {
                 let snapshot = host.snapshot();
                 self.terminal_layer(snapshot, width, height)
             }
-            ContentSource::Scene { scene } => container(self.scene_layer(scene, viewport))
-                .width(width)
-                .height(height)
-                .into(),
+            // A scene surface is one GPU draw of the whole document through the
+            // native Soil renderer. The widget path below stays as the explicit
+            // fallback (`CANVAS_SCENE_GPU=0`) because it is the older, cheaper
+            // renderer, not because this one is unproven.
+            ContentSource::Scene { scene } => {
+                let layer: Element<'static, Message> = if ::canvas::scene_gpu::enabled() {
+                    ::canvas::scene_gpu::view(
+                        std::sync::Arc::new(::canvas::spore_present::soil_scene(scene)),
+                        self.scene_theme(),
+                        self.document.revision,
+                    )
+                } else {
+                    self.scene_layer(scene, viewport)
+                };
+                container(layer).width(width).height(height).into()
+            }
             ContentSource::Spore => match self.spores.get(&surface.snapshot.id) {
                 Some(presented) => match &presented.present {
                     soil_scene::Present::Scene(scene) => {
