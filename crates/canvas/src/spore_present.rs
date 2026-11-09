@@ -156,7 +156,10 @@ fn content(content: &soil_scene::Content) -> NodeContent {
         | From::Polyline(_)
         | From::Shader(_)
         | From::GpuDense(_)
-        | From::GpuPoints3D(_) => NodeContent::Group,
+        | From::GpuPoints3D(_)
+        | From::Mesh(_)
+        | From::Camera(_)
+        | From::Light(_) => NodeContent::Group,
     }
 }
 
@@ -201,6 +204,7 @@ mod tests {
             soil_scene::Node {
                 id: "ground".into(),
                 parent: None,
+                transition_ms: None,
                 transform: soil_scene::Transform::default(),
                 content: soil_scene::Content::Rect(soil_scene::Rect {
                     ink: Some(soil_scene::Ink::Surface),
@@ -212,6 +216,7 @@ mod tests {
             soil_scene::Node {
                 id: "title".into(),
                 parent: Some("ground".into()),
+                transition_ms: None,
                 transform: soil_scene::Transform {
                     translation: [0.0, 1.0, 0.2],
                     ..Default::default()
