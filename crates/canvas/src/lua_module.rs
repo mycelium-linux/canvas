@@ -760,7 +760,9 @@ fn render_module(request: RenderRequest<'_>) -> Result<RetainedModuleScene> {
     let setup_selection = Rc::clone(&selection);
     let setup_buttons = buttons.clone();
     let setup_actions = actions.clone();
-    let scene = generate_scene_with_setup(
+    let presented = Rc::new(RefCell::new(None));
+    let setup_presented = Rc::clone(&presented);
+    let mut scene = generate_scene_with_setup(
         request.source,
         request.scene_capabilities,
         request.limits,
@@ -775,11 +777,19 @@ fn render_module(request: RenderRequest<'_>) -> Result<RetainedModuleScene> {
                 setup_selection,
                 &resources,
             )?;
+            install_soil_present_api(lua, request.limits.max_nodes, setup_presented)?;
             install_layout_api(lua, request.limits.max_nodes)?;
             install_button_api(lua, &manifest, &event, setup_buttons, setup_actions)?;
             install_host_resource_api(lua, &manifest, &resources, setup_placements)
         },
     )?;
+    if let Some(soil) = presented.borrow_mut().take() {
+        ensure(
+            scene.nodes.is_empty(),
+            "Canvas module must use either canvas.present or canvas.rect/text, not both",
+        )?;
+        scene = soil;
+    }
     let host_resources = Rc::try_unwrap(placements)
         .map_err(|_| Error("Canvas Lua retained internal resource state".into()))?
         .into_inner();
@@ -1226,6 +1236,55 @@ fn widget_set_text(lua: &Lua, text: &str) -> mlua::Result<mlua::Value> {
     let table = lua.create_table()?;
     table.set("text", text)?;
     Ok(mlua::Value::Table(table))
+}
+
+/// Add the document-presentation entry point.
+///
+/// This is the Lua peer of `soil_sdk_canvas::Surface::present_scene`: the view
+/// hands over one versioned `soil-scene` document, the host validates it, and
+/// Canvas renders it. The legacy `canvas.rect`/`canvas.text` primitives remain
+/// available for older views and for the compatibility fallback in `fungos.ui`.
+fn install_soil_present_api(
+    lua: &Lua,
+    max_nodes: usize,
+    presented: Rc<RefCell<Option<Scene>>>,
+) -> Result<()> {
+    let canvas: Table = lua.globals().get("canvas").map_err(lua_error)?;
+    canvas
+        .set(
+            "present",
+            lua.create_function(move |lua, document: Table| {
+                let value: serde_json::Value = lua.from_value(Value::Table(document))?;
+                let present: soil_scene::Present =
+                    serde_json::from_value(value).map_err(|error| {
+                        mlua::Error::RuntimeError(format!("Invalid soil scene: {error}"))
+                    })?;
+                present.validate().map_err(|error| {
+                    mlua::Error::RuntimeError(format!("Invalid soil scene: {error}"))
+                })?;
+                let soil_scene::Present::Scene(soil) = present else {
+                    return Err(mlua::Error::RuntimeError(
+                        "canvas.present needs a scene document".into(),
+                    ));
+                };
+                let scene = crate::spore_present::scene(&soil);
+                if scene.nodes.len() > max_nodes {
+                    return Err(mlua::Error::RuntimeError(
+                        "Canvas Lua scene exceeds its node limit".into(),
+                    ));
+                }
+                let mut slot = presented.borrow_mut();
+                if slot.is_some() {
+                    return Err(mlua::Error::RuntimeError(
+                        "canvas.present may be called only once per render".into(),
+                    ));
+                }
+                *slot = Some(scene);
+                Ok(())
+            })
+            .map_err(lua_error)?,
+        )
+        .map_err(lua_error)
 }
 
 fn install_host_resource_api(
@@ -2512,6 +2571,95 @@ canvas.text { id = "body-height", text = string.format("%.0f", laid.nodes[3].rec
             body_height.parse::<f32>().unwrap() > 20.0,
             "text should wrap to more than one line, got {body_height}"
         );
+    }
+
+    #[test]
+    fn a_soil_document_becomes_the_retained_module_scene() {
+        let manifest = ModuleManifest::parse(
+            r#"{
+              "schema_version":1,
+              "id":"soil-document-test",
+              "title":"Soil document test",
+              "capabilities":{"write_scene":true,"read_inputs":[],"read_theme":true}
+            }"#,
+        )
+        .unwrap();
+        let source = r#"
+canvas.present({
+  kind = "scene",
+  schema = 1,
+  nodes = {
+    { id = "bg", type = "rect", ink = "background", opacity = 1, radius = 0,
+      transform = { translation = { -4, 4, -1 }, scale = { 8, 8, 1 } } },
+    { id = "title", type = "text", text = "Soil document", ink = "text", opacity = 1,
+      transform = { translation = { -3, 3, 0 }, scale = { 0.5, 0.5, 1 } } },
+  },
+})
+"#;
+        let module = LuaModule::load(
+            manifest,
+            source,
+            ModuleInputSnapshot {
+                revision: 1,
+                now_ms: SEPT_2026,
+                values: BTreeMap::new(),
+            },
+            theme(),
+            BTreeMap::new(),
+            LuaSceneCapabilities::default(),
+            LuaSceneLimits::default(),
+        )
+        .expect("a soil scene document must render");
+        let scene = &module.retained().scene;
+        assert_eq!(scene.nodes.len(), 2);
+        assert!(matches!(
+            scene.nodes[0].content,
+            canvas_workspace::NodeContent::Rect { .. }
+        ));
+        assert!(matches!(
+            &scene.nodes[1].content,
+            canvas_workspace::NodeContent::Text { text, .. } if text == "Soil document"
+        ));
+    }
+
+    #[test]
+    fn a_module_cannot_mix_soil_documents_with_legacy_primitives() {
+        let manifest = ModuleManifest::parse(
+            r#"{
+              "schema_version":1,
+              "id":"mixed-document-test",
+              "title":"Mixed document test",
+              "capabilities":{"write_scene":true,"read_inputs":[],"read_theme":false}
+            }"#,
+        )
+        .unwrap();
+        let source = r#"
+canvas.present({
+  kind = "scene",
+  schema = 1,
+  nodes = {
+    { id = "bg", type = "rect", ink = "background", opacity = 1, radius = 0,
+      transform = { translation = { -4, 4, -1 }, scale = { 8, 8, 1 } } },
+  },
+})
+canvas.text { id = "legacy", text = "legacy", translation = { 0, 0, 0 }, scale = { 1, 1, 1 } }
+"#;
+        let error = LuaModule::load(
+            manifest,
+            source,
+            ModuleInputSnapshot {
+                revision: 1,
+                now_ms: SEPT_2026,
+                values: BTreeMap::new(),
+            },
+            theme(),
+            BTreeMap::new(),
+            LuaSceneCapabilities::default(),
+            LuaSceneLimits::default(),
+        )
+        .err()
+        .expect("the two scene authors cannot be mixed");
+        assert!(error.0.contains("either"), "{error}");
     }
 
     #[test]
