@@ -34,6 +34,7 @@ pub mod project_picker;
 pub mod project_switcher;
 pub mod reconcile;
 pub mod runtime_config;
+pub mod scene_gpu;
 pub mod screensaver;
 pub mod shell_dock;
 pub mod shell_geometry;

@@ -42,6 +42,7 @@ unibus-device = { path = "../unibus/crates/unibus-device" }
 unibus-media = { path = "../unibus/crates/unibus-media" }
 unibus-sdk = { path = "../unibus/crates/unibus-sdk" }
 soil-scene = { path = "../soil/crates/soil-scene" }
+soil-scene-gpu = { path = "../soil/crates/soil-scene-gpu" }
 soil-input = { path = "../soil/crates/soil-input" }
 soil-vt = { path = "../soil/crates/soil-vt" }
 soil-layout = { path = "../soil/crates/soil-layout" }
