@@ -1,0 +1,16 @@
+[package]
+name = "bar-proof"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Own workspace: a proof that a Lua scene can be painted by iced in a bar-shaped
+# window, without dragging iced into Canvas's graph.
+[workspace]
+
+[dependencies]
+iced = { version = "0.14", default-features = false, features = ["wgpu", "tokio", "canvas", "web-colors"] }
+mlua = { version = "0.12", features = ["luau"] }
+fontdue = "0.9"
+anyhow = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }

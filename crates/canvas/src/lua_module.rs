@@ -1325,7 +1325,7 @@ fn validate_retained_output(
 }
 
 impl ModuleInputValue {
-    fn kind(&self) -> InputKind {
+    pub(crate) fn kind(&self) -> InputKind {
         match self {
             Self::Number(_) => InputKind::Number,
             Self::Text(_) => InputKind::Text,

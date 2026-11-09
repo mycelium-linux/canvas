@@ -6,6 +6,8 @@ pub mod background_picker;
 pub mod briefing;
 pub mod bus;
 pub mod chart;
+#[cfg(feature = "lua-scenes")]
+pub mod chrome_regions;
 pub mod compose;
 pub mod control;
 pub mod display;

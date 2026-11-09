@@ -1,0 +1,16 @@
+[package]
+name = "counter-proof"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Its own workspace on purpose: a proof that iced runs on the web and in a
+# window should not drag iced into Canvas's dependency graph or vice versa.
+[workspace]
+
+[dependencies]
+iced = { version = "0.14", default-features = false, features = ["wgpu", "tokio", "web-colors"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"
+wasm-bindgen = "0.2"

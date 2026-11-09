@@ -21,9 +21,13 @@ use std::{
 const DEFAULT_SOURCE_BYTES: usize = 64 * 1024;
 const DEFAULT_MEMORY_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_INTERRUPT_BUDGET: u64 = 100_000;
-const DEFAULT_MAX_NODES: usize = 256;
+const DEFAULT_MAX_NODES: usize = 8_192;
 const HARD_MAX_SOURCE_BYTES: usize = 1024 * 1024;
 const HARD_MAX_MEMORY_BYTES: usize = 64 * 1024 * 1024;
+/// A ceiling, not a budget. It exists so a runaway module cannot ask the host to
+/// allocate forever; a wall of tiles, a long list or a dense chart fits inside it
+/// with room to spare, so no real view should ever meet it.
+const HARD_MAX_NODES: usize = 65_536;
 const HARD_MAX_INTERRUPTS: u64 = 10_000_000;
 
 /// Host-controlled limits for one isolated scene generation.
@@ -153,8 +157,7 @@ fn validate_inputs(
     if !(1..=HARD_MAX_SOURCE_BYTES).contains(&limits.max_source_bytes)
         || !(1..=HARD_MAX_MEMORY_BYTES).contains(&limits.max_memory_bytes)
         || !(1..=HARD_MAX_INTERRUPTS).contains(&limits.max_interrupts)
-        || limits.max_nodes == 0
-        || limits.max_nodes > 1_024
+        || !(1..=HARD_MAX_NODES).contains(&limits.max_nodes)
     {
         return Err(Error(
             "Canvas Lua limits must be positive and bounded".into(),

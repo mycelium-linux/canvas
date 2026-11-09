@@ -4233,13 +4233,33 @@ impl App {
         };
         let theme = ModuleThemeTokens::from_visual(&visual, accent);
         let artifact = ::canvas::shell_presentation::DESKTOP_BAR;
+        // Polling is the only path that may touch the disk: an installed Spore
+        // that claims `top-bar` is re-resolved there, and the built-in bar stays
+        // whenever the claim or the candidate is refused. `refresh_current`
+        // below keeps re-rendering whatever pair was last accepted.
         let result = if poll_files {
-            self.desktop_bar.refresh_files(artifact, snapshot, theme)
+            ::canvas::chrome_regions::present_files(
+                &mut self.desktop_bar,
+                &::canvas::chrome_regions::Loader::installed(),
+                ::canvas::chrome_regions::TOP_BAR,
+                artifact,
+                snapshot,
+                theme,
+            )
+            .map(|presented| presented.refused)
         } else {
-            self.desktop_bar.refresh_current(artifact, snapshot, theme)
+            self.desktop_bar
+                .refresh_current(artifact, snapshot, theme)
+                .map(|_| None)
         };
-        if let Err(error) = result {
-            self.status = format!("Desktop bar Lua error (last good retained): {error}");
+        match result {
+            Err(error) => {
+                self.status = format!("Desktop bar Lua error (last good retained): {error}");
+            }
+            Ok(Some(refused)) => {
+                self.status = format!("Desktop bar: built-in kept, {refused}");
+            }
+            Ok(None) => {}
         }
         self.refresh_desktop_dock(poll_files);
     }
