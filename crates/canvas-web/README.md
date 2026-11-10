@@ -1,20 +1,25 @@
 # Canvas Web
 
-View-only Canvas client for browser demos. Its default mode presents frames
-rendered offscreen by the running native Canvas, which makes the workspace,
-content, shader, chrome and selected theme pixel-identical to the TV. Press
-`F9` to toggle the independent Rust/WASM Canvas2D renderer for an intentionally
-lower-detail, low-bandwidth view.
+The browser is another Canvas backend. This crate runs the same iced
+application, scene renderer and message type as native Canvas; the only
+difference is the renderer underneath (WebGL on wasm, wgpu on the desktop). It
+contains no PNG mirror, no screenshot bridge, and no DOM re-implementation of a
+Spore.
 
-The exact path is owner-local: `canvas-web-host` is hard-limited to loopback,
-talks to Canvas through its owner-only Unix control socket, and returns only
-rendered PNG bytes. Credentials and socket authority never enter the browser.
-A runtime badge reports bridge failures instead of presenting a silent black
-screen.
+The first scene is the home Spore's checked-in fixture:
+`scenes/home.scene.json`. That is the exact document `fungos.ui` hands to a
+host (`{"kind":"scene","schema":1,"nodes":[...]}`), plus the host-owned
+control list. A scene is data: a pointer layer hit-tests the control
+rectangles, and pressing a tile emits a typed `canvas-intent` event to the page
+and never opens a Spore itself.
 
-This first slice deliberately owns no durable workspace state and performs no
-host actions. The JARVIS microphone and output controls emit typed intent only;
-they do not request browser permissions or open an audio device.
+WebAssembly has no system fonts. Iced's bundled Fira Sans is enabled for the
+scene text, and `assets/NotoSansSymbols2-Regular.ttf` (SIL OFL 1.1, license
+beside it) supplies the Spore's glyphs.
+
+This slice is deliberately pre-Luau. Browsers cannot compile a module at
+runtime, so the next slice ships a Luau wasm runtime and generates the same
+document from the composed `spore-dev-home.lua`. The renderer does not change.
 
 ## Run locally
 
@@ -25,27 +30,35 @@ cd crates/canvas-web
 env -u NO_COLOR trunk serve --release
 ```
 
-In a second terminal, with native Canvas running:
+Open <http://127.0.0.1:8088/>. `NO_COLOR=1` is removed because Trunk expects a
+boolean value for that option. The page does not need the native app, a control
+socket, or a loopback bridge.
+
+## Regenerate the home scene
+
+The scene is generated from the Spore's own fixture, not hand-authored here.
+From the `spores` checkout:
 
 ```sh
-cargo run -p canvas-web --bin canvas-web-host --features native-host
+cd spores/home
+lua tools/dump_scene.lua > ../../../canvas/crates/canvas-web/scenes/home.scene.json
 ```
 
-Open <http://127.0.0.1:8088/>. `NO_COLOR=1` is removed because Trunk expects a
-boolean value for that option.
+Run the generator whenever `home/ui/home.lua` or `sdk/ui/ui.lua` changes. The
+`canvas-web` tests fail if the launcher's landmark text or the nineteen
+openable controls disappear from the fixture.
 
 ## Verify
 
 ```sh
 cargo test -p canvas-web
 cargo check -p canvas-web --target wasm32-unknown-unknown
-cargo test -p canvas-web --features native-host --target aarch64-apple-darwin
 cd crates/canvas-web
 env -u NO_COLOR trunk build --release
 ```
 
-The screenshot bridge establishes visual parity first. The direct-rendering
-successor is a retained snapshot plus ordered patch feed driving shared native
-widget/layout code. It must resume by sequence or receive a fresh snapshot; it
-must never pretend a fire-and-forget stream is current. Audio belongs behind a
-separately authenticated WebAudio/WebRTC host that accepts `AudioIntent`.
+A `cargo check` for wasm proves the iced scene renderer compiles against the
+browser backend. `trunk build` produces `dist/`; serve it from any static origin
+that is allowed to publish the Spore's wasm assets. Host actions still belong
+to a separately authorized service: the page emits `canvas-intent`, and the
+host decides whether and where to execute it.

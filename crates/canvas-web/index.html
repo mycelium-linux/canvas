@@ -4,11 +4,12 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
     <meta name="theme-color" content="#020a11" />
-    <title>Canvas Web · LoD Demo</title>
-    <link data-trunk rel="rust" data-wasm-opt="z" />
+    <title>Canvas Web · Home Spore</title>
+    <link data-trunk rel="rust" />
     <style>
       html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #020a11; }
-      canvas { width: 100% !important; height: 100% !important; display: block; }
+      canvas { display: block; }
+      #intent { position: fixed; z-index: 20; left: 12px; bottom: 12px; margin: 0; color: #75acba; font: 11px ui-monospace, monospace; pointer-events: none; }
       #boot-status { box-sizing: border-box; position: fixed; z-index: 10; inset: auto 12px 12px 12px; display: flex; align-items: center; gap: .65rem; padding: .65rem .8rem; color: #dcf9ff; font: 11px ui-monospace, monospace; letter-spacing: .04em; background: rgba(2,10,17,.94); border: 1px solid #13485b; pointer-events: none; }
       #boot-status strong { color: #31e6ff; font-size: 18px; }
       #boot-status[data-state="ready"] { opacity: 0; transition: opacity 280ms ease-out; }
@@ -17,8 +18,8 @@
     </style>
   </head>
   <body>
-    <canvas id="canvas-web"></canvas>
-    <div id="boot-status"><strong>CANVAS / WASM</strong><span>STARTING DIRECT RENDERER</span></div>
+    <div id="boot-status"><strong>CANVAS / WASM</strong><span>STARTING CANVAS BACKEND</span></div>
+    <p id="intent"></p>
     <script>
       const canvasFailure = (detail) => {
         const status = document.getElementById("boot-status");
