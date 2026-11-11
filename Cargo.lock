@@ -771,16 +771,12 @@ dependencies = [
 name = "canvas-web"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "axum",
- "canvas",
  "canvas-core",
  "console_error_panic_hook",
  "iced",
  "js-sys",
  "serde",
  "serde_json",
- "tokio",
  "toml",
  "wasm-bindgen",
  "web-sys",
