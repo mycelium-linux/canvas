@@ -235,16 +235,29 @@ impl Drop for NativeSurfacePortReceiver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn rights_are_transferred_and_correlated_independently_of_registration_order() {
-        let path = std::env::temp_dir().join(format!(
+
+    /// macOS caps `sun_path` at 104 bytes. Some terminals point `TMPDIR` past
+    /// that, so fall back to `/tmp` when the ambient one is too long.
+    fn socket_path() -> std::path::PathBuf {
+        let name = format!(
             "canvas-mach-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-        ));
+        );
+        let temp = std::env::temp_dir();
+        if temp.join(&name).as_os_str().len() < 100 {
+            temp.join(name)
+        } else {
+            std::path::Path::new("/tmp").join(name)
+        }
+    }
+
+    #[test]
+    fn rights_are_transferred_and_correlated_independently_of_registration_order() {
+        let path = socket_path();
         let socket = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
         let mut receiver = NativeSurfacePortReceiver::bind(&path).unwrap();
         let sender = NativeSurfacePortSender::connect(&path).unwrap();
