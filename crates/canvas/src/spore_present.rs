@@ -68,8 +68,11 @@ fn soil_content(content: &NodeContent) -> soil_scene::Content {
         NodeContent::Image { asset } => To::Image(soil_scene::Image {
             asset: asset.sha256.clone(),
         }),
-        // The soil-scene vocabulary has no 3D node yet. Keep the node and its
-        // children addressable rather than refusing the whole scene.
+        // Canvas's own scene carries meshes, cameras and lights; a Soil scene
+        // deliberately does not. A 3D world belongs to the engine that owns it
+        // and reaches a host as pixels or a texture lease, so here the node
+        // keeps its place in the tree as a group instead of this crate growing
+        // a second 3D vocabulary for the producer to guess at.
         NodeContent::Mesh { .. } | NodeContent::Camera { .. } | NodeContent::Light { .. } => {
             To::Group
         }
@@ -91,6 +94,10 @@ fn soil_ink(ink: SemanticInk) -> soil_scene::Ink {
     }
 }
 
+/// One canonical transform: `soil_scene::Transform` is the shared answer, and
+/// this file is the only place the renderer's quaternion is turned into it.
+/// The wire carries euler radians applied X then Y then Z because two hosts
+/// that disagreed about the order would draw the same scene differently.
 fn euler([x, y, z, w]: [f32; 4]) -> [f32; 3] {
     let length = (x * x + y * y + z * z + w * w).sqrt();
     if length == 0.0 || !length.is_finite() {
@@ -133,21 +140,16 @@ fn content(content: &soil_scene::Content) -> NodeContent {
             ink: text.ink.map(ink),
             rgb: text.rgb,
         },
+        // A Spore's image is an asset it declared; the host resolves the id. An
+        // unresolvable asset draws nothing rather than guessing a path.
         From::Image(image) => NodeContent::Image {
-            // A Spore's image is an asset it declared; the host resolves the id.
-            // An unresolvable asset draws nothing rather than guessing a path.
-            asset: AssetRef {
-                sha256: image.asset.clone(),
-                media_type: "application/octet-stream".into(),
-                byte_length: 0,
-            },
+            asset: declared_asset(&image.asset),
         },
-        // Shaders are accepted by the schema and not drawn by this build: the
-        // node survives a round trip so a newer host can render it, and the older
-        // one draws its children instead of failing the whole scene.
-        // Canvas's 2D retained scene has no polyline yet. Keep the node as a
-        // group so a GPU scene survives the fallback path without inventing a
-        // second chart renderer in the compositor.
+        // The rest are accepted by the schema and not drawn by this build. Their
+        // position in the tree still matters: keeping the node as a group lets a
+        // tree survive the translation -- children land where the producer put
+        // them -- instead of failing the whole scene or inventing a second
+        // renderer for each vocabulary Canvas's retained 2D scene lacks.
         From::Area(_)
         | From::Band(_)
         | From::Points(_)
@@ -160,6 +162,19 @@ fn content(content: &soil_scene::Content) -> NodeContent {
         | From::Mesh(_)
         | From::Camera(_)
         | From::Light(_) => NodeContent::Group,
+    }
+}
+
+/// An asset a Spore declared, as the host records it.
+///
+/// The wire carries the id and nothing else: media type and length belong to
+/// the resolution step, and stating them here would assert a fact nobody
+/// checked.
+fn declared_asset(id: &str) -> AssetRef {
+    AssetRef {
+        sha256: id.to_owned(),
+        media_type: "application/octet-stream".into(),
+        byte_length: 0,
     }
 }
 
@@ -178,7 +193,11 @@ fn ink(ink: soil_scene::Ink) -> SemanticInk {
     }
 }
 
-/// Euler angles in radians, Z-Y-X, into a quaternion.
+/// Euler angles in radians, applied X then Y then Z, into a quaternion.
+///
+/// The order is the scene contract rather than a local choice:
+/// `soil_scene::Transform` states the same order, so a producer and this
+/// conversion cannot disagree about what a rotation means.
 fn quaternion([x, y, z]: [f32; 3]) -> [f32; 4] {
     if x == 0.0 && y == 0.0 && z == 0.0 {
         return [0.0, 0.0, 0.0, 1.0];
@@ -297,6 +316,30 @@ mod tests {
         let back = super::scene(&soil);
         assert_eq!(back.nodes.len(), 2);
         assert_eq!(back.nodes[1].parent_id.as_deref(), Some("ground"));
+    }
+
+    /// 3D kinds reach a Soil scene as groups: the tree survives, and this crate
+    /// does not invent a 3D vocabulary the shared wire does not have. A world
+    /// belongs to the engine that owns it and presents as pixels or a lease.
+    #[test]
+    fn a_3d_node_keeps_its_place_as_a_group() {
+        let scene = Scene {
+            nodes: vec![SceneNode {
+                id: "rig".into(),
+                parent_id: None,
+                transform: Transform3::default(),
+                content: NodeContent::Mesh {
+                    asset: AssetRef {
+                        sha256: "model:robot".into(),
+                        media_type: "model/gltf-binary".into(),
+                        byte_length: 4096,
+                    },
+                },
+            }],
+        };
+        let soil = soil_scene(&scene);
+        assert!(matches!(soil.nodes[0].content, soil_scene::Content::Group));
+        assert_eq!(soil.nodes[0].id, "rig");
     }
 
     #[test]
