@@ -51,6 +51,45 @@ pub fn apply(visual: &VisualTheme, theme: &mut fpl_gfx::Theme) -> Result<(), Inv
     coherence_native::gfx::apply(&tokens(visual), theme)
 }
 
+/// A widget's preferred motion feel, mapped onto gfx's host-owned [`MotionTheme`].
+///
+/// Appearance (palette, metrics, radii) already flows from Canvas density, so
+/// this is the remaining lever for a small/terminal look: how animated values
+/// move. Widgets declare it explicitly rather than the bridge guessing, keeping
+/// the choice loose-coupled and reversible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MotionStyle {
+    /// Smooth, decelerating transitions (gfx default). Good for organic faces.
+    Smooth,
+    /// Snappy, stepped readouts for terminal/HUD/compact screens: values ladder
+    /// in held increments instead of gliding. Integer snapping is left to the
+    /// widget via [`fpl_gfx::MotionTheme::quantum`] because the right grid
+    /// depends on each value's own domain (percent vs. integer count vs. bars).
+    Terminal,
+}
+
+impl MotionStyle {
+    /// Applies this motion feel onto a gfx theme's host-owned motion tokens.
+    /// Reversible: applying `Smooth` clears a prior `Terminal` feel.
+    pub fn apply(self, theme: &mut fpl_gfx::Theme) {
+        let m = &mut theme.motion;
+        match self {
+            MotionStyle::Smooth => {
+                m.ease = fpl_gfx::Ease::Cubic;
+                m.quantum = 0.0;
+                m.control_smoothing_ms = 80.0;
+                m.meter_decay = 1.8;
+            }
+            MotionStyle::Terminal => {
+                m.ease = fpl_gfx::Ease::Stepped(8);
+                m.quantum = 0.0;
+                m.control_smoothing_ms = 40.0;
+                m.meter_decay = 3.0;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,5 +133,19 @@ mod tests {
         let before = theme.clone();
         assert!(apply(&visual, &mut theme).is_err());
         assert_eq!(theme, before);
+    }
+
+    #[test]
+    fn terminal_motion_is_snappy_stepped_and_reversible() {
+        let mut theme = Theme::studio_dark();
+        MotionStyle::Terminal.apply(&mut theme);
+        assert_eq!(theme.motion.ease, fpl_gfx::Ease::Stepped(8));
+        // Terminal is snappier and decays meters faster than the smooth default.
+        assert!(theme.motion.control_smoothing_ms < 80.0);
+        assert!(theme.motion.meter_decay > 1.8);
+        // Reapplying Smooth clears the terminal feel entirely.
+        MotionStyle::Smooth.apply(&mut theme);
+        assert_eq!(theme.motion.ease, fpl_gfx::Ease::Cubic);
+        assert_eq!(theme.motion.quantum, 0.0);
     }
 }

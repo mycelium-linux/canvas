@@ -1,7 +1,7 @@
 //! `fpl-gfx` clock hosted directly in iced's existing compositor pass.
 
 use canvas_core::VisualTheme;
-use fpl_gfx::{AnalogClock, MotionTheme, Rect, Renderer, RendererConfig, Scene, Theme, Viewport};
+use fpl_gfx::{AnalogClock, Rect, Renderer, RendererConfig, Scene, Theme, Viewport};
 use iced::widget::shader::{self, Shader};
 use iced::{Element, Length, Rectangle};
 use iced_wgpu::wgpu;
@@ -74,11 +74,9 @@ pub(super) fn legacy_requested() -> bool {
 fn theme_from_canvas(visual: &VisualTheme) -> Result<Theme, coherence_native::InvalidMetrics> {
     let mut theme = Theme::studio_dark();
     theme.shapes.outline_width = 1.0;
-    theme.motion = MotionTheme {
-        meter_decay: 1.8,
-        control_smoothing_ms: 80.0,
-    };
     super::gfx_theme::apply(visual, &mut theme)?;
+    // This is a HUD/terminal face: laddered, snappy readouts rather than glides.
+    super::gfx_theme::MotionStyle::Terminal.apply(&mut theme);
     Ok(theme)
 }
 
