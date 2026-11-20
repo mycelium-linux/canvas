@@ -13,7 +13,13 @@
     <string>/Users/ajmwagar/Applications/DockCanvas.app/Contents/MacOS/dock-canvas</string>
   </array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <!-- A clean quit is the person closing the window. Restart only
+       after a crash; forcing the app back open after Cmd+Q made a
+       normal macOS window feel like a kiosk. -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+  </dict>
   <!-- Long enough that a crash-loop is visible in the log rather than a
        wall of restarts, short enough that a real crash comes back fast. -->
   <key>ThrottleInterval</key><integer>10</integer>

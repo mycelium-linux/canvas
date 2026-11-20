@@ -11,9 +11,10 @@ class SetupCanvasMcpTest(unittest.TestCase):
             desired = plistlib.loads(MODULE.launch_agent(app, home))
             self.assertEqual(
                 desired["ProgramArguments"],
-                ["/usr/bin/open", "-n", "-a", str(app)],
+                [str(app / "Contents/MacOS/dock-canvas")],
             )
-            self.assertFalse(desired["KeepAlive"])
+            # A crash comes back; a clean quit (closing the window) does not.
+            self.assertEqual(desired["KeepAlive"], {"SuccessfulExit": False})
             self.assertEqual(
                 desired["EnvironmentVariables"]["CANVAS_CONFIG_DIR"],
                 str(home / "Library/Application Support/Dock/canvas"),
