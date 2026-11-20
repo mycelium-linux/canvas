@@ -169,6 +169,10 @@ pub enum ModuleButtonAppearance {
     #[default]
     Standard,
     Quiet,
+    /// A hit region with no drawing of its own. The module paints the control
+    /// in its scene and the host owns only the press, so an authored interface
+    /// keeps its own look and is still pressable.
+    Invisible,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -791,6 +795,7 @@ fn install_button_api(
                     appearance: match spec.get::<Option<String>>("appearance")?.as_deref() {
                         None | Some("standard") => ModuleButtonAppearance::Standard,
                         Some("quiet") => ModuleButtonAppearance::Quiet,
+                        Some("invisible") => ModuleButtonAppearance::Invisible,
                         _ => return Err(mlua::Error::external("unknown module button appearance")),
                     },
                 };

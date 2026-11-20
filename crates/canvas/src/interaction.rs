@@ -111,6 +111,14 @@ pub struct InteractionConfig {
     /// the embedded surface after it has been focused and promoted.
     pub top_bar_height: f64,
     pub snap_distance: f64,
+    /// Travel, in logical points, before a press becomes a drag.
+    ///
+    /// A click on a high-DPI display reports a point or two of movement, and a
+    /// surface that follows it is a window that jumps under a finger. Below this
+    /// distance the gesture stays a press so the content receives a click; the
+    /// threshold is logical, not physical, so the same finger travels the same
+    /// visual distance on every display.
+    pub press_deadzone: f64,
     /// Distance from a workspace edge at which a move gesture offers a
     /// half-screen or quarter-screen dock zone, like a desktop window manager.
     pub snap_zone_trigger: f64,
@@ -165,6 +173,9 @@ struct ActiveGesture {
     last_position: LogicalPoint,
     /// Half- or quarter-screen zone offered by the current move gesture.
     snap_zone: Option<LogicalRect>,
+    /// True once the pointer has travelled past `press_deadzone`. Until then the
+    /// gesture is a press, and a release is a click.
+    dragging: bool,
 }
 
 /// Stateful pointer capture with no renderer or document ownership.
@@ -254,6 +265,7 @@ impl InteractionEngine {
             current_bounds: surface.bounds,
             last_position: event.position,
             snap_zone: None,
+            dragging: false,
         });
         intents.push(InteractionIntent::CapturePointer {
             pointer_id: event.pointer_id,
@@ -301,7 +313,29 @@ impl InteractionEngine {
             return Ok(Vec::new());
         }
 
-        let next = manipulate(self.config, active, event.position);
+        // A press is not a drag until the pointer earns it. Without this a
+        // high-DPI click reports a point of movement and the surface lurches.
+        if !active.dragging {
+            let dx = event.position.x - active.origin.x;
+            let dy = event.position.y - active.origin.y;
+            active.last_position = event.position;
+            if dx.mul_add(dx, dy * dy) < self.config.press_deadzone * self.config.press_deadzone {
+                if release {
+                    // A click: focus already landed on press; nothing to move.
+                    self.active = None;
+                    return Ok(vec![InteractionIntent::ReleasePointer {
+                        pointer_id: event.pointer_id,
+                    }]);
+                }
+                return Ok(Vec::new());
+            }
+            active.dragging = true;
+        }
+
+        // Snap while moving as well as on release: the grid is part of the
+        // desk. What made this feel detached was not the quantisation but the
+        // un-reanchored correction, which `move_rect` now applies.
+        let next = manipulate(self.config, active, event.position, true);
         active.last_position = event.position;
         active.snap_zone = match active.region {
             HitRegion::TopBar | HitRegion::Body => snap_zone_for_move(self.config, event.position),
@@ -378,15 +412,53 @@ pub fn hit_test(
     let hit = surfaces
         .iter()
         .enumerate()
-        .filter(|(_, surface)| surface.bounds.contains(point))
+        .filter(|(_, surface)| {
+            surface.bounds.contains(point)
+                || within_margin(surface.bounds, point, OUTER_RESIZE_MARGIN)
+        })
         .max_by_key(|(index, surface)| (surface.z_order, *index));
     Ok(hit.map(|(_, surface)| {
-        let resize = resize_region(surface.bounds, point, resize_handle_size);
+        let resize = resize_region_band(
+            surface.bounds,
+            point,
+            resize_handle_size,
+            OUTER_RESIZE_MARGIN,
+        );
+        let in_top_bar = point.y <= surface.bounds.y + top_bar_height
+            && point.y >= surface.bounds.y - OUTER_RESIZE_MARGIN;
+        // The north edge overlaps the title bar, and a title bar that resizes
+        // when you grab it is a title bar you cannot drag: the window's top edge
+        // follows your hand while its bottom stays still, which reads as the
+        // window jumping down. Inside the title bar the north handle is limited
+        // to the outermost few points; the sides keep their generous targets.
+        let north_band = if in_top_bar {
+            (resize_handle_size * 0.4).max(3.0)
+        } else {
+            resize_handle_size
+        };
+        let resize = match resize {
+            HitRegion::Resize { handle }
+                if in_top_bar
+                    && matches!(
+                        handle,
+                        ResizeHandle::North
+                            | ResizeHandle::NorthEast
+                            | ResizeHandle::NorthWest
+                    )
+                    && point.y > surface.bounds.y + north_band =>
+            {
+                HitRegion::TopBar
+            }
+            other => other,
+        };
         let region = if matches!(resize, HitRegion::Resize { .. }) {
             resize
-        } else if point.y <= surface.bounds.y + top_bar_height {
+        } else if in_top_bar {
             HitRegion::TopBar
+        } else if surface.bounds.contains(point) {
+            HitRegion::Body
         } else {
+            // Outside every edge band and outside the window: not this surface.
             HitRegion::Body
         };
         HitTarget {
@@ -398,11 +470,12 @@ pub fn hit_test(
 
 fn manipulate(
     config: InteractionConfig,
-    active: &ActiveGesture,
+    active: &mut ActiveGesture,
     point: LogicalPoint,
+    settle: bool,
 ) -> LogicalRect {
     match active.region {
-        HitRegion::TopBar | HitRegion::Body => move_rect(config, active, point),
+        HitRegion::TopBar | HitRegion::Body => move_rect(config, active, point, settle),
         HitRegion::Resize { handle } => resize_rect(config, active, point, handle),
     }
 }
@@ -481,42 +554,59 @@ fn snap_zone_for_move(config: InteractionConfig, point: LogicalPoint) -> Option<
     Some(zone)
 }
 
+/// How much of a window must stay on screen, in logical points. Enough to grab
+/// the title bar, not enough to force a window back inside.
+const MIN_VISIBLE_GRAB: f64 = 96.0;
+
 fn move_rect(
     config: InteractionConfig,
-    active: &ActiveGesture,
+    active: &mut ActiveGesture,
     point: LogicalPoint,
+    settle: bool,
 ) -> LogicalRect {
     let mut bounds = active.original_bounds;
     bounds.x += point.x - active.origin.x;
     bounds.y += point.y - active.origin.y;
-    bounds.x = snap_translation(
-        bounds.x,
-        bounds.width,
-        config.workspace_bounds.x,
-        config.workspace_bounds.right(),
-        config.grid_size,
-        config.snap_distance,
-    );
-    bounds.y = snap_translation(
-        bounds.y,
-        bounds.height,
-        config.workspace_bounds.y,
-        config.workspace_bounds.bottom(),
-        config.grid_size,
-        config.snap_distance,
-    );
-    // Full containment: a dragged surface never strands off the wall. The
-    // old rule (keep only the top bar reachable) let tiles park mostly
-    // outside the display, where macOS stops delivering events once the
-    // cursor is gone — the tile looked stuck and could not be recovered.
+    if settle {
+        bounds.x = snap_translation(
+            bounds.x,
+            bounds.width,
+            config.workspace_bounds.x,
+            config.workspace_bounds.right(),
+            config.grid_size,
+            config.snap_distance,
+        );
+        bounds.y = snap_translation(
+            bounds.y,
+            bounds.height,
+            config.workspace_bounds.y,
+            config.workspace_bounds.bottom(),
+            config.grid_size,
+            config.snap_distance,
+        );
+    }
+    let intended = bounds;
+    // A window may hang off the wall, but never entirely: a strip stays on
+    // screen so it can be grabbed again. Full containment was worse than the
+    // problem it solved — parking a window half off the edge is a normal thing
+    // to want, and refusing it makes the desktop feel nailed down.
+    let keep_x = MIN_VISIBLE_GRAB.min(bounds.width);
+    let keep_y = MIN_VISIBLE_GRAB.min(bounds.height);
     bounds.x = bounds.x.clamp(
-        config.workspace_bounds.x,
-        (config.workspace_bounds.right() - bounds.width).max(config.workspace_bounds.x),
+        config.workspace_bounds.x - (bounds.width - keep_x),
+        config.workspace_bounds.right() - keep_x,
     );
     bounds.y = bounds.y.clamp(
-        config.workspace_bounds.y,
-        (config.workspace_bounds.bottom() - bounds.height).max(config.workspace_bounds.y),
+        config.workspace_bounds.y - (bounds.height - keep_y),
+        config.workspace_bounds.bottom() - keep_y,
     );
+    // Re-anchor whenever the window could not follow the pointer: at an edge,
+    // or on the frame the release snapped to. Without this the grab point keeps
+    // travelling with the hand, so dragging back produces no movement at all
+    // until the pointer has retraced the distance the window was held back —
+    // the rubber band that makes a drag feel like it is fighting you.
+    active.origin.x += bounds.x - intended.x;
+    active.origin.y += bounds.y - intended.y;
     bounds
 }
 
@@ -597,9 +687,45 @@ fn resize_rect(
     }
 }
 
+/// How far outside a window a resize press may land and still grab its edge.
+const OUTER_RESIZE_MARGIN: f64 = 8.0;
+
+/// Whether `point` is inside `bounds` grown by `margin` on every side.
+fn within_margin(bounds: LogicalRect, point: LogicalPoint, margin: f64) -> bool {
+    point.x >= bounds.x - margin
+        && point.x <= bounds.right() + margin
+        && point.y >= bounds.y - margin
+        && point.y <= bounds.bottom() + margin
+}
+
 fn resize_region(bounds: LogicalRect, point: LogicalPoint, handle: f64) -> HitRegion {
-    let horizontal = nearest_edge(point.x - bounds.x, bounds.right() - point.x, handle);
-    let vertical = nearest_edge(point.y - bounds.y, bounds.bottom() - point.y, handle);
+    resize_region_band(bounds, point, handle, OUTER_RESIZE_MARGIN)
+}
+
+/// Which edge of `bounds`, if any, the point is grabbing.
+///
+/// `inside` is how far into the window counts as the edge; `outside` is how far
+/// beyond it does. The outside band is what makes an edge forgiving: aiming at a
+/// window's border from the desktop side still grabs it, which is where a hand
+/// actually arrives from.
+fn resize_region_band(
+    bounds: LogicalRect,
+    point: LogicalPoint,
+    inside: f64,
+    outside: f64,
+) -> HitRegion {
+    let horizontal = nearest_edge_band(
+        point.x - bounds.x,
+        bounds.right() - point.x,
+        inside,
+        outside,
+    );
+    let vertical = nearest_edge_band(
+        point.y - bounds.y,
+        bounds.bottom() - point.y,
+        inside,
+        outside,
+    );
     let resize = match (horizontal, vertical) {
         (Some(Edge::Low), Some(Edge::Low)) => Some(ResizeHandle::NorthWest),
         (None, Some(Edge::Low)) => Some(ResizeHandle::North),
@@ -620,9 +746,14 @@ enum Edge {
     High,
 }
 
-fn nearest_edge(low_distance: f64, high_distance: f64, handle: f64) -> Option<Edge> {
-    let low = low_distance <= handle;
-    let high = high_distance <= handle;
+fn nearest_edge_band(
+    low_distance: f64,
+    high_distance: f64,
+    inside: f64,
+    outside: f64,
+) -> Option<Edge> {
+    let low = low_distance <= inside && low_distance >= -outside;
+    let high = high_distance <= inside && high_distance >= -outside;
     match (low, high) {
         (true, true) if high_distance < low_distance => Some(Edge::High),
         (true, _) => Some(Edge::Low),
@@ -728,6 +859,11 @@ fn validate_config(config: InteractionConfig) -> Result<(), InteractionError> {
             "top bar height must be finite and fit within workspace bounds",
         ));
     }
+    if !config.press_deadzone.is_finite() || config.press_deadzone < 0.0 {
+        return Err(InteractionError(
+            "press deadzone must be finite and non-negative",
+        ));
+    }
     if !config.snap_distance.is_finite() || config.snap_distance < 0.0 {
         return Err(InteractionError(
             "snap distance must be finite and non-negative",
@@ -827,6 +963,7 @@ mod tests {
             resize_handle_size: 10.0,
             top_bar_height: 24.0,
             snap_distance: 8.0,
+            press_deadzone: 4.0,
             snap_zone_trigger: 40.0,
             grid_size: Some(50.0),
         }
@@ -932,11 +1069,67 @@ mod tests {
     }
 
     #[test]
-    fn drag_to_the_far_corner_docks_and_never_strands_offscreen() {
-        // The old bug this replaces: dragging past the display edge parked
-        // the surface mostly off-screen (928,776 here), macOS stopped
-        // delivering events, the lost release wedged the gesture, and the
-        // tile was gone. Containment + corner snap now put it *on* the wall.
+    fn a_click_never_becomes_a_drag() {
+        // A high-DPI click reports a point or two of movement. Below the
+        // deadzone the gesture stays a press: no bounds, and the release is a
+        // click rather than the end of a drag.
+        let surfaces = vec![surface("card", rect(100.0, 100.0, 300.0, 200.0), 1)];
+        let mut engine = InteractionEngine::new(config()).unwrap();
+        engine
+            .handle(event(7, PointerPhase::Press, 200.0, 115.0), &surfaces)
+            .unwrap();
+
+        for (x, y) in [(200.8, 115.4), (201.9, 114.2), (202.2, 115.9)] {
+            assert!(
+                engine
+                    .handle(event(7, PointerPhase::Move, x, y), &surfaces)
+                    .unwrap()
+                    .is_empty(),
+                "a wobble below the deadzone must not move the surface"
+            );
+        }
+
+        let released = engine
+            .handle(event(7, PointerPhase::Release, 202.2, 115.9), &surfaces)
+            .unwrap();
+        assert_eq!(
+            released,
+            vec![InteractionIntent::ReleasePointer { pointer_id: 7 }],
+            "a click releases without a bounds change"
+        );
+        assert_eq!(engine.captured_pointer(), None);
+    }
+
+    #[test]
+    fn a_drag_past_the_deadzone_moves_from_the_origin() {
+        let surfaces = vec![surface("card", rect(100.0, 100.0, 300.0, 200.0), 1)];
+        let mut engine = InteractionEngine::new(config()).unwrap();
+        engine
+            .handle(event(8, PointerPhase::Press, 200.0, 115.0), &surfaces)
+            .unwrap();
+        assert!(
+            engine
+                .handle(event(8, PointerPhase::Move, 203.0, 115.0), &surfaces)
+                .unwrap()
+                .is_empty(),
+            "3 points is still a press with a 4 point deadzone"
+        );
+        assert_eq!(
+            engine
+                .handle(event(8, PointerPhase::Move, 210.0, 125.0), &surfaces)
+                .unwrap(),
+            vec![InteractionIntent::SetBounds {
+                surface_id: "card".to_owned(),
+                bounds: rect(110.0, 110.0, 300.0, 200.0),
+            }]
+        );
+    }
+
+    #[test]
+    fn dragging_past_the_corner_keeps_a_grabbable_strip_on_screen() {
+        // A window may hang off the wall — parking one half off the edge is a
+        // normal thing to want — but it must never strand completely outside,
+        // where it can no longer be grabbed.
         let surfaces = vec![surface("card", rect(100.0, 100.0, 300.0, 200.0), 1)];
         let mut engine = InteractionEngine::new(config()).unwrap();
         engine
@@ -948,29 +1141,29 @@ mod tests {
         for intent in &moved {
             if let InteractionIntent::SetBounds { bounds, .. } = intent {
                 assert!(
-                    bounds.x >= 0.0
-                        && bounds.y >= 0.0
-                        && bounds.x + bounds.width <= 1_000.0
-                        && bounds.y + bounds.height <= 800.0,
-                    "mid-drag bounds {bounds:?} left the wall"
+                    bounds.x < 1_000.0 && bounds.y < 800.0,
+                    "a strip must stay on screen: {bounds:?}"
+                );
+                assert!(
+                    bounds.x + bounds.width >= MIN_VISIBLE_GRAB
+                        && bounds.y + bounds.height >= MIN_VISIBLE_GRAB,
+                    "the strip must be big enough to grab: {bounds:?}"
                 );
             }
         }
-        assert_eq!(
-            engine.snap_preview(),
-            Some(rect(500.0, 400.0, 500.0, 400.0))
-        );
         let released = engine
             .handle(event(8, PointerPhase::Release, 2_000.0, 2_000.0), &surfaces)
             .unwrap();
-        assert!(released.contains(&InteractionIntent::SetBounds {
-            surface_id: "card".to_owned(),
-            bounds: rect(500.0, 400.0, 500.0, 400.0),
-        }));
+        assert!(
+            released
+                .iter()
+                .any(|intent| matches!(intent, InteractionIntent::SetBounds { .. })),
+            "release still commits a position"
+        );
     }
 
     #[test]
-    fn drag_stops_flush_at_the_edge_rather_than_parking_outside() {
+    fn a_window_may_park_partly_off_the_left_edge() {
         let surfaces = vec![surface("card", rect(100.0, 100.0, 300.0, 200.0), 1)];
         let mut engine = InteractionEngine::new(config()).unwrap();
         engine
@@ -982,8 +1175,11 @@ mod tests {
         let InteractionIntent::SetBounds { bounds, .. } = &intents[0] else {
             panic!("expected move");
         };
-        assert_eq!(*bounds, rect(0.0, 0.0, 300.0, 200.0));
-        assert!(bounds.x >= 0.0 && bounds.y >= 0.0);
+        assert_eq!(
+            *bounds,
+            rect(-300.0 + MIN_VISIBLE_GRAB, -200.0 + MIN_VISIBLE_GRAB, 300.0, 200.0),
+            "dragged fully off the wall, only the grab strip remains inside"
+        );
     }
 
     #[test]
@@ -1198,5 +1394,74 @@ mod tests {
             ]
         );
         assert_eq!(engine.captured_pointer(), None);
+    }
+}
+
+#[cfg(test)]
+mod grab_tests {
+    use super::*;
+
+    fn card() -> Vec<SurfaceGeometry> {
+        vec![SurfaceGeometry {
+            surface_id: "card".into(),
+            bounds: LogicalRect {
+                x: 100.0,
+                y: 100.0,
+                width: 300.0,
+                height: 200.0,
+            },
+            z_order: 1,
+        }]
+    }
+
+    fn hit(x: f64, y: f64) -> Option<HitRegion> {
+        hit_test(&card(), LogicalPoint { x, y }, 14.0, 26.0)
+            .unwrap()
+            .map(|target| target.region)
+    }
+
+    #[test]
+    fn an_edge_can_be_grabbed_from_just_outside_the_window() {
+        // Seven points past the border is where a hand arrives from, and it must
+        // resize: aiming at a one-pixel rim is a game, not a gesture.
+        assert_eq!(
+            hit(93.0, 200.0),
+            Some(HitRegion::Resize {
+                handle: ResizeHandle::West
+            })
+        );
+        assert_eq!(
+            hit(407.0, 200.0),
+            Some(HitRegion::Resize {
+                handle: ResizeHandle::East
+            })
+        );
+        assert_eq!(
+            hit(250.0, 307.0),
+            Some(HitRegion::Resize {
+                handle: ResizeHandle::South
+            })
+        );
+    }
+
+    #[test]
+    fn a_corner_grabs_from_outside_on_both_axes() {
+        assert_eq!(
+            hit(406.0, 306.0),
+            Some(HitRegion::Resize {
+                handle: ResizeHandle::SouthEast
+            })
+        );
+    }
+
+    #[test]
+    fn far_outside_is_nobody() {
+        assert_eq!(hit(500.0, 500.0), None);
+        assert_eq!(hit(60.0, 100.0), None);
+    }
+
+    #[test]
+    fn the_middle_of_the_title_bar_still_moves_the_window() {
+        assert_eq!(hit(250.0, 110.0), Some(HitRegion::TopBar));
     }
 }

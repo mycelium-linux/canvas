@@ -100,7 +100,9 @@ struct TransientNotification {
 }
 const SURFACE_CONTROL_HIT_SIZE: f64 = 18.0;
 const SURFACE_CONTROL_INSET: f64 = 4.0;
-const SURFACE_RESIZE_HANDLE_SIZE: f64 = 10.0;
+// Generous on purpose: an edge you have to hit exactly is an edge people give up
+// on. The visual border stays thin; only the target grew.
+const SURFACE_RESIZE_HANDLE_SIZE: f64 = 14.0;
 const CANVAS_TOGGLE_KEYS: &str = "Ctrl-Option-C";
 const SNAP_LAYOUT_KEYS: &str = "Ctrl-Option-L";
 const FIT_LAYOUT_KEYS: &str = "Ctrl-Option-F";
@@ -549,7 +551,20 @@ enum Message {
     },
     WindowReady(iced::window::Id),
     WindowEvent(iced::window::Id, iced::window::Event),
-    MouseEvent(iced::window::Id, iced::mouse::Event),
+    /// `captured` means a widget under the pointer already claimed the event.
+    /// Window chrome is not a widget, so a press over a traffic light still has
+    /// to reach the app even when the surface's own controls capture it — that
+    /// filtering is why minimize and maximize did nothing on a live surface.
+    MouseEvent(iced::window::Id, iced::mouse::Event, bool),
+    ContextMenuOpen {
+        surface_id: String,
+        position: LogicalPoint,
+    },
+    ContextMenuPick {
+        surface_id: String,
+        action: WindowAction,
+    },
+    ContextMenuDismiss,
     RestoreSurface(String),
     BackgroundTileClicked(usize),
     LiveFrameLoaded {
@@ -629,11 +644,65 @@ impl Failure {
     }
 }
 
+/// Where a right press opened its menu, in window-local points.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContextMenu {
+    surface_id: String,
+    x: i32,
+    y: i32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WindowAction {
     Close,
     Minimize,
     Maximize,
+}
+
+/// Hover/pressed treatment for a menu row, from the same palette as everything
+/// else so a menu is never a differently-themed rectangle.
+fn menu_item_style(
+    visual: VisualTheme,
+    status: iced::widget::button::Status,
+) -> iced::widget::button::Style {
+    use iced::widget::button::Status;
+    let palette = visual.palette;
+    let background = match status {
+        Status::Hovered | Status::Pressed => Some(
+            Color {
+                a: 0.14,
+                ..color(palette.primary)
+            }
+            .into(),
+        ),
+        _ => None,
+    };
+    iced::widget::button::Style {
+        background,
+        text_color: color(palette.text),
+        border: iced::Border {
+            radius: 6.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// Where `soil-terminal` lives, for hosts that were started by a launcher with a
+/// minimal environment. An explicit `SOIL_TERMINAL` wins so a development build
+/// can stand in for the installed one.
+fn soil_terminal_binary() -> Option<std::path::PathBuf> {
+    if let Some(path) = std::env::var_os("SOIL_TERMINAL") {
+        return Some(path.into());
+    }
+    let mut candidates = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(std::path::PathBuf::from(home).join(".local/bin/soil-terminal"));
+    }
+    candidates.push("/usr/local/bin/soil-terminal".into());
+    candidates.push("/usr/bin/soil-terminal".into());
+    candidates.push("/opt/homebrew/bin/soil-terminal".into());
+    candidates.into_iter().find(|path| path.is_file())
 }
 
 fn window_action_label(action: WindowAction, maximized: bool) -> &'static str {
@@ -874,7 +943,16 @@ struct App {
     status: String,
     interaction: InteractionEngine,
     snap_preview: Option<LogicalRect>,
+    /// A menu opened by a right press. Host-owned so every surface and every
+    /// Spore gets one without each of them drawing its own popup.
+    context_menu: Option<ContextMenu>,
+    /// Failure keys whose diagnostic window is already open, so a module that
+    /// fails on every redraw does not open a window on every redraw.
+    reported_failures: BTreeSet<String>,
     cursor: Option<LogicalPoint>,
+    /// Offset added to raw pointer positions, so a global cursor can be turned
+    /// back into window-local coordinates for hit-testing.
+    cursor_offset: LogicalPoint,
     cursor_window: Option<iced::window::Id>,
     desktop_focused: bool,
     hovered_surface_id: Option<String>,
@@ -1310,7 +1388,10 @@ impl App {
             },
             interaction,
             snap_preview: None,
+            context_menu: None,
+            reported_failures: BTreeSet::new(),
             cursor: None,
+            cursor_offset: LogicalPoint { x: 0.0, y: 0.0 },
             cursor_window: None,
             desktop_focused: false,
             hovered_surface_id: None,
@@ -1427,12 +1508,16 @@ impl App {
     /// The normalized bounds the view should render for a surface: an
     /// interpolation from its previous bounds while a transition is in
     /// flight, otherwise the target.
-    fn presented_bounds(&self, surface_id: &str, bounds: NormalizedRect) -> [f32; 4] {
-        let target = [bounds.x, bounds.y, bounds.width, bounds.height];
-        self.transition
-            .as_ref()
-            .map(|t| t.placement(surface_id, target))
-            .unwrap_or(target)
+    /// Where a surface is drawn, in normalized coordinates.
+    ///
+    /// Deliberately *not* animated. Palette and opacity may ease; geometry may
+    /// not, because geometry is what the pointer is dragging. Interpolating it
+    /// means the window lags the hand by up to a transition's worth of frames,
+    /// and any surface that was not in the transition's starting set begins the
+    /// animation at the origin — which reads as a window jumping down the page
+    /// the moment you click it. A window is where the layout says it is.
+    fn presented_bounds(&self, _surface_id: &str, bounds: NormalizedRect) -> [f32; 4] {
+        [bounds.x, bounds.y, bounds.width, bounds.height]
     }
 
     fn tick_transition(&mut self) {
@@ -2270,11 +2355,38 @@ impl App {
                 }
                 Task::none()
             }
-            Message::MouseEvent(window, event) => {
+            Message::ContextMenuOpen {
+                surface_id,
+                position,
+            } => {
+                self.context_menu = Some(ContextMenu {
+                    surface_id,
+                    x: position.x.round() as i32,
+                    y: position.y.round() as i32,
+                });
+                self.bump();
+                Task::none()
+            }
+            Message::ContextMenuPick {
+                surface_id,
+                action,
+            } => {
+                self.context_menu = None;
+                self.apply_window_action(&surface_id, action);
+                self.bump();
+                Task::none()
+            }
+            Message::ContextMenuDismiss => {
+                if self.context_menu.take().is_some() {
+                    self.bump();
+                }
+                Task::none()
+            }
+            Message::MouseEvent(window, event, captured) => {
                 if self.project_switcher.is_some() {
                     return Task::none();
                 }
-                self.handle_mouse(window, event)
+                self.handle_mouse(window, event, captured)
             }
             Message::RestoreSurface(surface_id) => {
                 if self.minimized_surfaces.remove(&surface_id) {
@@ -6953,6 +7065,7 @@ impl App {
         &mut self,
         window: iced::window::Id,
         event: iced::mouse::Event,
+        captured: bool,
     ) -> Task<Message> {
         use iced::mouse::{Button, Event};
 
@@ -6962,6 +7075,7 @@ impl App {
             x: f64::from(viewport.x - self.frame.x),
             y: f64::from(viewport.y - self.frame.y),
         };
+        self.cursor_offset = offset;
 
         match event {
             Event::ButtonPressed(Button::Back) if self.focused_hid_target().is_none() => {
@@ -6975,50 +7089,48 @@ impl App {
             _ => {}
         }
 
-        if let Event::ButtonPressed(Button::Left) = &event
-            && let Some((surface_id, action)) = self.hit_test_surface_control()
-        {
-            self.desktop_press = None;
-            self.desktop_focused = false;
-            match action {
-                WindowAction::Close => {
-                    if self.document.surfaces.iter().any(|s| s.id == surface_id) {
-                        self.document.surfaces.retain(|s| s.id != surface_id);
-                        self.document
-                            .bindings
-                            .retain(|b| b.target.surface_id != surface_id);
-                        self.decoded.remove(&surface_id);
-                        self.shared_views.remove(&surface_id);
-                        self.minimized_surfaces.remove(&surface_id);
-                        self.maximized_surfaces.remove(&surface_id);
-                        self.rebuild_stack();
-                        if self.document.focused_surface_id.as_ref() == Some(&surface_id) {
-                            self.document.focused_surface_id =
-                                self.document.surfaces.last().map(|s| s.id.clone());
-                        }
-                        self.bump();
-                        self.status = format!("Closed {surface_id}.");
-                    }
-                }
-                WindowAction::Minimize => {
-                    if self.minimized_surfaces.insert(surface_id.clone()) {
-                        self.bump();
-                        self.status = format!("Minimized {surface_id}.");
-                    }
-                }
-                WindowAction::Maximize => {
-                    self.start_transition();
-                    self.status = if self.maximized_surfaces.remove(&surface_id) {
-                        format!("Restored {surface_id}.")
-                    } else {
-                        self.maximized_surfaces.clear();
-                        self.maximized_surfaces.insert(surface_id.clone());
-                        format!("Maximized {surface_id}.")
-                    };
-                    self.bump();
-                }
-            }
+        if let Event::ButtonPressed(Button::Right) = &event {
+            let surfaces = self.interaction_surfaces();
+            let point = self.cursor.map(|position| LogicalPoint {
+                x: position.x - offset.x,
+                y: position.y - offset.y,
+            });
+            let target = point.and_then(|point| {
+                hit_test(
+                    &surfaces,
+                    point,
+                    SURFACE_RESIZE_HANDLE_SIZE,
+                    f64::from(self.window_chrome().titlebar_height),
+                )
+                .ok()
+                .flatten()
+            });
+            // The menu opens at the pointer, in the same window-local points the
+            // layer is padded by.
+            self.context_menu = match (target, point) {
+                (Some(target), Some(point)) => Some(ContextMenu {
+                    surface_id: target.surface_id,
+                    x: point.x.round() as i32,
+                    y: point.y.round() as i32,
+                }),
+                _ => None,
+            };
+            self.bump();
             return Task::none();
+        }
+        if let Event::ButtonPressed(Button::Left) = &event
+            && let Some(position) = self.cursor
+            && self.activate_chrome_control(LogicalPoint {
+                x: position.x - offset.x,
+                y: position.y - offset.y,
+            })
+        {
+            return Task::none();
+        }
+
+
+        if matches!(event, Event::ButtonPressed(Button::Left)) && self.context_menu.take().is_some() {
+            self.bump();
         }
 
         let phase = match event {
@@ -7078,6 +7190,23 @@ impl App {
             _ => None,
         };
         let surfaces = self.interaction_surfaces();
+        if std::env::var_os("CANVAS_INPUT_TRACE").is_some()
+            && let Some(position) = self.cursor
+        {
+            eprintln!(
+                "input {event:?} at ({:.1},{:.1}) captured={captured} hit={:?}",
+                position.x,
+                position.y,
+                hit_test(
+                    &surfaces,
+                    position,
+                    SURFACE_RESIZE_HANDLE_SIZE,
+                    f64::from(self.window_chrome().titlebar_height),
+                )
+                .ok()
+                .flatten()
+            );
+        }
         if let Some(position) = self.cursor
             && self.handle_hid_pointer(&hid_event, position, &surfaces)
         {
@@ -7117,6 +7246,22 @@ impl App {
             return Task::none();
         };
         if self.handle_external_surface_pointer(phase, position, &surfaces) {
+            return Task::none();
+        }
+        // A widget claimed this press. It may keep its click, but the surface
+        // gesture must still start when the press is on the title bar or a
+        // resize edge: those are drawn by widgets too, and refusing them is how
+        // window dragging stopped working entirely.
+        if captured
+            && phase == PointerPhase::Press
+            && let Ok(Some(target)) = hit_test(
+                &surfaces,
+                position,
+                SURFACE_RESIZE_HANDLE_SIZE,
+                f64::from(self.window_chrome().titlebar_height),
+            )
+            && target.region == HitRegion::Body
+        {
             return Task::none();
         }
         if phase == PointerPhase::Press
@@ -7502,12 +7647,88 @@ impl App {
         }
     }
 
+    /// Act on a click on a window control at `position`.
+    ///
+    /// Shared by the native pointer path and the browser/control path so a
+    /// click means the same thing whichever host delivered it.
+    fn activate_chrome_control(&mut self, position: LogicalPoint) -> bool {
+        let previous = self.cursor;
+        self.cursor = Some(position);
+        let hit = self.hit_test_surface_control();
+        self.cursor = previous;
+        let Some((surface_id, action)) = hit else {
+            return false;
+        };
+        self.apply_window_action(&surface_id, action);
+        true
+    }
+
+    /// Everything a window control does, shared by the chrome hit test and the
+    /// right-click menu so both produce exactly one behaviour per action.
+    fn apply_window_action(&mut self, surface_id: &str, action: WindowAction) {
+        let surface_id = surface_id.to_owned();
+        self.desktop_press = None;
+        self.desktop_focused = false;
+        match action {
+            WindowAction::Close => {
+                if self.document.surfaces.iter().any(|s| s.id == surface_id) {
+                    self.document.surfaces.retain(|s| s.id != surface_id);
+                    self.document
+                        .bindings
+                        .retain(|b| b.target.surface_id != surface_id);
+                    self.decoded.remove(&surface_id);
+                    self.shared_views.remove(&surface_id);
+                    self.minimized_surfaces.remove(&surface_id);
+                    self.maximized_surfaces.remove(&surface_id);
+                    self.rebuild_stack();
+                    if self.document.focused_surface_id.as_ref() == Some(&surface_id) {
+                        self.document.focused_surface_id =
+                            self.document.surfaces.last().map(|s| s.id.clone());
+                    }
+                    self.bump();
+                    self.status = format!("Closed {surface_id}.");
+                }
+            }
+            WindowAction::Minimize => {
+                if self.minimized_surfaces.insert(surface_id.clone()) {
+                    self.bump();
+                    self.status = format!("Minimized {surface_id}.");
+                }
+            }
+            WindowAction::Maximize => {
+                self.start_transition();
+                self.status = if self.maximized_surfaces.remove(&surface_id) {
+                    format!("Restored {surface_id}.")
+                } else {
+                    self.maximized_surfaces.clear();
+                    self.maximized_surfaces.insert(surface_id.clone());
+                    format!("Maximized {surface_id}.")
+                };
+                self.bump();
+            }
+        }
+    }
+
     fn hit_test_surface_control(&self) -> Option<(String, WindowAction)> {
         if self.document.chrome.title == SurfaceTitleMode::Hidden {
             return None;
         }
+        // Frame-local, like every bound this function compares against. The
+        // callers convert from a window/global point; subtracting a second time
+        // here shifted every hit by the window offset, which is why a click on a
+        // traffic light landed on nothing.
         let position = self.cursor?;
-        let frame = self.frame;
+        // Surfaces are laid out in the *content* frame; the desktop bar is not
+        // part of it. Measuring controls against the full frame offsets every
+        // hit by the bar's height, which is why the traffic lights did nothing.
+        let shell_height = self
+            .overlay_on_viewport(self.overlays.fpl_mark, self.frame)
+            .then_some(::canvas::DESKTOP_BAR_HEIGHT)
+            .unwrap_or_default();
+        let frame = Rect {
+            height: self.frame.height.saturating_sub(shell_height).max(1),
+            ..self.frame
+        };
         let titlebar_height = f64::from(self.window_chrome().titlebar_height);
         let Layout::Canvas { placements } = self.document.active_layout() else {
             return None;
@@ -7520,12 +7741,15 @@ impl App {
             ))
         });
         for placement in placements {
+            // A surface that draws a title bar owns clickable controls. Only the
+            // two chromes that draw *no* title bar opt out; `Integrated` used to
+            // be skipped here while still drawing traffic lights, which is a
+            // control that looks pressable and is not.
             if matches!(
                 self.widget_chrome(&placement.surface_id),
                 Some(
                     canvas_widgets::WidgetChrome::DragOnly
                         | canvas_widgets::WidgetChrome::Frameless
-                        | canvas_widgets::WidgetChrome::Integrated
                 )
             ) {
                 continue;
@@ -7544,7 +7768,10 @@ impl App {
                 frame,
                 self.document.chrome,
             );
-            let top = bounds.y;
+            // Drawing places every surface below the desktop bar; hit-testing
+            // has to add the same offset or the traffic lights are 44px above
+            // where they appear.
+            let top = bounds.y + f64::from(shell_height);
             let bottom = top + titlebar_height;
             let left = bounds.x;
             let right_edge = bounds.x + bounds.width;
@@ -7630,6 +7857,10 @@ impl App {
                 InteractionIntent::SetBounds { surface_id, bounds } => {
                     let frame = self.frame;
                     let chrome = self.document.chrome;
+                    let shell_height = self
+                        .overlay_on_viewport(self.overlays.fpl_mark, self.frame)
+                        .then_some(::canvas::DESKTOP_BAR_HEIGHT)
+                        .unwrap_or_default();
                     let Layout::Canvas { placements } = self.document.active_layout_mut() else {
                         continue;
                     };
@@ -7637,7 +7868,12 @@ impl App {
                         .iter_mut()
                         .find(|placement| placement.surface_id == surface_id)
                     {
-                        let normalized = normalize_visible_surface_bounds(bounds, frame, chrome);
+                        let normalized = normalize_visible_surface_bounds_with_shell(
+                            bounds,
+                            frame,
+                            chrome,
+                            shell_height,
+                        );
                         if placement.bounds != normalized {
                             placement.bounds = normalized;
                             changed = true;
@@ -8142,10 +8378,15 @@ impl App {
 
     fn refresh_interaction_geometry(&mut self) {
         if self.interaction.captured_pointer().is_none() {
-            self.interaction = interaction_engine(
+            let shell_height = self
+                .overlay_on_viewport(self.overlays.fpl_mark, self.frame)
+                .then_some(::canvas::DESKTOP_BAR_HEIGHT)
+                .unwrap_or_default();
+            self.interaction = interaction_engine_with_shell(
                 self.frame,
                 self.document.chrome,
                 self.window_chrome().titlebar_height,
+                shell_height,
             );
         }
     }
@@ -8320,6 +8561,19 @@ impl App {
                     .is_grabbed(source_id)
                     .then(|| (source_id.clone(), *bounds))
             });
+        // Window controls are chrome, not content: a click on a traffic light
+        // must act before any surface sees it.
+        if phase == "press"
+            && self.activate_chrome_control(LogicalPoint {
+                // `x`/`y` are normalized to the window, and chrome hit-testing
+                // works in window-local space.
+                x: f64::from(x) * f64::from(self.frame.width),
+                y: f64::from(y) * f64::from(self.frame.height),
+            })
+        {
+            return;
+        }
+
         let hit = snapshot
             .surface_bounds
             .iter()
@@ -8874,19 +9128,94 @@ impl App {
         );
         match result {
             Ok(retained) => {
+                // Two destinations. `canvas.state` is the surface's own small
+                // memory: a stateless view runs in a fresh VM on every render, so
+                // a toggle has to live somewhere the host owns until the Spore
+                // does. Anything else is an intent for a controller and travels
+                // on the bus.
+                let mut updates: Vec<(String, String)> = Vec::new();
                 for action in retained.actions {
-                    match self.module_bus.publish(action) {
-                        Ok(request_id) => {
-                            self.status = format!(
-                                "Module command queued · {request_id} (awaiting controller)"
-                            )
+                    if action.destination == "canvas.state" {
+                        let value = action
+                            .body
+                            .get("value")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("true")
+                            .to_owned();
+                        updates.push((action.kind, value));
+                    } else if action.destination == "canvas.shell" {
+                        self.apply_shell_action(&action);
+                    } else {
+                        match self.module_bus.publish(action) {
+                            Ok(request_id) => {
+                                self.status = format!(
+                                    "Module command queued · {request_id} (awaiting controller)"
+                                )
+                            }
+                            Err(error) => self.status = format!("Module command failed: {error}"),
                         }
-                        Err(error) => self.status = format!("Module command failed: {error}"),
                     }
+                }
+                let changed = self.remember_module_state(surface_id, updates);
+                if changed {
+                    self.refresh_modules();
                 }
             }
             Err(error) => self.status = format!("Module activation rejected: {error}"),
         }
+    }
+
+    /// Shell intents: the dock and bar ask the compositor for things it already
+    /// owns. Publishing these to the module bus would require a controller to
+    /// echo them back, which is why a dock press did nothing.
+    fn apply_shell_action(&mut self, action: &::canvas::lua_module::ModuleAction) {
+        let Some(target) = action.body.get("surface_id").and_then(|id| id.as_str()) else {
+            return;
+        };
+        match action.kind.as_str() {
+            "focus" | "select" => {
+                if self.minimized_surfaces.remove(target) {
+                    self.bump();
+                } else if self.document.focused_surface_id.as_deref() == Some(target) {
+                    // Pressing the tile of the window you are already looking at
+                    // collapses it, which is what a dock icon does on every
+                    // desktop people already know.
+                    self.minimized_surfaces.insert(target.to_owned());
+                    self.bump();
+                }
+                self.document.focused_surface_id = Some(target.to_owned());
+                self.bump();
+            }
+            _ => {}
+        }
+    }
+
+    /// Write an action's payload into the surface's own inputs, which is the
+    /// state a stateless view is handed back on its next render. Returns whether
+    /// anything actually changed, so a repeated press does not re-run Lua.
+    #[cfg(feature = "lua-scenes")]
+    fn remember_module_state(&mut self, surface_id: &str, updates: Vec<(String, String)>) -> bool {
+        if updates.is_empty() {
+            return false;
+        }
+        let Some(surface) = self.decoded.get_mut(surface_id) else {
+            return false;
+        };
+        let ContentSource::Widget { spec } = &mut surface.source else {
+            return false;
+        };
+        let canvas_widgets::WidgetKind::Module { inputs, .. } = &mut spec.kind else {
+            return false;
+        };
+        let mut changed = false;
+        for (key, value) in updates {
+            let next = canvas_widgets::WidgetInput::Text { value };
+            if inputs.get(&key) != Some(&next) {
+                inputs.insert(key, next);
+                changed = true;
+            }
+        }
+        changed
     }
 
     #[cfg(feature = "lua-scenes")]
@@ -8897,8 +9226,12 @@ impl App {
         viewport: LogicalSize,
     ) -> Element<'static, Message> {
         let visual = self.presented_visual_theme();
+        // A control is pressable whenever it is enabled. The bus is how an
+        // action reaches a *controller*; an action addressed to the surface's own
+        // state needs no transport, and gating both on the bus is what made every
+        // authored interface a picture of an interface.
         let children = self.native_module_buttons(buttons, viewport, |control| {
-            (control.enabled && self.module_bus.connected()).then(|| Message::ModuleActivate {
+            control.enabled.then(|| Message::ModuleActivate {
                 surface_id: surface_id.to_owned(),
                 target_id: control.id.clone(),
             })
@@ -8951,7 +9284,13 @@ impl App {
                 let selected = selected(control);
                 let appearance = control.appearance;
                 let message = action(control);
-                let content: Element<'static, Message> = if let Some(icon) = control.icon {
+                let content: Element<'static, Message> = if appearance
+                    == ::canvas::lua_module::ModuleButtonAppearance::Invisible
+                {
+                    // The scene already draws this control; the host contributes
+                    // the press and nothing else.
+                    iced::widget::space::horizontal().into()
+                } else if let Some(icon) = control.icon {
                     let id = match &message {
                         Some(Message::ShellFocusSurface(id)) => Some(id.as_str()),
                         Some(Message::ShellLauncherPick { entry_id, .. }) => {
@@ -9041,6 +9380,12 @@ impl App {
                             canvas_widgets::live::app_chrome::quiet_button_style(
                                 visual, selected, status,
                             )
+                        }
+                        ::canvas::lua_module::ModuleButtonAppearance::Invisible => {
+                            iced::widget::button::Style {
+                                background: None,
+                                ..Default::default()
+                            }
                         }
                     });
                 let pin_id = match &message {
@@ -9132,6 +9477,7 @@ impl App {
                     // failure mode where a silent fallback would look like a
                     // working widget.
                     eprintln!("Canvas module {name} on surface {id}: {reason}");
+                    self.report_failure(&id, &name, &reason);
                     match self.modules.get(&id) {
                         Some(ModuleSurface::Rendered { scene, buttons, .. }) => {
                             ModuleSurface::Rendered {
@@ -9148,6 +9494,47 @@ impl App {
             self.modules.insert(id, resolved);
         }
         self.modules.retain(|id, _| live.contains(id));
+    }
+
+    /// Hand a module failure to `soil-terminal`, once per distinct failure.
+    ///
+    /// A rejected reload is terminal output: an error message and a Lua
+    /// traceback. Rather than invent another error panel, write it out and let
+    /// the terminal renderer show it, so a failure reads the same on the wall as
+    /// it does in a log. If no `soil-terminal` is installed this stays quiet and
+    /// the on-surface banner remains the only report.
+    fn report_failure(&mut self, surface_id: &str, module: &str, reason: &str) {
+        let key = format!("{surface_id}\u{0}{module}\u{0}{reason}");
+        if !self.reported_failures.insert(key) {
+            return;
+        }
+        let safe: String = surface_id
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let path = std::env::temp_dir().join(format!("canvas-module-error-{safe}.txt"));
+        let body = format!(
+            "\x1b[1;31mCanvas rejected a module\x1b[0m\r\n\r\n\
+             surface  {surface_id}\r\n\
+             module   {module}\r\n\r\n\
+             \x1b[1m{reason}\x1b[0m\r\n\r\n\
+             The surface is still showing its last good scene.\r\n\
+             Fix the module and it reloads on the next change; this window\r\n\
+             does not need to be open for that.\r\n",
+        );
+        if std::fs::write(&path, body).is_err() {
+            return;
+        }
+        let Some(binary) = soil_terminal_binary() else {
+            return;
+        };
+        let title = format!("Canvas · {surface_id}");
+        let _ = std::process::Command::new(binary)
+            .arg("--title")
+            .arg(title)
+            .arg("--text")
+            .arg(&path)
+            .spawn();
     }
 
     /// Draw a scene's text nodes in 2D, sized and coloured from the presented theme.
@@ -9293,7 +9680,11 @@ impl App {
                     .into()
             })
             .collect();
-        container(stack(children)).into()
+        // A `Stack` takes its intrinsic size from its *first* child, so shrink
+        // nodes would be laid out inside node #1's box and clipped. The scene
+        // owns the whole surface; fill it and let each node pad to its own
+        // position.
+        container(stack(children).width(Length::Fill).height(Length::Fill)).into()
     }
 
     fn surface_widget<'a>(
@@ -10111,26 +10502,37 @@ impl App {
         } else {
             title.to_owned()
         };
-        let bar = if show_title {
-            row![
-                controls,
-                container(text(title).size(11).color(color(palette.text_muted)))
-                    .padding(iced::Padding {
-                        top: 0.0,
-                        right: 8.0,
-                        bottom: 0.0,
-                        left: 8.0
-                    })
+        // The title is centred on the *bar*, not in the space left over by the
+        // controls, so it sits in the same place on every window regardless of
+        // how many buttons that window has. The controls are laid over it.
+        let centered_title = container(
+            text(title)
+                .size(12)
+                .font(iced::Font {
+                    weight: iced::font::Weight::Semibold,
+                    ..iced::Font::DEFAULT
+                })
+                .color(color(if focused {
+                    palette.text
+                } else {
+                    palette.text_muted
+                })),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center(Length::Fill);
+        let bar: Element<'_, Message> = if show_title {
+            iced::widget::stack![
+                centered_title,
+                container(row![controls].align_y(iced::alignment::Vertical::Center))
                     .width(Length::Fill)
-                    .align_x(if chrome.title_alignment == "center" {
-                        iced::alignment::Horizontal::Center
-                    } else {
-                        iced::alignment::Horizontal::Left
-                    })
+                    .height(Length::Fill)
+                    .align_x(iced::alignment::Horizontal::Left)
+                    .align_y(iced::alignment::Vertical::Center)
             ]
-            .align_y(iced::alignment::Vertical::Center)
+            .into()
         } else {
-            row![controls].align_y(iced::alignment::Vertical::Center)
+            row![controls].align_y(iced::alignment::Vertical::Center).into()
         };
         container(bar)
             .padding(iced::Padding {
@@ -10143,25 +10545,50 @@ impl App {
             .height(Length::Fixed(bar_height))
             .align_x(iced::alignment::Horizontal::Left)
             .align_y(iced::alignment::Vertical::Top)
-            .style(move |_| container::Style {
-                background: Some(
-                    Color::from_rgba8(
-                        palette.surface[0],
-                        palette.surface[1],
-                        palette.surface[2],
-                        chrome.header_opacity,
+            .style(move |_| {
+                // Machined metal: a light top edge falling into the surface
+                // colour, with the same rim tone the window uses. One material,
+                // not a translucent slab over a different one.
+                let base = palette.surface;
+                let sheen = iced::gradient::Linear::new(std::f32::consts::FRAC_PI_2)
+                    .add_stop(
+                        0.0,
+                        Color::from_rgba8(
+                            base[0].saturating_add(26),
+                            base[1].saturating_add(26),
+                            base[2].saturating_add(28),
+                            chrome.header_opacity,
+                        ),
                     )
-                    .into(),
-                ),
-                border: iced::Border {
-                    // The outer surface is the sole owner of window shape.
-                    // Giving the header its own rounded border makes it read
-                    // as a detached card floating above the content.
-                    color: Color::TRANSPARENT,
-                    width: 0.0,
-                    radius: 0.0.into(),
-                },
-                ..Default::default()
+                    .add_stop(
+                        0.55,
+                        Color::from_rgba8(base[0], base[1], base[2], chrome.header_opacity),
+                    )
+                    .add_stop(
+                        1.0,
+                        Color::from_rgba8(
+                            base[0].saturating_sub(10),
+                            base[1].saturating_sub(10),
+                            base[2].saturating_sub(8),
+                            chrome.header_opacity,
+                        ),
+                    );
+                container::Style {
+                    background: Some(iced::Background::Gradient(sheen.into())),
+                    border: iced::Border {
+                        // The outer surface owns window shape, so the header
+                        // takes no radius — but it does take the rim colour, so
+                        // the top edge and the window edge read as one piece of
+                        // metal instead of two materials meeting.
+                        color: Color {
+                            a: if focused { 0.55 } else { 0.32 },
+                            ..color(palette.border_strong)
+                        },
+                        width: 1.0,
+                        radius: 0.0.into(),
+                    },
+                    ..Default::default()
+                }
             })
             .into()
     }
@@ -10993,6 +11420,63 @@ impl App {
         }
         if let Some(picker) = self.theme_picker.as_ref() {
             layers.push(picker.view::<Message>(&|index| Message::ThemePickerSelect(index)));
+        }
+        if let Some(menu) = self.context_menu.as_ref() {
+            let visual = self.presented_visual_theme();
+            let palette = visual.palette;
+            let maximized = self.maximized_surfaces.contains(&menu.surface_id);
+            let rows: Vec<Element<'static, Message>> = [
+                WindowAction::Minimize,
+                WindowAction::Maximize,
+                WindowAction::Close,
+            ]
+            .into_iter()
+            .map(|action| {
+                let surface_id = menu.surface_id.clone();
+                button(
+                    text(window_action_label(action, maximized))
+                        .size(visual.metrics.small)
+                        .width(Length::Fill)
+                        .color(color(if action == WindowAction::Close {
+                            palette.danger
+                        } else {
+                            palette.text
+                        })),
+                )
+                .width(Length::Fill)
+                .padding([6, 10])
+                .style(move |_, status| menu_item_style(visual, status))
+                .on_press(Message::ContextMenuPick {
+                    surface_id,
+                    action,
+                })
+                .into()
+            })
+            .collect();
+            // Positioned by padding rather than by an absolute layer so it
+            // shares the window's own coordinate space with every other overlay.
+            layers.push(
+                container(
+                    container(column(rows).width(Length::Fixed(180.0)))
+                        .style(move |_| container::Style {
+                            background: Some(color(palette.surface_muted).into()),
+                            border: iced::Border {
+                                color: color(palette.border),
+                                width: 1.0,
+                                radius: 8.0.into(),
+                            },
+                            ..Default::default()
+                        }),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding(iced::Padding {
+                    top: menu.y.max(0) as f32,
+                    left: menu.x.max(0) as f32,
+                    ..Default::default()
+                })
+                .into(),
+            );
         }
         if let Some(picker) = self.project_switcher.as_ref() {
             #[cfg(feature = "lua-scenes")]
@@ -12054,30 +12538,67 @@ fn interaction_engine(
     chrome: SurfaceChrome,
     titlebar_height: f32,
 ) -> InteractionEngine {
-    let workspace = interaction_workspace_bounds(frame, chrome);
+    interaction_engine_with_shell(frame, chrome, titlebar_height, 0)
+}
+
+fn interaction_engine_with_shell(
+    frame: Rect,
+    chrome: SurfaceChrome,
+    titlebar_height: f32,
+    shell_height: u32,
+) -> InteractionEngine {
+    let workspace = interaction_workspace_bounds_with_shell(frame, chrome, shell_height);
     InteractionEngine::new(InteractionConfig {
         workspace_bounds: workspace,
         minimum_surface_size: LogicalPoint { x: 160.0, y: 120.0 },
         resize_handle_size: SURFACE_RESIZE_HANDLE_SIZE,
         top_bar_height: f64::from(titlebar_height),
-        snap_distance: 12.0,
-        snap_zone_trigger: 44.0,
-        grid_size: Some(8.0),
+        // Grid and edge snapping are off for now: an 8px grid made resizing
+        // jump under the hand, and a window that lands where the pointer left it
+        // is more important than one that lands on a lattice. Zone tiling (drag
+        // a window to an edge to fill half the desk) stays, because it is
+        // previewed before it commits.
+        snap_distance: 0.0,
+        press_deadzone: 4.0,
+        // Edge docking is off too. A window arrived at half the desk because the
+        // pointer crossed a band, which is the same complaint as the grid: the
+        // window should go exactly where it is let go. Re-enabling is one
+        // number here, and when it comes back it should commit on release only.
+        snap_zone_trigger: 0.0,
+        grid_size: None,
     })
     .expect("Canvas interaction defaults must remain valid")
 }
 
 fn interaction_workspace_bounds(frame: Rect, chrome: SurfaceChrome) -> LogicalRect {
-    visible_surface_bounds(
+    interaction_workspace_bounds_with_shell(frame, chrome, 0)
+}
+
+/// The rectangle a surface may occupy: the content frame (the display minus the
+/// desktop bar) projected the same way drawing projects it, then moved down by
+/// the bar. Drag clamping and pointer positions have to agree with that, or the
+/// window snaps away from the point it was grabbed by.
+fn interaction_workspace_bounds_with_shell(
+    frame: Rect,
+    chrome: SurfaceChrome,
+    shell_height: u32,
+) -> LogicalRect {
+    let content = Rect {
+        height: frame.height.saturating_sub(shell_height).max(1),
+        ..frame
+    };
+    let mut bounds = visible_surface_bounds(
         NormalizedRect {
             x: 0.0,
             y: 0.0,
             width: 1.0,
             height: 1.0,
         },
-        frame,
+        content,
         chrome,
-    )
+    );
+    bounds.y += f64::from(shell_height);
+    bounds
 }
 
 fn resize_cursor(handle: ResizeHandle) -> mouse::Interaction {
@@ -12232,13 +12753,42 @@ fn normalize_visible_surface_bounds(
     frame: Rect,
     chrome: SurfaceChrome,
 ) -> NormalizedRect {
-    let (padding, inner_width, inner_height, gap_inset) = surface_layout_metrics(frame, chrome);
+    normalize_visible_surface_bounds_with_shell(bounds, frame, chrome, 0)
+}
+
+/// The exact inverse of `presented_surface_geometry`.
+///
+/// A dragged rectangle arrives in the space surfaces are *drawn* in, which is
+/// the content frame moved down by the desktop bar. Storing it as a placement
+/// without undoing that offset adds the bar height on every single pointer
+/// move, which is why a window slid down the desk and away from the pointer
+/// that was holding it.
+fn normalize_visible_surface_bounds_with_shell(
+    bounds: LogicalRect,
+    frame: Rect,
+    chrome: SurfaceChrome,
+    shell_height: u32,
+) -> NormalizedRect {
+    let bounds = LogicalRect {
+        y: bounds.y - f64::from(shell_height),
+        ..bounds
+    };
+    // Metrics come from the *content* frame, because that is the frame
+    // `presented_surface_geometry` projected through. Using the full frame here
+    // made a stored height shrink by the bar's share on every drag.
+    let content = Rect {
+        height: frame.height.saturating_sub(shell_height).max(1),
+        ..frame
+    };
+    let (padding, inner_width, inner_height, gap_inset) =
+        surface_layout_metrics(content, chrome);
     // Horizontal positions may be negative when a surface is parked partly
     // offscreen. The interaction engine has already kept a usable section of
     // its top bar reachable, so clamping the origin here would turn the move
     // into a resize by shortening the stored width to the workspace edge.
     let x = (bounds.x - gap_inset - padding) / inner_width;
-    let y = ((bounds.y - gap_inset - padding) / inner_height).max(0.0);
+    // No floor at zero: a window is allowed to sit partly off the top or left.
+    let y = (bounds.y - gap_inset - padding) / inner_height;
     let width = ((bounds.width + gap_inset * 2.0) / inner_width).clamp(f64::EPSILON, 1.0);
     let height = ((bounds.height + gap_inset * 2.0) / inner_height).clamp(f64::EPSILON, 1.0);
     NormalizedRect {
@@ -13648,9 +14198,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             iced::event::listen_with(|event, status, window| match event {
                 iced::Event::Window(event) => Some(Message::WindowEvent(window, event)),
                 iced::Event::Mouse(
-                    iced::mouse::Event::ButtonPressed(_) | iced::mouse::Event::WheelScrolled { .. },
-                ) if status == iced::event::Status::Captured => None,
-                iced::Event::Mouse(event) => Some(Message::MouseEvent(window, event)),
+                    event @ (iced::mouse::Event::ButtonPressed(_)
+                    | iced::mouse::Event::WheelScrolled { .. }),
+                ) => Some(Message::MouseEvent(
+                    window,
+                    event,
+                    matches!(status, iced::event::Status::Captured),
+                )),
+                iced::Event::Mouse(event) => Some(Message::MouseEvent(window, event, false)),
                 iced::Event::Keyboard(event) => Some(Message::TerminalInput(event)),
                 _ => None,
             }),
@@ -16717,10 +17272,12 @@ mod tests {
             iced::mouse::Event::CursorMoved {
                 position: Point::new(180.0, 180.0),
             },
+            false
         );
         let _ = app.handle_mouse(
             window,
             iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            false
         );
         assert_eq!(app.document.focused_surface_id.as_deref(), Some("lower"));
         let Layout::Canvas { placements } = &app.document.layout else {
@@ -16770,10 +17327,12 @@ mod tests {
             iced::mouse::Event::CursorMoved {
                 position: Point::new(200.0, 240.0),
             },
+            false
         );
         let _ = app.handle_mouse(
             right,
             iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            false
         );
         assert_eq!(
             app.cursor,
@@ -16820,6 +17379,118 @@ mod tests {
         assert!(app.minimized_surfaces.is_empty());
         assert_eq!(app.document.focused_surface_id.as_deref(), Some("invoice"));
         assert!(app.runtime_revision > revision);
+    }
+
+    #[test]
+    fn pressing_a_window_moves_nothing_and_a_drag_tracks_the_pointer() {
+        use iced::mouse::{Button, Event};
+
+        let mut app = test_app();
+        let window = iced::window::Id::unique();
+        app.windows.insert(window, app.frame);
+        app.document.surfaces.push(Surface {
+            id: "sample".into(),
+            title: "Sample".into(),
+            content: SurfaceContent::Scene {
+                scene: Scene { nodes: Vec::new() },
+            },
+            inputs: Vec::new(),
+        });
+        app.document.layout = Layout::Canvas {
+            placements: vec![Placement {
+                surface_id: "sample".into(),
+                bounds: NormalizedRect {
+                    x: 0.1,
+                    y: 0.15,
+                    width: 0.4,
+                    height: 0.4,
+                },
+                layer: 0,
+            }],
+        };
+        let bounds = app
+            .interaction_surfaces()
+            .into_iter()
+            .find(|surface| surface.surface_id == "sample")
+            .expect("surface geometry")
+            .bounds;
+        // Inside the title bar but clear of the resize band and the traffic
+        // lights: this is where a person actually grabs a window.
+        let grab = LogicalPoint {
+            x: bounds.x + bounds.width / 2.0,
+            y: bounds.y + 20.0,
+        };
+        let before = app.document.layout.clone();
+        app.cursor = Some(grab);
+        app.handle_mouse(
+            window,
+            Event::ButtonPressed(Button::Left),
+            false,
+        );
+        assert_eq!(
+            app.document.layout, before,
+            "a press must not move the window at all"
+        );
+
+        // Now drag: the window must move by exactly the pointer's own movement,
+        // in both axes, with no accumulated offset.
+        let delta = LogicalPoint { x: 120.0, y: 90.0 };
+        app.cursor = Some(LogicalPoint {
+            x: grab.x + delta.x,
+            y: grab.y + delta.y,
+        });
+        app.handle_mouse(
+            window,
+            Event::CursorMoved {
+                position: iced::Point::new(app.cursor.unwrap().x as f32, app.cursor.unwrap().y as f32),
+            },
+            false,
+        );
+        let after = app
+            .interaction_surfaces()
+            .into_iter()
+            .find(|surface| surface.surface_id == "sample")
+            .expect("surface geometry")
+            .bounds;
+        let moved = LogicalPoint {
+            x: after.x - bounds.x,
+            y: after.y - bounds.y,
+        };
+        assert!(
+            (moved.x - delta.x).abs() < 1.0 && (moved.y - delta.y).abs() < 1.0,
+            "window moved {moved:?} for a pointer delta of {delta:?}"
+        );
+    }
+
+    #[test]
+    fn a_dragged_rectangle_survives_the_round_trip() {
+        // The drag path writes bounds back through `normalize_visible_surface_bounds`.
+        // If that is not the inverse of the space drags arrive in, every pointer
+        // move shifts the window by the desktop bar and it slides away from the
+        // hand holding it. This pins the two directions against each other.
+        let frame = INITIAL_FRAME;
+        let chrome = SurfaceChrome::default();
+        let shell = ::canvas::DESKTOP_BAR_HEIGHT;
+        let placement = NormalizedRect {
+            x: 0.12,
+            y: 0.2,
+            width: 0.5,
+            height: 0.45,
+        };
+        let content = Rect {
+            height: frame.height.saturating_sub(shell).max(1),
+            ..frame
+        };
+        let drawn = visible_surface_bounds(placement, content, chrome);
+        let drawn = LogicalRect {
+            y: drawn.y + f64::from(shell),
+            ..drawn
+        };
+        let stored = normalize_visible_surface_bounds_with_shell(drawn, frame, chrome, shell);
+        assert!((stored.x - placement.x).abs() < 1e-4, "{stored:?} vs {placement:?}");
+        assert!((stored.y - placement.y).abs() < 1e-4, "{stored:?} vs {placement:?}");
+        assert!((stored.width - placement.width).abs() < 1e-4);
+        assert!((stored.height - placement.height).abs() < 1e-4);
     }
 
     #[test]
@@ -16883,6 +17554,7 @@ mod tests {
         let _ = app.handle_mouse(
             window,
             iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            false
         );
         assert!(app.maximized_surfaces.contains("sample"));
         app.cursor = Some(LogicalPoint { x: 44.0, y: 10.0 });
@@ -16893,6 +17565,7 @@ mod tests {
         let _ = app.handle_mouse(
             window,
             iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            false
         );
         assert!(!app.maximized_surfaces.contains("sample"));
         assert_eq!(app.document.layout, original_layout);
@@ -17717,11 +18390,13 @@ mod tests {
             iced::mouse::Event::CursorMoved {
                 position: Point::new(200.0, 200.0),
             },
+            false
         );
 
         let _ = app.handle_mouse(
             window,
             iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            false
         );
         assert!(app.desktop_press.is_some());
         assert_ne!(app.status, "Zoomed the Canvas window.");
@@ -17729,6 +18404,7 @@ mod tests {
         let _ = app.handle_mouse(
             window,
             iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            false
         );
         assert_eq!(app.status, "Zoomed the Canvas window.");
         assert!(app.desktop_press.is_none());
@@ -17745,11 +18421,13 @@ mod tests {
             iced::mouse::Event::CursorMoved {
                 position: Point::new(200.0, 200.0),
             },
+            false
         );
         for _ in 0..2 {
             let _ = app.handle_mouse(
                 window,
                 iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            false
             );
         }
         assert_ne!(app.status, "Zoomed the Canvas window.");
