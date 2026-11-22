@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vitals</title>
+<style>
+body { margin: 0; }
+:root { color-scheme: dark; --ink:#e9ecf2; --muted:#8b93a7; --line:rgba(255,255,255,.08); --panel:#141821; --panel-2:#191f2b; --accent:#c8f169; --accent-ink:#18200a; }
+* { box-sizing: border-box; }
+html, body { min-height: 100%; }
+body { margin:0; background:#0b0d12; }
+.app { min-height:100vh; padding:28px clamp(20px,5vw,64px) 64px; color:var(--ink); background: radial-gradient(900px 480px at 15% -10%, rgba(200,241,105,.10), transparent 60%), radial-gradient(700px 420px at 95% 5%, rgba(110,140,255,.10), transparent 55%), #0b0d12; font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
+.topbar { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+.brand { font-weight:800; letter-spacing:.18em; font-size:13px; }
+.brand-sub { margin-left:10px; color:var(--muted); font-weight:500; letter-spacing:.04em; text-transform:lowercase; }
+.pill { border:1px solid var(--line); border-radius:999px; padding:6px 12px; color:var(--muted); font-size:12px; background:rgba(255,255,255,.03); }
+.header-actions { display:flex; align-items:center; gap:8px; }
+.btn { appearance:none; border:1px solid var(--line); border-radius:999px; padding:7px 13px; background:rgba(255,255,255,.045); color:var(--ink); font:600 12px/1 ui-sans-serif,system-ui,sans-serif; cursor:pointer; }
+.btn:hover { background:rgba(255,255,255,.09); border-color:rgba(255,255,255,.18); }
+.stage { margin-top:clamp(32px,6vh,72px); max-width:1180px; }
+.eyebrow { margin:0 0 8px; color:var(--muted); font-size:11px; letter-spacing:.22em; }
+.mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+
+.stage { max-width: 1180px; }
+.lede { color: var(--muted); margin: 10px 0 0; max-width: 62ch; }
+.rings { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; margin:0 0 18px; }
+.ring-card { border:1px solid var(--line); border-radius:20px; padding:18px; background:linear-gradient(180deg,rgba(255,255,255,.035),transparent 65%),var(--panel); box-shadow:0 20px 50px rgba(0,0,0,.28); }
+.ring-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:14px; }
+.ring-label { font-size:12px; letter-spacing:.16em; text-transform:uppercase; color:var(--muted); font-weight:700; }
+.ring-wrap { display:grid; place-items:center; padding:4px 0 8px; }
+.ring-svg { display:block; width:132px; height:132px; }
+.ring-meta { display:flex; justify-content:space-between; gap:8px; color:var(--muted); font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; }
+.fresh { font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); }
+.fresh.fresh { color:#7ee2a8; }
+.fresh.stale, .fresh.expired { color:#f5c542; }
+.metrics { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-bottom:18px; }
+.metric { border:1px solid var(--line); border-radius:16px; padding:15px 16px; background:var(--panel-2); }
+.metric-head { display:flex; justify-content:space-between; gap:8px; align-items:center; margin-bottom:8px; }
+.metric-label { color:var(--muted); font-size:11px; letter-spacing:.14em; text-transform:uppercase; font-weight:700; }
+.metric-value { font:700 26px/1.1 ui-sans-serif,system-ui,sans-serif; letter-spacing:-.03em; font-variant-numeric:tabular-nums; }
+.metric-unit { color:var(--muted); font:600 12px/1 ui-sans-serif,system-ui,sans-serif; margin-left:5px; letter-spacing:.04em; }
+.metric-source { color:var(--muted); font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; margin-top:7px; }
+.split { display:grid; grid-template-columns:minmax(0,1.35fr) minmax(280px,.65fr); gap:14px; }
+.sleep, .steps { border:1px solid var(--line); border-radius:20px; padding:20px; background:linear-gradient(180deg,rgba(255,255,255,.025),transparent 70%),var(--panel); }
+.sleep-head { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:16px; }
+.sleep-title { font:650 24px/1.15 ui-sans-serif,system-ui,sans-serif; letter-spacing:-.02em; }
+.sleep-source { color:var(--muted); font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; }
+.hypno { display:flex; min-height:44px; border-radius:10px; overflow:hidden; background:#0b0f15; border:1px solid var(--line); }
+.hypno-seg { min-width:2px; height:44px; }
+.stage-awake { background:#4a5366; }
+.stage-light { background:#58a6ff; }
+.stage-deep { background:#7c6cff; }
+.stage-rem { background:#c8f169; }
+.legend { display:flex; gap:14px; flex-wrap:wrap; margin-top:12px; color:var(--muted); font-size:11px; }
+.key::before { content:''; display:inline-block; width:9px; height:9px; border-radius:3px; margin-right:6px; vertical-align:1px; }
+.key.stage-awake::before { background:#4a5366; }
+.key.stage-light::before { background:#58a6ff; }
+.key.stage-deep::before { background:#7c6cff; }
+.key.stage-rem::before { background:#c8f169; }
+.step-row { display:flex; justify-content:space-between; gap:12px; padding:10px 0; border-bottom:1px solid var(--line); font-size:14px; }
+.step-row strong { font-variant-numeric:tabular-nums; }
+.step-note { color:var(--muted); font-size:12px; line-height:1.5; margin-top:14px; max-width:34ch; }
+.empty { color:var(--muted); }
+.footer { color:var(--muted); font-size:11px; margin-top:18px; letter-spacing:.04em; }
+@media (max-width:900px) { .rings,.metrics { grid-template-columns:1fr; } .split { grid-template-columns:1fr; } }
+
+</style>
+</head>
+<body>
+<div class="app"><header class="topbar"><div class=""><div class="brand">Vitals</div><p class="lede">Wearer-scoped health fusion. Ring primary, watch fallback, no invented totals.</p></div><div class="header-actions"><div class="pill">wearer owner · fresh</div><button class="btn" data-action="view-guest">View guest</button></div></header><div class="stage"><div class="rings"><article class="ring-card"><div class="ring-head"><span class="ring-label">Move</span><span class="fresh fresh">fresh</span></div><div class="ring-wrap"><svg class="ring-svg" viewBox="0 0 132 132" width="132" height="132"><circle cx="66" cy="66" r="55" fill="none" stroke="rgba(255,255,255,.07)" stroke-width="11"></circle><circle cx="66" cy="66" r="55" fill="none" stroke="#c8f169" stroke-width="11" stroke-linecap="round" stroke-dasharray="311.0175 345.575" transform="rotate(-90 66 66)"></circle><text x="66" y="70" text-anchor="middle" fill="#e9ecf2" font-size="30" font-weight="700">9000</text><text x="66" y="92" text-anchor="middle" fill="#8b93a7" font-size="10" letter-spacing="1.5">steps</text></svg></div><div class="ring-meta"><span class="">fused</span><span class="">9000 / 10000</span></div></article><article class="ring-card"><div class="ring-head"><span class="ring-label">Heart</span><span class="fresh fresh">fresh</span></div><div class="ring-wrap"><svg class="ring-svg" viewBox="0 0 132 132" width="132" height="132"><circle cx="66" cy="66" r="55" fill="none" stroke="rgba(255,255,255,.07)" stroke-width="11"></circle><circle cx="66" cy="66" r="55" fill="none" stroke="#ff6b8b" stroke-width="11" stroke-linecap="round" stroke-dasharray="110.584 345.575" transform="rotate(-90 66 66)"></circle><text x="66" y="70" text-anchor="middle" fill="#e9ecf2" font-size="30" font-weight="700">58</text><text x="66" y="92" text-anchor="middle" fill="#8b93a7" font-size="10" letter-spacing="1.5">bpm</text></svg></div><div class="ring-meta"><span class="">sim-ring</span><span class="">58 / 180</span></div></article><article class="ring-card"><div class="ring-head"><span class="ring-label">Oxygen</span><span class="fresh fresh">fresh</span></div><div class="ring-wrap"><svg class="ring-svg" viewBox="0 0 132 132" width="132" height="132"><circle cx="66" cy="66" r="55" fill="none" stroke="rgba(255,255,255,.07)" stroke-width="11"></circle><circle cx="66" cy="66" r="55" fill="none" stroke="#58a6ff" stroke-width="11" stroke-linecap="round" stroke-dasharray="335.20775 345.575" transform="rotate(-90 66 66)"></circle><text x="66" y="70" text-anchor="middle" fill="#e9ecf2" font-size="30" font-weight="700">97</text><text x="66" y="92" text-anchor="middle" fill="#8b93a7" font-size="10" letter-spacing="1.5">%</text></svg></div><div class="ring-meta"><span class="">sim-ring</span><span class="">97 / 100</span></div></article></div><div class="metrics"><article class="metric"><div class="metric-head"><span class="metric-label">Heart rate</span><span class="fresh fresh">fresh</span></div><div class="metric-value">58<span class="metric-unit">bpm</span></div><div class="metric-source">sim-ring</div></article><article class="metric"><div class="metric-head"><span class="metric-label">HRV</span><span class="fresh fresh">fresh</span></div><div class="metric-value">48<span class="metric-unit">ms</span></div><div class="metric-source">sim-ring</div></article><article class="metric"><div class="metric-head"><span class="metric-label">SpO2</span><span class="fresh fresh">fresh</span></div><div class="metric-value">97<span class="metric-unit">%</span></div><div class="metric-source">sim-ring</div></article><article class="metric"><div class="metric-head"><span class="metric-label">Skin temperature</span><span class="fresh fresh">fresh</span></div><div class="metric-value">36.6<span class="metric-unit">C</span></div><div class="metric-source">sim-ring</div></article><article class="metric"><div class="metric-head"><span class="metric-label">Sleep</span><span class="fresh fresh">fresh</span></div><div class="metric-value">7h 20m<span class="metric-unit"></span></div><div class="metric-source">sim-ring</div></article><article class="metric"><div class="metric-head"><span class="metric-label">Motion</span><span class="fresh fresh">fresh</span></div><div class="metric-value">1002<span class="metric-unit">mg</span></div><div class="metric-source">sim-pinetime</div></article></div><div class="split"><div class="sleep"><div class="sleep-head"><div class=""><div class="eyebrow">LAST NIGHT</div><div class="sleep-title">7h 20m sleep</div></div><div class="sleep-source">sim-ring</div></div><div class="hypno"><div class="hypno-seg stage-awake" title="awake · 20m" style="width:4%"></div><div class="hypno-seg stage-light" title="light · 90m" style="width:18%"></div><div class="hypno-seg stage-deep" title="deep · 80m" style="width:16%"></div><div class="hypno-seg stage-light" title="light · 60m" style="width:12%"></div><div class="hypno-seg stage-rem" title="rem · 50m" style="width:10%"></div><div class="hypno-seg stage-awake" title="awake · 10m" style="width:2%"></div><div class="hypno-seg stage-light" title="light · 60m" style="width:12%"></div><div class="hypno-seg stage-deep" title="deep · 50m" style="width:10%"></div><div class="hypno-seg stage-rem" title="rem · 50m" style="width:10%"></div><div class="hypno-seg stage-awake" title="awake · 10m" style="width:2%"></div></div><div class="legend"><span class="key stage-awake">awake</span><span class="key stage-light">light</span><span class="key stage-deep">deep</span><span class="key stage-rem">rem</span></div></div><div class="steps"><div class="eyebrow">STEPS BY DEVICE</div><div class="step-row"><span class="mono">sim-pinetime</span><strong>4231</strong></div><div class="step-row"><span class="mono">sim-ring</span><strong>9000</strong></div><div class="step-note">Never summed. The Move ring uses the fused per-bucket estimate.</div></div></div><div class="footer">policy <span class="mono">vitals-fusion-v1</span> · source <span class="mono">dev.fungos.vitals</span></div></div></div>
+</body>
+</html>
+
