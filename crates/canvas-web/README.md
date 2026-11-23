@@ -1,25 +1,21 @@
 # Canvas Web
 
-The browser is another Canvas backend. This crate runs the same iced
-application, scene renderer and message type as native Canvas; the only
-difference is the renderer underneath (WebGL on wasm, wgpu on the desktop). It
-contains no PNG mirror, no screenshot bridge, and no DOM re-implementation of a
-Spore.
+The browser is the hosted Mycelium desktop. It runs the same iced application
+and renderer stack in WebAssembly, loads `/v1/desktop` from the same origin,
+and draws the top bar, desktop, welcome transition, and prompt popup. There is
+no PNG mirror, no screenshot bridge, and no DOM re-implementation of a Spore.
 
-The first scene is the home Spore's checked-in fixture:
-`scenes/home.scene.json`. That is the exact document `fungos.ui` hands to a
-host (`{"kind":"scene","schema":1,"nodes":[...]}`), plus the host-owned
-control list. A scene is data: a pointer layer hit-tests the control
-rectangles, and pressing a tile emits a typed `canvas-intent` event to the page
-and never opens a Spore itself.
+The checked-in `scenes/home.scene.json` and its iced scene renderer remain as
+the compatibility fixture and regression tests. The hosted shell is the
+replacement path: JSON from the control plane, then Canvas/WASM presentation.
 
 WebAssembly has no system fonts. Iced's bundled Fira Sans is enabled for the
 scene text, and `assets/NotoSansSymbols2-Regular.ttf` (SIL OFL 1.1, license
 beside it) supplies the Spore's glyphs.
 
-This slice is deliberately pre-Luau. Browsers cannot compile a module at
-runtime, so the next slice ships a Luau wasm runtime and generates the same
-document from the composed `spore-dev-home.lua`. The renderer does not change.
+The welcome/profile copy currently comes from `/v1/desktop`. The onboarding
+Spore is the next slice; it will render through this shell rather than growing
+a second onboarding surface.
 
 ## Run locally
 
@@ -54,7 +50,7 @@ openable controls disappear from the fixture.
 cargo test -p canvas-web
 cargo check -p canvas-web --target wasm32-unknown-unknown
 cd crates/canvas-web
-env -u NO_COLOR trunk build --release
+FPL_BOB_LOCAL=1 env -u NO_COLOR trunk build --release
 ```
 
 A `cargo check` for wasm proves the iced scene renderer compiles against the
