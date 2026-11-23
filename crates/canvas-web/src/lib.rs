@@ -14,12 +14,17 @@ use iced::widget::{container, mouse_area, responsive, space, stack, text};
 use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Point, Size, Task};
 use serde::Deserialize;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[cfg(target_arch = "wasm32")]
 use serde::Serialize;
 
 #[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_futures::{JsFuture, spawn_local};
 
 const HOME_SCENE: &str = include_str!("../scenes/home.scene.json");
 const JARVIS: &str = include_str!("../../../config/themes/jarvis.toml");
@@ -440,15 +445,480 @@ fn iced_theme(_: &App) -> iced::Theme {
 #[allow(clippy::missing_errors_doc)]
 pub fn run() -> Result<(), wasm_bindgen::JsValue> {
     #[cfg(target_arch = "wasm32")]
-    console_error_panic_hook::set_once();
+    {
+        console_error_panic_hook::set_once();
+        spawn_local(async {
+            let desktop = load_desktop().await;
+            if let Err(error) = iced::application(
+                move || (desktop.clone(), Task::none()),
+                shell_update,
+                shell_view,
+            )
+            .title("Mycelium")
+            .theme(shell_theme)
+            .font(include_bytes!("../assets/NotoSansSymbols2-Regular.ttf").as_slice())
+            .subscription(shell_subscription)
+            .antialiasing(true)
+            .run()
+            {
+                web_sys::console::error_1(&format!("canvas shell: {error}").into());
+            }
+        });
+        Ok(())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        iced::application(|| (Shell::demo(), Task::none()), shell_update, shell_view)
+            .title("Mycelium")
+            .theme(shell_theme)
+            .font(include_bytes!("../assets/NotoSansSymbols2-Regular.ttf").as_slice())
+            .antialiasing(true)
+            .run()
+            .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))
+    }
+}
 
-    iced::application(|| (App::default(), Task::none()), update, view)
-        .title("Canvas Web · Home Spore")
-        .theme(iced_theme)
-        .font(include_bytes!("../assets/NotoSansSymbols2-Regular.ttf").as_slice())
-        .antialiasing(true)
-        .run()
-        .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))
+// ---------------------------------------------------------------------------
+// Hosted Mycelium shell
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+struct DesktopPayload {
+    account: DesktopAccount,
+    workspace: DesktopWorkspace,
+    #[serde(default)]
+    welcome: Option<DesktopWelcome>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DesktopAccount {
+    email: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    plan: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DesktopWorkspace {
+    name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DesktopWelcome {
+    #[serde(default)]
+    eyebrow: String,
+    headline: String,
+    #[serde(default)]
+    body: String,
+}
+
+#[derive(Debug, Clone)]
+struct Shell {
+    user_name: String,
+    email: String,
+    workspace: String,
+    plan: String,
+    welcome: DesktopWelcome,
+    welcome_frame: u32,
+    prompt_open: bool,
+    prompt: String,
+    prompt_note: String,
+}
+
+#[derive(Debug, Clone)]
+enum ShellMessage {
+    Tick,
+    TogglePrompt,
+    PromptChanged(String),
+    SubmitPrompt,
+}
+
+impl Shell {
+    fn from_payload(payload: DesktopPayload) -> Self {
+        let name = payload.account.name.unwrap_or_else(|| {
+            payload
+                .account
+                .email
+                .split('@')
+                .next()
+                .unwrap_or("there")
+                .split(['.', '_', '-'])
+                .next()
+                .unwrap_or("there")
+                .to_owned()
+        });
+        let mut user_name = name;
+        if let Some(first) = user_name.get_mut(0..1) {
+            first.make_ascii_uppercase();
+        }
+        let welcome = payload.welcome.unwrap_or_else(|| DesktopWelcome {
+            eyebrow: "MYCELIUM".to_owned(),
+            headline: format!("Welcome, {user_name}."),
+            body: "Your desktop is ready.".to_owned(),
+        });
+        Self {
+            user_name,
+            email: payload.account.email,
+            workspace: payload.workspace.name,
+            plan: payload.account.plan,
+            welcome,
+            welcome_frame: 0,
+            prompt_open: true,
+            prompt: String::new(),
+            prompt_note: "Try “make me a renewal desk”".to_owned(),
+        }
+    }
+
+    fn demo() -> Self {
+        Self::from_payload(DesktopPayload {
+            account: DesktopAccount {
+                email: "avery@fpl.dev".to_owned(),
+                name: Some("Avery".to_owned()),
+                plan: "starter".to_owned(),
+            },
+            workspace: DesktopWorkspace {
+                name: "Mycelium".to_owned(),
+            },
+            welcome: None,
+        })
+    }
+}
+
+impl Default for Shell {
+    fn default() -> Self {
+        Self::demo()
+    }
+}
+
+fn welcome_alpha(frame: u32) -> f32 {
+    let frame = frame as f32;
+    if frame < 42.0 {
+        1.0
+    } else if frame < 84.0 {
+        (1.0 - (frame - 42.0) / 42.0).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn shell_update(state: &mut Shell, message: ShellMessage) {
+    match message {
+        ShellMessage::Tick => {
+            if state.welcome_frame < 90 {
+                state.welcome_frame += 1;
+            }
+        }
+        ShellMessage::TogglePrompt => state.prompt_open = !state.prompt_open,
+        ShellMessage::PromptChanged(value) => state.prompt = value,
+        ShellMessage::SubmitPrompt => {
+            if !state.prompt.trim().is_empty() {
+                state.prompt_note = "Sent. The desktop is listening.".to_owned();
+                state.prompt.clear();
+            }
+        }
+    }
+}
+
+fn shell_subscription(state: &Shell) -> iced::Subscription<ShellMessage> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if state.welcome_frame < 90 {
+            return iced::time::every(Duration::from_millis(16)).map(|_| ShellMessage::Tick);
+        }
+    }
+    let _ = state;
+    iced::Subscription::none()
+}
+
+fn shell_theme(_: &Shell) -> iced::Theme {
+    iced::Theme::Dark
+}
+
+fn shell_button_style(
+    palette: ThemePalette,
+) -> impl Fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style + 'static {
+    move |_, status| {
+        let (background, border) = match status {
+            iced::widget::button::Status::Hovered => (
+                rgba(palette.surface_muted, 1.0),
+                rgba(palette.primary, 0.75),
+            ),
+            iced::widget::button::Status::Pressed => {
+                (rgba(palette.primary, 0.88), rgba(palette.primary, 1.0))
+            }
+            _ => (rgba(palette.surface, 0.92), rgba(palette.primary, 0.24)),
+        };
+        iced::widget::button::Style {
+            background: Some(Background::Color(background)),
+            text_color: rgb(palette.text),
+            border: Border {
+                color: border,
+                width: 1.0,
+                radius: 7.0.into(),
+            },
+            ..Default::default()
+        }
+    }
+}
+
+fn shell_view(state: &Shell) -> Element<'_, ShellMessage> {
+    mark_runtime_ready();
+    let palette = ThemePalette {
+        background: [2, 10, 17],
+        background_strong: [1, 6, 10],
+        surface: [7, 22, 32],
+        surface_muted: [11, 36, 48],
+        text: [220, 249, 255],
+        text_muted: [117, 172, 186],
+        primary: [49, 230, 255],
+        success: [49, 230, 255],
+        warning: [242, 193, 78],
+        danger: [255, 89, 112],
+        info: [117, 172, 186],
+        border: [19, 72, 91],
+        border_strong: [49, 230, 255],
+    };
+    let width = Length::Fill;
+
+    let top_bar = iced::widget::Row::with_children(vec![
+        text("MYCELIUM").size(11).color(rgb(palette.primary)).into(),
+        text(state.workspace.clone())
+            .size(11)
+            .color(rgb(palette.text_muted))
+            .into(),
+        iced::widget::Space::new().width(Length::Fill).into(),
+        text(format!("{} · {}", state.user_name, state.plan))
+            .size(11)
+            .color(rgb(palette.text_muted))
+            .into(),
+        iced::widget::button(text("Command").size(11).color(rgb(palette.text)))
+            .padding([7, 10])
+            .style(shell_button_style(palette))
+            .on_press(ShellMessage::TogglePrompt)
+            .into(),
+    ])
+    .spacing(14)
+    .align_y(Alignment::Center)
+    .padding([12, 18]);
+
+    let top_bar = iced::widget::container(top_bar)
+        .width(width)
+        .style(move |_| iced::widget::container::Style {
+            background: Some(Background::Color(rgba(palette.surface, 0.92))),
+            border: Border {
+                color: rgba(palette.primary, 0.16),
+                width: 1.0,
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        });
+
+    let shortcut = |glyph: &'static str, title: &'static str, detail: &'static str| {
+        iced::widget::button(
+            iced::widget::Column::with_children(vec![
+                text(glyph).size(24).color(rgb(palette.primary)).into(),
+                text(title).size(14).color(rgb(palette.text)).into(),
+                text(detail).size(11).color(rgb(palette.text_muted)).into(),
+            ])
+            .spacing(5)
+            .align_x(Alignment::Center),
+        )
+        .width(150)
+        .padding([18, 16])
+        .style(shell_button_style(palette))
+        .on_press(ShellMessage::TogglePrompt)
+    };
+
+    let desk = iced::widget::Column::with_children(vec![
+        text("YOUR DESK")
+            .size(10)
+            .color(rgb(palette.primary))
+            .into(),
+        text("A room for the work.")
+            .size(34)
+            .color(rgb(palette.text))
+            .into(),
+        text("The Canvas compositor is running. Prompts, windows, and Spores land here.")
+            .size(13)
+            .color(rgb(palette.text_muted))
+            .into(),
+        iced::widget::Space::new().height(18).into(),
+        iced::widget::Row::with_children(vec![
+            shortcut("✦", "Ask", "Prompt popup").into(),
+            shortcut("▤", "Notes", "Coming next").into(),
+            shortcut("◫", "Files", "Coming next").into(),
+            shortcut("⌘", "Command", "Anything").into(),
+        ])
+        .spacing(10)
+        .align_y(Alignment::Start)
+        .into(),
+        iced::widget::Space::new().height(Length::Fill).into(),
+    ])
+    .spacing(8)
+    .align_x(Alignment::Center)
+    .width(width)
+    .height(Length::Fill)
+    .padding([62, 28]);
+
+    let desktop = iced::widget::Column::with_children(vec![top_bar.into(), desk.into()])
+        .width(width)
+        .height(Length::Fill);
+
+    let mut layers: Vec<Element<'_, ShellMessage>> = vec![
+        iced::widget::container(desktop)
+            .width(width)
+            .height(Length::Fill)
+            .style(move |_| iced::widget::container::Style {
+                background: Some(Background::Color(rgb(palette.background))),
+                ..Default::default()
+            })
+            .into(),
+    ];
+
+    if state.prompt_open {
+        let input = iced::widget::text_input("Ask Mycelium, or type a command…", &state.prompt)
+            .on_input(ShellMessage::PromptChanged)
+            .on_submit(ShellMessage::SubmitPrompt)
+            .padding([12, 14])
+            .size(14)
+            .style(move |_, _| iced::widget::text_input::Style {
+                background: Background::Color(rgba(palette.surface_muted, 1.0)),
+                border: Border {
+                    color: rgba(palette.primary, 0.24),
+                    width: 1.0,
+                    radius: 6.0.into(),
+                },
+                icon: rgb(palette.primary),
+                placeholder: rgba(palette.text_muted, 0.9),
+                value: rgb(palette.text),
+                selection: rgba(palette.primary, 0.28),
+            });
+        let prompt = iced::widget::Column::with_children(vec![
+            iced::widget::Row::with_children(vec![
+                text("MYCELIUM / PROMPT")
+                    .size(10)
+                    .color(rgb(palette.primary))
+                    .into(),
+                iced::widget::Space::new().width(Length::Fill).into(),
+                iced::widget::button(text("Close").size(10).color(rgb(palette.text_muted)))
+                    .padding([5, 8])
+                    .style(shell_button_style(palette))
+                    .on_press(ShellMessage::TogglePrompt)
+                    .into(),
+            ])
+            .align_y(Alignment::Center)
+            .into(),
+            input.into(),
+            text(state.prompt_note.clone())
+                .size(11)
+                .color(rgb(palette.text_muted))
+                .into(),
+        ])
+        .spacing(10);
+        let prompt = iced::widget::container(prompt)
+            .width(560)
+            .padding(18)
+            .style(move |_| iced::widget::container::Style {
+                background: Some(Background::Color(rgba(palette.surface_muted, 0.98))),
+                border: Border {
+                    color: rgba(palette.primary, 0.55),
+                    width: 1.0,
+                    radius: 10.0.into(),
+                },
+                shadow: iced::Shadow {
+                    color: Color::from_rgba8(0, 0, 0, 0.45),
+                    offset: iced::Vector::new(0.0, 14.0),
+                    blur_radius: 36.0,
+                },
+                ..Default::default()
+            });
+        let prompt_layer = iced::widget::container(prompt)
+            .width(width)
+            .height(Length::Fill)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::End)
+            .padding(Padding {
+                top: 0.0,
+                right: 18.0,
+                bottom: 52.0,
+                left: 18.0,
+            });
+        layers.push(prompt_layer.into());
+    }
+
+    let alpha = welcome_alpha(state.welcome_frame);
+    if alpha > 0.0 {
+        let welcome = iced::widget::Column::with_children(vec![
+            text(if state.welcome.eyebrow.is_empty() {
+                "MYCELIUM".to_owned()
+            } else {
+                state.welcome.eyebrow.clone()
+            })
+            .size(10)
+            .color(rgba(palette.primary, alpha))
+            .into(),
+            text(state.welcome.headline.clone())
+                .size(56)
+                .color(rgba(palette.text, alpha))
+                .into(),
+            text(state.welcome.body.clone())
+                .size(14)
+                .color(rgba(palette.text_muted, alpha))
+                .into(),
+        ])
+        .spacing(12)
+        .align_x(Alignment::Center);
+        let welcome_layer = iced::widget::container(welcome)
+            .width(width)
+            .height(Length::Fill)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
+            .style(move |_| iced::widget::container::Style {
+                background: Some(Background::Color(rgba(palette.background, alpha * 0.98))),
+                ..Default::default()
+            });
+        layers.push(welcome_layer.into());
+    }
+
+    stack(layers).width(width).height(Length::Fill).into()
+}
+
+async fn load_desktop() -> Shell {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Some(window) = web_sys::window() else {
+            return Shell::demo();
+        };
+        let Ok(response) = JsFuture::from(window.fetch_with_str("/v1/desktop")).await else {
+            return Shell::demo();
+        };
+        let Ok(response) = response.dyn_into::<web_sys::Response>() else {
+            return Shell::demo();
+        };
+        if response.status() == 401 {
+            let _ = window.location().set_href("/v1/auth/login");
+            return Shell::demo();
+        }
+        let Ok(text) = JsFuture::from(response.text().expect("response text")).await else {
+            return Shell::demo();
+        };
+        let Some(text) = text.as_string() else {
+            return Shell::demo();
+        };
+        match serde_json::from_str::<DesktopPayload>(&text) {
+            Ok(payload) => Shell::from_payload(payload),
+            Err(error) => {
+                console_error_panic_hook::set_once();
+                web_sys::console::error_1(&format!("desktop payload: {error}").into());
+                Shell::demo()
+            }
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Shell::demo()
+    }
 }
 
 #[cfg(test)]

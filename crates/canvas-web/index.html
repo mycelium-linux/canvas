@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
     <meta name="theme-color" content="#020a11" />
-    <title>Canvas Web · Home Spore</title>
+    <title>Mycelium</title>
     <link data-trunk rel="rust" />
     <style>
       html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #020a11; }
@@ -18,7 +18,7 @@
     </style>
   </head>
   <body>
-    <div id="boot-status"><strong>CANVAS / WASM</strong><span>STARTING CANVAS BACKEND</span></div>
+    <div id="boot-status"><strong>MYCELIUM</strong><span>OPENING YOUR DESKTOP</span></div>
     <p id="intent"></p>
     <script>
       const canvasFailure = (detail) => {
@@ -30,6 +30,6 @@
       addEventListener("error", event => canvasFailure(event.message || "unknown error"));
       addEventListener("unhandledrejection", event => canvasFailure(String(event.reason || "unhandled rejection")));
     </script>
-    <noscript>Canvas Web requires WebAssembly and JavaScript.</noscript>
+    <noscript>Mycelium requires WebAssembly and JavaScript.</noscript>
   </body>
 </html>
